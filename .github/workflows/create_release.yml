@@ -33,11 +33,14 @@ jobs:
       - name: Build
         run: make build
 
+      - name: Create gzip
+        run: tar -zcvf railway.tar.gz bin
+
       - name: Archive binary
         uses: actions/upload-artifact@v2
         with:
-          name: railway
-          path: bin/railway
+          name: railway.tar.gz
+          path: railway.tar.gz
 
   create_release:
     name: Create Github Release
@@ -74,5 +77,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./railway
-          asset_name: railway
+          asset_path: ./railway.tar.gz
+          asset_name: railway.tar.gz
+          asset_content_type: application/gzip
