@@ -6,12 +6,13 @@ on:
 
 jobs:
   publish_brew:
+    name: Publish brew tap
     runs-on: ubuntu-latest
     steps:
       - name: Update Homebrew tap
         uses: dawidd6/action-homebrew-bump-formula@v3
         with:
-          token: ${{ secrets.BREW_TOKEN }}
+          token: ${{ secrets.GH_PAT }}
           tap: railwayapp/homebrew-railway
           formula: railway
           tag: ${{ github.ref }}
