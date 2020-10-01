@@ -1,5 +1,5 @@
 build:
-	@go build -o bin/cli
+	@go build -o bin/railway
 
 run:
 	@go run main.go
