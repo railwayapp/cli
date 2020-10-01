@@ -2,11 +2,11 @@ name: Create Release
 
 on:
   push:
-    # branches:
-    #   - master
+    branches:
+      - master
     # Only run on updates to the version file
-    # paths:
-    #   - "version"
+    paths:
+      - "version"
 
 jobs:
   build:
