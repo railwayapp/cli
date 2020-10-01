@@ -5,8 +5,8 @@ on:
     branches:
       - master
     # Only run on updates to the version file
-    paths:
-      - "version"
+    # paths:
+    #   - "version"
 
 jobs:
   build:
@@ -33,11 +33,14 @@ jobs:
       - name: Build
         run: make build
 
+      - name: Create gzip
+          run: tar -zcvf railway.tar.gz bin
+
       - name: Archive asset
         uses: actions/upload-artifact@v2
         with:
-          name: railway
-          path: bin/railway
+          name: cli
+          path: railway.tar.gz
 
   create_release:
     name: Create Github Release
@@ -47,10 +50,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Download binary
+      - name: Download asset
         uses: actions/download-artifact@v2
         with:
-          name: railway
+          name: cli
 
       - name: Set version
         id: version
