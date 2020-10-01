@@ -47,13 +47,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
       - name: Download binary
         uses: actions/download-artifact@v2
         with:
           name: cli
-
-      - name: Checkout code
-        uses: actions/checkout@v2
 
       - name: PRINT
         run: ls -R
