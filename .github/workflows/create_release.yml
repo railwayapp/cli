@@ -1,4 +1,4 @@
-name: Publish
+name: Create Release
 
 on:
   push:
@@ -55,7 +55,7 @@ jobs:
       - name: Set version
         id: version
         run: |
-          echo "$(cat version)" >> $GITHUB_ENV
+          echo "version=$(cat version)" >> $GITHUB_ENV
           echo "Version $version"
 
       - name: Create release
