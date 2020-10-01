@@ -33,14 +33,11 @@ jobs:
       - name: Build
         run: make build
 
-      - name: Create gzip
-        run: tar -zcvf railway.tar.gz bin
-
       - name: Archive asset
         uses: actions/upload-artifact@v2
         with:
-          name: cli
-          path: railway.tar.gz
+          name: railway
+          path: bin/railway
 
   create_release:
     name: Create Github Release
@@ -53,7 +50,7 @@ jobs:
       - name: Download asset
         uses: actions/download-artifact@v2
         with:
-          name: cli
+          name: railway
 
       - name: Set version
         id: version
@@ -77,6 +74,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: railway.tar.gz
-          asset_name: railway-${{ env.version }}.tar.gz
-          asset_content_type: application/gzip
+          asset_path: railway
+          asset_name: railway
+          asset_content_type: application/x-binary
