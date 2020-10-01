@@ -39,7 +39,7 @@ jobs:
       - name: Archive binary
         uses: actions/upload-artifact@v2
         with:
-          name: railway.tar.gz
+          name: cli
           path: railway.tar.gz
 
   create_release:
@@ -50,7 +50,7 @@ jobs:
       - name: Download binary
         uses: actions/download-artifact@v2
         with:
-          name: railway.tar.gz
+          name: cli
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v2
@@ -77,6 +77,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./railway.tar.gz
+          asset_path: railway.tar.gz
           asset_name: railway.tar.gz
           asset_content_type: application/gzip
