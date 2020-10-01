@@ -1,0 +1,21 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+
+jobs:
+  publish_brew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew tap
+        uses: dawidd6/action-homebrew-bump-formula@v3
+        with:
+          token: ${{ secrets.BREW_TOKEN }}
+          tap: railwayapp/homebrew-railway
+          formula: railway
+          tag: ${{ github.ref }}
+          revision: ${{ github.sha }}
