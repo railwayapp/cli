@@ -52,16 +52,17 @@ jobs:
       - name: Check out code into the Go module directory
         uses: actions/checkout@v2
 
-      - name: Read version
+      - name: Set version
+        id: version
         run: |
-          VERSION="$(cat version)"
-          echo "Version $VERSION"
+          echo "$(cat version)" >> $GITHUB_ENV
+          echo "Version $version"
 
       - name: Create release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v$VERSION
-          release_name: $VERSION
+          tag_name: v${{ env.version }}
+          release_name: v${{ env.version }}
           prerelease: true
