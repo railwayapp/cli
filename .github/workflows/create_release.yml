@@ -34,7 +34,7 @@ jobs:
         run: make build
 
       - name: Create gzip
-          run: tar -zcvf railway.tar.gz bin
+        run: tar -zcvf railway.tar.gz bin
 
       - name: Archive asset
         uses: actions/upload-artifact@v2
