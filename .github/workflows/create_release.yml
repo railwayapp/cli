@@ -81,5 +81,5 @@ jobs:
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: railway.tar.gz
-          asset_name: railway-${{ steps.create_release-outputs.tag_name }}.tar.gz
+          asset_name: railway-${{ steps.create_release.outputs.tag_name }}.tar.gz
           asset_content_type: application/gzip
