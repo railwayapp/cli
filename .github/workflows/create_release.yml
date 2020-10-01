@@ -56,9 +56,10 @@ jobs:
         id: version
         run: |
           echo "version=$(cat version)" >> $GITHUB_ENV
-          echo "Version $version"
+          echo "Version ${{ env.version }}"
 
       - name: Create release
+        id: create_release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,3 +67,12 @@ jobs:
           tag_name: v${{ env.version }}
           release_name: v${{ env.version }}
           prerelease: true
+
+      - name: Upload release asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./railway
+          asset_name: railway
