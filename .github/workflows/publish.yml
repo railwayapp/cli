@@ -1,0 +1,66 @@
+name: Publish
+
+on:
+  push:
+    # branches:
+    #   - master
+    # Only run on updates to the version file
+    # paths:
+    #   - "version"
+
+jobs:
+  build:
+    name: Build
+    runs-on: macos-latest
+    steps:
+      - name: Set up Go 1.x
+        uses: actions/setup-go@v2
+        with:
+          go-version: ^1.13
+        id: go
+
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Get dependencies
+        run: |
+          go get -v -t -d ./...
+          if [ -f Gopkg.toml ]; then
+              curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
+              dep ensure
+          fi
+
+      - name: Build
+        run: make build
+
+      - name: Archive binary
+        uses: actions/upload-artifact@v2
+        with:
+          name: railway
+          path: bin/railway
+
+  create_release:
+    name: Create Github Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binary
+        uses: actions/download-artifact@v2
+        with:
+          name: railway
+
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v2
+
+      - name: Read version
+        run: |
+          VERSION="$(cat version)"
+          echo "Version $VERSION"
+
+      - name: Create release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v$VERSION
+          release_name: $VERSION
+          prerelease: true
