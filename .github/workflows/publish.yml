@@ -39,12 +39,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Set output
+      - name: Set version
         id: vars
         run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
 
-      - name: Check output
-        run: echo ${{ steps.vars.outputs.tag }}
+      - name: Check version
+        run: echo "Version ${{ steps.vars.outputs.tag }}"
 
       - name: Use Node.js 12
         uses: actions/setup-node@v1
