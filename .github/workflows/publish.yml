@@ -32,6 +32,7 @@ jobs:
 
   publish_npm:
     name: Publish to NPM
+    needs: release_and_brew
     runs-on: ubuntu-latest
 
     steps:

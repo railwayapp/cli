@@ -12,7 +12,7 @@
   "goBinary": {
     "name": "railway",
     "path": "./bin",
-    "url": "https://github.com/railwayapp/cli/releases/download/v{{version}}/myGoPackage_{{version}}_{{platform}}_{{arch}}.tar.gz"
+    "url": "https://github.com/railwayapp/cli/releases/download/v{{version}}/railway_{{version}}_{{platform}}_{{arch}}.tar.gz"
   },
   "dependencies": {
     "go-npm": "^0.1.9"
