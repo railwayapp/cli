@@ -64,7 +64,8 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v2
-        ref: "master"
+        with:
+          ref: "master"
 
       - name: Bump NPM version
         run: npm --no-git-tag-version version ${{ steps.vars.outputs.tag }}
