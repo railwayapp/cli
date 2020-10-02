@@ -1,19 +1,100 @@
-name: Publish
+name: Create Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "*"
+    # Only run on updates to the version file
+    # paths:
+    #   - "version"
 
 jobs:
-  publish_brew:
-    name: Publish brew tap
+  build:
+    name: Publish
     runs-on: ubuntu-latest
+
     steps:
-      - name: Update Homebrew tap
-        uses: dawidd6/action-homebrew-bump-formula@v3
+      - name: Checkout code
+        uses: actions/checkout@v2
         with:
-          token: ${{ secrets.GH_PAT }}
-          tap: railwayapp/homebrew-railway
-          formula: railway
-          tag: ${{ github.ref }}
-          revision: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        id: go
+        with:
+          go-version: ^1.13
+
+      #     - name: Get dependencies
+      #       run: |
+      #         go get -v -t -d ./...
+      #         if [ -f Gopkg.toml ]; then
+      #             curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
+      #             dep ensure
+      #         fi
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v2
+        with:
+          version: latest
+          args: release --rm-dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+
+  # - name: Archive asset
+  #   uses: actions/upload-artifact@v2
+  #   with:
+  #     name: railway
+  #     path: bin/railway
+
+  # create_release:
+  #   name: Create Github Release
+  #   needs: build
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v2
+
+  #     - name: Download asset
+  #       uses: actions/download-artifact@v2
+  #       with:
+  #         name: railway
+
+  #     - name: Get version
+  #       id: get_version
+  #       run: |
+  #         echo ::set-output name=version::$(cat version)
+
+  #     - name: Create release
+  #       id: create_release
+  #       uses: actions/create-release@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+  #       with:
+  #         tag_name: v${{ steps.get_version.outputs.version }}
+  #         release_name: v${{ steps.get_version.outputs.version }}
+  #         prerelease: false
+
+  #     - name: Upload release asset
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+  #       with:
+  #         upload_url: ${{ steps.create_release.outputs.upload_url }}
+  #         asset_path: railway
+  #         asset_name: railway
+  #         asset_content_type: application/x-binary
+
+  # publish_brew:
+  #   name: Publish Brew tap
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Bump Brew
+  #       env:
+  #         HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.BREW_TOKEN }}
+  #       run: |
+  #         brew tap railwayapp/railway
+  #         brew bump-formula-pr -f --version=${{ steps.get_version.outputs.version }} --no-browse --no-audit \
+  #         --sha256=${{ steps.shasum.outputs.sha }} \
+  #         --url="https://github.com/extrawurst/gitui/releases/download/${{ steps.get_version.outputs.version }}/gitui-mac.tar.gz" \
+  #         extrawurst/tap/gitui

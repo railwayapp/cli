@@ -1,0 +1,18 @@
+# Documentation at http://goreleaser.com
+project_name: railway
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - binary: railway
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
