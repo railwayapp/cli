@@ -17,7 +17,7 @@ builds:
 brews:
   - tap:
       owner: railwayapp
-      name: railway
+      name: homebrew-railway
 
     commit_author:
       name: goreleaserbot
