@@ -62,7 +62,7 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Checkout code
+      - name: Checkout master
         uses: actions/checkout@v2
         with:
           ref: "master"
