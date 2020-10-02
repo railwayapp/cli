@@ -14,5 +14,20 @@ builds:
       - windows
       - darwin
 
+brews:
+  - tap:
+    owner: railwayapp
+    name: railway
+
+    commit_author:
+      name: goreleaserbot
+      email: goreleaser@railway.app
+
+    homepage: "https://railway.app"
+    description: "Develop and deploy code with zero configuration"
+
+    install: |
+      bin.install "railway"
+
 snapshot:
   name_template: "{{ .Tag }}-next"
