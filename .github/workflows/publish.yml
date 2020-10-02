@@ -44,11 +44,7 @@ jobs:
         run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
 
       - name: Check output
-        env:
-          RELEASE_VERSION: ${{ steps.vars.outputs.tag }}
-        run: |
-          echo $RELEASE_VERSION
-          echo ${{ steps.vars.outputs.tag }}
+        run: echo ${{ steps.vars.outputs.tag }}
 
       - name: Use Node.js 12
         uses: actions/setup-node@v1
@@ -65,6 +61,9 @@ jobs:
         run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Checkout master branch
+        run: git checkout master
 
       - name: Bump NPM version
         run: npm --no-git-tag-version version ${{ steps.vars.outputs.tag }}
