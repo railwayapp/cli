@@ -1,40 +1,38 @@
 name: Publish
 
-on: [push]
-
-# on:
-#   push:
-#     tags:
-#       - "*"
+on:
+  push:
+    tags:
+      - "*"
 
 jobs:
-  # release_and_brew:
-  #   name: Release and bump Brew
-  #   runs-on: ubuntu-latest
+  release_and_brew:
+    name: Release and bump Brew
+    runs-on: ubuntu-latest
 
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v2
-  #       with:
-  #         fetch-depth: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
 
-  #     - name: Set up Go
-  #       uses: actions/setup-go@v2
-  #       id: go
-  #       with:
-  #         go-version: ^1.13
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        id: go
+        with:
+          go-version: ^1.13
 
-  #     - name: Run GoReleaser
-  #       uses: goreleaser/goreleaser-action@v2
-  #       with:
-  #         version: latest
-  #         args: release --rm-dist
-  #       env:
-  #         GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v2
+        with:
+          version: latest
+          args: release --rm-dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
   publish_npm:
     name: Publish to NPM
-    # needs: release_and_brew
+    needs: release_and_brew
     runs-on: ubuntu-latest
 
     steps:
@@ -52,33 +50,26 @@ jobs:
           echo $RELEASE_VERSION
           echo ${{ steps.vars.outputs.tag }}
 
-      # - name: Set tag output
-      #   id: vars
-      #   run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+      - name: Use Node.js 12
+        uses: actions/setup-node@v1
+        with:
+          node-version: 12
+          registry-url: https://registry.npmjs.org/
 
-      # - name: Show tag output
-      #   run: echo "Version ${{ steps.vars.ouputs.tag }}"
+      - name: Setup Git user
+        run: |
+          git config --global user.name "Github Bot"
+          git config --global user.email "github-bot@railway.app"
 
-      # - name: Use Node.js 12
-      #   uses: actions/setup-node@v1
-      #   with:
-      #     node-version: 12
-      #     registry-url: https://registry.npmjs.org/
+      - name: Bump NPM version
+        run: npm version ${{ steps.vars.outputs.tag }}
 
-      # - name: Setup Git user
-      #   run: |
-      #     git config --global user.name "Github Bot"
-      #     git config --global user.email "github-bot@railway.app"
+      - name: NPM publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # - name: Bump NPM version
-      #   run: npm version ${{ steps.tag-output.tag }}
-
-      # - name: NPM publish
-      #   run: npm publish --access public
-      #   env:
-      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      # - name: Push changes
-      #   run: git push
-      #   env:
-      #     github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push changes
+        run: git push
+        env:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
