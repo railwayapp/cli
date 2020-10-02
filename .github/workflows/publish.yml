@@ -53,10 +53,8 @@ jobs:
           git config --global user.name "Github Bot"
           git config --global user.email "github-bot@railway.app"
 
-      - name: Setup NPM
-        run: |
-          npm ci
-          npm version from-git
+      - name: Bump NPM version
+        run: npm version from-git
 
       - name: NPM publish
         run: npm publish
