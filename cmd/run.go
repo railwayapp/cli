@@ -14,8 +14,13 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 
 	argsString := ""
 
+	// Inject railway envs
 	for k, v := range *envs {
-		argsString += fmt.Sprintf("%s=%+v", k, v)
+		argsString += fmt.Sprintf("%s=%+v ", k, v)
+	}
+
+	for _, arg := range req.Args {
+		argsString += fmt.Sprintf("%s ", arg)
 	}
 
 	bashCommand := exec.Command("bash", "-c", argsString)

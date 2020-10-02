@@ -87,6 +87,11 @@ func init() {
 		Short: "Show all your projects",
 		RunE:  contextualize(handler.List),
 	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "run",
+		Short: "Run command inside the Railway environment",
+		RunE:  contextualize(handler.Run),
+	})
 }
 
 func main() {
