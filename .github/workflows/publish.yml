@@ -39,8 +39,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Fetch tags
-        run: git fetch --prune --unshallow
+      - name: Set tag output
+        id: tag-output
+        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
 
       - name: Use Node.js 12
         uses: actions/setup-node@v1
@@ -54,7 +55,7 @@ jobs:
           git config --global user.email "github-bot@railway.app"
 
       - name: Bump NPM version
-        run: npm version from-git
+        run: npm version ${{ steps.tag-output.tag }}
 
       - name: NPM publish
         run: npm publish
