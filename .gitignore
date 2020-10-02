@@ -135,3 +135,6 @@ dist
 
 # Build directory
 bin
+
+# NPM token
+.npmrc
