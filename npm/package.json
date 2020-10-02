@@ -1,0 +1,20 @@
+{
+  "name": "@railway/cli",
+  "version": "0.0.1",
+  "description": "Develop and deploy code with zero configuration",
+  "main": "index.js",
+  "author": "Jake Runzer",
+  "license": "ISC",
+  "scripts": {
+    "postinstall": "go-npm install",
+    "preuninstall": "go-npm uninstall"
+  },
+  "goBinary": {
+    "name": "railway",
+    "path": "./bin",
+    "url": "https://github.com/railwayapp/cli/releases/download/v{{version}}/myGoPackage_{{version}}_{{platform}}_{{arch}}.tar.gz"
+  },
+  "dependencies": {
+    "go-npm": "^0.1.9"
+  }
+}
