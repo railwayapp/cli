@@ -8,14 +8,25 @@ import (
 )
 
 func (h *Handler) Use(ctx context.Context, req *entity.CommandRequest) error {
-	projectId, err := h.cfg.GetProject()
+	projectID, err := h.cfg.GetProject()
 	if err != nil {
 		return err
 	}
-	project, err := h.ctrl.GetProject(ctx, projectId)
+
+	project, err := h.ctrl.GetProject(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	_, err = ui.PromptEnvironments(project.Environments)
+
+	environment, err := ui.PromptEnvironments(project.Environments)
+	if err != nil {
+		return err
+	}
+
+	err = h.cfg.SetEnvironment(environment.Id)
+	if err != nil {
+		return err
+	}
+
 	return err
 }
