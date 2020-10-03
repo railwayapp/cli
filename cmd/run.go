@@ -1,9 +1,10 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
 
 	"github.com/railwayapp/cli/entity"
@@ -12,28 +13,23 @@ import (
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	envs, err := h.ctrl.GetEnvs(ctx)
 
-	argsString := ""
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	cmd := exec.Command(req.Args[0], req.Args[1:]...)
+	cmd.Env = os.Environ()
 
 	// Inject railway envs
 	for k, v := range *envs {
-		argsString += fmt.Sprintf("%s=%+v ", k, v)
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%+v", k, v))
 	}
 
-	for _, arg := range req.Args {
-		argsString += fmt.Sprintf("%s ", arg)
-	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stdout
+	cmd.Stdin = os.Stdin
 
-	bashCommand := exec.Command("bash", "-c", argsString)
+	cmd.Run()
 
-	pipe, _ := bashCommand.StdoutPipe()
-	if err := bashCommand.Start(); err != nil {
-		// handle error
-	}
-	reader := bufio.NewReader(pipe)
-	line, err := reader.ReadString('\n')
-	for err == nil {
-		fmt.Println(line)
-		line, err = reader.ReadString('\n')
-	}
 	return nil
 }
