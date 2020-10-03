@@ -29,7 +29,10 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	cmd.Stderr = os.Stdout
 	cmd.Stdin = os.Stdin
 
-	cmd.Run()
+	err = cmd.Run()
+	if err != nil {
+		fmt.Println(err.Error())
+	}
 
 	return nil
 }
