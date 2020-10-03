@@ -92,6 +92,11 @@ func init() {
 		Short: "Run command inside the Railway environment",
 		RunE:  contextualize(handler.Run),
 	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "build",
+		Short: "Generate env file for running Railway in production",
+		RunE:  contextualize(handler.Build),
+	})
 }
 
 func main() {
