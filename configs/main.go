@@ -16,11 +16,31 @@ type Config struct {
 }
 
 type Configs struct {
-	projectConfigs *Config
-	userConfigs    *Config
+	projectConfigs         *Config
+	userConfigs            *Config
+	RailwayProductionToken string
+	RailwayEnvFilePath     string
 }
 
-func unmarshalConfig(config *Config, data interface{}) error {
+func IsDevMode() bool {
+	environment, exists := os.LookupEnv("RAILWAY_ENV")
+	return exists && environment == "develop"
+}
+
+func (c *Configs) CreatePathIfNotExist(path string) error {
+	dir := filepath.Dir(path)
+
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, os.ModePerm)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Configs) unmarshalConfig(config *Config, data interface{}) error {
 	err := config.viper.ReadInConfig()
 	if err != nil {
 		return err
@@ -28,7 +48,7 @@ func unmarshalConfig(config *Config, data interface{}) error {
 	return config.viper.Unmarshal(&data)
 }
 
-func marshalConfig(config *Config, cfg interface{}) error {
+func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 	reflectCfg := reflect.ValueOf(cfg)
 	for i := 0; i < reflectCfg.NumField(); i++ {
 		k := reflectCfg.Type().Field(i).Name
@@ -36,7 +56,7 @@ func marshalConfig(config *Config, cfg interface{}) error {
 		config.viper.Set(k, v)
 	}
 
-	err := CreatePathIfNotExist(config.configPath)
+	err := c.CreatePathIfNotExist(config.configPath)
 	if err != nil {
 		return err
 	}
@@ -81,25 +101,9 @@ func New() *Configs {
 	}
 
 	return &Configs{
-		projectConfigs: projectConfig,
-		userConfigs:    userConfig,
+		projectConfigs:         projectConfig,
+		userConfigs:            userConfig,
+		RailwayProductionToken: os.Getenv("RAILWAY_PRODUCTION_TOKEN"),
+		RailwayEnvFilePath:     path.Join(projectDir, "env.json"),
 	}
-}
-
-func IsDevMode() bool {
-	environment, exists := os.LookupEnv("RAILWAY_ENV")
-	return exists && environment == "develop"
-}
-
-func CreatePathIfNotExist(path string) error {
-	dir := filepath.Dir(path)
-
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		err = os.MkdirAll(dir, os.ModePerm)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }

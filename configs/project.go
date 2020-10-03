@@ -8,18 +8,18 @@ import (
 func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 	var cfg entity.ProjectConfig
 
-	if err := unmarshalConfig(c.projectConfigs, &cfg); err != nil {
+	if err := c.unmarshalConfig(c.projectConfigs, &cfg); err != nil {
 		return nil, errors.ProjectNotFound
 	}
 	return &cfg, nil
 }
 
 func (c *Configs) SetProjectConfigs(cfg *entity.ProjectConfig) error {
-	return marshalConfig(c.projectConfigs, *cfg)
+	return c.marshalConfig(c.projectConfigs, *cfg)
 }
 
 func (c *Configs) SaveProjectConfig() error {
-	err := CreatePathIfNotExist(c.projectConfigs.configPath)
+	err := c.CreatePathIfNotExist(c.projectConfigs.configPath)
 	if err != nil {
 		return err
 	}
