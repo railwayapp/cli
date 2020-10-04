@@ -103,7 +103,7 @@ func New() *Configs {
 	return &Configs{
 		projectConfigs:         projectConfig,
 		userConfigs:            userConfig,
-		RailwayProductionToken: os.Getenv("RAILWAY_PRODUCTION_TOKEN"),
+		RailwayProductionToken: os.Getenv("RAILWAY_TOKEN"),
 		RailwayEnvFilePath:     path.Join(projectDir, "env.json"),
 	}
 }
