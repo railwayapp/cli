@@ -3,18 +3,22 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/errors"
 )
 
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	envs, err := h.ctrl.GetEnvs(ctx)
 
 	if err != nil {
-		log.Fatal(err)
+		return err
+	}
+
+	if len(req.Args) == 0 {
+		return errors.CommandNotSpecified
 	}
 
 	cmd := exec.Command(req.Args[0], req.Args[1:]...)
@@ -31,7 +35,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 
 	err = cmd.Run()
 	if err != nil {
-		fmt.Println(err.Error())
+		return err
 	}
 
 	return nil
