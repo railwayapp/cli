@@ -138,3 +138,6 @@ bin
 
 # NPM token
 .npmrc
+
+# Railway directories
+.railway
