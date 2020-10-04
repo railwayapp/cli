@@ -6,6 +6,7 @@ import (
 
 	gql "github.com/machinebox/graphql"
 	configs "github.com/railwayapp/cli/configs"
+	"github.com/railwayapp/cli/errors"
 )
 
 type Gateway struct {
@@ -19,6 +20,15 @@ func (g *Gateway) authorize(ctx context.Context, req *gql.Request) error {
 		return err
 	}
 	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
+	return nil
+}
+
+func (g *Gateway) setProjectToken(ctx context.Context, req *gql.Request) error {
+	if g.cfg.RailwayProductionToken == "" {
+		return errors.ProductionTokenNotSet
+	}
+
+	req.Header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	return nil
 }
 

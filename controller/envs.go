@@ -10,6 +10,16 @@ import (
 )
 
 func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
+	// Get envs through production token if it exists
+	if c.cfg.RailwayProductionToken != "" {
+		envs, err := c.gtwy.GetEnvsWithProjectToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return envs, err
+	}
+
 	projectCfg, err := c.cfg.GetProjectConfigs()
 	if err != nil {
 		return nil, err
