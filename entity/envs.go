@@ -5,4 +5,4 @@ type GetEnvsRequest struct {
 	EnvironmentID string
 }
 
-type Envs map[string]interface{}
+type Envs map[string]string
