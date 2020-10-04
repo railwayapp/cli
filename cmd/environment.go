@@ -7,7 +7,7 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func (h *Handler) Use(ctx context.Context, req *entity.CommandRequest) error {
+func (h *Handler) Environment(ctx context.Context, req *entity.CommandRequest) error {
 	projectID, err := h.cfg.GetProject()
 	if err != nil {
 		return err

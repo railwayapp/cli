@@ -73,9 +73,9 @@ func init() {
 		RunE:  contextualize(handler.Status),
 	})
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "use",
+		Use:   "environment",
 		Short: "Select an environment",
-		RunE:  contextualize(handler.Use),
+		RunE:  contextualize(handler.Environment),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "open",
