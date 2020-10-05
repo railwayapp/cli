@@ -22,9 +22,10 @@ jobs:
         with:
           go-version: ^1.13
 
-      - name: GCC multilib
+      - name: OSXCross for CGO Support
         run: |
-          sudo apt-get install gcc-multilib g++-multilib
+          mkdir ../../osxcross
+          git clone https://github.com/plentico/osxcross-target.git ../../osxcross/target
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v2
