@@ -8,19 +8,10 @@ before:
 builds:
   - binary: railway
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     goos:
       - linux
       - windows
-
-  - binary: railway
-    ldflags:
-      - -s
-    env:
-      - CGO_ENABLED=1
-      - CC=/home/runner/work/osxcross/target/bin/o64-clang
-      - CXX=/home/runner/work/osxcross/target/bin/o64-clang++
-    goos:
       - darwin
 
 brews:
