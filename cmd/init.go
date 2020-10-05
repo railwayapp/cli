@@ -9,6 +9,27 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
+func (h *Handler) saveProjectAndEnvironment(ctx context.Context, project *entity.Project) error {
+	if len(project.Environments) > 1 {
+		environment, err := ui.PromptEnvironments(project.Environments)
+		if err != nil {
+			return err
+		}
+
+		err = h.cfg.SetEnvironment(environment.Id)
+		if err != nil {
+			return err
+		}
+	} else if len(project.Environments) == 1 {
+		err := h.cfg.SetEnvironment(project.Environments[0].Id)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error {
 	name, err := ui.PromptText("Enter project name")
 	if err != nil {
@@ -27,11 +48,9 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 		return err
 	}
 
-	if len(project.Environments) > 0 {
-		err = h.cfg.SetEnvironment(project.Environments[0].Id)
-		if err != nil {
-			return err
-		}
+	err = h.saveProjectAndEnvironment(ctx, project)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("🎉 Created project %s\n", name)
@@ -51,26 +70,23 @@ func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	// Todo, prompt for environment
-	err = h.cfg.SetProjectConfigs(&entity.ProjectConfig{
-		Project:     project.Id,
-		Environment: project.Environments[0].Id,
-	})
-
-	if err != nil {
-		return nil
-	}
-
-	return nil
-}
-
-func (h *Handler) initFromID(ctx context.Context, req *entity.CommandRequest) error {
-	projectId, err := ui.PromptText("Enter your project id")
+	err = h.cfg.SetProject(project.Id)
 	if err != nil {
 		return err
 	}
 
-	project, err := h.ctrl.GetProject(ctx, projectId)
+	err = h.saveProjectAndEnvironment(ctx, project)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Connected to project %s 🎉\n", project.Name)
+
+	return nil
+}
+
+func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error {
+	project, err := h.ctrl.GetProject(ctx, projectID)
 	if err != nil {
 		return err
 	}
@@ -80,16 +96,14 @@ func (h *Handler) initFromID(ctx context.Context, req *entity.CommandRequest) er
 		return err
 	}
 
-	err = h.cfg.SetProject(projectId)
+	err = h.cfg.SetProject(projectID)
 	if err != nil {
 		return err
 	}
 
-	if len(project.Environments) > 0 {
-		err = h.cfg.SetEnvironment(project.Environments[0].Id)
-		if err != nil {
-			return err
-		}
+	err = h.saveProjectAndEnvironment(ctx, project)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Connected to project %s 🎉\n", project.Name)
@@ -97,7 +111,22 @@ func (h *Handler) initFromID(ctx context.Context, req *entity.CommandRequest) er
 	return nil
 }
 
+func (h *Handler) initFromID(ctx context.Context, req *entity.CommandRequest) error {
+	projectID, err := ui.PromptText("Enter your project id")
+	if err != nil {
+		return err
+	}
+
+	return h.saveProjectWithID(ctx, projectID)
+}
+
 func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
+	if len(req.Args) > 0 {
+		// projectID provided as argument
+		projectID := req.Args[0]
+		return h.saveProjectWithID(ctx, projectID)
+	}
+
 	isLoggedIn, _ := h.ctrl.IsLoggedIn(ctx)
 
 	selection, err := ui.PromptInit(isLoggedIn)
