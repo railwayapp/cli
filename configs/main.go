@@ -66,6 +66,25 @@ func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 	return err
 }
 
+func fetchHomeDir() (homeDir *string, err error) {
+	// In OSX BigSur, or terminals where the user isn't set
+	// user.Current cannot function
+	// As a backstop (We should be crosscompiling using clang)
+	// hoist the dirhir from env
+	defer func() {
+		if r := recover(); r != nil {
+			home := os.Getenv("HOME")
+			homeDir = &home
+			err = nil
+		}
+	}()
+	user, err := user.Current()
+	if err != nil {
+		return nil, err
+	}
+	return &user.HomeDir, nil
+}
+
 func New() *Configs {
 	// Configs stored in projects (<project>/.railway)
 	// Includes projectId, environmentId, etc
@@ -78,7 +97,7 @@ func New() *Configs {
 	projectPath := path.Join(projectDir, "./config.json")
 	projectViper.SetConfigFile(projectPath)
 	projectViper.ReadInConfig()
-	user, err := user.Current()
+
 	if err != nil {
 		panic(err)
 	}
@@ -91,7 +110,11 @@ func New() *Configs {
 	// Configs stored in root (~/.railway)
 	// Includes token, etc
 	userViper := viper.New()
-	userPath := path.Join(user.HomeDir, ".railway/config.json")
+	homeDir, err := fetchHomeDir()
+	if err != nil {
+		panic(err)
+	}
+	userPath := path.Join(*homeDir, ".railway/config.json")
 	userViper.SetConfigFile(userPath)
 	userViper.ReadInConfig()
 
