@@ -4,7 +4,7 @@
 
 This is the command line interface for [Railway](https://railway.app). Use it to connect your code to Railways infrastructure without needing to worry about environment variables or configuration.
 
-[View the docs](https://railway.app/docs/command-line)
+[View the docs](https://railway.app/docs/cli)
 
 ## Installation
 
@@ -25,7 +25,7 @@ npm i -g @railway/cli
 
 ## Documentation
 
-[View the full documentation](https://railway.app/cli)
+[View the full documentation](https://railway.app/docs/cli)
 
 ## Feedback
 
