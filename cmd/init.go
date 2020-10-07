@@ -100,6 +100,10 @@ func (h *Handler) initFromID(ctx context.Context, req *entity.CommandRequest) er
 func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 	isLoggedIn, _ := h.ctrl.IsLoggedIn(ctx)
 
+	if !isLoggedIn {
+		return errors.New("Account require to init project")
+	}
+
 	selection, err := ui.PromptInit(isLoggedIn)
 	if err != nil {
 		return err
