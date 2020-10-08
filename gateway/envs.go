@@ -32,20 +32,20 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	return resp.Envs, nil
 }
 
-func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, error) {
+func (g *Gateway) GetEnvsWithEnvToken(ctx context.Context) (*entity.Envs, error) {
 	gqlReq := gql.NewRequest(`
 	  query {
-			allEnvsForProjectToken
+			allEnvsForEnvToken
 		}
 	`)
 
-	err := g.setProjectToken(ctx, gqlReq)
+	err := g.setEnvToken(ctx, gqlReq)
 	if err != nil {
 		return nil, err
 	}
 
 	var resp struct {
-		Envs *entity.Envs `json:"allEnvsForProjectToken"`
+		Envs *entity.Envs `json:"allEnvsForEnvToken"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
 		return nil, err

@@ -23,7 +23,7 @@ func (g *Gateway) authorize(ctx context.Context, req *gql.Request) error {
 	return nil
 }
 
-func (g *Gateway) setProjectToken(ctx context.Context, req *gql.Request) error {
+func (g *Gateway) setEnvToken(ctx context.Context, req *gql.Request) error {
 	if g.cfg.RailwayProductionToken == "" {
 		return errors.ProductionTokenNotSet
 	}
