@@ -15,10 +15,10 @@ type Config struct {
 }
 
 type Configs struct {
-	projectConfigs         *Config
-	userConfigs            *Config
-	RailwayProductionToken string
-	RailwayEnvFilePath     string
+	projectConfigs     *Config
+	userConfigs        *Config
+	RailwayEnvToken    string
+	RailwayEnvFilePath string
 }
 
 func IsDevMode() bool {
@@ -100,9 +100,9 @@ func New() *Configs {
 	}
 
 	return &Configs{
-		projectConfigs:         projectConfig,
-		userConfigs:            userConfig,
-		RailwayProductionToken: os.Getenv("RAILWAY_TOKEN"),
-		RailwayEnvFilePath:     path.Join(projectDir, "env.json"),
+		projectConfigs:     projectConfig,
+		userConfigs:        userConfig,
+		RailwayEnvToken:    os.Getenv("RAILWAY_TOKEN"),
+		RailwayEnvFilePath: path.Join(projectDir, "env.json"),
 	}
 }

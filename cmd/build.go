@@ -8,7 +8,7 @@ import (
 )
 
 func (h *Handler) Build(ctx context.Context, req *entity.CommandRequest) error {
-	if h.cfg.RailwayProductionToken == "" {
+	if h.cfg.RailwayEnvToken == "" {
 		fmt.Println("Railway env file is only generated in production")
 		return nil
 	}

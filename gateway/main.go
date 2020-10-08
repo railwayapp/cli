@@ -24,11 +24,11 @@ func (g *Gateway) authorize(ctx context.Context, req *gql.Request) error {
 }
 
 func (g *Gateway) setEnvToken(ctx context.Context, req *gql.Request) error {
-	if g.cfg.RailwayProductionToken == "" {
+	if g.cfg.RailwayEnvToken == "" {
 		return errors.ProductionTokenNotSet
 	}
 
-	req.Header.Add("project-access-token", g.cfg.RailwayProductionToken)
+	req.Header.Add("project-access-token", g.cfg.RailwayEnvToken)
 	return nil
 }
 
