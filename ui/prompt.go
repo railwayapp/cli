@@ -62,3 +62,45 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 	i, _, err := prompt.Run()
 	return environments[i], err
 }
+
+func PromptTemplate() (string, error) {
+	promptLang := promptui.Select{
+		Label: "Select Language",
+		Items: []string{"JavaScript", "Python", "Ruby", "Elixir"},
+	}
+
+	_, _, err := promptLang.Run()
+	if err != nil {
+		return "", err
+	}
+
+	promptType := promptui.Select{
+		Label: "Select Language",
+		Items: []string{"Basic", "Blog", "Todo"},
+	}
+
+	_, _, err = promptType.Run()
+	if err != nil {
+		return "", err
+	}
+	promptProj := promptui.Select{
+		Label: "Select Template",
+		Items: []string{"Redwood", "NextJS", "Ghost"},
+	}
+	_, selection, err := promptProj.Run()
+	return selection, err
+}
+
+func PromptFiles(label string, files []*entity.GithubFile) (*entity.GithubFile, error) {
+	prompt := promptui.Select{
+		Label: label,
+		Items: files,
+		Templates: &promptui.SelectTemplates{
+			Active:   `{{ .Name | underline }}`,
+			Inactive: `{{ .Name }}`,
+			Selected: `{{ .Name }}`,
+		},
+	}
+	i, _, err := prompt.Run()
+	return files[i], err
+}

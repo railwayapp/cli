@@ -1,4 +1,4 @@
-package gateway
+package railway
 
 import (
 	"context"

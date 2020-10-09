@@ -92,6 +92,11 @@ func init() {
 		Short: "Run command inside the Railway environment",
 		RunE:  contextualize(handler.Run),
 	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "template",
+		Short: "Start a project from template",
+		RunE:  contextualize(handler.Template),
+	})
 }
 
 func main() {

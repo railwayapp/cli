@@ -38,7 +38,7 @@ func (c *Controller) GetUser(ctx context.Context) (*entity.User, error) {
 	if userCfg.Token == "" {
 		return nil, errors.New("Not logged in")
 	}
-	return c.gtwy.GetUser(ctx)
+	return c.rwGateway.GetUser(ctx)
 }
 
 func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
@@ -102,7 +102,7 @@ func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
 		return nil, err
 	}
 	if code == returnedCode {
-		return c.gtwy.GetUser(ctx)
+		return c.rwGateway.GetUser(ctx)
 	}
 	return nil, nil
 }
