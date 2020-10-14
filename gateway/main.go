@@ -23,6 +23,13 @@ func (g *Gateway) authorize(ctx context.Context, req *gql.Request) error {
 	return nil
 }
 
+func (g *Gateway) getProjectToken(ctx context.Context) (string, error) {
+	if g.cfg.RailwayEnvToken == "" {
+		return "", errors.ProductionTokenNotSet
+	}
+	return g.cfg.RailwayEnvToken, nil
+}
+
 func (g *Gateway) setProjectToken(ctx context.Context, req *gql.Request) error {
 	if g.cfg.RailwayEnvToken == "" {
 		return errors.ProductionTokenNotSet
@@ -39,6 +46,14 @@ func GetGQLHost() string {
 	}
 
 	return fmt.Sprintf("%s/graphql", baseURL)
+}
+
+func GetEnvcacheHost() string {
+	baseURL := "https://envcache.railway.workers.dev"
+	if configs.IsDevMode() {
+		baseURL = fmt.Sprintf("http://localhost:8787")
+	}
+	return baseURL
 }
 
 func New() *Gateway {
