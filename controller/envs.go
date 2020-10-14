@@ -12,7 +12,7 @@ import (
 func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 	// Get envs through env token if it exists
 	if c.cfg.RailwayEnvToken != "" {
-		envs, err := c.gtwy.GetEnvsWithEnvToken(ctx)
+		envs, err := c.gtwy.GetEnvcacheWithProjectToken(ctx)
 		if err != nil {
 			return nil, err
 		}

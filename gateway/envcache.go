@@ -8,13 +8,13 @@ import (
 
 	"github.com/railwayapp/cli/entity"
 
-	"github.com/railwaypp/cli/common/configs"
+	"github.com/railwayapp/cli/common/configs"
 )
 
 var ENVCACHE_URL = configs.ENVCACHE_URL
 
-func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, error) {
-	token, err := getProjectToken(ctx)
+func (g *Gateway) GetEnvcacheWithProjectToken(ctx context.Context) (*entity.Envs, error) {
+	token, err := g.getProjectToken(ctx)
 	if err != nil {
 		return nil, err
 	}
