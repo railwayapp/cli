@@ -49,7 +49,7 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		return nil, errors.New(string(bodyBytes))
 	}
 	var res entity.UpResponse
