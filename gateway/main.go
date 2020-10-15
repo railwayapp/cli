@@ -32,12 +32,16 @@ func (g *Gateway) setProjectToken(ctx context.Context, req *gql.Request) error {
 	return nil
 }
 
-func GetGQLHost() string {
+func GetHost() string {
 	baseURL := "https://backboard.railway.app"
 	if configs.IsDevMode() {
 		baseURL = fmt.Sprintf("http://localhost:8082")
 	}
+	return baseURL
+}
 
+func GetGQLHost() string {
+	baseURL := GetHost()
 	return fmt.Sprintf("%s/graphql", baseURL)
 }
 
