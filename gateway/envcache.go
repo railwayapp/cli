@@ -18,13 +18,20 @@ func (g *Gateway) GetEnvcacheWithProjectToken(ctx context.Context) (*entity.Envs
 	if err != nil {
 		return nil, err
 	}
+	client := http.Client{}
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/token?token=%s", ENVCACHE_URL, token), nil)
+	resp, err := client.Do(req)
+	fmt.Println(resp.Body)
+	// var resp struct {
+	// 	Envs *entity.Envs
+	// }
+	var envs map[string]string
 
-	var resp struct {
+	err = json.NewDecoder(req.Body).Decode(&envs)
+	fmt.Println("DECODED ENVS", envs)
+	var respo struct {
 		Envs *entity.Envs
 	}
 
-	err = json.NewDecoder(req.Body).Decode(&resp)
-
-	return resp.Envs, nil
+	return respo.Envs, nil
 }
