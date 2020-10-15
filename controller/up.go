@@ -13,6 +13,10 @@ import (
 	"github.com/railwayapp/cli/entity"
 )
 
+var IGNORE_FILES = map[string]bool{
+	"node_modules": true,
+}
+
 func compress(src string, buf io.Writer) error {
 	// tar > gzip > buf
 	zr := gzip.NewWriter(buf)
@@ -35,7 +39,8 @@ func compress(src string, buf io.Writer) error {
 			return err
 		}
 		// if not a dir, write file content
-		if !fi.IsDir() {
+		_, ignore := IGNORE_FILES[fi.Name()]
+		if !fi.IsDir() && !ignore {
 			data, err := os.Open(file)
 			if err != nil {
 				return err
@@ -55,7 +60,6 @@ func compress(src string, buf io.Writer) error {
 	if err := zr.Close(); err != nil {
 		return err
 	}
-	//
 	return nil
 }
 
@@ -64,13 +68,18 @@ func (c *Controller) Up(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	environmentID, err := c.cfg.GetEnvironment()
+	if err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := compress("./", &buf); err != nil {
 		return err
 	}
 	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
-		Data:      buf,
-		ProjectID: projectID,
+		Data:          buf,
+		ProjectID:     projectID,
+		EnvironmentID: environmentID,
 	})
 	if err != nil {
 		return err
