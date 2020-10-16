@@ -92,6 +92,11 @@ func init() {
 		Short: "Run command inside the Railway environment",
 		RunE:  contextualize(handler.Run),
 	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Get version of the Railway CLI",
+		RunE:  contextualize(handler.Version),
+	})
 }
 
 func main() {

@@ -4,6 +4,8 @@ go 1.14
 
 require (
 	github.com/briandowns/spinner v1.11.1
+	github.com/google/go-github v17.0.0+incompatible
+	github.com/google/go-github/v28 v28.1.1
 	github.com/logrusorgru/aurora v0.0.0-20200102142835-e9ef32dff381
 	github.com/machinebox/graphql v0.2.2
 	github.com/manifoldco/promptui v0.7.0
