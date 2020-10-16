@@ -14,7 +14,7 @@ func (h *Handler) Version(ctx context.Context, req *entity.CommandRequest) error
 }
 
 func (h *Handler) CheckVersion(ctx context.Context, req *entity.CommandRequest) error {
-	if constants.Version != "Piped into LDflags on build. You are probably running Railway CLI from source." {
+	if constants.Version != constants.VersionDefault {
 		latest, _ := h.ctrl.GetLatestVersion()
 		// Surpressing error as getting latest version is desired, not required
 
