@@ -9,6 +9,8 @@ builds:
   - binary: railway
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/railwayapp/cli/constants.Version={{.Version}}
     goos:
       - linux
       - windows
