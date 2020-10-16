@@ -92,6 +92,11 @@ func init() {
 		Short: "Run command inside the Railway environment",
 		RunE:  contextualize(handler.Run),
 	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "up",
+		Short: "Upload and deploy",
+		RunE:  contextualize(handler.Up),
+	})
 }
 
 func main() {
