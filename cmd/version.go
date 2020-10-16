@@ -6,6 +6,7 @@ import (
 
 	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 func (h *Handler) Version(ctx context.Context, req *entity.CommandRequest) error {
@@ -19,7 +20,7 @@ func (h *Handler) CheckVersion(ctx context.Context, req *entity.CommandRequest) 
 		// Surpressing error as getting latest version is desired, not required
 
 		if latest != "" && latest != constants.Version {
-			fmt.Printf("A newer version of the Railway CLI is available, please update to: %s\n", latest)
+			fmt.Println(ui.Bold(fmt.Sprintf("A newer version of the Railway CLI is available, please update to: %s", latest)))
 		}
 	}
 	return nil
