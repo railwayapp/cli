@@ -15,3 +15,8 @@ func Bold(text string) string {
 	color := Color(os.Stdout)
 	return color.Sprintf(color.Bold(text))
 }
+
+func Colorize(payload string) aurora.Value {
+	color := Color(os.Stdout)
+	return color.Magenta(payload).Bold()
+}
