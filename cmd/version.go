@@ -16,6 +16,7 @@ func (h *Handler) Version(ctx context.Context, req *entity.CommandRequest) error
 func (h *Handler) CheckVersion(ctx context.Context, req *entity.CommandRequest) error {
 	if constants.Version != constants.VersionDefault {
 		latest, _ := h.ctrl.GetLatestVersion()
+		latest = latest[1:]
 		// Surpressing error as getting latest version is desired, not required
 
 		if latest != "" && latest != constants.Version {
