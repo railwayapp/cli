@@ -32,4 +32,4 @@ brews:
       bin.install "railway"
 
 snapshot:
-  name_template: "{{ .Tag }}"
+  name_template: "v{{ .Tag }}"
