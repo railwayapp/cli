@@ -4,27 +4,23 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/google/go-github/github"
 	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
 )
 
 func (h *Handler) Version(ctx context.Context, req *entity.CommandRequest) error {
 	fmt.Println(fmt.Sprintf("railway version %s", constants.Version))
+	return nil
+}
+
+func (h *Handler) CheckVersion(ctx context.Context, req *entity.CommandRequest) error {
 	if constants.Version != "source" {
-		latest, err := getLatestVersion()
-		if err != nil {
-			return err
-		}
+		latest, _ := h.ctrl.GetLatestVersion()
+		// Surpressing error as getting latest version is desired, not required
+
 		if latest != "" && latest != constants.Version {
 			fmt.Println("A newer version of the Railway CLI is available, please update to:", latest)
 		}
 	}
 	return nil
-}
-
-func getLatestVersion() (string, error) {
-	client := github.NewClient(nil)
-	rep, _, err := client.Repositories.GetLatestRelease(context.Background(), "railwayapp", "cli")
-	return *rep.TagName, err
 }
