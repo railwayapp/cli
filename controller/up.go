@@ -5,12 +5,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
 	"github.com/monochromegane/go-gitignore"
+	"github.com/railwayapp/cli/entity"
 )
 
 func compress(src string, buf io.Writer) error {
@@ -69,27 +70,26 @@ func compress(src string, buf io.Writer) error {
 }
 
 func (c *Controller) Up(ctx context.Context) error {
-	// projectID, err := c.cfg.GetProject()
-	// if err != nil {
-	// 	return err
-	// }
-	// environmentID, err := c.cfg.GetEnvironment()
-	// if err != nil {
-	// 	return err
-	// }
+	projectID, err := c.cfg.GetProject()
+	if err != nil {
+		return err
+	}
+	environmentID, err := c.cfg.GetEnvironment()
+	if err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := compress("./", &buf); err != nil {
 		return err
 	}
-	ioutil.WriteFile("./out.tar.gz", buf.Bytes(), 0777)
-	// res, err := c.gtwy.Up(ctx, &entity.UpRequest{
-	// 	Data:          buf,
-	// 	ProjectID:     projectID,
-	// 	EnvironmentID: environmentID,
-	// })
-	// if err != nil {
-	// 	return err
-	// }
-	//fmt.Printf("Deploy available at %s\n", res.URL)
+	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
+		Data:          buf,
+		ProjectID:     projectID,
+		EnvironmentID: environmentID,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Deploy available at %s\n", res.URL)
 	return nil
 }
