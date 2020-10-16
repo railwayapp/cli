@@ -5,31 +5,37 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	"github.com/railwayapp/cli/entity"
+	"github.com/monochromegane/go-gitignore"
 )
-
-var IGNORE_FILES = map[string]bool{
-	"node_modules": true,
-}
 
 func compress(src string, buf io.Writer) error {
 	// tar > gzip > buf
 	zr := gzip.NewWriter(buf)
 	tw := tar.NewWriter(zr)
 
+	ignore, err := gitignore.NewGitIgnore(".gitignore", ".")
+	if err != nil {
+		return err
+	}
 	// walk through every file in the folder
 	filepath.Walk(src, func(file string, fi os.FileInfo, err error) error {
+		if ignore.Match(file, fi.IsDir()) {
+			return nil
+		}
 		// generate tar header
 		header, err := tar.FileInfoHeader(fi, file)
 		if err != nil {
 			return err
 		}
 
+		if err != nil {
+			return err
+		}
 		// must provide real name
 		// (see https://golang.org/src/archive/tar/common.go?#L626)
 		header.Name = filepath.ToSlash(file)
@@ -39,8 +45,7 @@ func compress(src string, buf io.Writer) error {
 			return err
 		}
 		// if not a dir, write file content
-		_, ignore := IGNORE_FILES[fi.Name()]
-		if !fi.IsDir() && !ignore {
+		if !fi.IsDir() {
 			data, err := os.Open(file)
 			if err != nil {
 				return err
@@ -64,26 +69,27 @@ func compress(src string, buf io.Writer) error {
 }
 
 func (c *Controller) Up(ctx context.Context) error {
-	projectID, err := c.cfg.GetProject()
-	if err != nil {
-		return err
-	}
-	environmentID, err := c.cfg.GetEnvironment()
-	if err != nil {
-		return err
-	}
+	// projectID, err := c.cfg.GetProject()
+	// if err != nil {
+	// 	return err
+	// }
+	// environmentID, err := c.cfg.GetEnvironment()
+	// if err != nil {
+	// 	return err
+	// }
 	var buf bytes.Buffer
 	if err := compress("./", &buf); err != nil {
 		return err
 	}
-	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
-		Data:          buf,
-		ProjectID:     projectID,
-		EnvironmentID: environmentID,
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Deploy available at %s\n", res.URL)
+	ioutil.WriteFile("./out.tar.gz", buf.Bytes(), 0777)
+	// res, err := c.gtwy.Up(ctx, &entity.UpRequest{
+	// 	Data:          buf,
+	// 	ProjectID:     projectID,
+	// 	EnvironmentID: environmentID,
+	// })
+	// if err != nil {
+	// 	return err
+	// }
+	//fmt.Printf("Deploy available at %s\n", res.URL)
 	return nil
 }
