@@ -96,8 +96,8 @@ func init() {
 		Use:   "version",
 		Short: "Get version of the Railway CLI",
 		RunE:  contextualize(handler.Version),
-  })
-  rootCmd.AddCommand(&cobra.Command{
+	})
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "up",
 		Short: "Upload and deploy",
 		RunE:  contextualize(handler.Up),
