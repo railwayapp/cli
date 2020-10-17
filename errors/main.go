@@ -1,6 +1,11 @@
 package errors
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/railwayapp/cli/ui"
+)
 
 type RailwayError error
 
@@ -11,5 +16,5 @@ var (
 	ProblemFetchingProjects RailwayError = errors.New("There was a problem fetching your projects")
 	ProjectCreateFailed     RailwayError = errors.New("There was a problem creating the project")
 	ProductionTokenNotSet   RailwayError = errors.New("RAILWAY_TOKEN environment variable not set")
-	CommandNotSpecified     RailwayError = errors.New("Specify a command to run in side the railway environment. railway run <cmd>")
+	CommandNotSpecified     RailwayError = errors.New(fmt.Sprintf("Specify a command to run in side the railway environment.\n%s %s", ui.Bold("railway run"), ui.MagentaText("<cmd>")))
 )

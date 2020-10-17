@@ -13,6 +13,7 @@ import (
 	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 const (
@@ -114,14 +115,14 @@ func (c *Controller) Logout(ctx context.Context) error {
 		return err
 	}
 	if userCfg.Token == "" {
-		fmt.Println("Already logged out")
+		fmt.Printf("🚪 Already %s out\n", ui.YellowText("logged"))
 		return nil
 	}
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{})
 	if err != nil {
 		return err
 	}
-	fmt.Println("Successfully logged out")
+	fmt.Printf("👋 %s out\n", ui.YellowText("Logged"))
 	return nil
 }
 

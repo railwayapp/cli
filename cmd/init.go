@@ -53,7 +53,7 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 		return err
 	}
 
-	fmt.Printf("🎉 Created project %s\n", name)
+	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
 	h.ctrl.OpenProjectInBrowser(ctx, project.Id)
 
 	return nil
@@ -80,7 +80,7 @@ func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	fmt.Printf("Connected to project %s 🎉\n", project.Name)
+	fmt.Printf("🔌 %s to project %s\n", ui.MagentaText("Connected"), ui.GreenText(project.Name))
 
 	return nil
 }
@@ -106,7 +106,7 @@ func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error
 		return err
 	}
 
-	fmt.Printf("Connected to project %s 🎉\n", project.Name)
+	fmt.Printf("🔌 %s to project %s\n", ui.MagentaText("Connected"), ui.GreenText(project.Name))
 
 	return nil
 }

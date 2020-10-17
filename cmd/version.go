@@ -10,7 +10,7 @@ import (
 )
 
 func (h *Handler) Version(ctx context.Context, req *entity.CommandRequest) error {
-	fmt.Println(fmt.Sprintf("railway version %s", constants.Version))
+	fmt.Printf("railway version %s", ui.MagentaText(constants.Version))
 	return nil
 }
 
@@ -20,7 +20,7 @@ func (h *Handler) CheckVersion(ctx context.Context, req *entity.CommandRequest) 
 		// Surpressing error as getting latest version is desired, not required
 
 		if latest != "" && latest != constants.Version {
-			fmt.Println(ui.Bold(fmt.Sprintf("A newer version of the Railway CLI is available, please update to: %s", latest)))
+			fmt.Println(ui.Bold(fmt.Sprintf("A newer version of the Railway CLI is available, please update to: %s", ui.MagentaText(latest))))
 		}
 	}
 	return nil

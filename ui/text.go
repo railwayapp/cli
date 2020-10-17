@@ -16,7 +16,22 @@ func Bold(text string) string {
 	return color.Sprintf(color.Bold(text))
 }
 
-func Colorize(payload string) aurora.Value {
+func RedText(payload string) aurora.Value {
+	color := Color(os.Stdout)
+	return color.Red(payload).Bold()
+}
+
+func MagentaText(payload string) aurora.Value {
 	color := Color(os.Stdout)
 	return color.Magenta(payload).Bold()
+}
+
+func GreenText(payload string) aurora.Value {
+	color := Color(os.Stdout)
+	return color.Green(payload).Bold()
+}
+
+func YellowText(payload string) aurora.Value {
+	color := Color(os.Stdout)
+	return color.Yellow(payload).Bold()
 }

@@ -44,7 +44,7 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 		Templates: &promptui.SelectTemplates{
 			Active:   `{{ .Name | underline }}`,
 			Inactive: `{{ .Name }}`,
-			Selected: fmt.Sprintf("✔ Selected {{ .Name }} "),
+			Selected: fmt.Sprintf("%s Selected {{ .Name | bold }} ", GreenText("✔")),
 		},
 	}
 	i, _, err := prompt.Run()
@@ -58,7 +58,7 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 		Templates: &promptui.SelectTemplates{
 			Active:   `{{ .Name | underline }}`,
 			Inactive: `{{ .Name }}`,
-			Selected: `{{ .Name }}`,
+			Selected: fmt.Sprintf("%s Selected {{ .Name | bold }} ", GreenText("✔")),
 		},
 	}
 	i, _, err := prompt.Run()
