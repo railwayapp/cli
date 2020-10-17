@@ -30,6 +30,3 @@ brews:
 
     install: |
       bin.install "railway"
-
-snapshot:
-  name_template: "{{ .Tag }}"
