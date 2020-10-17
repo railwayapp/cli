@@ -40,6 +40,7 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
+	g.authorize(ctx, httpReq.Header)
 	client := &http.Client{}
 	resp, err := client.Do(httpReq)
 	if err != nil {
