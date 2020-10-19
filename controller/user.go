@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 
@@ -41,14 +42,17 @@ func (c *Controller) GetUser(ctx context.Context) (*entity.User, error) {
 	return c.gtwy.GetUser(ctx)
 }
 
-func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
+func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error) {
 	var token string
 	var returnedCode string
 	port, err := c.randomizer.Port()
+
 	if err != nil {
 		return nil, err
 	}
+
 	code := c.randomizer.Code()
+
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
@@ -56,6 +60,7 @@ func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
 		srv := &http.Server{Addr: strconv.Itoa(port)}
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", getAPIURL())
+
 			if r.Method == http.MethodGet {
 				w.Header().Set("Content-Type", "application/json")
 				token = r.URL.Query().Get("token")
@@ -71,8 +76,10 @@ func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
 					w.Write(byteRes)
 					return
 				}
+
 				res := LoginResponse{Status: loginSuccessResponse}
 				byteRes, err := json.Marshal(&res)
+
 				if err != nil {
 					fmt.Println(err)
 				}
@@ -85,26 +92,50 @@ func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
 				w.WriteHeader(204)
 				return
 			}
+
 			wg.Done()
+
 			if err := srv.Shutdown(ctx); err != nil {
 				fmt.Println(err)
 			}
 		})
+
 		http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil)
 	}()
+
 	url := getLoginURL(port, code)
 	browser.OpenURL(url)
 	wg.Wait()
+
+	if code != returnedCode {
+		return nil, errors.New("Login failed")
+	}
+
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{
 		Token: token,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if code == returnedCode {
-		return c.gtwy.GetUser(ctx)
+
+	user, err := c.gtwy.GetUser(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return nil, nil
+
+	return user, nil
+}
+
+func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error) {
+	return nil, errors.New("Browserless login not implemented")
+}
+
+func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
+	if isBrowserless {
+		return c.browserlessLogin(ctx)
+	}
+
+	return c.browserBasedLogin(ctx)
 }
 
 func (c *Controller) Logout(ctx context.Context) error {
@@ -145,4 +176,12 @@ func getLoginURL(port int, code string) string {
 	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("port=%d&code=%s", port, code)))
 	url := fmt.Sprintf("%s/cli-login?d=%s", getAPIURL(), buffer)
 	return url
+}
+
+func isSSH() bool {
+	if os.Getenv("SSH_TTY") != "" || os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" {
+		return true
+	}
+
+	return false
 }
