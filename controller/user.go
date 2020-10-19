@@ -189,7 +189,7 @@ func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error)
 }
 
 func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
-	if isBrowserless {
+	if isBrowserless || isSSH() {
 		return c.browserlessLogin(ctx)
 	}
 
