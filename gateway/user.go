@@ -18,7 +18,7 @@ func (g *Gateway) GetUser(ctx context.Context) (*entity.User, error) {
 	}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 
 	if err != nil {
 		return nil, err

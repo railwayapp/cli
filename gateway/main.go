@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	gql "github.com/machinebox/graphql"
 	configs "github.com/railwayapp/cli/configs"
@@ -14,12 +15,12 @@ type Gateway struct {
 	gqlClient *gql.Client
 }
 
-func (g *Gateway) authorize(ctx context.Context, req *gql.Request) error {
+func (g *Gateway) authorize(ctx context.Context, header http.Header) error {
 	user, err := g.cfg.GetUserConfigs()
 	if err != nil {
 		return err
 	}
-	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
+	header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
 	return nil
 }
 
