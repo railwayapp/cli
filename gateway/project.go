@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	gql "github.com/machinebox/graphql"
-	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
@@ -165,8 +164,4 @@ func GetRailwayUrl() string {
 	}
 
 	return url
-}
-
-func (g *Gateway) OpenProjectInBrowser(projectID string) {
-	browser.OpenURL(fmt.Sprintf("%s/project/%s", GetRailwayUrl(), projectID))
 }

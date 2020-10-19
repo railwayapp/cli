@@ -25,8 +25,3 @@ func (c *Controller) UpdateProject(ctx context.Context, req *entity.UpdateProjec
 func (c *Controller) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 	return c.gtwy.GetProjects(ctx)
 }
-
-// OpenProjectInBrowser opens the provided projectId in the browser
-func (c *Controller) OpenProjectInBrowser(ctx context.Context, projectID string) {
-	c.gtwy.OpenProjectInBrowser(projectID)
-}

@@ -54,7 +54,12 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 	}
 
 	fmt.Printf("🎉 Created project %s\n", name)
-	h.ctrl.OpenProjectInBrowser(ctx, project.Id)
+
+	openArgs := []string{"project"}
+	err = h.ctrl.OpenInBrowser(ctx, openArgs, project.Id)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
