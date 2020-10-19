@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/pkg/browser"
 	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
-	"github.com/stripe/stripe-cli/pkg/open"
 )
 
 func (h *Handler) Open(ctx context.Context, req *entity.CommandRequest) error {
@@ -26,9 +26,9 @@ func (h *Handler) Open(ctx context.Context, req *entity.CommandRequest) error {
 	}
 	if url, ok := constants.DocsURLMap[req.Args[0]]; ok {
 		if strings.Contains(url, "%s") {
-			err = open.Browser(fmt.Sprintf(url, project.Id))
+			err = browser.OpenURL(fmt.Sprintf(url, project.Id))
 		} else {
-			err = open.Browser(url)
+			err = browser.OpenURL(url)
 		}
 	}
 	return nil
