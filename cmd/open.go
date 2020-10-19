@@ -7,39 +7,35 @@ import (
 
 	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
+	"github.com/stripe/stripe-cli/pkg/open"
 )
 
 func (h *Handler) Open(ctx context.Context, req *entity.CommandRequest) error {
+	projectCfg, err := h.cfg.GetProjectConfigs()
+	if err != nil {
+		return err
+	}
+	project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
 	if len(req.Args) == 0 {
 		fmt.Println("Use railway open to open links to Railway from the CLI. Here's whats we have:")
-		projectCfg, err := h.cfg.GetProjectConfigs()
-		if err != nil {
-			return err
-		}
-
-		project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
-
 		err = nameList(project.Id)
 		if err != nil {
 			return err
 		}
-		// for i := 0; i < len(constants.DocsURLMap); i++ {
-		// 	fmt.Println(i)
-		// }
+		return nil
+	}
+	if url, ok := constants.DocsURLMap[req.Args[0]]; ok {
+		if strings.Contains(url, "%s") {
+			err = open.Browser(fmt.Sprintf(url, project.Id))
+		} else {
+			err = open.Browser(url)
+		}
 	}
 	return nil
-	// projectId, err := h.cfg.GetProject()
-	// if err != nil {
-	// 	return err
-	// }
-
-	// h.ctrl.OpenProjectInBrowser(ctx, projectId)
-	// return nil
 }
 
 func nameList(id string) error {
 	names, longest := getNames()
-	//	fmt.Println("names", names)
 	fmt.Printf("%s%s\n", padName("shortcut", longest), "    url")
 	fmt.Printf("%s%s\n", padName("--------", longest), "    ---------")
 
