@@ -5,14 +5,9 @@ import (
 	"fmt"
 
 	"github.com/railwayapp/cli/entity"
-	"github.com/railwayapp/cli/ui"
 )
 
 func (h *Handler) Login(ctx context.Context, req *entity.CommandRequest) error {
-	ui.StartSpinner(&ui.SpinnerCfg{
-		Message: "Logging in...",
-	})
-
 	isBrowserless, err := req.Cmd.Flags().GetBool("browserless")
 	if err != nil {
 		return err
@@ -23,6 +18,6 @@ func (h *Handler) Login(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	ui.StopSpinner(fmt.Sprintf("🎉 Logged in as %s (%s)", user.Name, user.Email))
+	fmt.Printf("🎉 Logged in as %s (%s)", user.Name, user.Email)
 	return nil
 }

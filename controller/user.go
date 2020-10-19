@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
@@ -30,6 +31,9 @@ type LoginResponse struct {
 	Status string `json:"status,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
+
+const maxAttempts = 2 * 60
+const pollInterval = 1 * time.Second
 
 func (c *Controller) GetUser(ctx context.Context) (*entity.User, error) {
 	userCfg, err := c.cfg.GetUserConfigs()
@@ -103,8 +107,15 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 		http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil)
 	}()
 
-	url := getLoginURL(port, code)
-	browser.OpenURL(url)
+	url := getBrowserBasedLoginURL(port, code)
+	err = browser.OpenURL(url)
+
+	if err != nil {
+		// Opening the browser failed. Try browserless login
+		return c.browserlessLogin(ctx)
+	}
+
+	fmt.Printf("Redirecting you to %s\n", url)
 	wg.Wait()
 
 	if code != returnedCode {
@@ -126,8 +137,55 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 	return user, nil
 }
 
+func (c *Controller) pollForToken(ctx context.Context, code string) (string, error) {
+	var count = 0
+	for count < maxAttempts {
+		token, err := c.gtwy.ConsumeLoginSession(ctx, code)
+
+		if err != nil {
+			return "", errors.New("Login failed")
+		}
+
+		if token != "" {
+			return token, nil
+		}
+
+		count++
+		time.Sleep(pollInterval)
+	}
+
+	return "", errors.New("Login timeout")
+}
+
 func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error) {
-	return nil, errors.New("Browserless login not implemented")
+	wordCode, err := c.gtwy.CreateLoginSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := getBrowserlessLoginURL(wordCode)
+
+	fmt.Printf("Your pairing code is: %s\n", wordCode)
+	fmt.Printf("To authenticate with Railway, please go to \n    %s\n", url)
+
+	token, err := c.pollForToken(ctx, wordCode)
+	if err != nil {
+		return nil, err
+	}
+
+	err = c.cfg.SetUserConfigs(&entity.UserConfig{
+		Token: token,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	user, err := c.gtwy.GetUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
 }
 
 func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
@@ -172,8 +230,14 @@ func getAPIURL() string {
 	return baseRailwayURL
 }
 
-func getLoginURL(port int, code string) string {
+func getBrowserBasedLoginURL(port int, code string) string {
 	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("port=%d&code=%s", port, code)))
+	url := fmt.Sprintf("%s/cli-login?d=%s", getAPIURL(), buffer)
+	return url
+}
+
+func getBrowserlessLoginURL(wordCode string) string {
+	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("wordCode=%s", wordCode)))
 	url := fmt.Sprintf("%s/cli-login?d=%s", getAPIURL(), buffer)
 	return url
 }
