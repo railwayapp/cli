@@ -80,7 +80,7 @@ func init() {
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "open",
-		Short: "Open the project in railway",
+		Short: "Open Railway links via the CLI",
 		RunE:  contextualize(handler.Open),
 	})
 	rootCmd.AddCommand(&cobra.Command{
