@@ -17,21 +17,18 @@ func Bold(text string) string {
 }
 
 func RedText(payload string) aurora.Value {
-	color := Color(os.Stdout)
-	return color.Red(payload)
+	return aurora.Red(payload)
 }
 
 func MagentaText(payload string) aurora.Value {
-	color := Color(os.Stdout)
-	return color.Magenta(payload)
+	return aurora.Magenta(payload)
+
 }
 
 func GreenText(payload string) aurora.Value {
-	color := Color(os.Stdout)
-	return color.Green(payload)
+	return aurora.Green(payload)
 }
 
 func YellowText(payload string) aurora.Value {
-	color := Color(os.Stdout)
-	return color.Yellow(payload)
+	return aurora.Yellow(payload)
 }
