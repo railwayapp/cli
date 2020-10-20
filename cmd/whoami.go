@@ -14,11 +14,11 @@ func (h *Handler) Whoami(ctx context.Context, req *entity.CommandRequest) error 
 		return err
 	}
 
-	userText := fmt.Sprintf("%s", user.Email)
+	userText := fmt.Sprintf("%s", ui.MagentaText(user.Email))
 	if user.Name != "" {
-		userText = fmt.Sprintf("%s (%s)", user.Name, user.Email)
+		userText = fmt.Sprintf("%s (%s)", user.Name, ui.MagentaText(user.Email))
 	}
-	fmt.Println(fmt.Sprintf("👋 Hey, %s", ui.MagentaText(userText)))
+	fmt.Println(fmt.Sprintf("👋 Hey %s", userText))
 
 	// Todo, more info, also more fun
 	return nil
