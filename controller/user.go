@@ -189,7 +189,7 @@ func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error)
 }
 
 func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
-	if isBrowserless || isSSH() {
+	if isBrowserless || isSSH() || isCodeSpaces() {
 		return c.browserlessLogin(ctx)
 	}
 
@@ -265,4 +265,8 @@ func isSSH() bool {
 	}
 
 	return false
+}
+
+func isCodeSpaces() bool {
+	return os.Getenv("CODESPACES") == "true"
 }
