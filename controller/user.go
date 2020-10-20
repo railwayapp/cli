@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 
 	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 const (
@@ -93,7 +95,9 @@ func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
 		http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil)
 	}()
 	url := getLoginURL(port, code)
-	browser.OpenURL(url)
+
+	confirmBrowserOpen("Logging in...", url)
+
 	wg.Wait()
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{
 		Token: token,
@@ -132,6 +136,21 @@ func (c *Controller) IsLoggedIn(ctx context.Context) (bool, error) {
 	}
 	isLoggedIn := userCfg.Token != ""
 	return isLoggedIn, nil
+}
+
+func confirmBrowserOpen(spinnerMsg string, url string) {
+	fmt.Printf("Press Enter to open the browser (^C to quit)")
+	fmt.Fscanln(os.Stdin)
+	ui.StartSpinner(&ui.SpinnerCfg{
+		Message: spinnerMsg,
+	})
+	err := browser.OpenURL(url)
+	if err != nil {
+		ui.StopSpinner(fmt.Sprintf("Failed to open browser, please go to %s manually.", url))
+		ui.StartSpinner(&ui.SpinnerCfg{
+			Message: spinnerMsg,
+		})
+	}
 }
 
 func getAPIURL() string {
