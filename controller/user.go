@@ -115,14 +115,14 @@ func (c *Controller) Logout(ctx context.Context) error {
 		return err
 	}
 	if userCfg.Token == "" {
-		fmt.Printf("🚪 Already %s out\n", ui.YellowText("logged"))
+		fmt.Printf("🚪  %s\n", ui.YellowText("Already logged out"))
 		return nil
 	}
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("👋 %s out\n", ui.YellowText("Logged"))
+	fmt.Printf("👋 %s\n", ui.YellowText("Logged out"))
 	return nil
 }
 
