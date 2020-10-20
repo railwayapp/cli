@@ -109,7 +109,7 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 	}()
 
 	url := getBrowserBasedLoginURL(port, code)
-	err = confirmBrowserOpen("Logging in...", url)
+	err = confirmBrowserOpen("Logging in...\n", url)
 
 	if err != nil {
 		// Opening the browser failed. Try browserless login
