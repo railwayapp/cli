@@ -96,17 +96,9 @@ func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
 	}()
 	url := getLoginURL(port, code)
 
-	fmt.Printf("Press Enter to open the browser (^C to quit)")
-	fmt.Fscanln(os.Stdin)
-	ui.StartSpinner(&ui.SpinnerCfg{
-		Message: "Logging in...",
-	})
-	err = browser.OpenURL(url)
+	err = confirmBrowserOpen("Logging in...", url)
 	if err != nil {
-		ui.StopSpinner(fmt.Sprintf("Failed to open browser, please go to %s manually.", url))
-		ui.StartSpinner(&ui.SpinnerCfg{
-			Message: "Logging in...",
-		})
+		return nil, err
 	}
 
 	wg.Wait()
@@ -147,6 +139,22 @@ func (c *Controller) IsLoggedIn(ctx context.Context) (bool, error) {
 	}
 	isLoggedIn := userCfg.Token != ""
 	return isLoggedIn, nil
+}
+
+func confirmBrowserOpen(spinnerMsg string, url string) error {
+	fmt.Printf("Press Enter to open the browser (^C to quit)")
+	fmt.Fscanln(os.Stdin)
+	ui.StartSpinner(&ui.SpinnerCfg{
+		Message: spinnerMsg,
+	})
+	err := browser.OpenURL(url)
+	if err != nil {
+		ui.StopSpinner(fmt.Sprintf("Failed to open browser, please go to %s manually.", url))
+		ui.StartSpinner(&ui.SpinnerCfg{
+			Message: spinnerMsg,
+		})
+	}
+	return nil
 }
 
 func getAPIURL() string {
