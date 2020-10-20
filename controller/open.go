@@ -6,14 +6,28 @@ import (
 	"strings"
 
 	"github.com/railwayapp/cli/constants"
+	"github.com/railwayapp/cli/errors"
 )
 
 // OpenInBrowser opens the provided url in the browser
 func (c *Controller) OpenInBrowser(ctx context.Context, args []string, projectId string) error {
 	if len(args) == 0 {
 		nameList(projectId)
+		return nil
+	}
+	if url, ok := constants.DocsURLMap[args[0]]; ok {
+		if strings.Contains(url, "%s") {
+			url = fmt.Sprintf(url, projectId)
+		}
+		err := c.gtwy.OpenInBrowser(url)
+		if err != nil {
+			return err
+		}
+	} else {
+		return errors.OpenCommandNotFound
 	}
 	return nil
+
 }
 
 func nameList(id string) error {
