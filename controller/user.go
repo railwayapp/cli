@@ -109,7 +109,7 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 	}()
 
 	url := getBrowserBasedLoginURL(port, code)
-	err = confirmBrowserOpen("Logging in...\n", url)
+	err = c.ConfirmBrowserOpen("Logging in...", url)
 
 	if err != nil {
 		// Opening the browser failed. Try browserless login
@@ -223,7 +223,7 @@ func (c *Controller) IsLoggedIn(ctx context.Context) (bool, error) {
 	return isLoggedIn, nil
 }
 
-func confirmBrowserOpen(spinnerMsg string, url string) error {
+func (c *Controller) ConfirmBrowserOpen(spinnerMsg string, url string) error {
 	fmt.Printf("Press Enter to open the browser (^C to quit)")
 	fmt.Fscanln(os.Stdin)
 	ui.StartSpinner(&ui.SpinnerCfg{
