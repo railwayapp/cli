@@ -141,7 +141,7 @@ func (c *Controller) IsLoggedIn(ctx context.Context) (bool, error) {
 	return isLoggedIn, nil
 }
 
-func confirmBrowserOpen(spinnerMsg string, url string) error {
+func confirmBrowserOpen(spinnerMsg string, url string) {
 	fmt.Printf("Press Enter to open the browser (^C to quit)")
 	fmt.Fscanln(os.Stdin)
 	ui.StartSpinner(&ui.SpinnerCfg{
