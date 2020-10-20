@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -69,18 +68,18 @@ func compress(src string, buf io.Writer) error {
 	return nil
 }
 
-func (c *Controller) Up(ctx context.Context) error {
+func (c *Controller) Up(ctx context.Context) (string, error) {
 	projectID, err := c.cfg.GetProject()
 	if err != nil {
-		return err
+		return "", err
 	}
 	environmentID, err := c.cfg.GetEnvironment()
 	if err != nil {
-		return err
+		return "", err
 	}
 	var buf bytes.Buffer
 	if err := compress("./", &buf); err != nil {
-		return err
+		return "", err
 	}
 	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
 		Data:          buf,
@@ -88,8 +87,7 @@ func (c *Controller) Up(ctx context.Context) error {
 		EnvironmentID: environmentID,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
-	fmt.Printf("Deploy available at %s\n", res.URL)
-	return nil
+	return res.URL, nil
 }

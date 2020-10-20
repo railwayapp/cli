@@ -4,7 +4,7 @@ go 1.14
 
 require (
 	github.com/briandowns/spinner v1.11.1
-	github.com/fatih/color v1.9.0 // indirect
+	github.com/fatih/color v1.9.0
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/google/go-github v17.0.0+incompatible
 	github.com/google/go-querystring v1.0.0 // indirect

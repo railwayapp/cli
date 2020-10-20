@@ -13,6 +13,6 @@ func (h *Handler) Login(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
-	ui.StopSpinner(fmt.Sprintf("🎉 Logged in as %s (%s)", user.Name, user.Email))
+	ui.StopSpinner(fmt.Sprintf("🎉 Logged in as %s (%s)", ui.Bold(user.Name), user.Email))
 	return nil
 }
