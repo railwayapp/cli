@@ -14,7 +14,10 @@ require (
 	github.com/magiconair/properties v1.8.3 // indirect
 	github.com/manifoldco/promptui v0.7.0
 	github.com/matryer/is v1.4.0 // indirect
+	github.com/mattn/go-colorable v0.1.7 // indirect
+	github.com/mitchellh/mapstructure v1.3.3 // indirect
 	github.com/monochromegane/go-gitignore v0.0.0-20200626010858-205db1a8cc00
+	github.com/pelletier/go-toml v1.8.1 // indirect
 	github.com/pkg/browser v0.0.0-20180916011732-0a3d74bf9ce4
 	github.com/spf13/afero v1.4.0 // indirect
 	github.com/spf13/cast v1.3.1 // indirect
