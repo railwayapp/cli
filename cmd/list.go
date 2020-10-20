@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/railwayapp/cli/entity"
-	"github.com/railwayapp/cli/ui"
 )
 
 func (h *Handler) List(ctx context.Context, req *entity.CommandRequest) error {
@@ -14,9 +13,8 @@ func (h *Handler) List(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	// TODO PRETTY
 	for _, v := range projects {
-		fmt.Println(ui.MagentaText(v.Name))
+		fmt.Println(v.Name)
 	}
 
 	return nil
