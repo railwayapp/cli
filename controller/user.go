@@ -96,10 +96,7 @@ func (c *Controller) Login(ctx context.Context) (*entity.User, error) {
 	}()
 	url := getLoginURL(port, code)
 
-	err = confirmBrowserOpen("Logging in...", url)
-	if err != nil {
-		return nil, err
-	}
+	confirmBrowserOpen("Logging in...", url)
 
 	wg.Wait()
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{
