@@ -10,13 +10,13 @@ import (
 
 func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	ui.StartSpinner(&ui.SpinnerCfg{
-		Message: "Accelerating your train to the clouds...",
+		Message: "Laying tracks in the clouds...",
 	})
 	url, err := h.ctrl.Up(ctx)
 	if err != nil {
 		return err
 	} else {
-		ui.StopSpinner(fmt.Sprintf("☁️ %s available at %s\n", ui.GreenText("Deploy"), ui.MagentaText(url)))
+		ui.StopSpinner(fmt.Sprintf("☁️ Deploy available at %s\n", ui.GrayText(url)))
 	}
 	return nil
 }
