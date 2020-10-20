@@ -80,7 +80,7 @@ func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	fmt.Printf("🔌 %s to project %s\n", ui.MagentaText("Connected"), ui.GreenText(project.Name))
+	fmt.Printf("🔌 Connected to project %s\n", ui.GreenText(project.Name))
 
 	return nil
 }
@@ -106,7 +106,7 @@ func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error
 		return err
 	}
 
-	fmt.Printf("🔌 %s to project %s\n", ui.MagentaText("Connected"), ui.GreenText(project.Name))
+	fmt.Printf("🔌 Connected to project %s\n", ui.GreenText(project.Name))
 
 	return nil
 }
