@@ -4,7 +4,6 @@ import (
 	"context"
 	b64 "encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
 
@@ -42,7 +42,7 @@ func (c *Controller) GetUser(ctx context.Context) (*entity.User, error) {
 		return nil, err
 	}
 	if userCfg.Token == "" {
-		return nil, errors.New("Not logged in")
+		return nil, errors.UserConfigNotFound
 	}
 	return c.gtwy.GetUser(ctx)
 }
@@ -119,7 +119,7 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 	wg.Wait()
 
 	if code != returnedCode {
-		return nil, errors.New("Login failed")
+		return nil, errors.LoginFailed
 	}
 
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{
@@ -143,7 +143,7 @@ func (c *Controller) pollForToken(ctx context.Context, code string) (string, err
 		token, err := c.gtwy.ConsumeLoginSession(ctx, code)
 
 		if err != nil {
-			return "", errors.New("Login failed")
+			return "", errors.LoginFailed
 		}
 
 		if token != "" {
@@ -154,7 +154,7 @@ func (c *Controller) pollForToken(ctx context.Context, code string) (string, err
 		time.Sleep(pollInterval)
 	}
 
-	return "", errors.New("Login timeout")
+	return "", errors.LoginTimeout
 }
 
 func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error) {
