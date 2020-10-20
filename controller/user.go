@@ -119,7 +119,7 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 	wg.Wait()
 
 	if code != returnedCode {
-		return nil, errors.New("Login failed")
+		return nil, errors.LoginFailed
 	}
 
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{
@@ -143,7 +143,7 @@ func (c *Controller) pollForToken(ctx context.Context, code string) (string, err
 		token, err := c.gtwy.ConsumeLoginSession(ctx, code)
 
 		if err != nil {
-			return "", errors.New("Login failed")
+			return "", errors.LoginFailed
 		}
 
 		if token != "" {
@@ -154,7 +154,7 @@ func (c *Controller) pollForToken(ctx context.Context, code string) (string, err
 		time.Sleep(pollInterval)
 	}
 
-	return "", errors.New("Login timeout")
+	return "", errors.LoginTimeout
 }
 
 func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error) {
