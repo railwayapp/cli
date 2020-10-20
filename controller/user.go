@@ -154,7 +154,6 @@ func confirmBrowserOpen(spinnerMsg string, url string) {
 			Message: spinnerMsg,
 		})
 	}
-	return nil
 }
 
 func getAPIURL() string {
