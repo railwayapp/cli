@@ -18,6 +18,7 @@ func (h *Handler) Login(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	fmt.Printf("🎉 Logged in as %s (%s)", user.Name, user.Email)
+	fmt.Printf(fmt.Sprintf("🎉 Logged in as %s (%s)", ui.Bold(user.Name), user.Email))
+
 	return nil
 }

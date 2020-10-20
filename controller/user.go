@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 const (
@@ -108,14 +109,13 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 	}()
 
 	url := getBrowserBasedLoginURL(port, code)
-	err = browser.OpenURL(url)
+	err = confirmBrowserOpen("Logging in...", url)
 
 	if err != nil {
 		// Opening the browser failed. Try browserless login
 		return c.browserlessLogin(ctx)
 	}
 
-	fmt.Printf("Redirecting you to %s\n", url)
 	wg.Wait()
 
 	if code != returnedCode {
@@ -203,14 +203,14 @@ func (c *Controller) Logout(ctx context.Context) error {
 		return err
 	}
 	if userCfg.Token == "" {
-		fmt.Println("Already logged out")
+		fmt.Printf("🚪  %s\n", ui.YellowText("Already logged out"))
 		return nil
 	}
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{})
 	if err != nil {
 		return err
 	}
-	fmt.Println("Successfully logged out")
+	fmt.Printf("👋 %s\n", ui.YellowText("Logged out"))
 	return nil
 }
 
@@ -221,6 +221,21 @@ func (c *Controller) IsLoggedIn(ctx context.Context) (bool, error) {
 	}
 	isLoggedIn := userCfg.Token != ""
 	return isLoggedIn, nil
+}
+
+func confirmBrowserOpen(spinnerMsg string, url string) error {
+	fmt.Printf("Press Enter to open the browser (^C to quit)")
+	fmt.Fscanln(os.Stdin)
+	ui.StartSpinner(&ui.SpinnerCfg{
+		Message: spinnerMsg,
+	})
+
+	err := browser.OpenURL(url)
+
+	if err != nil {
+		ui.StopSpinner(fmt.Sprintf("Failed to open browser, attempting browserless login.", url))
+		return err
+	}
 }
 
 func getAPIURL() string {
