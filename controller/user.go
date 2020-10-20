@@ -4,7 +4,6 @@ import (
 	"context"
 	b64 "encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
 
@@ -38,7 +38,7 @@ func (c *Controller) GetUser(ctx context.Context) (*entity.User, error) {
 		return nil, err
 	}
 	if userCfg.Token == "" {
-		return nil, errors.New("Not logged in")
+		return nil, errors.UserConfigNotFound
 	}
 	return c.gtwy.GetUser(ctx)
 }

@@ -39,7 +39,7 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 		Project *entity.Project `json:"projectById"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		return nil, errors.ProjectNotFound
+		return nil, errors.ProjectConfigNotFound
 	}
 	return resp.Project, nil
 }
