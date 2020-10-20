@@ -42,11 +42,15 @@ func contextualize(fn entity.HandlerFunction) entity.CobraFunction {
 func init() {
 	// Initializes all commands
 	handler := cmd.New()
-	rootCmd.AddCommand(&cobra.Command{
+
+	loginCmd := &cobra.Command{
 		Use:   "login",
 		Short: "Login to Railway",
 		RunE:  contextualize(handler.Login),
-	})
+	}
+	loginCmd.Flags().Bool("browserless", false, "--browserless")
+
+	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "logout",
 		Short: "Logout of Railway",
