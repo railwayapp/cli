@@ -9,13 +9,17 @@ import (
 )
 
 func (h *Handler) Login(ctx context.Context, req *entity.CommandRequest) error {
-	ui.StartSpinner(&ui.SpinnerCfg{
-		Message: "Logging in...",
-	})
-	user, err := h.ctrl.Login(ctx)
+	isBrowserless, err := req.Cmd.Flags().GetBool("browserless")
 	if err != nil {
 		return err
 	}
-	ui.StopSpinner(fmt.Sprintf("🎉 Logged in as %s (%s)", user.Name, user.Email))
+
+	user, err := h.ctrl.Login(ctx, isBrowserless)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf(fmt.Sprintf("🎉 Logged in as %s (%s)\n", ui.Bold(user.Name), user.Email))
+
 	return nil
 }

@@ -42,68 +42,77 @@ func contextualize(fn entity.HandlerFunction) entity.CobraFunction {
 func init() {
 	// Initializes all commands
 	handler := cmd.New()
-	rootCmd.AddCommand(&cobra.Command{
+
+	loginCmd := &cobra.Command{
 		Use:   "login",
 		Short: "Login to Railway",
-		RunE:  contextualize(handler.Login, handler.Telemetry),
-	})
+		RunE:  contextualize(handler.Login),
+	}
+	loginCmd.Flags().Bool("browserless", false, "--browserless")
+
+	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "logout",
 		Short: "Logout of Railway",
-		RunE:  contextualize(handler.Logout, handler.Telemetry),
+		RunE:  contextualize(handler.Logout),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "whoami",
 		Short: "Show the currently logged in user",
-		RunE:  contextualize(handler.Whoami, handler.Telemetry),
+		RunE:  contextualize(handler.Whoami),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "init",
 		Short:             "Initialize Railway",
 		PersistentPreRunE: contextualize(handler.CheckVersion),
-		RunE:              contextualize(handler.Init, handler.Telemetry),
+		RunE:              contextualize(handler.Init),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "env",
 		Short: "Show environment variables",
-		RunE:  contextualize(handler.Env, handler.Telemetry),
+		RunE:  contextualize(handler.Env),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "Show status",
-		RunE:  contextualize(handler.Status, handler.Telemetry),
+		RunE:  contextualize(handler.Status),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "environment",
 		Short: "Select an environment",
-		RunE:  contextualize(handler.Environment, handler.Telemetry),
+		RunE:  contextualize(handler.Environment),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "open",
 		Short: "Open the project in railway",
-		RunE:  contextualize(handler.Open, handler.Telemetry),
+		RunE:  contextualize(handler.Open),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "Show all your projects",
-		RunE:  contextualize(handler.List, handler.Telemetry),
+		RunE:  contextualize(handler.List),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "run",
 		Short:             "Run command inside the Railway environment",
 		PersistentPreRunE: contextualize(handler.CheckVersion),
-		RunE:              contextualize(handler.Run, handler.Telemetry),
+		RunE:              contextualize(handler.Run),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "version",
 		Short:             "Get version of the Railway CLI",
 		PersistentPreRunE: contextualize(handler.CheckVersion),
-		RunE:              contextualize(handler.Version, handler.Telemetry),
+		RunE:              contextualize(handler.Version),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "up",
 		Short: "Upload and deploy",
-		RunE:  contextualize(handler.Up, handler.Telemetry),
+		RunE:  contextualize(handler.Up),
+	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "docs",
+		Short: "Open Railway Docs in browser",
+		RunE:  contextualize(handler.Docs),
 	})
 }
 

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"fmt"
+
 	"github.com/manifoldco/promptui"
 	"github.com/railwayapp/cli/entity"
 )
@@ -42,7 +44,7 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 		Templates: &promptui.SelectTemplates{
 			Active:   `{{ .Name | underline }}`,
 			Inactive: `{{ .Name }}`,
-			Selected: `{{ .Name }}`,
+			Selected: fmt.Sprintf("%s Project: {{ .Name | magenta | bold }} ", GreenText("✔")),
 		},
 	}
 	i, _, err := prompt.Run()
@@ -56,7 +58,7 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 		Templates: &promptui.SelectTemplates{
 			Active:   `{{ .Name | underline }}`,
 			Inactive: `{{ .Name }}`,
-			Selected: `{{ .Name }}`,
+			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", GreenText("✔")),
 		},
 	}
 	i, _, err := prompt.Run()
