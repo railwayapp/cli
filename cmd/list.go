@@ -13,7 +13,6 @@ func (h *Handler) List(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	// TODO PRETTY
 	for _, v := range projects {
 		fmt.Println(v.Name)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 func (h *Handler) Whoami(ctx context.Context, req *entity.CommandRequest) error {
@@ -17,8 +18,7 @@ func (h *Handler) Whoami(ctx context.Context, req *entity.CommandRequest) error 
 	if user.Name != "" {
 		userText = fmt.Sprintf("%s (%s)", user.Name, user.Email)
 	}
-
-	fmt.Println(fmt.Sprintf("Hello 👋 %s", userText))
+	fmt.Println(fmt.Sprintf("👋 Hey, %s", ui.MagentaText(userText)))
 
 	// Todo, more info, also more fun
 	return nil

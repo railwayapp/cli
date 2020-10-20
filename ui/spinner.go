@@ -25,7 +25,7 @@ var s = &spinner.Spinner{}
 
 func StartSpinner(cfg *SpinnerCfg) {
 	if cfg.Tokens == nil {
-		cfg.Tokens = TrainRight
+		cfg.Tokens = TrainEmojis
 	}
 	if cfg.Duration.Microseconds() == 0 {
 		cfg.Duration = time.Duration(100) * time.Millisecond
