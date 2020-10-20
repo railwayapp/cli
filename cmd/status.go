@@ -45,7 +45,7 @@ func (h *Handler) Status(ctx context.Context, req *entity.CommandRequest) error 
 			}
 		}
 	} else {
-		fmt.Println(errors.UserConfigNotFound)
+		fmt.Println(errors.ProjectConfigNotFound)
 	}
 
 	return nil
