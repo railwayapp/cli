@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
 
@@ -24,26 +25,27 @@ func (h *Handler) Status(ctx context.Context, req *entity.CommandRequest) error 
 	}
 
 	project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
+	if err != nil {
+		return err
+	}
 
 	if project != nil {
-		fmt.Printf("Project: %s\n", ui.MagentaText(project.Name))
+		fmt.Printf("Project: %s\n", ui.Bold(fmt.Sprint(ui.MagentaText(project.Name))))
 
 		if projectCfg.Environment != "" {
-			fmt.Printf("Environment: %s\n", ui.BlueText(getEnvironmentNameFromID(projectCfg.Environment, project.Environments)))
+			fmt.Printf("Environment: %s\n", ui.Bold(fmt.Sprint(ui.BlueText(getEnvironmentNameFromID(projectCfg.Environment, project.Environments)))))
 		} else {
-			fmt.Println("Not connected to an environment")
+			fmt.Println(ui.RedText("Not connected to an environment"))
 		}
 
 		if len(project.Plugins) > 0 {
 			fmt.Printf("Plugins:\n")
 			for i := range project.Plugins {
-				fmt.Printf("%s\n", ui.GrayText(project.Plugins[i].Name))
+				fmt.Printf("%s\n", ui.Bold(fmt.Sprint(ui.GrayText(project.Plugins[i].Name))))
 			}
 		}
-	} else if projectCfg.Project != "" {
-		fmt.Println("Project not found. Maybe you need to login?")
 	} else {
-		fmt.Println("Not connected to a project. Run railway init.")
+		fmt.Println(errors.ProjectConfigNotFound)
 	}
 
 	return nil

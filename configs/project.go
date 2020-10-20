@@ -9,7 +9,7 @@ func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 	var cfg entity.ProjectConfig
 
 	if err := c.unmarshalConfig(c.projectConfigs, &cfg); err != nil {
-		return nil, errors.ProjectNotFound
+		return nil, errors.ProjectConfigNotFound
 	}
 	return &cfg, nil
 }
