@@ -26,18 +26,18 @@ func (h *Handler) Status(ctx context.Context, req *entity.CommandRequest) error 
 	project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
 
 	if project != nil {
-		fmt.Printf("%s to project %s\n", ui.GreenText("Connected"), ui.MagentaText(project.Name))
+		fmt.Printf("Project: %s\n", ui.MagentaText(project.Name))
 
 		if projectCfg.Environment != "" {
-			fmt.Printf("%s %s\n", ui.GreenText("Using environment"), ui.MagentaText(getEnvironmentNameFromID(projectCfg.Environment, project.Environments)))
+			fmt.Printf("Environment: %s\n", ui.BlueText(getEnvironmentNameFromID(projectCfg.Environment, project.Environments)))
 		} else {
 			fmt.Println("Not connected to an environment")
 		}
 
 		if len(project.Plugins) > 0 {
-			fmt.Printf("%s\n", ui.GreenText("Plugins added:"))
+			fmt.Printf("Plugins:\n")
 			for i := range project.Plugins {
-				fmt.Printf("%s\n", ui.MagentaText(project.Plugins[i].Name))
+				fmt.Printf("%s\n", ui.GrayText(project.Plugins[i].Name))
 			}
 		}
 	} else if projectCfg.Project != "" {
