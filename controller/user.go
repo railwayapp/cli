@@ -236,6 +236,8 @@ func confirmBrowserOpen(spinnerMsg string, url string) error {
 		ui.StopSpinner(fmt.Sprintf("Failed to open browser, attempting browserless login.", url))
 		return err
 	}
+
+	return nil
 }
 
 func getAPIURL() string {

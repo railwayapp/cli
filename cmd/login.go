@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 func (h *Handler) Login(ctx context.Context, req *entity.CommandRequest) error {
