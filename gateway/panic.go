@@ -1,24 +1,37 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
+
+	gql "github.com/machinebox/graphql"
+	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/errors"
 )
 
 // GetProject returns a project of id projectId, error otherwise
 func (g *Gateway) SendPanic(ctx context.Context, i interface{}) error {
-	url := fmt.Sprintf("%s/cli/panic", GetHost())
-	jsonValue, _ := json.Marshal(i)
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonValue))
-	fmt.Println("", req.Body)
-	req.Header.Set("Content-Type", "application/json")
-	res, _ := http.DefaultClient.Do(req)
+	gqlReq := gql.NewRequest(`
+		mutation($projectId: ID!) {
+			sendCliTelemetry(projectId: $projectId) {
+				id,
+				meta {
+					error
+					projectid,
+					environmentid,
+					user,
+				}
+			}
+		}
+	`)
+	g.authorize(ctx, gqlReq.Header)
 
-	defer res.Body.Close()
-	// body, _ := ioutil.ReadAll(res.Body)
-	fmt.Println("sent it", res)
-	return nil
+	gqlReq.Var("name", req.Name)
+
+	var resp struct {
+		Project *entity.Project `json:"sendCliTelemetry"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return nil, errors.SomethingWentWrong
+	}
+	return resp.Project, nil
 }
