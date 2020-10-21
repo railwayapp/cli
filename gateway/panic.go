@@ -9,14 +9,14 @@ import (
 )
 
 // GetProject returns a project of id projectId, error otherwise
-func (g *Gateway) SendPanic(ctx context.Context, i interface{}) error {
+func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) error {
 	gqlReq := gql.NewRequest(`
 		mutation($projectId: ID!) {
 			sendCliTelemetry(projectId: $projectId) {
 				id,
 				meta {
 					error
-					projectid,
+						projectid,
 					environmentid,
 					user,
 				}
@@ -25,7 +25,7 @@ func (g *Gateway) SendPanic(ctx context.Context, i interface{}) error {
 	`)
 	g.authorize(ctx, gqlReq.Header)
 
-	gqlReq.Var("name", req.Name)
+	gqlReq.Var("projectId", req.ProjectID)
 
 	var resp struct {
 		Project *entity.Project `json:"sendCliTelemetry"`
