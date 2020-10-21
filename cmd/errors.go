@@ -5,9 +5,9 @@ import (
 	"fmt"
 )
 
-func (h *Handler) Errors(ctx context.Context, err error) error {
+func (h *Handler) Errors(ctx context.Context, i interface{}) error {
 	// pass along error to controller that passes it to gateway to send it off to backboard
-	fmt.Println("hey")
+	fmt.Println("hey", i)
 	//surpress errors
 	return nil
 }
