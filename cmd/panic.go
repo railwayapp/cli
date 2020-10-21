@@ -2,12 +2,11 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 )
 
-func (h *Handler) Errors(ctx context.Context, i interface{}) error {
+func (h *Handler) Panic(ctx context.Context, i interface{}) error {
 	// pass along error to controller that passes it to gateway to send it off to backboard
-	fmt.Println("hey", i)
+	h.ctrl.SendPanic(ctx, i)
 	//surpress errors
 	return nil
 }

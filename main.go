@@ -81,7 +81,7 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "Show status",
-		RunE:  contextualize(handler.Status, handler.Errors),
+		RunE:  contextualize(handler.Status, handler.Panic),
 	})
 	// rootCmd.AddCommand(&cobra.Command{
 	// 	Use:   "environment",
