@@ -109,7 +109,7 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 	}()
 
 	url := getBrowserBasedLoginURL(port, code)
-	err = c.ConfirmBrowserOpen("Logging in...", url)
+	err = c.ConfirmBrowserOpen("Logging in...\n", url)
 
 	if err != nil {
 		// Opening the browser failed. Try browserless login
@@ -189,7 +189,7 @@ func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error)
 }
 
 func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
-	if isBrowserless || isSSH() {
+	if isBrowserless || isSSH() || isCodeSpaces() {
 		return c.browserlessLogin(ctx)
 	}
 
@@ -233,7 +233,7 @@ func (c *Controller) ConfirmBrowserOpen(spinnerMsg string, url string) error {
 	err := browser.OpenURL(url)
 
 	if err != nil {
-		ui.StopSpinner(fmt.Sprintf("Failed to open browser, attempting browserless login.", url))
+		ui.StopSpinner(fmt.Sprintf("Failed to open browser, attempting browserless login."))
 		return err
 	}
 
@@ -265,4 +265,8 @@ func isSSH() bool {
 	}
 
 	return false
+}
+
+func isCodeSpaces() bool {
+	return os.Getenv("CODESPACES") == "true"
 }
