@@ -11,14 +11,14 @@ import (
 
 func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) (bool, error) {
 	gqlReq := gql.NewRequest(`
-		mutation($command: String, $panicErr: String, $projectId: String, $environmentId: String) {
-			sendTelemetry(command: $command, panicErr: $panicErr, projectId: $projectId, environmenteId: $environemntId)
+		mutation($command: String!, $error: String!, $projectId: String, $environmentId: String) {
+			sendTelemetry(command: $command, error: $error, projectId: $projectId, environmentId: $environmentId)
 		}
 	`)
 	g.authorize(ctx, gqlReq.Header)
 
 	gqlReq.Var("command", req.Command)
-	gqlReq.Var("panicErr", req.PanicError)
+	gqlReq.Var("error", req.PanicError)
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("environmentId", req.EnvironmentID)
 
