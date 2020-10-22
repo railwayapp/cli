@@ -167,6 +167,6 @@ func GetRailwayUrl() string {
 	return url
 }
 
-func (g *Gateway) OpenProjectInBrowser(projectID string) {
-	browser.OpenURL(fmt.Sprintf("%s/project/%s", GetRailwayUrl(), projectID))
+func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) {
+	browser.OpenURL(fmt.Sprintf("%s/project/%s?environmentId=%s", GetRailwayUrl(), projectID, environmentID))
 }
