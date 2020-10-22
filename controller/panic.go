@@ -9,13 +9,14 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func (c *Controller) SendPanic(ctx context.Context, panicErr string, command string) (bool, error) {
+func (c *Controller) SendPanic(ctx context.Context, panicErr string, stacktrace string, command string) (bool, error) {
 	confirmSendPanic()
 	projectCfg, err := c.cfg.GetProjectConfigs()
 	if err != nil {
 		return c.gtwy.SendPanic(ctx, &entity.PanicRequest{
 			Command:       command,
 			PanicError:    panicErr,
+			Stacktrace:    stacktrace,
 			ProjectID:     "",
 			EnvironmentID: "",
 		})
@@ -24,6 +25,7 @@ func (c *Controller) SendPanic(ctx context.Context, panicErr string, command str
 	return c.gtwy.SendPanic(ctx, &entity.PanicRequest{
 		Command:       command,
 		PanicError:    panicErr,
+		Stacktrace:    stacktrace,
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
 	})

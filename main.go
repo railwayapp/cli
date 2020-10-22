@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/railwayapp/cli/cmd"
@@ -28,7 +29,7 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		ctx := context.Background()
 		defer func() {
 			if r := recover(); r != nil {
-				panicFn(ctx, fmt.Sprint(r), cmd.Name(), args)
+				panicFn(ctx, fmt.Sprint(r), string(debug.Stack()), cmd.Name(), args)
 			}
 		}()
 
