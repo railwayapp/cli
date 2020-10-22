@@ -10,8 +10,6 @@ import (
 )
 
 func (h *Handler) Version(ctx context.Context, req *entity.CommandRequest) error {
-	//TODO: rm this line
-	panic("wee woo")
 	fmt.Printf("railway version %s", ui.MagentaText(constants.Version))
 	return nil
 }

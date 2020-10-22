@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
@@ -27,8 +26,6 @@ func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) (bool
 		Status bool `json:"sendTelemetry"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		//TODO: rm this line
-		fmt.Println(err)
 		return false, errors.TelemetryFailed
 	}
 	return resp.Status, nil
