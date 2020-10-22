@@ -28,7 +28,7 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		ctx := context.Background()
 		defer func() {
 			if r := recover(); r != nil {
-				panicFn(ctx, r)
+				panicFn(ctx, fmt.Sprint(r), cmd.Name(), args)
 			}
 		}()
 
@@ -78,11 +78,11 @@ func init() {
 	// 	Short: "Show environment variables",
 	// 	RunE:  contextualize(handler.Env),
 	// })
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "status",
-		Short: "Show status",
-		RunE:  contextualize(handler.Status, handler.Panic),
-	})
+	// rootCmd.AddCommand(&cobra.Command{
+	// 	Use:   "status",
+	// 	Short: "Show status",
+	// 	RunE:  contextualize(handler.Status, handler.Panic),
+	// })
 	// rootCmd.AddCommand(&cobra.Command{
 	// 	Use:   "environment",
 	// 	Short: "Select an environment",
@@ -104,12 +104,12 @@ func init() {
 	// 	PersistentPreRunE: contextualize(handler.CheckVersion),
 	// 	RunE:              contextualize(handler.Run),
 	// })
-	// rootCmd.AddCommand(&cobra.Command{
-	// 	Use:               "version",
-	// 	Short:             "Get version of the Railway CLI",
-	// 	PersistentPreRunE: contextualize(handler.CheckVersion),
-	// 	RunE:              contextualize(handler.Version),
-	// })
+	rootCmd.AddCommand(&cobra.Command{
+		Use:               "version",
+		Short:             "Get version of the Railway CLI",
+		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
+		RunE:              contextualize(handler.Version, handler.Panic),
+	})
 	// rootCmd.AddCommand(&cobra.Command{
 	// 	Use:   "up",
 	// 	Short: "Upload and deploy",

@@ -41,7 +41,6 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
 		return nil, errors.ProjectConfigNotFound
 	}
-	panic("a problem")
 	return resp.Project, nil
 }
 

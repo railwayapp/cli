@@ -5,13 +5,29 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
 )
 
-// GetProject returns a project of id projectId, error otherwise
-func (c *Controller) SendPanic(ctx context.Context, i interface{}) error {
+func (c *Controller) SendPanic(ctx context.Context, panicErr string, command string) (bool, error) {
 	confirmSendPanic()
-	return c.gtwy.SendPanic(ctx, i)
+	projectCfg, err := c.cfg.GetProjectConfigs()
+	if err != nil {
+		return c.gtwy.SendPanic(ctx, &entity.PanicRequest{
+			Command:       command,
+			PanicError:    panicErr,
+			ProjectID:     "",
+			EnvironmentID: "",
+		})
+
+	}
+	return c.gtwy.SendPanic(ctx, &entity.PanicRequest{
+		Command:       command,
+		PanicError:    panicErr,
+		ProjectID:     projectCfg.Project,
+		EnvironmentID: projectCfg.Environment,
+	})
+
 }
 
 func confirmSendPanic() {

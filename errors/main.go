@@ -18,4 +18,5 @@ var (
 	CommandNotSpecified     RailwayError = errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Specify a command to run inside the railway environment."), ui.Bold("railway run <cmd>")))
 	LoginFailed             RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("Login failed")))
 	LoginTimeout            RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("Login timeout")))
+	TelemetryFailed         RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("One of our trains derailed. Any chance you can report this error on our Discord (https://railway.app/help)?")))
 )

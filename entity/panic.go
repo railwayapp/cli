@@ -1,7 +1,8 @@
 package entity
 
 type PanicRequest struct {
-	Msg           interface{}
+	Command       string
+	PanicError    string
 	ProjectID     string
 	EnvironmentID string
 }

@@ -2,36 +2,33 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
 )
 
-// GetProject returns a project of id projectId, error otherwise
-func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) error {
+func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) (bool, error) {
 	gqlReq := gql.NewRequest(`
-		mutation($projectId: ID!) {
-			sendCliTelemetry(projectId: $projectId) {
-				id,
-				meta {
-					error
-						projectid,
-					environmentid,
-					user,
-				}
-			}
+		mutation($command: String, $panicErr: String, $projectId: String, $environmentId: String) {
+			sendTelemetry(command: $command, panicErr: $panicErr, projectId: $projectId, environmenteId: $environemntId)
 		}
 	`)
 	g.authorize(ctx, gqlReq.Header)
 
+	gqlReq.Var("command", req.Command)
+	gqlReq.Var("panicErr", req.PanicError)
 	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("environmentId", req.EnvironmentID)
 
 	var resp struct {
-		Project *entity.Project `json:"sendCliTelemetry"`
+		Status bool `json:"sendTelemetry"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		return nil, errors.SomethingWentWrong
+		//TODO: rm this line
+		fmt.Println(err)
+		return false, errors.TelemetryFailed
 	}
-	return resp.Project, nil
+	return resp.Status, nil
 }
