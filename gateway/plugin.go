@@ -11,7 +11,7 @@ import (
 
 func (g *Gateway) CreatePlugin(ctx context.Context, req *entity.CreatePluginRequest) (*entity.Plugin, error) {
 	gqlReq := gql.NewRequest(`
-		mutation($projectId: String, $name: String) {
+		mutation($projectId: String!, $name: String!) {
 			createPlugin(projectId: $projectId, name: $name) {
 				id,
 				name

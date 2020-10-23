@@ -32,13 +32,13 @@ func (h *Handler) Add(ctx context.Context, req *entity.CommandRequest) error {
 	if !allowCreation {
 		return errors.PluginAlreadyExists
 	}
-	createdPlugin, err := h.ctrl.CreatePlugin(ctx, &entity.CreatePluginRequest{
+	_, err = h.ctrl.CreatePlugin(ctx, &entity.CreatePluginRequest{
 		ProjectID: project.Id,
 		Plugin:    pluginRequest,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("🎉 Created plugin %s\n", ui.MagentaText(createdPlugin.Name))
+	fmt.Printf("🎉 Created plugin %s\n", ui.MagentaText(pluginRequest))
 	return nil
 }
