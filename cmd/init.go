@@ -115,7 +115,7 @@ func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 	isLoggedIn, _ := h.ctrl.IsLoggedIn(ctx)
 
 	if !isLoggedIn {
-		return errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Account require to init project") ui.Bold("railway login")))
+		return errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login")))
 	}
 
 	selection, err := ui.PromptInit(isLoggedIn)
