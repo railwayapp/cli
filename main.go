@@ -114,6 +114,11 @@ func init() {
 		Short: "Open Railway Docs in browser",
 		RunE:  contextualize(handler.Docs),
 	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "add",
+		Short: "Add Railway plugins",
+		RunE:  contextualize(handler.Add),
+	})
 }
 
 func main() {
