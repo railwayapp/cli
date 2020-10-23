@@ -15,23 +15,31 @@ func (c *Controller) GetPlugins(ctx context.Context, projectId string) ([]*entit
 	if err != nil {
 		return nil, err
 	}
-	plugins := projectCfg.Plugins
-	return plugins, nil
+	return projectCfg.Plugins, nil
 }
 
-func (c *Controller) PluginExists(ctx context.Context, pluginRequest string, projectId string) (bool, error) {
+func availablePlugins(pluginRequest string) []*entity.Plugin {
+	set := map[string]bool{"env": true, "postgresql": true, "mongodb": true, "redis": true}
+	delete(set, pluginRequest)
+	keys := []*entity.Plugin{}
+	for key, _ := range set {
+		keys = append(keys, &entity.Plugin{Name: key})
+	}
+	return keys
+}
+func (c *Controller) PluginExists(ctx context.Context, pluginRequest string, projectId string) (bool, []*entity.Plugin, error) {
 	plugins, err := c.GetPlugins(ctx, projectId)
 	if err != nil {
-		return false, err
+		return true, nil, err
 	}
-	doesExist := false
+	allowCreation := true
 	for i := 0; i < len(plugins); i++ {
 		if plugins[i].Name == pluginRequest {
-			doesExist = true
+			allowCreation = false
 		}
 	}
-	if doesExist {
-		return false, nil
+	if !allowCreation {
+		return false, availablePlugins(pluginRequest), nil
 	}
-	return true, nil
+	return true, availablePlugins(""), nil
 }

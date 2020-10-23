@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
@@ -25,11 +24,9 @@ func (g *Gateway) CreatePlugin(ctx context.Context, req *entity.CreatePluginRequ
 	gqlReq.Var("name", req.Plugin)
 
 	var resp struct {
-		Plugin *entity.Plugin `json:"createProject"`
+		Plugin *entity.Plugin `json:"createPlugin"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		//TODO: delete this line
-		fmt.Println(err)
 		return nil, errors.PluginCreateFailed
 	}
 	return resp.Plugin, nil
