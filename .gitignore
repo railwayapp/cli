@@ -141,3 +141,6 @@ bin
 
 # Railway directories
 .railway
+
+# bin
+cli
