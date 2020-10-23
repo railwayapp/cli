@@ -5,7 +5,6 @@ import (
 
 	"github.com/manifoldco/promptui"
 	"github.com/railwayapp/cli/entity"
-	"github.com/railwayapp/cli/ui"
 )
 
 type Prompt string
@@ -56,7 +55,7 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 	greenCheck := GreenText("✔")
 	if len(environments) == 1 {
 		environment := environments[0]
-		fmt.Println("%s Environment: %s", greenCheck, ui.BlueText(environment.Id))
+		fmt.Printf("%s Environment: %s\n", greenCheck, BlueText(environment.Id))
 		return environment, nil
 	}
 	prompt := promptui.Select{
