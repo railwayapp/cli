@@ -5,6 +5,7 @@ import (
 
 	"github.com/manifoldco/promptui"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 type Prompt string
@@ -52,8 +53,11 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 }
 
 func PromptEnvironments(environments []*entity.Environment) (*entity.Environment, error) {
+	greenCheck := GreenText("✔")
 	if len(environments) == 1 {
-		return environments[0], nil
+		environment := environments[0]
+		fmt.Println("%s Environment: %s", greenCheck, ui.BlueText(environment.Id))
+		return environment, nil
 	}
 	prompt := promptui.Select{
 		Label: "Select Environment",
@@ -61,7 +65,7 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 		Templates: &promptui.SelectTemplates{
 			Active:   `{{ .Name | underline }}`,
 			Inactive: `{{ .Name }}`,
-			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", GreenText("✔")),
+			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", greenCheck),
 		},
 	}
 	i, _, err := prompt.Run()
