@@ -52,6 +52,9 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 }
 
 func PromptEnvironments(environments []*entity.Environment) (*entity.Environment, error) {
+	if len(environments) == 1 {
+		return environments[0], nil
+	}
 	prompt := promptui.Select{
 		Label: "Select Environment",
 		Items: environments,
