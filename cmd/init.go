@@ -9,25 +9,27 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func (h *Handler) saveProjectAndEnvironment(ctx context.Context, project *entity.Project) error {
+func (h *Handler) saveProjectAndEnvironment(ctx context.Context, project *entity.Project) (*entity.Environment, error) {
 	if len(project.Environments) > 1 {
 		environment, err := ui.PromptEnvironments(project.Environments)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		err = h.cfg.SetEnvironment(environment.Id)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		return environment, nil
 	} else if len(project.Environments) == 1 {
 		err := h.cfg.SetEnvironment(project.Environments[0].Id)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		return project.Environments[0], nil
 	}
 
-	return nil
+	return nil, nil
 }
 
 func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error {
@@ -48,13 +50,13 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 		return err
 	}
 
-	err = h.saveProjectAndEnvironment(ctx, project)
+	environment, err := h.saveProjectAndEnvironment(ctx, project)
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
-	h.ctrl.OpenProjectInBrowser(ctx, project.Id)
+	h.ctrl.OpenProjectInBrowser(ctx, project.Id, environment.Id)
 
 	return nil
 }
@@ -75,7 +77,7 @@ func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	err = h.saveProjectAndEnvironment(ctx, project)
+	_, err = h.saveProjectAndEnvironment(ctx, project)
 	if err != nil {
 		return err
 	}
@@ -99,7 +101,7 @@ func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error
 		return err
 	}
 
-	err = h.saveProjectAndEnvironment(ctx, project)
+	_, err = h.saveProjectAndEnvironment(ctx, project)
 	if err != nil {
 		return err
 	}
