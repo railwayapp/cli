@@ -20,6 +20,7 @@ func (g *Gateway) CreatePlugin(ctx context.Context, req *entity.CreatePluginRequ
 	`)
 
 	g.authorize(ctx, gqlReq.Header)
+
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("name", req.Plugin)
 
@@ -27,8 +28,9 @@ func (g *Gateway) CreatePlugin(ctx context.Context, req *entity.CreatePluginRequ
 		Plugin *entity.Plugin `json:"createProject"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		//TODO: delete this line
 		fmt.Println(err)
-		return nil, errors.ProjectCreateFailed
+		return nil, errors.PluginCreateFailed
 	}
 	return resp.Plugin, nil
 }
