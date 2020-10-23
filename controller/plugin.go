@@ -18,7 +18,7 @@ func (c *Controller) GetPlugins(ctx context.Context, projectId string) ([]*entit
 	return projectCfg.Plugins, nil
 }
 
-func availablePlugins(pluginRequest string) []*entity.Plugin {
+func (c *Controller) AvailablePlugins(pluginRequest string) []*entity.Plugin {
 	set := map[string]bool{"env": true, "postgresql": true, "mongodb": true, "redis": true}
 	delete(set, pluginRequest)
 	keys := []*entity.Plugin{}
@@ -39,7 +39,7 @@ func (c *Controller) PluginExists(ctx context.Context, pluginRequest string, pro
 		}
 	}
 	if !allowCreation {
-		return false, availablePlugins(pluginRequest), nil
+		return false, c.AvailablePlugins(pluginRequest), nil
 	}
-	return true, availablePlugins(""), nil
+	return true, c.AvailablePlugins(""), nil
 }
