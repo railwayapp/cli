@@ -18,4 +18,6 @@ var (
 	CommandNotSpecified     RailwayError = errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Specify a command to run inside the railway environment."), ui.Bold("railway run <cmd>")))
 	LoginFailed             RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("Login failed")))
 	LoginTimeout            RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("Login timeout")))
+	PluginAlreadyExists     RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("Plugin already exists")))
+	PluginNotSpecified      RailwayError = errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Specify a plugin to create."), ui.Bold("railway add <plugin>")))
 )

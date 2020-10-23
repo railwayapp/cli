@@ -9,26 +9,26 @@ import (
 	"github.com/railwayapp/cli/errors"
 )
 
-func (g *Gateway) GetPlugins(ctx context.Context, projectId string) ([]*entity.Plugin, error) {
+func (g *Gateway) CreatePlugin(ctx context.Context, req *entity.CreatePluginRequest) (*entity.Plugin, error) {
 	gqlReq := gql.NewRequest(`
-		query ($projectId: ID!) {
-			projectById(projectId: $projectId) {
+		mutation($projectId: String, $name: String) {
+			createPlugin(projectId: $projectId, name: $name) {
 				id,
-				name,
+				name
 			}
 		}
 	`)
 
-	gqlReq.Var("projectId", projectId)
-
 	g.authorize(ctx, gqlReq.Header)
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("name", req.Plugin)
 
 	var resp struct {
-		PluginList *entity.PluginList `json:"projectById"`
+		Plugin *entity.Plugin `json:"createProject"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		return nil, errors.ProjectConfigNotFound
+		fmt.Println(err)
+		return nil, errors.ProjectCreateFailed
 	}
-	fmt.Println("plug list", resp.PluginList)
-	return resp.PluginList.Plugins, nil
+	return resp.Plugin, nil
 }
