@@ -10,14 +10,6 @@ func (c *Controller) CreatePlugin(ctx context.Context, req *entity.CreatePluginR
 	return c.gtwy.CreatePlugin(ctx, req)
 }
 
-func (c *Controller) GetPlugins(ctx context.Context, projectId string) ([]*entity.Plugin, error) {
-	projectCfg, err := c.gtwy.GetProject(ctx, projectId)
-	if err != nil {
-		return nil, err
-	}
-	return projectCfg.Plugins, nil
-}
-
 func (c *Controller) AvailablePlugins(pluginRequest string) []*entity.Plugin {
 	set := map[string]bool{"env": true, "postgresql": true, "mongodb": true, "redis": true}
 	delete(set, pluginRequest)
@@ -42,4 +34,12 @@ func (c *Controller) PluginExists(ctx context.Context, pluginRequest string, pro
 		return false, c.AvailablePlugins(pluginRequest), nil
 	}
 	return true, c.AvailablePlugins(""), nil
+}
+
+func (c *Controller) GetPlugins(ctx context.Context, plugin string) ([]*entity.Plugin, error) {
+	projectCfg, err := c.gtwy.GetProject(ctx, projectId)
+	if err != nil {
+		return nil, err
+	}
+	return projectCfg.Plugins, nil
 }
