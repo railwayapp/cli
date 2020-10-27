@@ -9,22 +9,15 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func (h *Handler) addNew(ctx context.Context, req *entity.CommandRequest, pluginsAvailable []*entity.Plugin) (string, error) {
+func (h *Handler) addNew(ctx context.Context, req *entity.CommandRequest, pluginsAvailable []*entity.Plugin) error {
 	fmt.Println("Plugins you can create:")
 	pluginSelected, err := ui.PromptPlugins(pluginsAvailable)
+	pluginRequest = pluginSelected.Name
 	if err != nil {
-		return "", err
+		return err
 	}
-	return pluginSelected.Name, nil
 }
-func (h *Handler) addExists(ctx context.Context, req *entity.CommandRequest, pluginsAvailable []*entity.Plugin) (string, error) {
-	fmt.Println("You already created that plugin!\nPlugins you can create:")
-	pluginSelected, err := ui.PromptPlugins(pluginsAvailable)
-	if err != nil {
-		return "", err
-	}
-	return pluginSelected.Name, nil
-}
+
 func (h *Handler) Add(ctx context.Context, req *entity.CommandRequest) error {
 	projectCfg, err := h.cfg.GetProjectConfigs()
 	if err != nil {
@@ -35,16 +28,18 @@ func (h *Handler) Add(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
-	if len(req.Args[0]) == 0 {
-		pluginRequest, err := h.addNew(ctx, req, h.ctrl.AvailablePlugins(""))
-	} else {
-		pluginRequest := strings.TrimSpace(req.Args[0])
-		allowCreation, pluginsAvailable, err := h.ctrl.PluginExists(ctx, pluginRequest, project.Id)
+
+	pluginRequest := strings.TrimSpace(req.Args[0])
+	allowCreation, pluginsAvailable, err := h.ctrl.PluginExists(ctx, pluginRequest, project.Id)
+	if err != nil {
+		return err
+	}
+	if !allowCreation {
+		fmt.Println("You already created that plugin!\nPlugins you can create:")
+		pluginSelected, err := ui.PromptPlugins(pluginsAvailable)
+		pluginRequest = pluginSelected.Name
 		if err != nil {
 			return err
-		}
-		if !allowCreation {
-			pluginRequest, err = h.addExists(ctx, req, pluginsAvailable)
 		}
 	}
 
