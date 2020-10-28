@@ -92,7 +92,7 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 				w.Write(byteRes)
 			} else if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, PATCH, POST, DELETE")
-				w.Header().Set("Access-Control-Allow-Headers", "authorization")
+				w.Header().Set("Access-Control-Allow-Headers", "authorization, sentry-trace")
 				w.Header().Set("Content-Length", "0")
 				w.WriteHeader(204)
 				return
