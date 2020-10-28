@@ -21,4 +21,5 @@ var (
 	PluginAlreadyExists     RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("Plugin already exists")))
 	PluginNotSpecified      RailwayError = errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Specify a plugin to create."), ui.Bold("railway add <plugin>")))
 	PluginCreateFailed      RailwayError = errors.New(fmt.Sprintf("%s\nOne of our trains probably derailed!", ui.RedText("There was a problem creating the plugin.")))
+	PluginGetFailed         RailwayError = errors.New(fmt.Sprintf("%s\nOne of our trains probably derailed!", ui.RedText("There was a problem getting plugins available for creation.")))
 )

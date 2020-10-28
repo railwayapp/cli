@@ -23,7 +23,7 @@ func (g *Gateway) GetAvailablePlugins(ctx context.Context, projectId string) (*[
 		Plugins *[]string `json:"availablePluginsForProject"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		return nil, errors.ProjectConfigNotFound
+		return nil, errors.PluginGetFailed
 	}
 	return resp.Plugins, nil
 }
