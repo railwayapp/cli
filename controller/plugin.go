@@ -10,7 +10,7 @@ func (c *Controller) CreatePlugin(ctx context.Context, req *entity.CreatePluginR
 	return c.gtwy.CreatePlugin(ctx, req)
 }
 
-func (c *Controller) GetAvailablePlugins(ctx context.Context, projectId string) (*[]string, error) {
+func (c *Controller) GetAvailablePlugins(ctx context.Context, projectId string) ([]*string, error) {
 	plugins, err := c.gtwy.GetAvailablePlugins(ctx, projectId)
 	if err != nil {
 		return nil, err
