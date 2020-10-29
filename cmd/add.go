@@ -31,7 +31,7 @@ func (h *Handler) Add(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 	plugin, err := h.ctrl.CreatePlugin(ctx, &entity.CreatePluginRequest{
-		ProjectID: projectId,
+		ProjectID: projectCfg.Project,
 		Plugin:    selection,
 	})
 	if err != nil {

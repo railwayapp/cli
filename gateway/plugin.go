@@ -8,7 +8,7 @@ import (
 	"github.com/railwayapp/cli/errors"
 )
 
-func (g *Gateway) GetAvailablePlugins(ctx context.Context, projectId string) ([]*string, error) {
+func (g *Gateway) GetAvailablePlugins(ctx context.Context, projectId string) ([]string, error) {
 	gqlReq := gql.NewRequest(`
 		query ($projectId: ID!) {
 			availablePluginsForProject(projectId: $projectId)
@@ -20,7 +20,7 @@ func (g *Gateway) GetAvailablePlugins(ctx context.Context, projectId string) ([]
 	g.authorize(ctx, gqlReq.Header)
 
 	var resp struct {
-		Plugins []*string `json:"availablePluginsForProject"`
+		Plugins []string `json:"availablePluginsForProject"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
 		return nil, errors.PluginGetFailed

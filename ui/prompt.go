@@ -65,7 +65,7 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 	return environments[i], err
 }
 
-func PromptPlugins(plugins []*string) (*string, error) {
+func PromptPlugins(plugins []string) (string, error) {
 	prompt := promptui.Select{
 		Label: "Select Plugin",
 		Items: plugins,
