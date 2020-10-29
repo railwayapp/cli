@@ -15,10 +15,10 @@ type Config struct {
 }
 
 type Configs struct {
-	projectConfigs         *Config
-	userConfigs            *Config
-	RailwayProductionToken string
-	RailwayEnvFilePath     string
+	deprecatedProjectConfigs *Config
+	rootConfigs              *Config
+	RailwayProductionToken   string
+	RailwayEnvFilePath       string
 }
 
 func IsDevMode() bool {
@@ -66,7 +66,7 @@ func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 }
 
 func New() *Configs {
-	// Configs stored in projects (<project>/.railway)
+	// DEPRECATED: Project Configs stored in projects (<project>/.railway)
 	// Includes projectId, environmentId, etc
 	projectDir, err := filepath.Abs("./.railway")
 	if err != nil {
@@ -87,22 +87,22 @@ func New() *Configs {
 		configPath: projectPath,
 	}
 
-	// Configs stored in root (~/.railway)
-	// Includes token, etc
-	userViper := viper.New()
-	userPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
-	userViper.SetConfigFile(userPath)
-	userViper.ReadInConfig()
+	// Root configs stored in root (~/.railway)
+	// Includes token, projectId, environmentId (both based on project path), etc
+	rootViper := viper.New()
+	rootPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
+	rootViper.SetConfigFile(rootPath)
+	rootViper.ReadInConfig()
 
-	userConfig := &Config{
-		viper:      userViper,
-		configPath: userPath,
+	rootConfig := &Config{
+		viper:      rootViper,
+		configPath: rootPath,
 	}
 
 	return &Configs{
-		projectConfigs:         projectConfig,
-		userConfigs:            userConfig,
-		RailwayProductionToken: os.Getenv("RAILWAY_TOKEN"),
-		RailwayEnvFilePath:     path.Join(projectDir, "env.json"),
+		deprecatedProjectConfigs: projectConfig,
+		rootConfigs:              rootConfig,
+		RailwayProductionToken:   os.Getenv("RAILWAY_TOKEN"),
+		RailwayEnvFilePath:       path.Join(projectDir, "env.json"),
 	}
 }
