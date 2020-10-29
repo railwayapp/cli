@@ -124,7 +124,7 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "add",
 		Short: "Add Railway plugins",
-		RunE:  contextualize(handler.Add),
+		RunE:  contextualize(handler.Add, handler.Panic),
 	})
 }
 
