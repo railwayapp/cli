@@ -22,4 +22,5 @@ var (
 	PluginNotSpecified      RailwayError = errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Specify a plugin to create."), ui.Bold("railway add <plugin>")))
 	PluginCreateFailed      RailwayError = errors.New(fmt.Sprintf("%s\nUhh Ohh! One of our trains derailed.", ui.RedText("There was a problem creating the plugin.")))
 	PluginGetFailed         RailwayError = errors.New(fmt.Sprintf("%s\nUhh Ohh! One of our trains derailed.", ui.RedText("There was a problem getting plugins available for creation.")))
+	TelemetryFailed         RailwayError = errors.New(fmt.Sprintf("%s", ui.RedText("One of our trains derailed. Any chance you can report this error on our Discord (https://railway.app/help)?")))
 )

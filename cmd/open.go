@@ -11,7 +11,11 @@ func (h *Handler) Open(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
+	environmentId, err := h.cfg.GetEnvironment()
+	if err != nil {
+		return err
+	}
 
-	h.ctrl.OpenProjectInBrowser(ctx, projectId)
+	h.ctrl.OpenProjectInBrowser(ctx, projectId, environmentId)
 	return nil
 }

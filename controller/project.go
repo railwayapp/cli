@@ -27,6 +27,6 @@ func (c *Controller) GetProjects(ctx context.Context) ([]*entity.Project, error)
 }
 
 // OpenProjectInBrowser opens the provided projectId in the browser
-func (c *Controller) OpenProjectInBrowser(ctx context.Context, projectID string) {
-	c.gtwy.OpenProjectInBrowser(projectID)
+func (c *Controller) OpenProjectInBrowser(ctx context.Context, projectID string, environmentID string) {
+	c.gtwy.OpenProjectInBrowser(projectID, environmentID)
 }

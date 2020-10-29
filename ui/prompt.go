@@ -52,13 +52,19 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 }
 
 func PromptEnvironments(environments []*entity.Environment) (*entity.Environment, error) {
+	greenCheck := GreenText("✔")
+	if len(environments) == 1 {
+		environment := environments[0]
+		fmt.Printf("%s Environment: %s\n", greenCheck, BlueText(environment.Id))
+		return environment, nil
+	}
 	prompt := promptui.Select{
 		Label: "Select Environment",
 		Items: environments,
 		Templates: &promptui.SelectTemplates{
 			Active:   `{{ .Name | underline }}`,
 			Inactive: `{{ .Name }}`,
-			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", GreenText("✔")),
+			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", greenCheck),
 		},
 	}
 	i, _, err := prompt.Run()
