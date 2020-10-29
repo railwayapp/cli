@@ -100,9 +100,9 @@ func New() *Configs {
 	}
 
 	return &Configs{
-		deprecatedProjectConfigs: projectConfig,
-		rootConfigs:              rootConfig,
-		RailwayProductionToken:   os.Getenv("RAILWAY_TOKEN"),
-		RailwayEnvFilePath:       path.Join(projectDir, "env.json"),
+		projectConfigs:         projectConfig,
+		rootConfigs:            rootConfig,
+		RailwayProductionToken: os.Getenv("RAILWAY_TOKEN"),
+		RailwayEnvFilePath:     path.Join(projectDir, "env.json"),
 	}
 }
