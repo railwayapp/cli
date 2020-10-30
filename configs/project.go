@@ -19,7 +19,7 @@ func (c *Configs) SetProjectConfigs(cfg *entity.ProjectConfig) error {
 }
 
 func (c *Configs) SaveProjectConfig() error {
-	err := c.CreatePathIfNotExist(c.rootConfig.configPath)
+	err := c.CreatePathIfNotExist(c.rootConfigs.configPath)
 	if err != nil {
 		return err
 	}

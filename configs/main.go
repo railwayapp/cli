@@ -15,10 +15,10 @@ type Config struct {
 }
 
 type Configs struct {
-	deprecatedProjectConfigs *Config
-	rootConfigs              *Config
-	RailwayProductionToken   string
-	RailwayEnvFilePath       string
+	projectConfigs         *Config
+	rootConfigs            *Config
+	RailwayProductionToken string
+	RailwayEnvFilePath     string
 }
 
 func IsDevMode() bool {
