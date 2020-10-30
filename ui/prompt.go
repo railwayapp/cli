@@ -70,3 +70,17 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 	i, _, err := prompt.Run()
 	return environments[i], err
 }
+
+func PromptPlugins(plugins []string) (string, error) {
+	prompt := promptui.Select{
+		Label: "Select Plugin",
+		Items: plugins,
+		Templates: &promptui.SelectTemplates{
+			Active:   `{{ . | underline }}`,
+			Inactive: `{{ . }}`,
+			Selected: fmt.Sprintf("%s Plugin: {{ . | blue | bold }} ", GreenText("✔")),
+		},
+	}
+	i, _, err := prompt.Run()
+	return plugins[i], err
+}
