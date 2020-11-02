@@ -1,6 +1,8 @@
 package configs
 
 import (
+	"fmt"
+
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
 )
@@ -11,6 +13,7 @@ func (c *Configs) GetUserConfigs() (*entity.UserConfig, error) {
 	if err := c.unmarshalConfig(c.rootConfigs, &cfg); err != nil {
 		return nil, errors.UserConfigNotFound
 	}
+	fmt.Println("get user config", &cfg)
 	return &cfg, nil
 }
 
