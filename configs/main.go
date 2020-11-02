@@ -65,6 +65,17 @@ func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 	return err
 }
 
+func (c *Configs) matchPath() string {
+	path, err := os.Getwd()
+	paths, err := c.rootConfigs.viper.Get("projects")
+	var match string
+	for i := 0; i < len(paths); i++ {
+		match, err := filepath.Match(path, paths)
+	}
+	return match
+
+}
+
 func New() *Configs {
 	// DEPRECATED: Project Configs stored in projects (<project>/.railway)
 	// Includes projectId, environmentId, etc
