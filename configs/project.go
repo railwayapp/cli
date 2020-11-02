@@ -8,9 +8,12 @@ import (
 func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 	var cfg entity.ProjectConfig
 
-	if err := c.unmarshalConfig(c.rootConfigs, &cfg); err != nil {
-		return nil, errors.ProjectConfigNotFound
+	if err := c.unmarshalConfig(c.projectConfigs, &cfg); err != nil {
+		if err := c.unmarshalConfig(c.rootConfigs, &cfg); err != nil {
+			return nil, errors.ProjectConfigNotFound
+		}
 	}
+
 	return &cfg, nil
 }
 
