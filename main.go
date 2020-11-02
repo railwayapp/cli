@@ -126,6 +126,11 @@ func init() {
 		Short: "Add Railway plugins",
 		RunE:  contextualize(handler.Add, handler.Panic),
 	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "config",
+		Short: "DELETE THIS",
+		RunE:  contextualize(handler.Config, handler.Panic),
+	})
 }
 
 func main() {
