@@ -1,8 +1,6 @@
 package configs
 
 import (
-	"fmt"
-
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
 )
@@ -34,18 +32,20 @@ func (c *Configs) SaveProjectConfig() error {
 }
 
 func (c *Configs) SetProject(projectId string) error {
-	fmt.Println("set project", projectId)
-	return nil
-	// c.projectConfigs.viper.Set("project", projectId)
-	// return c.SaveProjectConfig()
+	//need to get correct path from matchpath() and append with dot delimiter
+	c.projectConfigs.viper.Set("project", projectId)
+	return c.SaveProjectConfig()
 }
 
 func (c *Configs) SetEnvironment(environmentId string) error {
+	//need to get correct path from matchpath() and append with dot delimiter
 	c.projectConfigs.viper.Set("environment", environmentId)
 	return c.SaveProjectConfig()
 }
 
 func (c *Configs) GetProject() (string, error) {
+	//c.rootConfigs.viper.ReadInConfig
+	//c.rootConfigs.viper.GetStringMap("project.<closest path match>")
 	err := c.projectConfigs.viper.ReadInConfig()
 	if err != nil {
 		return "", errors.ProjectConfigNotFound
@@ -54,6 +54,8 @@ func (c *Configs) GetProject() (string, error) {
 }
 
 func (c *Configs) GetEnvironment() (string, error) {
+	//c.rootConfigs.viper.ReadInConfig
+	//c.rootConfigs.viper.GetStringMap("project.<closest path match>")
 	err := c.projectConfigs.viper.ReadInConfig()
 	if err != nil {
 		return "", err

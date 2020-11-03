@@ -1,6 +1,6 @@
 package entity
 
 type RootConfig struct {
-	Token    string          `json:"token"`
-	Projects []ProjectConfig `json:"projects"`
+	Token    string                     `json:"token"`
+	Projects map[string][]ProjectConfig `json:"projects"`
 }

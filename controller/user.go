@@ -206,7 +206,7 @@ func (c *Controller) Logout(ctx context.Context) error {
 		fmt.Printf("🚪  %s\n", ui.YellowText("Already logged out"))
 		return nil
 	}
-	err = c.cfg.SetUserConfigs(&entity.UserConfig{})
+	err = c.cfg.SetUserConfigs(&entity.RootConfig{token: ""})
 	if err != nil {
 		return err
 	}
