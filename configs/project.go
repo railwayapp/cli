@@ -1,6 +1,8 @@
 package configs
 
 import (
+	"fmt"
+
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
 )
@@ -27,13 +29,15 @@ func (c *Configs) SaveProjectConfig() error {
 		return err
 	}
 
-	err = c.projectConfigs.viper.WriteConfig()
+	err = c.rootConfigs.viper.WriteConfig()
 	return err
 }
 
 func (c *Configs) SetProject(projectId string) error {
-	c.projectConfigs.viper.Set("project", projectId)
-	return c.SaveProjectConfig()
+	fmt.Println("set project", projectId)
+	return nil
+	// c.projectConfigs.viper.Set("project", projectId)
+	// return c.SaveProjectConfig()
 }
 
 func (c *Configs) SetEnvironment(environmentId string) error {
