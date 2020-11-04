@@ -10,6 +10,10 @@ import (
 	"github.com/railwayapp/cli/errors"
 )
 
+const (
+	CLI_SOURCE_HEADER = "cli"
+)
+
 type Gateway struct {
 	cfg       *configs.Configs
 	gqlClient *gql.Client
@@ -21,6 +25,7 @@ func (g *Gateway) authorize(ctx context.Context, header http.Header) error {
 		return err
 	}
 	header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
+	header.Add("x-source", CLI_SOURCE_HEADER)
 	return nil
 }
 
