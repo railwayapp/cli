@@ -1,37 +1,23 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"mime/multipart"
 	"net/http"
 
 	"github.com/railwayapp/cli/entity"
 )
 
 func constructReq(ctx context.Context, req *entity.UpRequest) (*http.Request, error) {
-	body := new(bytes.Buffer)
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", req.ProjectID)
+	url := fmt.Sprintf("%s/project/%s/environment/%s/up", GetHost(), req.ProjectID, req.EnvironmentID)
+	httpReq, err := http.NewRequest("POST", url, &req.Data)
 	if err != nil {
 		return nil, err
 	}
-	part.Write(req.Data.Bytes())
-
-	err = writer.Close()
-	if err != nil {
-		return nil, err
-	}
-	url := fmt.Sprintf("%s/project/%s/up", GetHost(), req.ProjectID)
-	httpReq, err := http.NewRequest("POST", url, body)
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+	httpReq.Header.Set("Content-Type", "multipart/form-data")
 	return httpReq, nil
 }
 
