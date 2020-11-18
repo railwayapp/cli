@@ -1,10 +1,11 @@
 package configs
 
 import (
+	"encoding/json"
+	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
-	"reflect"
 
 	"github.com/spf13/viper"
 )
@@ -48,24 +49,46 @@ func (c *Configs) unmarshalConfig(config *Config, data interface{}) error {
 }
 
 func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
-	reflectCfg := reflect.ValueOf(cfg)
-	for i := 0; i < reflectCfg.NumField(); i++ {
-		k := reflectCfg.Type().Field(i).Name
-		v := reflectCfg.Field(i).Interface()
-		config.viper.Set(k, v)
-	}
+	// reflectCfg := reflect.ValueOf(cfg)
+	// for i := 0; i < reflectCfg.NumField(); i++ {
+	// 	k := reflectCfg.Type().Field(i).Name
+	// 	v := reflectCfg.Field(i).Interface()
+	// 	config.viper.Set(k, v)
+	// }
+
+	// err = config.viper.WriteConfig()
 
 	err := c.CreatePathIfNotExist(config.configPath)
 	if err != nil {
 		return err
 	}
 
-	err = config.viper.WriteConfig()
+	jsonString, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(config.configPath, jsonString, os.ModePerm)
+	if err != nil {
+		return err
+	}
 
 	return err
 }
 
 func New() *Configs {
+	// Configs stored in root (~/.railway)
+	// Includes token, etc
+	userViper := viper.New()
+	userPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
+	userViper.SetConfigFile(userPath)
+	userViper.ReadInConfig()
+
+	userConfig := &Config{
+		viper:      userViper,
+		configPath: userPath,
+	}
+
 	// Configs stored in projects (<project>/.railway)
 	// Includes projectId, environmentId, etc
 	projectDir, err := filepath.Abs("./.railway")
@@ -78,25 +101,9 @@ func New() *Configs {
 	projectViper.SetConfigFile(projectPath)
 	projectViper.ReadInConfig()
 
-	if err != nil {
-		panic(err)
-	}
-
 	projectConfig := &Config{
 		viper:      projectViper,
 		configPath: projectPath,
-	}
-
-	// Configs stored in root (~/.railway)
-	// Includes token, etc
-	userViper := viper.New()
-	userPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
-	userViper.SetConfigFile(userPath)
-	userViper.ReadInConfig()
-
-	userConfig := &Config{
-		viper:      userViper,
-		configPath: userPath,
 	}
 
 	return &Configs{

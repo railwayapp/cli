@@ -9,5 +9,6 @@ type User struct {
 }
 
 type UserConfig struct {
-	Token string `json:"token"`
+	Token    string                   `json:"token"`
+	Projects map[string]ProjectConfig `json:"projects"`
 }

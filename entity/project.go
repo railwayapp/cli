@@ -20,6 +20,7 @@ type Project struct {
 }
 
 type ProjectConfig struct {
+	ProjectPath string `json:"projectPath,omitempty"`
 	Project     string `json:"project,omitempty"`
 	Environment string `json:"environment,omitempty"`
 }
