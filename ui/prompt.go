@@ -55,7 +55,7 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 	greenCheck := GreenText("✔")
 	if len(environments) == 1 {
 		environment := environments[0]
-		fmt.Printf("%s Environment: %s\n", greenCheck, BlueText(environment.Id))
+		fmt.Printf("%s Environment: %s\n", greenCheck, BlueText(environment.Name))
 		return environment, nil
 	}
 	prompt := promptui.Select{
