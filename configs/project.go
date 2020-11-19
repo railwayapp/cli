@@ -45,14 +45,14 @@ func (c *Configs) MigrateLocalProjectConfig() error {
 	return nil
 }
 
-func (c *Configs) getPWD() (string, error) {
-	pwd, err := os.Getwd()
+func (c *Configs) getCWD() (string, error) {
+	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
-	pwd = strings.ToLower(pwd)
+	cwd = strings.ToLower(cwd)
 
-	return pwd, nil
+	return cwd, nil
 }
 
 func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
@@ -64,12 +64,34 @@ func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 	}
 
 	// lookup project in global config based on pwd
-	pwd, err := c.getPWD()
+	cwd, err := c.getCWD()
 	if err != nil {
 		return nil, err
 	}
 
-	projectCfg, found := userCfg.Projects[pwd]
+	var longestPath = -1
+	var pathMatch = ""
+	for path := range userCfg.Projects {
+		// use exact match if it exsits
+		if path == cwd {
+			longestPath = len(path)
+			pathMatch = path
+			break
+		}
+
+		// check if parent path matches
+		var matches = strings.HasPrefix(cwd, fmt.Sprintf("%s/", path))
+		if matches && len(path) > longestPath {
+			longestPath = len(path)
+			pathMatch = path
+		}
+	}
+
+	if longestPath == -1 {
+		return nil, errors.ProjectConfigNotFound
+	}
+
+	projectCfg, found := userCfg.Projects[pathMatch]
 
 	if !found {
 		return nil, errors.ProjectConfigNotFound
@@ -94,19 +116,19 @@ func (c *Configs) SetProjectConfigs(cfg *entity.ProjectConfig) error {
 }
 
 func (c *Configs) createNewProjectConfig() (*entity.ProjectConfig, error) {
-	pwd, err := c.getPWD()
+	cwd, err := c.getCWD()
 	if err != nil {
 		return nil, err
 	}
 
 	projectCfg := &entity.ProjectConfig{
-		ProjectPath: pwd,
+		ProjectPath: cwd,
 	}
 
 	return projectCfg, nil
 }
 
-func (c *Configs) SetProject(projectId string) error {
+func (c *Configs) SetProject(projectID string) error {
 	projectCfg, err := c.GetProjectConfigs()
 
 	if err != nil {
@@ -117,7 +139,19 @@ func (c *Configs) SetProject(projectId string) error {
 		}
 	}
 
-	projectCfg.Project = projectId
+	projectCfg.Project = projectID
+	return c.SetProjectConfigs(projectCfg)
+}
+
+// SetNewProject configures railway project for current working directory
+func (c *Configs) SetNewProject(projectID string) error {
+	projectCfg, err := c.createNewProjectConfig()
+
+	if err != nil {
+		return err
+	}
+
+	projectCfg.Project = projectID
 	return c.SetProjectConfigs(projectCfg)
 }
 
