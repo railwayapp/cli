@@ -7,7 +7,3 @@ type User struct {
 	Avatar   string    `json:"avatar,omitempty"`
 	Projects []Project `json:"projects,omitempty"`
 }
-
-type UserConfig struct {
-	Token string `json:"token"`
-}

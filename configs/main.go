@@ -15,8 +15,8 @@ type Config struct {
 }
 
 type Configs struct {
+	rootConfigs            *Config
 	projectConfigs         *Config
-	userConfigs            *Config
 	RailwayProductionToken string
 	RailwayEnvFilePath     string
 }
@@ -52,20 +52,26 @@ func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 	for i := 0; i < reflectCfg.NumField(); i++ {
 		k := reflectCfg.Type().Field(i).Name
 		v := reflectCfg.Field(i).Interface()
+
 		config.viper.Set(k, v)
 	}
 
-	err := c.CreatePathIfNotExist(config.configPath)
-	if err != nil {
-		return err
-	}
-
-	err = config.viper.WriteConfig()
-
-	return err
+	return config.viper.WriteConfig()
 }
 
 func New() *Configs {
+	// Configs stored in root (~/.railway)
+	// Includes token, etc
+	rootViper := viper.New()
+	rootConfigPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
+	rootViper.SetConfigFile(rootConfigPath)
+	rootViper.ReadInConfig()
+
+	rootConfig := &Config{
+		viper:      rootViper,
+		configPath: rootConfigPath,
+	}
+
 	// Configs stored in projects (<project>/.railway)
 	// Includes projectId, environmentId, etc
 	projectDir, err := filepath.Abs("./.railway")
@@ -78,30 +84,14 @@ func New() *Configs {
 	projectViper.SetConfigFile(projectPath)
 	projectViper.ReadInConfig()
 
-	if err != nil {
-		panic(err)
-	}
-
 	projectConfig := &Config{
 		viper:      projectViper,
 		configPath: projectPath,
 	}
 
-	// Configs stored in root (~/.railway)
-	// Includes token, etc
-	userViper := viper.New()
-	userPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
-	userViper.SetConfigFile(userPath)
-	userViper.ReadInConfig()
-
-	userConfig := &Config{
-		viper:      userViper,
-		configPath: userPath,
-	}
-
 	return &Configs{
 		projectConfigs:         projectConfig,
-		userConfigs:            userConfig,
+		rootConfigs:            rootConfig,
 		RailwayProductionToken: os.Getenv("RAILWAY_TOKEN"),
 		RailwayEnvFilePath:     path.Join(projectDir, "env.json"),
 	}

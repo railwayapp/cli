@@ -22,7 +22,7 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 		return err
 	}
 
-	err = h.cfg.SetProject(project.Id)
+	err = h.cfg.SetNewProject(project.Id)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	err = h.cfg.SetProject(project.Id)
+	err = h.cfg.SetNewProject(project.Id)
 	if err != nil {
 		return err
 	}
@@ -78,7 +78,7 @@ func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error
 		return err
 	}
 
-	err = h.cfg.SetProject(project.Id)
+	err = h.cfg.SetNewProject(project.Id)
 	if err != nil {
 		return err
 	}
