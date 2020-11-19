@@ -18,9 +18,3 @@ type Project struct {
 	Environments []*Environment `json:"environments,omitempty"`
 	Plugins      []*Plugin      `json:"plugins,omitempty"`
 }
-
-type ProjectConfig struct {
-	ProjectPath string `json:"projectPath,omitempty"`
-	Project     string `json:"project,omitempty"`
-	Environment string `json:"environment,omitempty"`
-}

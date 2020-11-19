@@ -45,20 +45,29 @@ func (c *Configs) MigrateLocalProjectConfig() error {
 	return nil
 }
 
+func (c *Configs) getPWD() (string, error) {
+	pwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	pwd = strings.ToLower(pwd)
+
+	return pwd, nil
+}
+
 func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 	c.MigrateLocalProjectConfig()
 
-	userCfg, err := c.GetUserConfigs()
+	userCfg, err := c.GetRootConfigs()
 	if err != nil {
 		return nil, errors.ProjectConfigNotFound
 	}
 
 	// lookup project in global config based on pwd
-	pwd, err := os.Getwd()
+	pwd, err := c.getPWD()
 	if err != nil {
 		return nil, err
 	}
-	pwd = strings.ToLower(pwd)
 
 	projectCfg, found := userCfg.Projects[pwd]
 
@@ -70,38 +79,42 @@ func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 }
 
 func (c *Configs) SetProjectConfigs(cfg *entity.ProjectConfig) error {
-	userCfg, err := c.GetUserConfigs()
+	rootCfg, err := c.GetRootConfigs()
 	if err != nil {
-		// User config not found, create it
-		userCfg = &entity.UserConfig{
-			Token:    "",
-			Projects: make(map[string]entity.ProjectConfig),
-		}
+		rootCfg = &entity.RootConfig{}
 	}
 
-	if userCfg.Projects == nil {
-		userCfg.Projects = make(map[string]entity.ProjectConfig)
+	if rootCfg.Projects == nil {
+		rootCfg.Projects = make(map[string]entity.ProjectConfig)
 	}
 
-	userCfg.Projects[cfg.ProjectPath] = *cfg
+	rootCfg.Projects[cfg.ProjectPath] = *cfg
 
-	return c.marshalConfig(c.userConfigs, userCfg)
+	return c.SetRootConfig(rootCfg)
 }
 
-func (c *Configs) SaveProjectConfig() error {
-	err := c.CreatePathIfNotExist(c.projectConfigs.configPath)
+func (c *Configs) createNewProjectConfig() (*entity.ProjectConfig, error) {
+	pwd, err := c.getPWD()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	err = c.projectConfigs.viper.WriteConfig()
-	return err
+	projectCfg := &entity.ProjectConfig{
+		ProjectPath: pwd,
+	}
+
+	return projectCfg, nil
 }
 
 func (c *Configs) SetProject(projectId string) error {
 	projectCfg, err := c.GetProjectConfigs()
+
 	if err != nil {
-		return err
+		projectCfg, err = c.createNewProjectConfig()
+
+		if err != nil {
+			return err
+		}
 	}
 
 	projectCfg.Project = projectId
@@ -110,8 +123,13 @@ func (c *Configs) SetProject(projectId string) error {
 
 func (c *Configs) SetEnvironment(environmentId string) error {
 	projectCfg, err := c.GetProjectConfigs()
+
 	if err != nil {
-		return err
+		projectCfg, err = c.createNewProjectConfig()
+
+		if err != nil {
+			return err
+		}
 	}
 
 	projectCfg.Environment = environmentId

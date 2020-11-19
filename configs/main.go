@@ -16,8 +16,8 @@ type Config struct {
 }
 
 type Configs struct {
+	rootConfigs            *Config
 	projectConfigs         *Config
-	userConfigs            *Config
 	RailwayProductionToken string
 	RailwayEnvFilePath     string
 }
@@ -79,14 +79,14 @@ func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 func New() *Configs {
 	// Configs stored in root (~/.railway)
 	// Includes token, etc
-	userViper := viper.New()
-	userPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
-	userViper.SetConfigFile(userPath)
-	userViper.ReadInConfig()
+	rootViper := viper.New()
+	rootConfigPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
+	rootViper.SetConfigFile(rootConfigPath)
+	rootViper.ReadInConfig()
 
-	userConfig := &Config{
-		viper:      userViper,
-		configPath: userPath,
+	rootConfig := &Config{
+		viper:      rootViper,
+		configPath: rootConfigPath,
 	}
 
 	// Configs stored in projects (<project>/.railway)
@@ -108,7 +108,7 @@ func New() *Configs {
 
 	return &Configs{
 		projectConfigs:         projectConfig,
-		userConfigs:            userConfig,
+		rootConfigs:            rootConfig,
 		RailwayProductionToken: os.Getenv("RAILWAY_TOKEN"),
 		RailwayEnvFilePath:     path.Join(projectDir, "env.json"),
 	}
