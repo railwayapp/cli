@@ -56,6 +56,12 @@ func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 		config.viper.Set(k, v)
 	}
 
+	err := c.CreatePathIfNotExist(config.configPath)
+
+	if err != nil {
+		return err
+	}
+
 	return config.viper.WriteConfig()
 }
 
