@@ -69,18 +69,11 @@ func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 		return nil, err
 	}
 
+	// find longest matching parent path
 	var longestPath = -1
 	var pathMatch = ""
 	for path := range userCfg.Projects {
-		// use exact match if it exsits
-		if path == cwd {
-			longestPath = len(path)
-			pathMatch = path
-			break
-		}
-
-		// check if parent path matches
-		var matches = strings.HasPrefix(cwd, fmt.Sprintf("%s/", path))
+		var matches = strings.HasPrefix(fmt.Sprintf("%s/", cwd), fmt.Sprintf("%s/", path))
 		if matches && len(path) > longestPath {
 			longestPath = len(path)
 			pathMatch = path
