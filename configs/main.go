@@ -1,11 +1,10 @@
 package configs
 
 import (
-	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 
 	"github.com/spf13/viper"
 )
@@ -49,31 +48,15 @@ func (c *Configs) unmarshalConfig(config *Config, data interface{}) error {
 }
 
 func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
-	// reflectCfg := reflect.ValueOf(cfg)
-	// for i := 0; i < reflectCfg.NumField(); i++ {
-	// 	k := reflectCfg.Type().Field(i).Name
-	// 	v := reflectCfg.Field(i).Interface()
-	// 	config.viper.Set(k, v)
-	// }
+	reflectCfg := reflect.ValueOf(cfg)
+	for i := 0; i < reflectCfg.NumField(); i++ {
+		k := reflectCfg.Type().Field(i).Name
+		v := reflectCfg.Field(i).Interface()
 
-	// err = config.viper.WriteConfig()
-
-	err := c.CreatePathIfNotExist(config.configPath)
-	if err != nil {
-		return err
+		config.viper.Set(k, v)
 	}
 
-	jsonString, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	err = ioutil.WriteFile(config.configPath, jsonString, os.ModePerm)
-	if err != nil {
-		return err
-	}
-
-	return err
+	return config.viper.WriteConfig()
 }
 
 func New() *Configs {
