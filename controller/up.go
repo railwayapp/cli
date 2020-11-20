@@ -8,9 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
-	"github.com/monochromegane/go-gitignore"
 	"github.com/railwayapp/cli/entity"
+	gitignore "github.com/railwayapp/cli/gateway"
 )
 
 func compress(src string, buf io.Writer) error {
@@ -18,15 +19,26 @@ func compress(src string, buf io.Writer) error {
 	zr := gzip.NewWriter(buf)
 	tw := tar.NewWriter(zr)
 
-	ignore, err := gitignore.NewGitIgnore(".gitignore", ".")
+	ignore, err := gitignore.CompileIgnoreFile(".gitignore")
+
 	if err != nil {
 		return err
 	}
+
 	// walk through every file in the folder
 	filepath.Walk(src, func(file string, fi os.FileInfo, err error) error {
-		if ignore.Match(file, fi.IsDir()) {
+		if fi.IsDir() {
 			return nil
 		}
+
+		if strings.HasPrefix(file, ".git") {
+			return nil
+		}
+
+		if ignore.MatchesPath(file) {
+			return nil
+		}
+
 		// generate tar header
 		header, err := tar.FileInfoHeader(fi, file)
 		if err != nil {
@@ -54,6 +66,7 @@ func compress(src string, buf io.Writer) error {
 				return err
 			}
 		}
+
 		return nil
 	})
 
@@ -78,9 +91,10 @@ func (c *Controller) Up(ctx context.Context) (string, error) {
 		return "", err
 	}
 	var buf bytes.Buffer
-	if err := compress("./", &buf); err != nil {
+	if err := compress(".", &buf); err != nil {
 		return "", err
 	}
+
 	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
 		Data:          buf,
 		ProjectID:     projectID,
