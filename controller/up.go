@@ -5,13 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	// "github.com/monochromegane/go-gitignore"
 	"github.com/railwayapp/cli/entity"
 	gitignore "github.com/railwayapp/cli/gateway"
 )
@@ -62,7 +60,6 @@ func compress(src string, buf io.Writer) error {
 		if !fi.IsDir() {
 			data, err := os.Open(file)
 			if err != nil {
-				fmt.Printf("4\n")
 				return err
 			}
 			if _, err := io.Copy(tw, data); err != nil {
