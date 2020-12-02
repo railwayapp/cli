@@ -37,7 +37,7 @@ get_checksum_url() {
 }
 
 command_exists() {
-	command -v "$@" >/dev/null 2>&1
+  command -v "$@" >/dev/null 2>&1
 }
 
 fmt_error() {
@@ -57,33 +57,33 @@ fmt_code() {
 }
 
 setup_color() {
-	# Only use colors if connected to a terminal
-	if [ -t 1 ]; then
-		RED=$(printf '\033[31m')
-		GREEN=$(printf '\033[32m')
-		YELLOW=$(printf '\033[33m')
-		BLUE=$(printf '\033[34m')
-		MAGENTA=$(printf '\033[35m')
-		BOLD=$(printf '\033[1m')
-		RESET=$(printf '\033[m')
-	else
-		RED=""
-		GREEN=""
-		YELLOW=""
-		BLUE=""
+  # Only use colors if connected to a terminal
+  if [ -t 1 ]; then
+    RED=$(printf '\033[31m')
+    GREEN=$(printf '\033[32m')
+    YELLOW=$(printf '\033[33m')
+    BLUE=$(printf '\033[34m')
+    MAGENTA=$(printf '\033[35m')
+    BOLD=$(printf '\033[1m')
+    RESET=$(printf '\033[m')
+  else
+    RED=""
+    GREEN=""
+    YELLOW=""
+    BLUE=""
     MAGENTA=""
-		BOLD=""
-		RESET=""
-	fi
+    BOLD=""
+    RESET=""
+  fi
 }
 
 get_os() {
-	case "$(uname -s)" in
+  case "$(uname -s)" in
     *linux* ) echo "linux" ;;
     *Linux* ) echo "linux" ;;
     *darwin* ) echo "darwin" ;;
     *Darwin* ) echo "darwin" ;;
-	esac
+  esac
 }
 
 get_machine() {
