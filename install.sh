@@ -33,7 +33,7 @@ get_download_url() {
 }
 
 get_checksum_url() {
-  echo "https://github.com/railwayapp/cli/releases/download/v$1/railway_$0_checksums.txt"
+  echo "https://github.com/railwayapp/cli/releases/download/v$1/railway_$1_checksums.txt"
 }
 
 command_exists() {
@@ -42,6 +42,10 @@ command_exists() {
 
 fmt_error() {
   echo ${RED}"Error: $@"${RESET} >&2
+}
+
+fmt_warning() {
+  echo ${YELLOW}"Warning: $@"${RESET} >&2
 }
 
 fmt_underline() {
@@ -73,7 +77,6 @@ setup_color() {
 	fi
 }
 
-
 get_os() {
 	case "$(uname -s)" in
     *linux* ) echo "linux" ;;
@@ -96,6 +99,25 @@ get_tmp_dir() {
   echo $(mktemp -d)
 }
 
+do_checksum() {
+  checksum_url=$(get_checksum_url $version)
+  expected_checksum=$(curl -sL $checksum_url | grep $asset_name | awk '{print $1}')
+
+  if command_exists sha256sum; then
+    checksum=$(sha256sum $asset_name | awk '{print $1}')
+  elif command_exists shasum; then
+    checksum=$(shasum -a 256 $asset_name | awk '{print $1}')
+  else
+    fmt_warning "Could not find a checksum program. Install shasum or sha256sum to validate checksum."
+    return 0
+  fi
+
+  if [[ "$checksum" != "$expected_checksum" ]]; then
+    fmt_error "Checksums do not match"
+    exit 1
+  fi
+}
+
 do_install_binary() {
   asset_name=$(get_asset_name $version $os $machine)
   download_url=$(get_download_url $version $os $machine)
@@ -115,6 +137,8 @@ do_install_binary() {
   # Download tar.gz to tmp directory
   echo "Downloading $download_url"
   (cd $tmp_dir && curl -sL -O "$download_url")
+
+  (cd $tmp_dir && do_checksum)
 
   # Extract download
   (cd $tmp_dir && tar -xzf "$asset_name")
