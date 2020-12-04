@@ -9,5 +9,5 @@ func (c *Controller) GetLatestVersion() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return *rep.TagName, err
+	return *rep.TagName, nil
 }
