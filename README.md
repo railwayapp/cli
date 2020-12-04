@@ -8,7 +8,7 @@ This is the command line interface for [Railway](https://railway.app). Use it to
 
 ## Installation
 
-The Railway CLI is available through [Homebrew](https://brew.sh/) or [NPM](https://www.npmjs.com/package/@railway/cli).
+The Railway CLI is available through [Homebrew](https://brew.sh/), [NPM](https://www.npmjs.com/package/@railway/cli), or as a curl.
 
 ### Brew
 
@@ -21,6 +21,12 @@ brew install railway
 
 ```shell
 npm i -g @railway/cli
+```
+
+### curl
+
+```shell
+sh -c "$(curl -sSL https://raw.githubusercontent.com/railwayapp/cli/master/install.sh)"
 ```
 
 ## Documentation
