@@ -110,11 +110,13 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 
 	url := getBrowserBasedLoginURL(port, code)
 	err = c.ConfirmBrowserOpen("Logging in...", url)
-
+	
 	if err != nil {
 		// Opening the browser failed. Try browserless login
 		return c.browserlessLogin(ctx)
 	}
+	
+	fmt.Println("No dice? Try railway login --browserless")	
 
 	wg.Wait()
 
