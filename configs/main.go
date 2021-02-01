@@ -69,7 +69,11 @@ func New() *Configs {
 	// Configs stored in root (~/.railway)
 	// Includes token, etc
 	rootViper := viper.New()
-	rootConfigPath := path.Join(os.Getenv("HOME"), ".railway/config.json")
+	configPath := ".railway/config.json"
+	if IsDevMode() {
+		configPath = ".railway/dev-config.json"
+	}
+	rootConfigPath := path.Join(os.Getenv("HOME"), configPath)
 	rootViper.SetConfigFile(rootConfigPath)
 	rootViper.ReadInConfig()
 
