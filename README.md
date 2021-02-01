@@ -31,7 +31,7 @@ sh -c "$(curl -sSL https://raw.githubusercontent.com/railwayapp/cli/master/insta
 
 ## Documentation
 
-[View the full documentation](https://railway.app/docs/cli)
+[View the full documentation](https://docs.railway.app)
 
 ## Feedback
 
