@@ -108,6 +108,17 @@ func (c *Configs) SetProjectConfigs(cfg *entity.ProjectConfig) error {
 	return c.SetRootConfig(rootCfg)
 }
 
+func (c *Configs) RemoveProjectConfigs(cfg *entity.ProjectConfig) error {
+	rootCfg, err := c.GetRootConfigs()
+	if err != nil {
+		rootCfg = &entity.RootConfig{}
+	}
+
+	delete(rootCfg.Projects, cfg.ProjectPath)
+
+	return c.SetRootConfig(rootCfg)
+}
+
 func (c *Configs) createNewProjectConfig() (*entity.ProjectConfig, error) {
 	cwd, err := c.getCWD()
 	if err != nil {

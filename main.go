@@ -75,6 +75,11 @@ func init() {
 		RunE:              contextualize(handler.Init, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
+		Use:   "disconnect",
+		Short: "Disconnect from railway",
+		RunE:  contextualize(handler.Disconnect, handler.Panic),
+	})
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "env",
 		Short: "Show environment variables",
 		RunE:  contextualize(handler.Env, handler.Panic),
