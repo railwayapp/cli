@@ -75,10 +75,9 @@ func init() {
 		RunE:              contextualize(handler.Init, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
-		Use:               "disconnect",
-		Short:             "Disconnect from railway",
-		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
-		RunE:              contextualize(handler.Disconnect, handler.Panic),
+		Use:   "disconnect",
+		Short: "Disconnect from railway",
+		RunE:  contextualize(handler.Disconnect, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "env",
