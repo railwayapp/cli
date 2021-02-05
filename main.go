@@ -105,10 +105,11 @@ func init() {
 		RunE:  contextualize(handler.List, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
-		Use:               "run",
-		Short:             "Run command inside the Railway environment",
-		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
-		RunE:              contextualize(handler.Run, handler.Panic),
+		Use:                "run",
+		Short:              "Run command inside the Railway environment",
+		PersistentPreRunE:  contextualize(handler.CheckVersion, handler.Panic),
+		RunE:               contextualize(handler.Run, handler.Panic),
+		DisableFlagParsing: true,
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "version",
