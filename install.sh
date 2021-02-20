@@ -112,7 +112,7 @@ do_checksum() {
     return 0
   fi
 
-  if [[ "$checksum" != "$expected_checksum" ]]; then
+  if [ "$checksum" != "$expected_checksum" ]; then
     fmt_error "Checksums do not match"
     exit 1
   fi
@@ -171,7 +171,7 @@ main() {
     echo "Please create an issue so we can add support. $ISSUE_URL"
     exit 1
   fi
-  
+
   do_install_binary
 
   printf "$MAGENTA"
