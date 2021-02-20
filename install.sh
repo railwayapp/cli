@@ -10,9 +10,10 @@ set -e
 #   sh -c "$(curl -sSL https://github.com/railwayapp/cli/blob/master/install.sh)"
 #
 
+INSTALL_DIR=${INSTALL_DIR:-"/usr/local/bin"}
+BINARY_NAME=${BINARY_NAME:-"railway"}
+
 REPO_NAME="railwayapp/cli"
-INSTALL_DIR="/usr/local/bin"
-BINARY_NAME="railway"
 ISSUE_URL="https://github.com/railwayapp/cli/issues/new"
 
 # Usage
