@@ -60,6 +60,8 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
+	printLooksGood()
+
 	return nil
 }
 
@@ -90,7 +92,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 
 	buildCmd := exec.Command("docker", buildArgs...)
 	ui.StartSpinner(&ui.SpinnerCfg{
-		Message: fmt.Sprintf("Building %s from Dockerfile...", image),
+		Message: fmt.Sprintf("Building %s from Dockerfile... (this may take a bit)", ui.GreenText(image)),
 		Tokens:  ui.TrainEmojis,
 	})
 
@@ -100,14 +102,14 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 		return showCmdError(buildCmd.Args, out, err)
 	}
 
-	ui.StopSpinner(fmt.Sprintf("🎉 Built %s", image))
+	ui.StopSpinner(fmt.Sprintf("🎉 Built %s", ui.GreenText(image)))
 
 	port, err := getAvailablePort()
 	if err != nil {
 		return err
 	}
 	// Start running the image
-	fmt.Printf("🚅 Running %s at 127.0.0.1:%d\n\n", image, port)
+	fmt.Printf("🚂 Running at %s\n\n", ui.GreenText(fmt.Sprintf("127.0.0.1:%d", port)))
 
 	runArgs := []string{"run", "--rm", "-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port), "-e", fmt.Sprintf("PORT=%d", port)}
 	// Build up env
@@ -127,6 +129,8 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	if err != nil {
 		return err
 	}
+
+	printLooksGood()
 
 	return nil
 }
@@ -177,4 +181,13 @@ func catchSignals(cmd *exec.Cmd) {
 		sig := <-sigs
 		cmd.Process.Signal(sig)
 	}()
+}
+
+func printLooksGood() {
+	// Get space between last output and this message
+	fmt.Println()
+	fmt.Printf(
+		"🚄 Looks good? Then put it on the train and deploy with `%s`!\n",
+		ui.GreenText("railway up"),
+	)
 }
