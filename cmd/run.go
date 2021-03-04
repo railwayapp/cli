@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
+	"syscall"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
@@ -51,6 +53,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	cmd.Stdin = os.Stdin
+	catchSignals(cmd)
 
 	err = cmd.Run()
 	if err != nil {
@@ -75,8 +78,8 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	// Strip characters not allowed in Docker image names
 	envName := getEnvironmentNameFromID(projectCfg.Environment, project.Environments)
 	sanitiser := regexp.MustCompile(`[^A-Za-z0-9_-]`)
-	imageName := sanitiser.ReplaceAllString(project.Name, "") + "-" + sanitiser.ReplaceAllString(envName, "")
-	image := fmt.Sprintf("railway-local/%s:latest", imageName)
+	imageNameWithoutNsOrTag := sanitiser.ReplaceAllString(project.Name, "") + "-" + sanitiser.ReplaceAllString(envName, "")
+	image := fmt.Sprintf("railway-local/%s:latest", imageNameWithoutNsOrTag)
 
 	buildArgs := []string{"build", "-q", "-t", image, pwd}
 
@@ -106,7 +109,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	// Start running the image
 	fmt.Printf("🚅 Running %s at 127.0.0.1:%d\n\n", image, port)
 
-	runArgs := []string{"run", "-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port), "-e", fmt.Sprintf("PORT=%d", port)}
+	runArgs := []string{"run", "--rm", "-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port), "-e", fmt.Sprintf("PORT=%d", port)}
 	// Build up env
 	for k, v := range *envs {
 		runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%+v", k, v))
@@ -118,13 +121,22 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stdout
 	runCmd.Stdin = os.Stdin
+	catchSignals(runCmd)
 
 	err = runCmd.Run()
 	if err != nil {
 		return err
 	}
 
-	// TODO: Probably should be cleaning up the image here...
+	// Clean up the image
+	fmt.Println(fmt.Sprintf("♻️ Cleaning up Docker image %s", image))
+	cleanupArgs := []string{"rmi", "-f", image}
+	cleanupCmd := exec.Command("docker", cleanupArgs...)
+
+	out, err = cleanupCmd.CombinedOutput()
+	if err != nil {
+		return showCmdError(cleanupCmd.Args, out, err)
+	}
 
 	return nil
 }
@@ -165,4 +177,14 @@ func showCmdError(args []string, output []byte, err error) error {
 		fmt.Printf("%+v\n", argstr)
 	}
 	return err
+}
+
+func catchSignals(cmd *exec.Cmd) {
+	sigs := make(chan os.Signal, 1)
+
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigs
+		cmd.Process.Signal(sig)
+	}()
 }
