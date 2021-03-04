@@ -128,16 +128,6 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 		return err
 	}
 
-	// Clean up the image
-	fmt.Println(fmt.Sprintf("♻️ Cleaning up Docker image %s", image))
-	cleanupArgs := []string{"rmi", "-f", image}
-	cleanupCmd := exec.Command("docker", cleanupArgs...)
-
-	out, err = cleanupCmd.CombinedOutput()
-	if err != nil {
-		return showCmdError(cleanupCmd.Args, out, err)
-	}
-
 	return nil
 }
 
