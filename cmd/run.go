@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	goErrors "errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -11,6 +13,8 @@ import (
 	"github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
+
+var RAIL_PORT = 4411
 
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	envs, err := h.ctrl.GetEnvs(ctx)
@@ -95,7 +99,10 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 
 	ui.StopSpinner(fmt.Sprintf("🎉 Built %s", image))
 
-	port := 4411
+	port, err := getAvailablePort()
+	if err != nil {
+		return err
+	}
 	// Start running the image
 	fmt.Printf("🚅 Running %s at 127.0.0.1:%d\n\n", image, port)
 
@@ -120,6 +127,25 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	// TODO: Probably should be cleaning up the image here...
 
 	return nil
+}
+
+func getAvailablePort() (int, error) {
+	searchRange := 64
+	for i := RAIL_PORT; i < RAIL_PORT+searchRange; i++ {
+		if isAvailable(i) {
+			return i, nil
+		}
+	}
+	return -1, goErrors.New(fmt.Sprintf("Couldn't find available port between %d and %d", RAIL_PORT, RAIL_PORT+searchRange))
+}
+
+func isAvailable(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
 }
 
 func showCmdError(args []string, output []byte, err error) error {
