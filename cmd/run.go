@@ -111,7 +111,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	// Start running the image
 	fmt.Printf("🚂 Running at %s\n\n", ui.GreenText(fmt.Sprintf("127.0.0.1:%d", port)))
 
-	runArgs := []string{"run", "--rm", "-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port), "-e", fmt.Sprintf("PORT=%d", port)}
+	runArgs := []string{"run", "--init", "--rm", "-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port), "-e", fmt.Sprintf("PORT=%d", port)}
 	// Build up env
 	for k, v := range *envs {
 		runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%+v", k, v))
