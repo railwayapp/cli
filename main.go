@@ -76,7 +76,7 @@ func init() {
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "disconnect",
-		Short: "Disconnect from railway",
+		Short: "Disconnect from Railway",
 		RunE:  contextualize(handler.Disconnect, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
@@ -131,6 +131,11 @@ func init() {
 		Use:   "add",
 		Short: "Add Railway plugins",
 		RunE:  contextualize(handler.Add, handler.Panic),
+	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "connect",
+		Short: "Connect to your Railway database",
+		RunE:  contextualize(handler.Connect, handler.Panic),
 	})
 }
 
