@@ -42,15 +42,19 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 		plugin = req.Args[0]
 	}
 
+	if !isPluginValid(plugin) {
+		return fmt.Errorf("Invalid plugin: %s", plugin)
+	}
 	envs, err := h.ctrl.GetEnvs(ctx)
 	if err != nil {
 		return err
 	}
-	if !isPluginValid(plugin) {
-		return fmt.Errorf("Invalid plugin: %s", plugin)
-	}
 
 	command, connectEnv := buildConnectCommand(plugin, envs)
+	if !commandExistsInPath(command[0]) {
+		fmt.Println("🚨", ui.RedText(command[0]), "was not found in $PATH.")
+		return nil
+	}
 
 	cmd := exec.Command(command[0], command[1:]...)
 
@@ -70,6 +74,13 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 	}
 
 	return nil
+}
+
+func commandExistsInPath(cmd string) bool {
+	// The error can be safely ignored because it indicates a failure to find the
+	// command in $PATH.
+	_, err := exec.LookPath(cmd)
+	return err == nil
 }
 
 func isPluginValid(plugin string) bool {
