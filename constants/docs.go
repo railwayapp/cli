@@ -1,3 +1,3 @@
 package constants
 
-const RailwayDocsURL = "https://railway.app/docs"
+const RailwayDocsURL = "https://docs.railway.app"
