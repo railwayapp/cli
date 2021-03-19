@@ -91,6 +91,7 @@ func PromptConfirm(msg string, confirmation string) error {
 		if confirmation != input {
 			return errors.New("Invalid!")
 		}
+		return nil
 	}
 	prompt := promptui.Prompt{
 		Label:    msg,
