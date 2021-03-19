@@ -10,7 +10,8 @@ type UserConfig struct {
 }
 
 type ProjectConfig struct {
-	ProjectPath string `json:"projectPath,omitempty"`
-	Project     string `json:"project,omitempty"`
-	Environment string `json:"environment,omitempty"`
+	ProjectPath     string          `json:"projectPath,omitempty"`
+	Project         string          `json:"project,omitempty"`
+	Environment     string          `json:"environment,omitempty"`
+	LockedEnvsNames map[string]bool `json:"lockedEnvsNames,omitempty"`
 }

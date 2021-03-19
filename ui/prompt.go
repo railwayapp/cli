@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/manifoldco/promptui"
@@ -83,4 +84,18 @@ func PromptPlugins(plugins []string) (string, error) {
 	}
 	i, _, err := prompt.Run()
 	return plugins[i], err
+}
+
+func PromptProtect(environment string) error {
+	validate := func(input string) error {
+		if environment != input {
+			return errors.New("Nope")
+		}
+	}
+	prompt := promptui.Prompt{
+		Label:    "Protected Environment!\n Confirm by typing the environment name!",
+		Validate: validate,
+	}
+	_, err := prompt.Run()
+	return err
 }

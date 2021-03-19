@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
@@ -23,6 +24,10 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 	projectCfg, err := c.cfg.GetProjectConfigs()
 	if err != nil {
 		return nil, err
+	}
+
+	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
+		ui.PromptProtect(projectCfg.Environment)
 	}
 
 	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{
