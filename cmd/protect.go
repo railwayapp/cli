@@ -11,6 +11,7 @@ func (h *Handler) Protect(ctx context.Context, req *entity.CommandRequest) error
 	if err != nil {
 		return err
 	}
+
 	projectConfigs.LockedEnvsNames[projectConfigs.Environment] = true
 
 	err = h.cfg.SetProjectConfigs(projectConfigs)
