@@ -113,7 +113,7 @@ func init() {
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "protect",
-		Short: "Protect a branch (Actions will require confirmation)",
+		Short: "[EXPERIMENTAL!] Protect current branch (Actions will require confirmation)",
 		RunE:  contextualize(handler.Protect, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
