@@ -27,7 +27,7 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 	}
 
 	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
-		ui.PromptProtect(projectCfg.Environment)
+		ui.PromptConfirm("Protected Environment!\n Confirm by typing the environment name!", projectCfg.Environment)
 	}
 
 	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{

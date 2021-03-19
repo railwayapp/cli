@@ -86,14 +86,14 @@ func PromptPlugins(plugins []string) (string, error) {
 	return plugins[i], err
 }
 
-func PromptProtect(environment string) error {
+func PromptConfirm(msg string, confirmation string) error {
 	validate := func(input string) error {
-		if environment != input {
-			return errors.New("Nope")
+		if confirmation != input {
+			return errors.New("Invalid!")
 		}
 	}
 	prompt := promptui.Prompt{
-		Label:    "Protected Environment!\n Confirm by typing the environment name!",
+		Label:    msg,
 		Validate: validate,
 	}
 	_, err := prompt.Run()
