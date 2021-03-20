@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"os"
 
@@ -26,8 +27,13 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 		return nil, err
 	}
 
+	fmt.Println(projectCfg.LockedEnvsNames)
+
+	fmt.Println(projectCfg.Environment)
+
 	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
-		ui.PromptConfirm("Protected Environment!\n Confirm by typing the environment name!", projectCfg.Environment)
+		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").BgBlack().String()))
+		ui.PromptConfirm("Press Enter to Confirm Action")
 	}
 
 	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{

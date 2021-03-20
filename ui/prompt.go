@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/manifoldco/promptui"
@@ -86,16 +85,9 @@ func PromptPlugins(plugins []string) (string, error) {
 	return plugins[i], err
 }
 
-func PromptConfirm(msg string, confirmation string) error {
-	validate := func(input string) error {
-		if confirmation != input {
-			return errors.New("Invalid!")
-		}
-		return nil
-	}
+func PromptConfirm(msg string) error {
 	prompt := promptui.Prompt{
-		Label:    msg,
-		Validate: validate,
+		Label: msg,
 	}
 	_, err := prompt.Run()
 	return err
