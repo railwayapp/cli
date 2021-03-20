@@ -112,6 +112,11 @@ func init() {
 		DisableFlagParsing: true,
 	})
 	rootCmd.AddCommand(&cobra.Command{
+		Use:   "protect",
+		Short: "[EXPERIMENTAL!] Protect current branch (Actions will require confirmation)",
+		RunE:  contextualize(handler.Protect, handler.Panic),
+	})
+	rootCmd.AddCommand(&cobra.Command{
 		Use:               "version",
 		Short:             "Get version of the Railway CLI",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),

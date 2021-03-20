@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"os"
 
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 )
 
 func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
@@ -23,6 +25,11 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 	projectCfg, err := c.cfg.GetProjectConfigs()
 	if err != nil {
 		return nil, err
+	}
+
+	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
+		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
+		ui.PromptConfirm("Press Enter to Confirm Action")
 	}
 
 	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{

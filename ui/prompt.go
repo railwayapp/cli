@@ -84,3 +84,11 @@ func PromptPlugins(plugins []string) (string, error) {
 	i, _, err := prompt.Run()
 	return plugins[i], err
 }
+
+func PromptConfirm(msg string) error {
+	prompt := promptui.Prompt{
+		Label: msg,
+	}
+	_, err := prompt.Run()
+	return err
+}
