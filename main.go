@@ -19,7 +19,7 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 	Version:       constants.Version,
 	Short:         "🚅 Railway. Infrastructure, Instantly.",
-	Long:          "Interact with 🚅 Railway via CLI \n\n Deploy infrastructure, instantly. Docs: https://railway.app/docs",
+	Long:          "Interact with 🚅 Railway via CLI \n\n Deploy infrastructure, instantly. Docs: https://docs.railway.app",
 }
 
 /* contextualize converts a HandlerFunction to a cobra function
