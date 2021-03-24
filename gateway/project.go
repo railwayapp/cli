@@ -71,6 +71,34 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 	return resp.Project, nil
 }
 
+func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.CreateProjectFromTemplateRequest) (*entity.CreateProjectFromTemplateResult, error) {
+	gqlReq := gql.NewRequest(`
+		mutation($name: String!, $org: String!, $template: String!, $isPrivate: Boolean, $plugins: [String!], $variables: Json) {
+			createProjectFromTemplate(name: $name, org: $org, template: $template, isPrivate: $isPrivate, plugins: $plugins, variables: $variables) {
+				projectId
+				workflowId
+			}
+		}
+	`)
+
+	g.authorize(ctx, gqlReq.Header)
+
+	gqlReq.Var("name", req.Name)
+	gqlReq.Var("org", req.Org)
+	gqlReq.Var("template", req.Template)
+	gqlReq.Var("isPrivate", req.IsPrivate)
+	gqlReq.Var("plugins", req.Plugins)
+	gqlReq.Var("variables", req.Variables)
+
+	var resp struct {
+		Result *entity.CreateProjectFromTemplateResult `json:"createProjectFromTemplate"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return nil, errors.ProjectCreateFromTemplateFailed
+	}
+	return resp.Result, nil
+}
+
 func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRequest) (*entity.Project, error) {
 	gqlReq := gql.NewRequest(`
 		mutation($projectId: ID!) {

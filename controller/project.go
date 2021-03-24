@@ -16,6 +16,11 @@ func (c *Controller) CreateProject(ctx context.Context, req *entity.CreateProjec
 	return c.gtwy.CreateProject(ctx, req)
 }
 
+// CreateProjectFromTemplate creates a project from template specified by the project request, error otherwise
+func (c *Controller) CreateProjectFromTemplate(ctx context.Context, req *entity.CreateProjectFromTemplateRequest) (*entity.CreateProjectFromTemplateResult, error) {
+	return c.gtwy.CreateProjectFromTemplate(ctx, req)
+}
+
 // UpdateProject updates a project specified by the project request, error otherwise
 func (c *Controller) UpdateProject(ctx context.Context, req *entity.UpdateProjectRequest) (*entity.Project, error) {
 	return c.gtwy.UpdateProject(ctx, req)
