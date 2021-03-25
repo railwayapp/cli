@@ -33,7 +33,10 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 
 	gqlReq.Var("projectId", projectId)
 
-	g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
 
 	var resp struct {
 		Project *entity.Project `json:"projectById"`
@@ -58,7 +61,10 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 		}
 	`)
 
-	g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
 
 	gqlReq.Var("name", req.Name)
 
@@ -73,18 +79,21 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 
 func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.CreateProjectFromTemplateRequest) (*entity.CreateProjectFromTemplateResult, error) {
 	gqlReq := gql.NewRequest(`
-		mutation($name: String!, $org: String!, $template: String!, $isPrivate: Boolean, $plugins: [String!], $variables: Json) {
-			createProjectFromTemplate(name: $name, org: $org, template: $template, isPrivate: $isPrivate, plugins: $plugins, variables: $variables) {
+		mutation($name: String!, $owner: String!, $template: String!, $isPrivate: Boolean, $plugins: [String!], $variables: Json) {
+			createProjectFromTemplate(name: $name, owner: $owner, template: $template, isPrivate: $isPrivate, plugins: $plugins, variables: $variables) {
 				projectId
 				workflowId
 			}
 		}
 	`)
 
-	g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
 
 	gqlReq.Var("name", req.Name)
-	gqlReq.Var("org", req.Org)
+	gqlReq.Var("owner", req.Owner)
 	gqlReq.Var("template", req.Template)
 	gqlReq.Var("isPrivate", req.IsPrivate)
 	gqlReq.Var("plugins", req.Plugins)

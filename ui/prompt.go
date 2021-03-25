@@ -57,7 +57,9 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 
 // PromptStarterTemplates fetches available templates and prompts the user to select one
 func PromptStarterTemplates() (*entity.Template, error) {
-	StartSpinner(&SpinnerCfg{Message: "Fetching starter templates"}) // Fetch starter templates
+	StartSpinner(&SpinnerCfg{
+		Message: "Fetching starter templates",
+	})
 	resp, err := http.Get("https://raw.githubusercontent.com/railwayapp/starters/master/featured.json")
 	if err != nil {
 		return nil, err
@@ -86,6 +88,15 @@ func PromptStarterTemplates() (*entity.Template, error) {
 	}
 	i, _, err := prompt.Run()
 	return &data.Templates[i], err
+}
+
+func PromptIsRepoPrivate() (bool, error) {
+	prompt := promptui.Select{
+		Label: "Select repo visibility",
+		Items: []string{"Public", "Private"},
+	}
+	_, visibility, err := prompt.Run()
+	return visibility == "Private", err
 }
 
 func PromptProjectName() (string, error) {

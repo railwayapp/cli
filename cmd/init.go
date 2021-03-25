@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/railwayapp/cli/entity"
-	errors2 "github.com/railwayapp/cli/errors"
+	CLIErrors "github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 	"time"
 )
@@ -52,19 +52,21 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 		return err
 	}
 
-	// Select GitHub org
+	// Select GitHub owner
 
-	ui.StartSpinner(&ui.SpinnerCfg{Message: "Fetching GitHub scopes"})
+	ui.StartSpinner(&ui.SpinnerCfg{
+		Message: "Fetching GitHub scopes",
+	})
 	scopes, err := h.ctrl.GetWritableGithubScopes(ctx)
 	if err != nil {
 		return err
 	}
 	if len(scopes) == 0 {
-		return errors2.NoGitHubScopesFound
+		return CLIErrors.NoGitHubScopesFound
 	}
 	ui.StopSpinner("")
 
-	org, err := ui.PromptGitHubScopes(scopes)
+	owner, err := ui.PromptGitHubScopes(scopes)
 	if err != nil {
 		return err
 	}
@@ -72,6 +74,14 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	// Enter project name
 
 	name, err := ui.PromptProjectName()
+	if err != nil {
+		return err
+	}
+
+	isPrivate, err := ui.PromptIsRepoPrivate()
+	if err != nil {
+		return err
+	}
 
 	// Prompt for env vars (if required)
 
@@ -91,12 +101,14 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 
 	// Create Railway project
 
-	ui.StartSpinner(&ui.SpinnerCfg{Message: "Creating project"})
+	ui.StartSpinner(&ui.SpinnerCfg{
+		Message: "Creating project",
+	})
 	creationResult, err := h.ctrl.CreateProjectFromTemplate(ctx, &entity.CreateProjectFromTemplateRequest{
 		Name:      name,
-		Org:       org,
+		Owner:     owner,
 		Template:  template.Href,
-		IsPrivate: false,
+		IsPrivate: isPrivate,
 		Plugins:   template.Plugins,
 		Variables: variables,
 	})
@@ -118,15 +130,15 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 
 	for {
 		time.Sleep(2 * time.Second)
-		ws, err := h.ctrl.GetWorkflowStatus(ctx, creationResult.WorkflowID)
+		workflowStatus, err := h.ctrl.GetWorkflowStatus(ctx, creationResult.WorkflowID)
 		if err != nil {
 			return err
 		}
-		if ws.Status == "Error" {
-			ui.StopSpinner("")
-			return errors2.WorkflowFailed
+		if workflowStatus.IsError() {
+			ui.StopSpinner("Uhh Ohh. Workflow failed!")
+			return CLIErrors.WorkflowFailed
 		}
-		if ws.Status == "Complete" {
+		if workflowStatus.IsComplete() {
 			ui.StopSpinner("Project creation complete 🚀")
 			break
 		}

@@ -8,7 +8,7 @@ type CreateProjectRequest struct {
 
 type CreateProjectFromTemplateRequest struct {
 	Name      string            // Required
-	Org       string            // Required
+	Owner     string            // Required
 	Template  string            // Required
 	IsPrivate bool              // Optional
 	Plugins   []string          // Optional
