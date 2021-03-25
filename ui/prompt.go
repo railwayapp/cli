@@ -99,6 +99,45 @@ func PromptIsRepoPrivate() (bool, error) {
 	return visibility == "Private", err
 }
 
+func PromptEnvVars(envVars []entity.TemplateEnvVar) (map[string]string, error) {
+	variables := make(map[string]string)
+	if len(envVars) > 0 {
+		fmt.Printf("\n%s\n", Bold("Environment Variables"))
+	}
+
+	requiredValidator := func(s string) error {
+		if s == "" {
+			return errors.New("value required")
+		}
+		return nil
+	}
+
+	for _, envVar := range envVars {
+		prompt := promptui.Prompt{
+			Label:   envVar.Name,
+			Default: envVar.DefaultValue,
+		}
+		if envVar.Optional {
+			fmt.Printf("\n%s %s\n", envVar.Desc, GrayText("(Optional)"))
+		} else {
+			fmt.Printf("\n%s %s\n", envVar.Desc, GrayText("(Required)"))
+			prompt.Validate = requiredValidator
+		}
+
+		v, err := prompt.Run()
+		if err != nil {
+			return nil, err
+		}
+
+		variables[envVar.Name] = v
+	}
+
+	// Extra newline to match the ones outputted in the loop
+	fmt.Print("\n")
+
+	return variables, nil
+}
+
 func PromptProjectName() (string, error) {
 	prompt := promptui.Prompt{
 		Label: "Enter project name",

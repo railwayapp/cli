@@ -85,18 +85,9 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 
 	// Prompt for env vars (if required)
 
-	variables := make(map[string]string)
-	if len(template.EnvVars) > 0 {
-		fmt.Printf("\n%s\n", ui.Bold("Environment Variables"))
-		for _, envVar := range template.EnvVars {
-			fmt.Printf("\n(%s)\n", ui.GrayText(envVar.Desc))
-			v, err := ui.PromptText(envVar.Name)
-			if err != nil {
-				return err
-			}
-			variables[name] = v
-		}
-		fmt.Print("\n")
+	variables, err := ui.PromptEnvVars(template.EnvVars)
+	if err != nil {
+		return err
 	}
 
 	// Create Railway project
@@ -157,7 +148,7 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	}
 
 	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
-	h.ctrl.OpenProjectInBrowser(ctx, project.Id, environment.Id)
+	h.ctrl.OpenProjectDeploymentsInBrowser(ctx, project.Id)
 
 	return nil
 }
