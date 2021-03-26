@@ -106,13 +106,6 @@ func PromptEnvVars(envVars []entity.TemplateEnvVar) (map[string]string, error) {
 		fmt.Printf("\n%s\n", Bold("Environment Variables"))
 	}
 
-	requiredValidator := func(s string) error {
-		if s == "" {
-			return errors.New("value required")
-		}
-		return nil
-	}
-
 	for _, envVar := range envVars {
 		prompt := promptui.Prompt{
 			Label:   envVar.Name,
@@ -122,7 +115,7 @@ func PromptEnvVars(envVars []entity.TemplateEnvVar) (map[string]string, error) {
 			fmt.Printf("\n%s %s\n", envVar.Desc, GrayText("(Optional)"))
 		} else {
 			fmt.Printf("\n%s %s\n", envVar.Desc, GrayText("(Required)"))
-			prompt.Validate = requiredValidator
+			prompt.Validate = validatorRequired("value required")
 		}
 
 		v, err := prompt.Run()
@@ -148,12 +141,7 @@ func PromptProjectName() (string, error) {
 			Invalid: fmt.Sprintf("%s {{ . | bold }}: ", promptui.IconBad),
 			Success: fmt.Sprintf("%s {{ . | magenta | bold }}: ", promptui.IconGood),
 		},
-		Validate: func(s string) error {
-			if strings.TrimSpace(s) == "" {
-				return errors.New("project name required")
-			}
-			return nil
-		},
+		Validate: validatorRequired("project name required"),
 	}
 	return prompt.Run()
 }
@@ -216,4 +204,13 @@ func PromptConfirm(msg string) error {
 	}
 	_, err := prompt.Run()
 	return err
+}
+
+func validatorRequired(errorMsg string) func(s string) error {
+	return func(s string) error {
+		if strings.TrimSpace(s) == "" {
+			return errors.New(errorMsg)
+		}
+		return nil
+	}
 }
