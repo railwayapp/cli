@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/manifoldco/promptui"
 	"github.com/railwayapp/cli/entity"
@@ -142,16 +143,13 @@ func PromptProjectName() (string, error) {
 	prompt := promptui.Prompt{
 		Label: "Enter project name",
 		Templates: &promptui.PromptTemplates{
-			Prompt:          "{{ . }} ",
-			Confirm:         "",
-			Valid:           fmt.Sprintf("%s {{ . | bold }}: ", promptui.IconGood),
-			Invalid:         fmt.Sprintf("%s {{ . | bold }}: ", promptui.IconBad),
-			Success:         fmt.Sprintf("%s {{ . | magenta | bold }}: ", promptui.IconGood),
-			ValidationError: "",
-			FuncMap:         nil,
+			Prompt:  "{{ . }} ",
+			Valid:   fmt.Sprintf("%s {{ . | bold }}: ", promptui.IconGood),
+			Invalid: fmt.Sprintf("%s {{ . | bold }}: ", promptui.IconBad),
+			Success: fmt.Sprintf("%s {{ . | magenta | bold }}: ", promptui.IconGood),
 		},
 		Validate: func(s string) error {
-			if s == "" {
+			if strings.TrimSpace(s) == "" {
 				return errors.New("project name required")
 			}
 			return nil
