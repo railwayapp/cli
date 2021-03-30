@@ -78,7 +78,10 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 						fmt.Println(err)
 					}
 					w.WriteHeader(400)
-					w.Write(byteRes)
+					_, err = w.Write(byteRes)
+					if err != nil {
+						fmt.Println("Invalid login response failed to serialize!")
+					}
 					return
 				}
 
@@ -89,7 +92,10 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 					fmt.Println(err)
 				}
 				w.WriteHeader(200)
-				w.Write(byteRes)
+				_, err = w.Write(byteRes)
+				if err != nil {
+					fmt.Println("Valid login response failed to serialize!")
+				}
 			} else if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, PATCH, POST, DELETE")
 				w.Header().Set("Access-Control-Allow-Headers", "*")
@@ -110,13 +116,13 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 
 	url := getBrowserBasedLoginURL(port, code)
 	err = c.ConfirmBrowserOpen("Logging in...", url)
-	
+
 	if err != nil {
 		// Opening the browser failed. Try browserless login
 		return c.browserlessLogin(ctx)
 	}
-	
-	fmt.Println("No dice? Try railway login --browserless")	
+
+	fmt.Println("No dice? Try railway login --browserless")
 
 	wg.Wait()
 
