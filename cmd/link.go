@@ -7,6 +7,12 @@ import (
 )
 
 func (h *Handler) Link(ctx context.Context, req *entity.CommandRequest) error {
+	if len(req.Args) > 0 {
+		// projectID provided as argument
+		projectID := req.Args[0]
+		return h.saveProjectWithID(ctx, projectID)
+	}
+
 	isLoggedIn, err := h.ctrl.IsLoggedIn(ctx)
 	if err != nil {
 		return err
