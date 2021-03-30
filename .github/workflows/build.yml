@@ -35,3 +35,4 @@ jobs:
 
       - name: Lint CLI
         uses: golangci/golangci-lint-action@v2
+        
