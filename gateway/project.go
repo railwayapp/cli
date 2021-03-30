@@ -198,16 +198,16 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 func GetRailwayUrl() string {
 	url := "https://railway.app"
 	if configs.IsDevMode() {
-		url = fmt.Sprintf("http://localhost:3000")
+		url = "http://localhost:3000"
 	}
 
 	return url
 }
 
-func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) {
-	browser.OpenURL(fmt.Sprintf("%s/project/%s?environmentId=%s", GetRailwayUrl(), projectID, environmentID))
+func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) error {
+	return browser.OpenURL(fmt.Sprintf("%s/project/%s?environmentId=%s", GetRailwayUrl(), projectID, environmentID))
 }
 
-func (g *Gateway) OpenProjectDeploymentsInBrowser(projectID string) {
-	browser.OpenURL(fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID))
+func (g *Gateway) OpenProjectDeploymentsInBrowser(projectID string) error {
+	return browser.OpenURL(fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID))
 }
