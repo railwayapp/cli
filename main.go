@@ -55,7 +55,7 @@ func init() {
 
 	loginCmd := &cobra.Command{
 		Use:   "login",
-		Short: "Login to Railway",
+		Short: "Login to your Railway account",
 		RunE:  contextualize(handler.Login, handler.Panic),
 	}
 	loginCmd.Flags().Bool("browserless", false, "--browserless")
@@ -63,53 +63,69 @@ func init() {
 	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "logout",
-		Short: "Logout of Railway",
+		Short: "Logout of your Railway account",
 		RunE:  contextualize(handler.Logout, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "whoami",
-		Short: "Show the currently logged in user",
+		Short: "Get the current logged in user",
 		RunE:  contextualize(handler.Whoami, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "init",
-		Short:             "Initialize Railway",
+		Short:             "Create a new Railway project",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
 		RunE:              contextualize(handler.Init, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "disconnect",
-		Short: "Disconnect from Railway",
-		RunE:  contextualize(handler.Disconnect, handler.Panic),
+		Use:               "link",
+		Short:             "Associate existing project with current directory",
+		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
+		RunE:              contextualize(handler.Link, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "env",
-		Short: "Show environment variables",
-		RunE:  contextualize(handler.Env, handler.Panic),
+		Use:   "unlink",
+		Short: "Disassociate project from current directory",
+		RunE:  contextualize(handler.Unlink, handler.Panic),
+	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:        "disconnect",
+		RunE:       contextualize(handler.Unlink, handler.Panic),
+		Deprecated: "Please use 'railway unlink' instead", /**/
+	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:        "env",
+		RunE:       contextualize(handler.Variables, handler.Panic),
+		Deprecated: "Please use 'railway variables' instead", /**/
+	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "variables",
+		Short: "Show variables for active environment",
+		RunE:  contextualize(handler.Variables, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "status",
-		Short: "Show status",
+		Short: "Show information about the current project",
 		RunE:  contextualize(handler.Status, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "environment",
-		Short: "Select an environment",
+		Short: "Change the active environment",
 		RunE:  contextualize(handler.Environment, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "open",
-		Short: "Open the project in railway",
+		Short: "Open project dashboard in default browser",
 		RunE:  contextualize(handler.Open, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "list",
-		Short: "Show all your projects",
+		Short: "List all projects in your Railway account",
 		RunE:  contextualize(handler.List, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:                "run",
-		Short:              "Run command inside the Railway environment",
+		Short:              "Run a local command using variables from the active environment",
 		PersistentPreRunE:  contextualize(handler.CheckVersion, handler.Panic),
 		RunE:               contextualize(handler.Run, handler.Panic),
 		DisableFlagParsing: true,
@@ -121,28 +137,28 @@ func init() {
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "version",
-		Short:             "Get version of the Railway CLI",
+		Short:             "Get the version of the Railway CLI",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
 		RunE:              contextualize(handler.Version, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "up",
-		Short: "Upload and deploy",
+		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "docs",
-		Short: "Open Railway Docs in browser",
+		Short: "Open Railway Documentation in default browser",
 		RunE:  contextualize(handler.Docs, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "add",
-		Short: "Add Railway plugins",
+		Short: "Add a new plugin to your project",
 		RunE:  contextualize(handler.Add, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "connect",
-		Short: "Connect to your Railway database",
+		Short: "Open an interactive shell to a database",
 		RunE:  contextualize(handler.Connect, handler.Panic),
 	})
 }

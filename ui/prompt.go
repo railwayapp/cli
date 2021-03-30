@@ -17,19 +17,13 @@ type Selection string
 const (
 	InitPrompt       Prompt    = "What would you like to do?"
 	InitNew          Selection = "Create new Project"
-	InitFromTemplate Selection = "Deploy a starter project"
-	InitFromAccount  Selection = "Connect to existing project"
-	InitFromID       Selection = "Enter existing project id"
+	InitFromTemplate Selection = "Select starter template"
 )
 
-func PromptInit(isLoggedIn bool) (Selection, error) {
-	existingProjectPrompt := InitFromID
-	if isLoggedIn {
-		existingProjectPrompt = InitFromAccount
-	}
+func PromptInit() (Selection, error) {
 	selectPrompt := promptui.Select{
 		Label: InitPrompt,
-		Items: []Selection{InitNew, existingProjectPrompt, InitFromTemplate},
+		Items: []Selection{InitNew, InitFromTemplate},
 	}
 	_, selection, err := selectPrompt.Run()
 	return Selection(selection), err

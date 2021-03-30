@@ -150,35 +150,6 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	return h.ctrl.OpenProjectDeploymentsInBrowser(ctx, project.Id)
 }
 
-func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandRequest) error {
-	projects, err := h.ctrl.GetProjects(ctx)
-	if err != nil {
-		return err
-	}
-
-	project, err := ui.PromptProjects(projects)
-	if err != nil {
-		return err
-	}
-
-	err = h.cfg.SetNewProject(project.Id)
-	if err != nil {
-		return err
-	}
-
-	environment, err := ui.PromptEnvironments(project.Environments)
-	if err != nil {
-		return err
-	}
-
-	err = h.cfg.SetEnvironment(environment.Id)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error {
 	project, err := h.ctrl.GetProject(ctx, projectID)
 	if err != nil {
@@ -203,15 +174,6 @@ func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error
 	return nil
 }
 
-func (h *Handler) initFromID(ctx context.Context, req *entity.CommandRequest) error {
-	projectID, err := ui.PromptText("Enter your project id")
-	if err != nil {
-		return err
-	}
-
-	return h.saveProjectWithID(ctx, projectID)
-}
-
 func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 	if len(req.Args) > 0 {
 		// projectID provided as argument
@@ -225,7 +187,7 @@ func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 		return fmt.Errorf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login"))
 	}
 
-	selection, err := ui.PromptInit(isLoggedIn)
+	selection, err := ui.PromptInit()
 	if err != nil {
 		return err
 	}
@@ -235,10 +197,6 @@ func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 		return h.initNew(ctx, req)
 	case ui.InitFromTemplate:
 		return h.initFromTemplate(ctx, req)
-	case ui.InitFromAccount:
-		return h.initFromAccount(ctx, req)
-	case ui.InitFromID:
-		return h.initFromID(ctx, req)
 	default:
 		return errors.New("Invalid selection")
 	}
