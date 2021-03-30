@@ -131,8 +131,6 @@ func buildConnectCommand(plugin string, envs *entity.Envs) ([]string, map[string
 			"-d",
 			(*envs)["PGDATABASE"],
 		}
-		break
-
 	case "mongo":
 		fallthrough
 	case "mongodb":
@@ -146,8 +144,6 @@ func buildConnectCommand(plugin string, envs *entity.Envs) ([]string, map[string
 				(*envs)["MONGOPORT"],
 			),
 		}
-		break
-
 	case "mysql":
 		command = []string{
 			"mysql",
@@ -158,7 +154,6 @@ func buildConnectCommand(plugin string, envs *entity.Envs) ([]string, map[string
 			"--protocol=TCP",
 			(*envs)["MYSQLDATABASE"],
 		}
-		break
 	}
 	return command, connectEnv
 }

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	goErrors "errors"
 	"fmt"
 	"net"
 	"os"
@@ -142,7 +141,7 @@ func getAvailablePort() (int, error) {
 			return i, nil
 		}
 	}
-	return -1, goErrors.New(fmt.Sprintf("Couldn't find available port between %d and %d", RAIL_PORT, RAIL_PORT+searchRange))
+	return -1, fmt.Errorf("Couldn't find available port between %d and %d", RAIL_PORT, RAIL_PORT+searchRange)
 }
 
 func isAvailable(port int) bool {

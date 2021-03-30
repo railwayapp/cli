@@ -18,7 +18,7 @@ func (h *Handler) Whoami(ctx context.Context, req *entity.CommandRequest) error 
 	if user.Name != "" {
 		userText = fmt.Sprintf("%s (%s)", user.Name, ui.MagentaText(user.Email))
 	}
-	fmt.Println(fmt.Sprintf("👋 Hey %s", userText))
+	fmt.Printf("👋 Hey %s", userText)
 
 	// Todo, more info, also more fun
 	return nil
