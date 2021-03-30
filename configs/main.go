@@ -78,9 +78,9 @@ func New() *Configs {
 	rootViper.SetConfigFile(rootConfigPath)
 	err := rootViper.ReadInConfig()
 	if os.IsNotExist(err) {
-		// That's okay, continue
+		// That's okay, configs are created as needed
 	} else if err != nil {
-		fmt.Println("Unable to load project config!")
+		fmt.Printf("Unable to parse railway config! %#v\n", err)
 	}
 
 	rootConfig := &Config{
@@ -100,9 +100,9 @@ func New() *Configs {
 	projectViper.SetConfigFile(projectPath)
 	err = projectViper.ReadInConfig()
 	if os.IsNotExist(err) {
-		// That's okay, continue
+		// That's okay, configs are created as needed
 	} else if err != nil {
-		fmt.Println("Unable to load project config!")
+		fmt.Printf("Unable to parse project config! %#v\n", err)
 	}
 
 	projectConfig := &Config{
