@@ -61,11 +61,9 @@ func (c *Configs) getCWD() (string, error) {
 }
 
 func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
-	err := c.MigrateLocalProjectConfig()
-	if err != nil {
-		// This probably failed because the config doesn't exist yet
-		// TODO: Better error handling herer
-	}
+	_ = c.MigrateLocalProjectConfig()
+	// Ignore error because the config probably doesn't exist yet
+	// TODO: Better error handling here
 
 	userCfg, err := c.GetRootConfigs()
 	if err != nil {
