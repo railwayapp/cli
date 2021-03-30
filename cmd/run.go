@@ -179,7 +179,10 @@ func catchSignals(cmd *exec.Cmd) {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
-		cmd.Process.Signal(sig)
+		err := cmd.Process.Signal(sig)
+		if err != nil {
+			fmt.Println("Child process error: \n", err)
+		}
 	}()
 }
 

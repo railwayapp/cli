@@ -112,8 +112,6 @@ func buildConnectCommand(plugin string, envs *entity.Envs) ([]string, map[string
 	case "redis":
 		// run
 		command = []string{"redis-cli", "-u", (*envs)["REDIS_URL"]}
-		break
-
 	case "psql":
 		fallthrough
 	case "postgres":

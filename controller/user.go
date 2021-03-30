@@ -111,7 +111,9 @@ func (c *Controller) browserBasedLogin(ctx context.Context) (*entity.User, error
 			}
 		})
 
-		http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil)
+		if err := http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil); err != nil {
+			fmt.Println("Login server handshake failed!")
+		}
 	}()
 
 	url := getBrowserBasedLoginURL(port, code)
@@ -241,7 +243,7 @@ func (c *Controller) ConfirmBrowserOpen(spinnerMsg string, url string) error {
 	err := browser.OpenURL(url)
 
 	if err != nil {
-		ui.StopSpinner(fmt.Sprintf("Failed to open browser, attempting browserless login."))
+		ui.StopSpinner("Failed to open browser, attempting browserless login.")
 		return err
 	}
 
