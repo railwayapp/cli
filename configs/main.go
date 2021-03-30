@@ -99,13 +99,11 @@ func New() *Configs {
 	projectViper.SetConfigName("config")
 	projectViper.SetConfigType("json")
 	err = projectViper.ReadInConfig()
-	if err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-			// Config file not found; that's okay
-		} else {
-			// Config file was found but another error was produced
-			fmt.Printf("Unable to load project config! %#v\n", err)
-		}
+	if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+		// Config file not found; that's okay
+	} else if err != nil {
+		// Config file was found but another error was produced
+		fmt.Printf("Unable to load project config! %#v\n", err)
 	}
 
 	projectConfig := &Config{
