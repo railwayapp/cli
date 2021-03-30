@@ -176,9 +176,9 @@ func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error
 
 func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 	if len(req.Args) > 0 {
-		// projectID provided as argument
-		projectID := req.Args[0]
-		return h.saveProjectWithID(ctx, projectID)
+		// NOTE: This is to support legacy `railway init <PROJECT_ID>` which should
+		//  now be `railway link <PROJECT_ID>`
+		return h.Link(ctx, req)
 	}
 
 	isLoggedIn, _ := h.ctrl.IsLoggedIn(ctx)
