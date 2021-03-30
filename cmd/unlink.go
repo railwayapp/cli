@@ -8,7 +8,7 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func (h *Handler) Disconnect(ctx context.Context, req *entity.CommandRequest) error {
+func (h *Handler) Unlink(ctx context.Context, req *entity.CommandRequest) error {
 	projectCfg, _ := h.cfg.GetProjectConfigs()
 
 	project, err := h.ctrl.GetProject(ctx, projectCfg.Project)

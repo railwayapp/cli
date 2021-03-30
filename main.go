@@ -70,20 +70,26 @@ func init() {
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "init",
-		Short:             "Initialize a project in the current directory",
+		Short:             "Create a new Railway project",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
 		RunE:              contextualize(handler.Init, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
-		Use:        "disconnect",
-		Short:      "Disconnect from Railway",
-		RunE:       contextualize(handler.Disconnect, handler.Panic),
-		Deprecated: "The 'railway disconnect' command is now railway 'disassociate'", /**/
+		Use:               "link",
+		Short:             "Associate current directory to existing project",
+		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
+		RunE:              contextualize(handler.Link, handler.Panic),
 	})
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "disassociate",
-		Short: "Remove association between project and current directory",
-		RunE:  contextualize(handler.Disconnect, handler.Panic),
+		Use:   "unlink",
+		Short: "Disassociate project from current directory",
+		RunE:  contextualize(handler.Unlink, handler.Panic),
+	})
+	rootCmd.AddCommand(&cobra.Command{
+		Use:        "disconnect",
+		Short:      "Disassociate project from current directory",
+		RunE:       contextualize(handler.Unlink, handler.Panic),
+		Deprecated: "The disconnect command is now 'railway unlink'", /**/
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:        "env",
