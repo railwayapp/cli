@@ -19,6 +19,6 @@ func (h *Handler) Build(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	fmt.Printf(`Env written to %s
-Do NOT commit the env.json file. This command should only be run as a production build step.`, h.cfg.RailwayEnvFilePath)
+Do NOT commit the env.json file. This command should only be run as a production build step.\n`, h.cfg.RailwayEnvFilePath)
 	return nil
 }
