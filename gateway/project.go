@@ -33,7 +33,10 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 
 	gqlReq.Var("projectId", projectId)
 
-	g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
 
 	var resp struct {
 		Project *entity.Project `json:"projectById"`
@@ -58,7 +61,10 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 		}
 	`)
 
-	g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
 
 	gqlReq.Var("name", req.Name)
 
@@ -69,6 +75,37 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 		return nil, errors.ProjectCreateFailed
 	}
 	return resp.Project, nil
+}
+
+func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.CreateProjectFromTemplateRequest) (*entity.CreateProjectFromTemplateResult, error) {
+	gqlReq := gql.NewRequest(`
+		mutation($name: String!, $owner: String!, $template: String!, $isPrivate: Boolean, $plugins: [String!], $variables: Json) {
+			createProjectFromTemplate(name: $name, owner: $owner, template: $template, isPrivate: $isPrivate, plugins: $plugins, variables: $variables) {
+				projectId
+				workflowId
+			}
+		}
+	`)
+
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	gqlReq.Var("name", req.Name)
+	gqlReq.Var("owner", req.Owner)
+	gqlReq.Var("template", req.Template)
+	gqlReq.Var("isPrivate", req.IsPrivate)
+	gqlReq.Var("plugins", req.Plugins)
+	gqlReq.Var("variables", req.Variables)
+
+	var resp struct {
+		Result *entity.CreateProjectFromTemplateResult `json:"createProjectFromTemplate"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return nil, errors.ProjectCreateFromTemplateFailed
+	}
+	return resp.Result, nil
 }
 
 func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRequest) (*entity.Project, error) {
@@ -169,4 +206,8 @@ func GetRailwayUrl() string {
 
 func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) {
 	browser.OpenURL(fmt.Sprintf("%s/project/%s?environmentId=%s", GetRailwayUrl(), projectID, environmentID))
+}
+
+func (g *Gateway) OpenProjectDeploymentsInBrowser(projectID string) {
+	browser.OpenURL(fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID))
 }

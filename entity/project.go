@@ -6,10 +6,24 @@ type CreateProjectRequest struct {
 	Plugins     []string // Optional
 }
 
+type CreateProjectFromTemplateRequest struct {
+	Name      string            // Required
+	Owner     string            // Required
+	Template  string            // Required
+	IsPrivate bool              // Optional
+	Plugins   []string          // Optional
+	Variables map[string]string // Optional
+}
+
 type UpdateProjectRequest struct {
 	Id          string  // Required
 	Name        *string // Optional
 	Description *string // Optional
+}
+
+type CreateProjectFromTemplateResult struct {
+	WorkflowID string
+	ProjectID  string
 }
 
 type Project struct {

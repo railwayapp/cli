@@ -17,7 +17,10 @@ func (g *Gateway) GetAvailablePlugins(ctx context.Context, projectId string) ([]
 
 	gqlReq.Var("projectId", projectId)
 
-	g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
 
 	var resp struct {
 		Plugins []string `json:"availablePluginsForProject"`
@@ -38,7 +41,10 @@ func (g *Gateway) CreatePlugin(ctx context.Context, req *entity.CreatePluginRequ
 		}
 	`)
 
-	g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
 
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("name", req.Plugin)

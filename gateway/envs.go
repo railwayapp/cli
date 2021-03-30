@@ -18,7 +18,6 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	gqlReq.Var("environmentId", req.EnvironmentID)
 
 	err := g.authorize(ctx, gqlReq.Header)
-
 	if err != nil {
 		return nil, err
 	}
