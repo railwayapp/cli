@@ -77,8 +77,10 @@ func New() *Configs {
 	rootConfigPath := path.Join(os.Getenv("HOME"), rootConfigPartialPath)
 	rootViper.SetConfigFile(rootConfigPath)
 	err := rootViper.ReadInConfig()
-	if err != nil {
-		fmt.Println("Unable to load root config!")
+	if os.IsNotExist(err) {
+		// That's okay, configs are created as needed
+	} else if err != nil {
+		fmt.Printf("Unable to parse railway config! %s\n", err)
 	}
 
 	rootConfig := &Config{
@@ -94,21 +96,18 @@ func New() *Configs {
 	}
 	projectViper := viper.New()
 
-	// NOTE: viper.ConfigFileNotFound not produced if using projectViper.setConfigFile()
-	projectViper.AddConfigPath(projectDir)
-	projectViper.SetConfigName("config")
-	projectViper.SetConfigType("json")
+	projectPath := path.Join(projectDir, "./config.json")
+	projectViper.SetConfigFile(projectPath)
 	err = projectViper.ReadInConfig()
-	if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-		// Config file not found; that's okay
+	if os.IsNotExist(err) {
+		// That's okay, configs are created as needed
 	} else if err != nil {
-		// Config file was found but another error was produced
-		fmt.Printf("Unable to load project config! %#v\n", err)
+		fmt.Printf("Unable to parse project config! %s\n", err)
 	}
 
 	projectConfig := &Config{
 		viper:      projectViper,
-		configPath: projectViper.ConfigFileUsed(),
+		configPath: projectPath,
 	}
 
 	return &Configs{
