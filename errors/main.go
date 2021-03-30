@@ -9,6 +9,8 @@ import (
 
 type RailwayError error
 
+// TEST
+
 var (
 	UserConfigNotFound      RailwayError = errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Not logged in."), ui.Bold("railway login")))
 	ProjectConfigNotFound   RailwayError = errors.New(fmt.Sprintf("%s. Tip: If you haven't, do railway login\nOtherwise, run %s to get plugged into a new or existing project.", ui.RedText("Project not found."), ui.Bold("railway init")))
