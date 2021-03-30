@@ -41,7 +41,7 @@ func (g *Gateway) setProjectToken(ctx context.Context, req *gql.Request) error {
 func GetHost() string {
 	baseURL := "https://backboard.railway.app"
 	if configs.IsDevMode() {
-		baseURL = fmt.Sprintf("http://localhost:8082")
+		baseURL = "http://localhost:8082"
 	}
 	return baseURL
 }

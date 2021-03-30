@@ -29,7 +29,10 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		ctx := context.Background()
 		defer func() {
 			if r := recover(); r != nil {
-				panicFn(ctx, fmt.Sprint(r), string(debug.Stack()), cmd.Name(), args)
+				err := panicFn(ctx, fmt.Sprint(r), string(debug.Stack()), cmd.Name(), args)
+				if err != nil {
+					fmt.Println("Unable to relay panic to server. Are you connected to the internet?")
+				}
 			}
 		}()
 
