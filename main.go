@@ -89,13 +89,13 @@ func init() {
 		Use:        "disconnect",
 		Short:      "Disassociate project from current directory",
 		RunE:       contextualize(handler.Unlink, handler.Panic),
-		Deprecated: "The disconnect command is now 'railway unlink'", /**/
+		Deprecated: "Please use 'railway unlink' instead", /**/
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:        "env",
 		Short:      "Show variables from active environment",
 		RunE:       contextualize(handler.Variables, handler.Panic),
-		Deprecated: "The 'railway env' command is now 'railway variables'",
+		Deprecated: "Please use 'railway variables' instead", /**/
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "variables",
