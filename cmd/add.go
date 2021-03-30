@@ -8,15 +8,6 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func stringInSlice(a string, list []string) bool {
-	for _, b := range list {
-		if b == a {
-			return true
-		}
-	}
-	return false
-}
-
 func (h *Handler) Add(ctx context.Context, req *entity.CommandRequest) error {
 	projectCfg, err := h.cfg.GetProjectConfigs()
 	if err != nil {
