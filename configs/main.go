@@ -94,16 +94,23 @@ func New() *Configs {
 	}
 	projectViper := viper.New()
 
-	projectPath := path.Join(projectDir, "./config.json")
-	projectViper.SetConfigFile(projectPath)
+	// NOTE: viper.ConfigFileNotFound not produced if using projectViper.setConfigFile()
+	projectViper.AddConfigPath(projectDir)
+	projectViper.SetConfigName("config")
+	projectViper.SetConfigType("json")
 	err = projectViper.ReadInConfig()
 	if err != nil {
-		fmt.Println("Unable to load project config!")
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			// Config file not found; that's okay
+		} else {
+			// Config file was found but another error was produced
+			fmt.Printf("Unable to load project config! %#v\n", err)
+		}
 	}
 
 	projectConfig := &Config{
 		viper:      projectViper,
-		configPath: projectPath,
+		configPath: projectViper.ConfigFileUsed(),
 	}
 
 	return &Configs{
