@@ -32,11 +32,11 @@ func (c *Controller) GetProjects(ctx context.Context) ([]*entity.Project, error)
 }
 
 // OpenProjectInBrowser opens the provided projectId in the browser
-func (c *Controller) OpenProjectInBrowser(ctx context.Context, projectID string, environmentID string) {
-	c.gtwy.OpenProjectInBrowser(projectID, environmentID)
+func (c *Controller) OpenProjectInBrowser(ctx context.Context, projectID string, environmentID string) error {
+	return c.gtwy.OpenProjectInBrowser(projectID, environmentID)
 }
 
 // OpenProjectDeploymentsInBrowser opens the provided projectId's depolyments in the browser
-func (c *Controller) OpenProjectDeploymentsInBrowser(ctx context.Context, projectID string) {
-	c.gtwy.OpenProjectDeploymentsInBrowser(projectID)
+func (c *Controller) OpenProjectDeploymentsInBrowser(ctx context.Context, projectID string) error {
+	return c.gtwy.OpenProjectDeploymentsInBrowser(projectID)
 }

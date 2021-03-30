@@ -1,6 +1,7 @@
 package configs
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -75,7 +76,10 @@ func New() *Configs {
 	}
 	rootConfigPath := path.Join(os.Getenv("HOME"), rootConfigPartialPath)
 	rootViper.SetConfigFile(rootConfigPath)
-	rootViper.ReadInConfig()
+	err := rootViper.ReadInConfig()
+	if err != nil {
+		fmt.Println("Unable to load root config!")
+	}
 
 	rootConfig := &Config{
 		viper:      rootViper,
@@ -92,7 +96,10 @@ func New() *Configs {
 
 	projectPath := path.Join(projectDir, "./config.json")
 	projectViper.SetConfigFile(projectPath)
-	projectViper.ReadInConfig()
+	err = projectViper.ReadInConfig()
+	if err != nil {
+		fmt.Println("Unable to load project config!")
+	}
 
 	projectConfig := &Config{
 		viper:      projectViper,

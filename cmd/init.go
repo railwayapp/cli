@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/railwayapp/cli/entity"
 	CLIErrors "github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
-	"time"
 )
 
 func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error {
@@ -39,9 +40,7 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 	}
 
 	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
-	h.ctrl.OpenProjectInBrowser(ctx, project.Id, environment.Id)
-
-	return nil
+	return h.ctrl.OpenProjectInBrowser(ctx, project.Id, environment.Id)
 }
 
 func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandRequest) error {
@@ -148,9 +147,7 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	}
 
 	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
-	h.ctrl.OpenProjectDeploymentsInBrowser(ctx, project.Id)
-
-	return nil
+	return h.ctrl.OpenProjectDeploymentsInBrowser(ctx, project.Id)
 }
 
 func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandRequest) error {
@@ -225,7 +222,7 @@ func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 	isLoggedIn, _ := h.ctrl.IsLoggedIn(ctx)
 
 	if !isLoggedIn {
-		return errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login")))
+		return fmt.Errorf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login"))
 	}
 
 	selection, err := ui.PromptInit(isLoggedIn)
