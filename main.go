@@ -79,7 +79,7 @@ func init() {
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:               "link",
-		Short:             "Associate current directory to existing project",
+		Short:             "Associate existing project with current directory",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
 		RunE:              contextualize(handler.Link, handler.Panic),
 	})
@@ -90,13 +90,11 @@ func init() {
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:        "disconnect",
-		Short:      "Disassociate project from current directory",
 		RunE:       contextualize(handler.Unlink, handler.Panic),
 		Deprecated: "Please use 'railway unlink' instead", /**/
 	})
 	rootCmd.AddCommand(&cobra.Command{
 		Use:        "env",
-		Short:      "Show variables from active environment",
 		RunE:       contextualize(handler.Variables, handler.Panic),
 		Deprecated: "Please use 'railway variables' instead", /**/
 	})
