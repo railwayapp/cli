@@ -32,7 +32,9 @@ jobs:
 
       - name: Build
         run: make build
+      
+      - name: Clean modcache
+        run: go clean -modcache
 
       - name: Lint CLI
         uses: golangci/golangci-lint-action@v2
-        
