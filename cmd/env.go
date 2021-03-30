@@ -42,3 +42,15 @@ func (h *Handler) Env(ctx context.Context, req *entity.CommandRequest) error {
 	}
 	return nil
 }
+
+func (h *Handler) EnvSet(ctx context.Context, req *entity.CommandRequest) error {
+	return nil
+}
+
+func (h *Handler) EnvGet(ctx context.Context, req *entity.CommandRequest) error {
+	return nil
+}
+
+func (h *Handler) EnvDelete(ctx context.Context, req *entity.CommandRequest) error {
+	return nil
+}

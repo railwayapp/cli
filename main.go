@@ -57,91 +57,140 @@ func init() {
 	}
 	loginCmd.Flags().Bool("browserless", false, "--browserless")
 
-	rootCmd.AddCommand(loginCmd)
-	rootCmd.AddCommand(&cobra.Command{
+	logoutCmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Logout of Railway",
 		RunE:  contextualize(handler.Logout, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	whoamiCmd := &cobra.Command{
 		Use:   "whoami",
 		Short: "Show the currently logged in user",
 		RunE:  contextualize(handler.Whoami, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	initCmd := &cobra.Command{
 		Use:               "init",
 		Short:             "Initialize Railway",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
 		RunE:              contextualize(handler.Init, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	disconnectCmd := &cobra.Command{
 		Use:   "disconnect",
 		Short: "Disconnect from Railway",
 		RunE:  contextualize(handler.Disconnect, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	envCmd := &cobra.Command{
 		Use:   "env",
 		Short: "Show environment variables",
 		RunE:  contextualize(handler.Env, handler.Panic),
+	}
+	envCmd.AddCommand(&cobra.Command{
+		Use:   "set",
+		Short: "Add or change value of variable",
+		RunE:  contextualize(handler.EnvSet, handler.Panic),
 	})
-	rootCmd.AddCommand(&cobra.Command{
+	envCmd.AddCommand(&cobra.Command{
+		Use:   "get",
+		Short: "get the value of a variable",
+		RunE:  contextualize(handler.EnvGet, handler.Panic),
+	})
+	envCmd.AddCommand(&cobra.Command{
+		Use:   "delete",
+		Short: "Delete a variable",
+		RunE:  contextualize(handler.EnvDelete, handler.Panic),
+	})
+
+	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show status",
 		RunE:  contextualize(handler.Status, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	environmentCmd := &cobra.Command{
 		Use:   "environment",
 		Short: "Select an environment",
 		RunE:  contextualize(handler.Environment, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	openCmd := &cobra.Command{
 		Use:   "open",
 		Short: "Open the project in railway",
 		RunE:  contextualize(handler.Open, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "Show all your projects",
 		RunE:  contextualize(handler.List, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	runCmd := &cobra.Command{
 		Use:                "run",
 		Short:              "Run command inside the Railway environment",
 		PersistentPreRunE:  contextualize(handler.CheckVersion, handler.Panic),
 		RunE:               contextualize(handler.Run, handler.Panic),
 		DisableFlagParsing: true,
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	protectCmd := &cobra.Command{
 		Use:   "protect",
 		Short: "[EXPERIMENTAL!] Protect current branch (Actions will require confirmation)",
 		RunE:  contextualize(handler.Protect, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	versionCmd := &cobra.Command{
 		Use:               "version",
 		Short:             "Get version of the Railway CLI",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
 		RunE:              contextualize(handler.Version, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	upCmd := &cobra.Command{
 		Use:   "up",
 		Short: "Upload and deploy",
 		RunE:  contextualize(handler.Up, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	docsCmd := &cobra.Command{
 		Use:   "docs",
 		Short: "Open Railway Docs in browser",
 		RunE:  contextualize(handler.Docs, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	addCmd := &cobra.Command{
 		Use:   "add",
 		Short: "Add Railway plugins",
 		RunE:  contextualize(handler.Add, handler.Panic),
-	})
-	rootCmd.AddCommand(&cobra.Command{
+	}
+
+	connectCmd := &cobra.Command{
 		Use:   "connect",
 		Short: "Connect to your Railway database",
 		RunE:  contextualize(handler.Connect, handler.Panic),
-	})
+	}
+
+	rootCmd.AddCommand(
+		loginCmd,
+		logoutCmd,
+		whoamiCmd,
+		initCmd,
+		disconnectCmd,
+		envCmd,
+		statusCmd,
+		environmentCmd,
+		openCmd,
+		listCmd,
+		runCmd,
+		protectCmd,
+		versionCmd,
+		upCmd,
+		docsCmd,
+		addCmd,
+		connectCmd,
+	)
 }
 
 func main() {
