@@ -80,7 +80,7 @@ func New() *Configs {
 	if os.IsNotExist(err) {
 		// That's okay, configs are created as needed
 	} else if err != nil {
-		fmt.Printf("Unable to parse railway config! %#v\n", err)
+		fmt.Printf("Unable to parse railway config! %s\n", err)
 	}
 
 	rootConfig := &Config{
@@ -102,7 +102,7 @@ func New() *Configs {
 	if os.IsNotExist(err) {
 		// That's okay, configs are created as needed
 	} else if err != nil {
-		fmt.Printf("Unable to parse project config! %#v\n", err)
+		fmt.Printf("Unable to parse project config! %s\n", err)
 	}
 
 	projectConfig := &Config{
