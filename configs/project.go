@@ -61,7 +61,10 @@ func (c *Configs) getCWD() (string, error) {
 }
 
 func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
-	c.MigrateLocalProjectConfig()
+	err := c.MigrateLocalProjectConfig()
+	if err != nil {
+		// It's okay, it may not exist yet
+	}
 
 	userCfg, err := c.GetRootConfigs()
 	if err != nil {
