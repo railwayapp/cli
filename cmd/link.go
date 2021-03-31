@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"fmt"
+
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
 )
@@ -29,6 +31,11 @@ func (h *Handler) linkFromAccount(ctx context.Context, req *entity.CommandReques
 	projects, err := h.ctrl.GetProjects(ctx)
 	if err != nil {
 		return err
+	}
+
+	if len(projects) == 0 {
+		fmt.Printf("No Projects. Create one with %s\n", ui.GreenText("railway init"))
+		return nil
 	}
 
 	project, err := ui.PromptProjects(projects)
