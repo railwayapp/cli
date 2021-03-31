@@ -208,9 +208,7 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 
 	projects := resp.Me.Projects
 	for _, team := range resp.Me.Teams {
-		for _, p := range team.Projects {
-			projects = append(projects, p)
-		}
+		projects = append(projects, team.Projects...)
 	}
 
 	return projects, nil
