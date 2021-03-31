@@ -31,4 +31,5 @@ type Project struct {
 	Name         string         `json:"name,omitempty"`
 	Environments []*Environment `json:"environments,omitempty"`
 	Plugins      []*Plugin      `json:"plugins,omitempty"`
+	Team         *string        `json:"team,omitempty"`
 }

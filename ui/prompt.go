@@ -41,8 +41,8 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 		Label: "Select Project",
 		Items: projects,
 		Templates: &promptui.SelectTemplates{
-			Active:   `{{ .Name | underline }}`,
-			Inactive: `{{ .Name }}`,
+			Active:   `[{{ .Team }}] {{ .Name | underline }}`,
+			Inactive: `[{{ .Team }}] {{ .Name }}`,
 			Selected: fmt.Sprintf("%s Project: {{ .Name | magenta | bold }} ", promptui.IconGood),
 		},
 	}

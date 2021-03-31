@@ -174,10 +174,12 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 	gqlReq := gql.NewRequest(fmt.Sprintf(`
 		query {
 			me {
+				name
 				projects {
 					%s
 			  }
 				teams {
+					name
 					projects {
 						%s
 					}
@@ -195,8 +197,10 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 
 	var resp struct {
 		Me struct {
+			Name     *string           `json:"name"`
 			Projects []*entity.Project `json:"projects"`
 			Teams    []*struct {
+				Name     string            `json:"name"`
 				Projects []*entity.Project `json:"projects"`
 			} `json:"teams"`
 		} `json:"me"`
@@ -207,7 +211,18 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 	}
 
 	projects := resp.Me.Projects
+
+	for _, project := range resp.Me.Projects {
+		name := "Me"
+		if resp.Me.Name != nil {
+			name = *resp.Me.Name
+		}
+		project.Team = &name
+	}
 	for _, team := range resp.Me.Teams {
+		for _, project := range team.Projects {
+			project.Team = &team.Name
+		}
 		projects = append(projects, team.Projects...)
 	}
 
