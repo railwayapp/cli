@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/railwayapp/cli/entity"
 	CLIErrors "github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
-	"time"
 )
 
 func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error {
@@ -39,9 +40,7 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 	}
 
 	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
-	h.ctrl.OpenProjectInBrowser(ctx, project.Id, environment.Id)
-
-	return nil
+	return h.ctrl.OpenProjectInBrowser(ctx, project.Id, environment.Id)
 }
 
 func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandRequest) error {
@@ -148,38 +147,7 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	}
 
 	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
-	h.ctrl.OpenProjectDeploymentsInBrowser(ctx, project.Id)
-
-	return nil
-}
-
-func (h *Handler) initFromAccount(ctx context.Context, req *entity.CommandRequest) error {
-	projects, err := h.ctrl.GetProjects(ctx)
-	if err != nil {
-		return err
-	}
-
-	project, err := ui.PromptProjects(projects)
-	if err != nil {
-		return err
-	}
-
-	err = h.cfg.SetNewProject(project.Id)
-	if err != nil {
-		return err
-	}
-
-	environment, err := ui.PromptEnvironments(project.Environments)
-	if err != nil {
-		return err
-	}
-
-	err = h.cfg.SetEnvironment(environment.Id)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return h.ctrl.OpenProjectDeploymentsInBrowser(ctx, project.Id)
 }
 
 func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error {
@@ -206,29 +174,20 @@ func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error
 	return nil
 }
 
-func (h *Handler) initFromID(ctx context.Context, req *entity.CommandRequest) error {
-	projectID, err := ui.PromptText("Enter your project id")
-	if err != nil {
-		return err
-	}
-
-	return h.saveProjectWithID(ctx, projectID)
-}
-
 func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 	if len(req.Args) > 0 {
-		// projectID provided as argument
-		projectID := req.Args[0]
-		return h.saveProjectWithID(ctx, projectID)
+		// NOTE: This is to support legacy `railway init <PROJECT_ID>` which should
+		//  now be `railway link <PROJECT_ID>`
+		return h.Link(ctx, req)
 	}
 
 	isLoggedIn, _ := h.ctrl.IsLoggedIn(ctx)
 
 	if !isLoggedIn {
-		return errors.New(fmt.Sprintf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login")))
+		return fmt.Errorf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login"))
 	}
 
-	selection, err := ui.PromptInit(isLoggedIn)
+	selection, err := ui.PromptInit()
 	if err != nil {
 		return err
 	}
@@ -238,10 +197,6 @@ func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 		return h.initNew(ctx, req)
 	case ui.InitFromTemplate:
 		return h.initFromTemplate(ctx, req)
-	case ui.InitFromAccount:
-		return h.initFromAccount(ctx, req)
-	case ui.InitFromID:
-		return h.initFromID(ctx, req)
 	default:
 		return errors.New("Invalid selection")
 	}

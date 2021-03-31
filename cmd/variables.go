@@ -21,7 +21,7 @@ func Max(x, y int) int {
 	return y
 }
 
-func (h *Handler) Env(ctx context.Context, req *entity.CommandRequest) error {
+func (h *Handler) Variables(ctx context.Context, req *entity.CommandRequest) error {
 	envs, err := h.ctrl.GetEnvs(ctx)
 	if err != nil {
 		return err

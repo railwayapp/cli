@@ -1,6 +1,7 @@
 package configs
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -75,7 +76,12 @@ func New() *Configs {
 	}
 	rootConfigPath := path.Join(os.Getenv("HOME"), rootConfigPartialPath)
 	rootViper.SetConfigFile(rootConfigPath)
-	rootViper.ReadInConfig()
+	err := rootViper.ReadInConfig()
+	if os.IsNotExist(err) {
+		// That's okay, configs are created as needed
+	} else if err != nil {
+		fmt.Printf("Unable to parse railway config! %s\n", err)
+	}
 
 	rootConfig := &Config{
 		viper:      rootViper,
@@ -92,7 +98,12 @@ func New() *Configs {
 
 	projectPath := path.Join(projectDir, "./config.json")
 	projectViper.SetConfigFile(projectPath)
-	projectViper.ReadInConfig()
+	err = projectViper.ReadInConfig()
+	if os.IsNotExist(err) {
+		// That's okay, configs are created as needed
+	} else if err != nil {
+		fmt.Printf("Unable to parse project config! %s\n", err)
+	}
 
 	projectConfig := &Config{
 		viper:      projectViper,

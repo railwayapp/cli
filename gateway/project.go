@@ -158,24 +158,33 @@ func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
 // their environments associated with those projects, error otherwise
 // Performs a dual join
 func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
-	gqlReq := gql.NewRequest(`
+	projectFrag := `
+		id,
+		name,
+		plugins {
+			id,
+			name,
+		},
+		environments {
+			id,
+			name
+		}, 
+	`
+
+	gqlReq := gql.NewRequest(fmt.Sprintf(`
 		query {
 			me {
 				projects {
-					id,
-					name,
-					plugins {
-					  id,
-					  name,
-					},
-					environments {
-					  id,
-					  name
-					}, 
+					%s
 			  }
+				teams {
+					projects {
+						%s
+					}
+				}
 			}
 		}
-	`)
+	`, projectFrag, projectFrag))
 
 	// TODO build this into the GQL client
 	err := g.authorize(ctx, gqlReq.Header)
@@ -186,28 +195,38 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 
 	var resp struct {
 		Me struct {
-			Projects []*entity.Project
+			Projects []*entity.Project `json:"projects"`
+			Teams    []*struct {
+				Projects []*entity.Project `json:"projects"`
+			} `json:"teams"`
 		} `json:"me"`
 	}
+
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
 		return nil, errors.ProblemFetchingProjects
 	}
-	return resp.Me.Projects, nil
+
+	projects := resp.Me.Projects
+	for _, team := range resp.Me.Teams {
+		projects = append(projects, team.Projects...)
+	}
+
+	return projects, nil
 }
 
 func GetRailwayUrl() string {
 	url := "https://railway.app"
 	if configs.IsDevMode() {
-		url = fmt.Sprintf("http://localhost:3000")
+		url = "http://localhost:3000"
 	}
 
 	return url
 }
 
-func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) {
-	browser.OpenURL(fmt.Sprintf("%s/project/%s?environmentId=%s", GetRailwayUrl(), projectID, environmentID))
+func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) error {
+	return browser.OpenURL(fmt.Sprintf("%s/project/%s?environmentId=%s", GetRailwayUrl(), projectID, environmentID))
 }
 
-func (g *Gateway) OpenProjectDeploymentsInBrowser(projectID string) {
-	browser.OpenURL(fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID))
+func (g *Gateway) OpenProjectDeploymentsInBrowser(projectID string) error {
+	return browser.OpenURL(fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID))
 }

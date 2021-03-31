@@ -16,6 +16,5 @@ func (h *Handler) Open(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	h.ctrl.OpenProjectInBrowser(ctx, projectId, environmentId)
-	return nil
+	return h.ctrl.OpenProjectInBrowser(ctx, projectId, environmentId)
 }

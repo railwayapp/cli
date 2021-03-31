@@ -12,7 +12,7 @@ func (c *Configs) GetUserConfigs() (*entity.UserConfig, error) {
 		return nil, errors.UserConfigNotFound
 	}
 
-	if &rootCfg.User == nil || rootCfg.User.Token == "" {
+	if rootCfg.User.Token == "" {
 		return nil, errors.UserConfigNotFound
 	}
 
