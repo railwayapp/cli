@@ -47,7 +47,7 @@ func hasTeams(projects []*entity.Project) bool {
 
 func promptTeams(projects []*entity.Project) (*string, error) {
 	if hasTeams(projects) {
-		tm := make(map[string]bool, 0)
+		tm := make(map[string]bool)
 		for _, project := range projects {
 			if project.Team != nil {
 				tm[*project.Team] = true
