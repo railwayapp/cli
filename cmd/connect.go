@@ -18,9 +18,12 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 		return err
 	}
 
-	envName := getEnvironmentNameFromID(projectCfg.Environment, project.Environments)
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
+	}
 
-	fmt.Printf("🎉 Connecting to: %s %s\n", ui.MagentaText(project.Name), ui.MagentaText(envName))
+	fmt.Printf("🎉 Connecting to: %s %s\n", ui.MagentaText(project.Name), ui.MagentaText(environment.Name))
 
 	var plugin string
 

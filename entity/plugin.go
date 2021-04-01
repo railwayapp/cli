@@ -5,7 +5,7 @@ type PluginList struct {
 }
 
 type Plugin struct {
-	Id   string `json:"id,omitempty"`
+	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
 }
 

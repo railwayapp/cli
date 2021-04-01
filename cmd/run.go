@@ -77,9 +77,13 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	}
 
 	// Strip characters not allowed in Docker image names
-	envName := getEnvironmentNameFromID(projectCfg.Environment, project.Environments)
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+
 	sanitiser := regexp.MustCompile(`[^A-Za-z0-9_-]`)
-	imageNameWithoutNsOrTag := sanitiser.ReplaceAllString(project.Name, "") + "-" + sanitiser.ReplaceAllString(envName, "")
+	imageNameWithoutNsOrTag := sanitiser.ReplaceAllString(project.Name, "") + "-" + sanitiser.ReplaceAllString(environment.Name, "")
 	image := fmt.Sprintf("railway-local/%s:latest", imageNameWithoutNsOrTag)
 
 	buildArgs := []string{"build", "-q", "-t", image, pwd}

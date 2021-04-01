@@ -53,6 +53,10 @@ func GetGQLHost() string {
 
 func New() *Gateway {
 	gqlClient := gql.NewClient(GetGQLHost())
+	gqlClient.Log = func(s string) {
+		// Uncomment this for verbose query logging
+		// fmt.Println(s)
+	}
 	return &Gateway{
 		cfg:       configs.New(),
 		gqlClient: gqlClient,
