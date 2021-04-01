@@ -36,13 +36,58 @@ func PromptText(text string) (string, error) {
 	return prompt.Run()
 }
 
+func hasTeams(projects []*entity.Project) bool {
+	for _, project := range projects {
+		if project.Team != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func promptTeams(projects []*entity.Project) (*string, error) {
+	if hasTeams(projects) {
+		tm := make(map[string]bool, 0)
+		for _, project := range projects {
+			if project.Team != nil {
+				tm[*project.Team] = true
+			}
+		}
+		teams := make([]string, 0)
+		for team := range tm {
+			teams = append(teams, team)
+		}
+		prompt := promptui.Select{
+			Label: "Select Team",
+			Items: teams,
+			Templates: &promptui.SelectTemplates{
+				Selected: fmt.Sprintf("%s Team: {{ .Name | green | bold }} ", promptui.IconGood),
+			},
+		}
+		_, team, err := prompt.Run()
+		return &team, err
+	}
+	return nil, nil
+}
+
 func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
+	// Check if need to prompt teams
+	team, err := promptTeams(projects)
+	if err != nil {
+		return nil, err
+	}
+	filteredProjects := make([]*entity.Project, 0)
+	for _, project := range projects {
+		if *project.Team == *team {
+			filteredProjects = append(filteredProjects, project)
+		}
+	}
 	prompt := promptui.Select{
 		Label: "Select Project",
-		Items: projects,
+		Items: filteredProjects,
 		Templates: &promptui.SelectTemplates{
-			Active:   `[{{ .Team }}] {{ .Name | underline }}`,
-			Inactive: `[{{ .Team }}] {{ .Name }}`,
+			Active:   `{{ .Name | underline }}`,
+			Inactive: `{{ .Name }}`,
 			Selected: fmt.Sprintf("%s Project: {{ .Name | magenta | bold }} ", promptui.IconGood),
 		},
 	}
