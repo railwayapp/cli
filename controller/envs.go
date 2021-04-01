@@ -34,7 +34,7 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 			return nil, err
 		}
 		if !confirm {
-			return nil, err
+			return nil, nil
 		}
 	}
 
@@ -80,7 +80,7 @@ func (c *Controller) UpdateEnvs(ctx context.Context, envs *entity.Envs) (*entity
 			return nil, err
 		}
 		if !confirm {
-			return nil, err
+			return nil, nil
 		}
 	}
 

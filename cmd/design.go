@@ -13,7 +13,7 @@ func (h *Handler) Design(ctx context.Context, req *entity.CommandRequest) error 
 	fmt.Print(ui.AlertWarning("That might not hve been what you wanted"))
 	fmt.Print(ui.AlertInfo("Just so you know you know, Railway is awesome"))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Unordered List"))
 	fmt.Print(ui.UnorderedList([]string{
 		"List Item 1",
@@ -21,14 +21,14 @@ func (h *Handler) Design(ctx context.Context, req *entity.CommandRequest) error 
 		"List Item 3",
 	}))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Ordered List"))
 	fmt.Print(ui.OrderedList([]string{
 		"First Step",
 		"Next Step",
 	}))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Key-Value Pairs"))
 	fmt.Print(ui.KeyValues(map[string]string{
 		"First Key":  "Value 1",
@@ -36,29 +36,29 @@ func (h *Handler) Design(ctx context.Context, req *entity.CommandRequest) error 
 		"Third Key":  "Value 3",
 	}))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Truncated Text"))
 	fmt.Println(ui.Truncate("012345678901234567890123456789", 50))
 	fmt.Println(ui.Truncate("012345678901234567890123456789", 10))
 	fmt.Println(ui.Truncate("012345678901234567890123456789", 0))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Secret Text"))
 	fmt.Printf("My super secret password is %s, the name of my childhood pet.\n", ui.ObscureText("Luke"))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Paragraph"))
 	fmt.Print(ui.Paragraph("Paragraphs print the given text, but wrap it automatically when the lines are too long. It's super convenient!"))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Indented"))
 	fmt.Print(ui.Indent("func main() {\n  println(\"Hello World!\")\n}"))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Block Quote"))
 	fmt.Print(ui.BlockQuote("That's the thing about counter-intuitive ideas. They contradict your intuitions. So, they seem wrong"))
 
-	println("")
+	fmt.Println("")
 	fmt.Print(ui.Heading("Generic Line Prefix"))
 	fmt.Print(ui.PrefixLines("Line 1\nLine 2\nLine 3", "🥳 "))
 

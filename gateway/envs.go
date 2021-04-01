@@ -76,5 +76,5 @@ func (g *Gateway) UpdateEnvsForPlugin(ctx context.Context, req *entity.UpdateEnv
 		return nil, err
 	}
 
-	return &entity.Envs{}, nil
+	return resp.Envs, nil
 }

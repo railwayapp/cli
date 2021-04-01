@@ -32,8 +32,9 @@ func (h *Handler) VariablesGet(ctx context.Context, req *entity.CommandRequest) 
 		return err
 	}
 
-	envName := req.Args[0]
-	fmt.Println(envs.Get(envName))
+	for _, key := range req.Args {
+		fmt.Println(envs.Get(key))
+	}
 
 	return nil
 }

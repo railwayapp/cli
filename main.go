@@ -117,7 +117,7 @@ func init() {
 		Use:   "get",
 		Short: "Get the value of a variable",
 		RunE:  contextualize(handler.VariablesGet, handler.Panic),
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MinimumNArgs(1),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
 		Use:   "set",
