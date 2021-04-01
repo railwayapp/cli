@@ -3,54 +3,98 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"github.com/railwayapp/cli/ui"
+	"strings"
 
 	"github.com/railwayapp/cli/entity"
 )
 
-func Min(x, y int) int {
-	if x < y {
-		return x
-	}
-	return y
-}
-
-func Max(x, y int) int {
-	if x > y {
-		return x
-	}
-	return y
-}
-
-func (h *Handler) Variables(ctx context.Context, req *entity.CommandRequest) error {
+func (h *Handler) Variables(ctx context.Context, _ *entity.CommandRequest) error {
 	envs, err := h.ctrl.GetEnvs(ctx)
 	if err != nil {
 		return err
 	}
 
-	var minSpacing = 15
-	var maxSpacing = 100
-	var longest = 0
-
-	for k := range *envs {
-		if len(k) > longest {
-			longest = len(k)
-		}
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
 	}
 
-	for k, v := range *envs {
-		fmt.Printf("%-*s\t%s\n", Max(minSpacing, Min(maxSpacing, longest)), k, v)
+	fmt.Print(ui.Heading(fmt.Sprintf("%s Environment Variables", environment.Name)))
+	fmt.Print(ui.KeyValues(*envs))
+
+	return nil
+}
+
+func (h *Handler) VariablesGet(ctx context.Context, req *entity.CommandRequest) error {
+	envs, err := h.ctrl.GetEnvs(ctx)
+	if err != nil {
+		return err
 	}
+
+	envName := req.Args[0]
+	fmt.Println(envs.Get(envName))
+
 	return nil
 }
 
-func (h *Handler) EnvSet(ctx context.Context, req *entity.CommandRequest) error {
+func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) error {
+	envs, err := h.ctrl.GetEnvs(ctx)
+	if err != nil {
+		return err
+	}
+
+	updatedEnvs := &entity.Envs{}
+	updatedEnvNames := make([]string, 0)
+	for _, kvPair := range req.Args {
+		parts := strings.SplitN(kvPair, "=", 2)
+		key := parts[0]
+		value := parts[1]
+
+		envs.Set(key, value)
+		updatedEnvs.Set(key, value)
+		updatedEnvNames = append(updatedEnvNames, key)
+	}
+
+	_, err = h.ctrl.UpdateEnvs(ctx, envs)
+	if err != nil {
+		return err
+	}
+
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(ui.Heading(fmt.Sprintf("Updated %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
+	fmt.Print(ui.KeyValues(*updatedEnvs))
+
 	return nil
 }
 
-func (h *Handler) EnvGet(ctx context.Context, req *entity.CommandRequest) error {
-	return nil
-}
+func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandRequest) error {
+	envs, err := h.ctrl.GetEnvs(ctx)
+	if err != nil {
+		return err
+	}
 
-func (h *Handler) EnvDelete(ctx context.Context, req *entity.CommandRequest) error {
+	updatedEnvNames := make([]string, 0)
+	for _, key := range req.Args {
+		updatedEnvNames = append(updatedEnvNames, key)
+		envs.Delete(key)
+	}
+
+	_, err = h.ctrl.UpdateEnvs(ctx, envs)
+	if err != nil {
+		return err
+	}
+
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
+
 	return nil
 }

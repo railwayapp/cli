@@ -192,12 +192,27 @@ func PromptPlugins(plugins []string) (string, error) {
 	return plugins[i], err
 }
 
-func PromptConfirm(msg string) error {
-	prompt := promptui.Prompt{
-		Label: msg,
+// PromptYesNo prompts the user to continue an action using the common (y/N) action
+func PromptYesNo(msg string) (bool, error) {
+	fmt.Printf("%s (y/N): ", msg)
+	var response string
+	_, err := fmt.Scan(&response)
+	if err != nil {
+		return false, err
 	}
-	_, err := prompt.Run()
-	return err
+	response = strings.ToLower(response)
+
+	isNo := response == "n" || response == "no"
+	isYes := response == "y" || response == "yes"
+
+	if isYes {
+		return true, nil
+	} else if isNo {
+		return false, nil
+	} else {
+		fmt.Println("Please type yes or no and then press enter:")
+		return PromptYesNo(msg)
+	}
 }
 
 func validatorRequired(errorMsg string) func(s string) error {
