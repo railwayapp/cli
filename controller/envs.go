@@ -110,7 +110,7 @@ func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.En
 }
 
 func (c *Controller) GetEnvsForEnvPlugin(ctx context.Context) (*entity.Envs, error) {
-	// Get envs through production token if it exists
+	// Get envs through project token if it exists
 	if c.cfg.RailwayProductionToken != "" {
 		envs, err := c.gtwy.GetEnvsWithProjectToken(ctx)
 		if err != nil {
