@@ -70,6 +70,11 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 	fmt.Print(ui.Heading(fmt.Sprintf("Updated %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
 	fmt.Print(ui.KeyValues(*updatedEnvs))
 
+	err = h.ctrl.DeployEnvironmentTriggers(ctx)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -96,6 +101,11 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 	}
 
 	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
+
+	err = h.ctrl.DeployEnvironmentTriggers(ctx)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
