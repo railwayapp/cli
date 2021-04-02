@@ -5,6 +5,12 @@ type GetEnvsRequest struct {
 	EnvironmentID string
 }
 
+type GetEnvsForPluginRequest struct {
+	ProjectID     string
+	EnvironmentID string
+	PluginID      string
+}
+
 type UpdateEnvsRequest struct {
 	ProjectID     string
 	EnvironmentID string
