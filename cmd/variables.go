@@ -40,7 +40,7 @@ func (h *Handler) VariablesGet(ctx context.Context, req *entity.CommandRequest) 
 }
 
 func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) error {
-	envs, err := h.ctrl.GetEnvs(ctx)
+	envs, err := h.ctrl.GetEnvsForEnvPlugin(ctx)
 	if err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		updatedEnvNames = append(updatedEnvNames, key)
 	}
 
-	_, err = h.ctrl.UpdateEnvs(ctx, envs)
+	_, err = h.ctrl.UpdateEnvsForEnvPlugin(ctx, envs)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 }
 
 func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandRequest) error {
-	envs, err := h.ctrl.GetEnvs(ctx)
+	envs, err := h.ctrl.GetEnvsForEnvPlugin(ctx)
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 		envs.Delete(key)
 	}
 
-	_, err = h.ctrl.UpdateEnvs(ctx, envs)
+	_, err = h.ctrl.UpdateEnvsForEnvPlugin(ctx, envs)
 	if err != nil {
 		return err
 	}

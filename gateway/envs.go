@@ -30,6 +30,30 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	return resp.Envs, nil
 }
 
+func (g *Gateway) GetEnvsForPlugin(ctx context.Context, req *entity.GetEnvsForPluginRequest) (*entity.Envs, error) {
+	gqlReq := gql.NewRequest(`
+		query ($projectId: String!, $environmentId: String!, $pluginId: String!) {
+			allEnvsForPlugin(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId)
+		}
+	`)
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("environmentId", req.EnvironmentID)
+	gqlReq.Var("pluginId", req.PluginID)
+
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Envs *entity.Envs `json:"allEnvsForPlugin"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Envs, nil
+}
+
 func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, error) {
 	gqlReq := gql.NewRequest(`
 	  	query {
