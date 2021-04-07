@@ -40,6 +40,7 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 			nextIdx := len(partials)
 			delimiter := prevIdx
 			if numLines != 0 {
+				// If num is provided do a walkback by n lines to get latest n logs
 				delimiter = int(math.Max(float64(len(partials)-int(numLines)), float64(prevIdx)))
 			}
 			delta := partials[delimiter:nextIdx]
