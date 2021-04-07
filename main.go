@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
 	"github.com/railwayapp/cli/cmd"
 	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -164,6 +166,9 @@ func init() {
 }
 
 func main() {
+	if _, err := os.Stat("/proc/version"); !os.IsNotExist(err) && runtime.GOOS == "windows" {
+		fmt.Printf("%s : Running in Non standard shell!\n Please consider using something like WSL!", ui.RedText(ui.Bold("[WARNING!]")))
+	}
 	if err := rootCmd.Execute(); err != nil {
 		if strings.Contains(err.Error(), "unknown command") {
 			suggStr := "\nS"
