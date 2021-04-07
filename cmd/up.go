@@ -18,7 +18,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	} else {
 		ui.StopSpinner(fmt.Sprintf("☁️ Deploy available at %s\n", ui.GrayText(url)))
 	}
-	detach, err := req.Cmd.Flags().GetBool("detatch")
+	detach, err := req.Cmd.Flags().GetBool("detach")
 	if err != nil {
 		return err
 	}
