@@ -184,7 +184,7 @@ func init() {
 
 	addRootCmd(&cobra.Command{
 		Use:   "logs",
-		Short: "Get app logs",
+		Short: "View the most-recent deploy's logs",
 		RunE:  contextualize(handler.Logs, handler.Panic),
 	})
 
