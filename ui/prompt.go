@@ -36,10 +36,55 @@ func PromptText(text string) (string, error) {
 	return prompt.Run()
 }
 
+func hasTeams(projects []*entity.Project) bool {
+	for _, project := range projects {
+		if project.Team != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func promptTeams(projects []*entity.Project) (*string, error) {
+	if hasTeams(projects) {
+		tm := make(map[string]bool)
+		for _, project := range projects {
+			if project.Team != nil {
+				tm[*project.Team] = true
+			}
+		}
+		teams := make([]string, 0)
+		for team := range tm {
+			teams = append(teams, team)
+		}
+		prompt := promptui.Select{
+			Label: "Select Team",
+			Items: teams,
+			Templates: &promptui.SelectTemplates{
+				Selected: fmt.Sprintf("%s Team: {{ .Name | green | bold }} ", promptui.IconGood),
+			},
+		}
+		_, team, err := prompt.Run()
+		return &team, err
+	}
+	return nil, nil
+}
+
 func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
+	// Check if need to prompt teams
+	team, err := promptTeams(projects)
+	if err != nil {
+		return nil, err
+	}
+	filteredProjects := make([]*entity.Project, 0)
+	for _, project := range projects {
+		if *project.Team == *team {
+			filteredProjects = append(filteredProjects, project)
+		}
+	}
 	prompt := promptui.Select{
 		Label: "Select Project",
-		Items: projects,
+		Items: filteredProjects,
 		Templates: &promptui.SelectTemplates{
 			Active:   `{{ .Name | underline }}`,
 			Inactive: `{{ .Name }}`,
@@ -192,12 +237,27 @@ func PromptPlugins(plugins []string) (string, error) {
 	return plugins[i], err
 }
 
-func PromptConfirm(msg string) error {
-	prompt := promptui.Prompt{
-		Label: msg,
+// PromptYesNo prompts the user to continue an action using the common (y/N) action
+func PromptYesNo(msg string) (bool, error) {
+	fmt.Printf("%s (y/N): ", msg)
+	var response string
+	_, err := fmt.Scan(&response)
+	if err != nil {
+		return false, err
 	}
-	_, err := prompt.Run()
-	return err
+	response = strings.ToLower(response)
+
+	isNo := response == "n" || response == "no"
+	isYes := response == "y" || response == "yes"
+
+	if isYes {
+		return true, nil
+	} else if isNo {
+		return false, nil
+	} else {
+		fmt.Println("Please type yes or no and then press enter:")
+		return PromptYesNo(msg)
+	}
 }
 
 func validatorRequired(errorMsg string) func(s string) error {

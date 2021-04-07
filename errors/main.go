@@ -18,6 +18,7 @@ var (
 	ProjectCreateFailed                 RailwayError = fmt.Errorf("%s\nOne of our trains probably derailed!", ui.RedText("There was a problem creating the project."))
 	ProjectCreateFromTemplateFailed     RailwayError = fmt.Errorf("%s\nOne of our trains probably derailed!", ui.RedText("There was a problem creating the project from template."))
 	ProductionTokenNotSet               RailwayError = fmt.Errorf("%s\nRun %s and head under `tokens` section. You can generate tokens to access Railway environment variables. Set that token in your environment as `RAILWAY_TOKEN=<insert token>` and you're all aboard!", ui.RedText("RAILWAY_TOKEN environment variable not set."), ui.Bold("railway open"))
+	EnvironmentNotFound                 RailwayError = fmt.Errorf("%s", ui.RedText("No active environment found. Please select one"))
 	NoGitHubScopesFound                 RailwayError = fmt.Errorf("%s", ui.RedText("No GitHub organizations found. Please link your GitHub account to Railway and try again."))
 	CommandNotSpecified                 RailwayError = fmt.Errorf("%s\nRun %s", ui.RedText("Specify a command to run inside the railway environment. Not providing a command will build and run the Dockerfile in the current directory."), ui.Bold("railway run [cmd]"))
 	LoginFailed                         RailwayError = fmt.Errorf("%s", ui.RedText("Login failed"))
