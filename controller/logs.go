@@ -3,11 +3,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
 
-func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, detached bool) error {
+func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32) error {
 	projectID, err := c.cfg.GetProject()
 	if err != nil {
 		return err
@@ -37,7 +38,11 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, detached bool)
 			}
 			partials := strings.Split(deploy.DeployLogs, "\n")
 			nextIdx := len(partials)
-			delta := partials[prevIdx:nextIdx]
+			delimiter := prevIdx
+			if numLines != 0 {
+				delimiter = int(math.Max(float64(len(partials)-int(numLines)), float64(prevIdx)))
+			}
+			delta := partials[delimiter:nextIdx]
 			if len(delta) == 0 {
 				return nil
 			}
@@ -48,7 +53,8 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, detached bool)
 		if err != nil {
 			return err
 		}
-		if detached {
+		if numLines != 0 {
+			// Break if numlines provided
 			return nil
 		}
 	}
