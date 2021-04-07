@@ -182,11 +182,13 @@ func init() {
 		RunE:  contextualize(handler.Up, handler.Panic),
 	})
 
-	addRootCmd(&cobra.Command{
+	logsCmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Get app logs",
 		RunE:  contextualize(handler.Logs, handler.Panic),
-	})
+	}
+	logsCmd.Flags().BoolP("detach", "d", false, "--detatch")
+	addRootCmd(logsCmd)
 
 	addRootCmd(&cobra.Command{
 		Use:   "docs",
