@@ -176,11 +176,14 @@ func init() {
 		RunE:              contextualize(handler.Version, handler.Panic),
 	})
 
-	addRootCmd(&cobra.Command{
+	upCmd := &cobra.Command{
 		Use:   "up",
 		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
-	})
+	}
+	upCmd.Flags().BoolP("detach", "d", false, "--detatch")
+
+	addRootCmd(upCmd)
 
 	logsCmd := &cobra.Command{
 		Use:   "logs",

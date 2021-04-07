@@ -12,6 +12,7 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId st
 	gqlReq := gql.NewRequest(`
 		query ($projectId: ID!, $environmentId: ID!) {
 			allDeploymentsForEnvironment(projectId: $projectId, environmentId: $environmentId) {
+				id
 				buildLogs
 				deployLogs
 				status
@@ -34,4 +35,32 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId st
 		return nil, errors.PluginGetFailed
 	}
 	return resp.Deployments, nil
+}
+
+func (g *Gateway) GetDeploymentByID(ctx context.Context, projectId string, deploymentId string) (*entity.Deployment, error) {
+	gqlReq := gql.NewRequest(`
+		query ($projectId: ID!, $deploymentId: ID!) {
+			deploymentById(projectId: $projectId, deploymentId: $deploymentId) {
+				id
+				buildLogs
+				deployLogs
+				status
+			}
+		}
+	`)
+	gqlReq.Var("projectId", projectId)
+	gqlReq.Var("deploymentId", deploymentId)
+
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Deployment *entity.Deployment `json:"deploymentById"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return nil, errors.PluginGetFailed
+	}
+	return resp.Deployment, nil
 }
