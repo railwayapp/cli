@@ -39,9 +39,8 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 			if err != nil {
 				return err
 			}
-			fmt.Println(deploy.Status)
 			if deploy.Status != status {
-				// Resert when moving states
+				// Reset when moving states
 				prevIdx = 0
 				status = deploy.Status
 			}
