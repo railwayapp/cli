@@ -6,6 +6,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/railwayapp/cli/entity"
 )
 
 func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32) error {
@@ -27,6 +29,7 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 	latestDeploy := deployments[0]
 	// Streaming
 	prevIdx := 0
+	status := "SUCCESS"
 	for {
 		err := func() error {
 			if prevIdx != 0 {
@@ -36,7 +39,14 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 			if err != nil {
 				return err
 			}
-			partials := strings.Split(deploy.DeployLogs, "\n")
+			fmt.Println(deploy.Status)
+			if deploy.Status != status {
+				// Resert when moving states
+				prevIdx = 0
+				status = deploy.Status
+			}
+			logs := fetchCurrentLogs(*deploy)
+			partials := strings.Split(logs, "\n")
 			nextIdx := len(partials)
 			delimiter := prevIdx
 			if numLines != 0 {
@@ -59,4 +69,11 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 			return nil
 		}
 	}
+}
+
+func fetchCurrentLogs(deployment entity.Deployment) string {
+	if deployment.Status == "BUILDING" {
+		return deployment.BuildLogs
+	}
+	return deployment.DeployLogs
 }

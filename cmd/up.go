@@ -18,5 +18,12 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	} else {
 		ui.StopSpinner(fmt.Sprintf("☁️ Deploy available at %s\n", ui.GrayText(url)))
 	}
-	return nil
+	detach, err := req.Cmd.Flags().GetBool("detatch")
+	if err != nil {
+		return err
+	}
+	if detach {
+		return nil
+	}
+	return h.ctrl.GetActiveDeploymentLogs(ctx, 0)
 }
