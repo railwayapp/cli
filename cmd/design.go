@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
 )
@@ -10,7 +11,7 @@ import (
 func (h *Handler) Design(ctx context.Context, req *entity.CommandRequest) error {
 	fmt.Print(ui.Heading("Alerts"))
 	fmt.Print(ui.AlertDanger("Something bad is going to happen!"))
-	fmt.Print(ui.AlertWarning("That might not hve been what you wanted"))
+	fmt.Print(ui.AlertWarning("That might not have been what you wanted"))
 	fmt.Print(ui.AlertInfo("Just so you know you know, Railway is awesome"))
 
 	fmt.Println("")

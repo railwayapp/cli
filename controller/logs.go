@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 )
 
 func (c *Controller) GetActiveDeploymentLogs(ctx context.Context) (string, error) {
@@ -18,6 +17,5 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context) (string, error
 	if err != nil {
 		return "", err
 	}
-	fmt.Println(deployments[0].DeployLogs)
-	return "", nil
+	return deployments[0].DeployLogs, nil
 }

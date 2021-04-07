@@ -15,6 +15,10 @@ func (h *Handler) Logs(ctx context.Context, req *entity.CommandRequest) error {
 		return fmt.Errorf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login"))
 	}
 
-	h.ctrl.GetActiveDeploymentLogs(ctx)
+	deployLogs, err := h.ctrl.GetActiveDeploymentLogs(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println(deployLogs)
 	return nil
 }

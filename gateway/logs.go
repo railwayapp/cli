@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
@@ -9,9 +10,12 @@ import (
 )
 
 func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId string, environmentId string) ([]entity.Deployment, error) {
+	fmt.Println(projectId, environmentId)
 	gqlReq := gql.NewRequest(`
 		query ($projectId: ID!, $environmentId: ID!) {
-			allDeploymentsForEnvironment(projectId: $projectId, environmentId: $environmentId)
+			allDeploymentsForEnvironment(projectId: $projectId, environmentId: $environmentId) {
+				deployLogs
+			}
 		}
 	`)
 
