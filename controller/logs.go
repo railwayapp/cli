@@ -29,7 +29,7 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 	latestDeploy := deployments[0]
 	// Streaming
 	prevIdx := 0
-	status := "SUCCESS"
+	status := latestDeploy.Status
 	for {
 		err := func() error {
 			if prevIdx != 0 {

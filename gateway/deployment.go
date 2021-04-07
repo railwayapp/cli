@@ -13,8 +13,6 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId st
 		query ($projectId: ID!, $environmentId: ID!) {
 			allDeploymentsForEnvironment(projectId: $projectId, environmentId: $environmentId) {
 				id
-				buildLogs
-				deployLogs
 				status
 			}
 		}
