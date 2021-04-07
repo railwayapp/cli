@@ -183,6 +183,12 @@ func init() {
 	})
 
 	addRootCmd(&cobra.Command{
+		Use:   "logs",
+		Short: "Get app logs",
+		RunE:  contextualize(handler.Logs, handler.Panic),
+	})
+
+	addRootCmd(&cobra.Command{
 		Use:   "docs",
 		Short: "Open Railway Documentation in default browser",
 		RunE:  contextualize(handler.Docs, handler.Panic),
