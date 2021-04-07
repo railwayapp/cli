@@ -17,12 +17,10 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Fetching latest deployment...")
 	deployments, err := c.gtwy.GetDeploymentsForEnvironment(ctx, projectID, environmentID)
 	if err != nil {
 		return err
 	}
-	fmt.Println("✅")
 
 	latestDeploy := deployments[0]
 	// Streaming
