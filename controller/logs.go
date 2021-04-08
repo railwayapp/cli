@@ -62,10 +62,10 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 		}
 		delta := partials[delimiter:nextIdx]
 		if len(delta) == 0 {
-			return nil
+			continue
 		}
-		prevIdx = nextIdx
 		fmt.Println(strings.Join(delta, "\n"))
+		prevIdx = nextIdx
 		if req.NumLines != 0 {
 			// Break if numlines provided
 			return nil

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
 	"github.com/railwayapp/cli/cmd"
 	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -189,6 +191,12 @@ func init() {
 	}).Flags().Int32P("lines", "n", 0, "Output a specific number of lines")
 
 	addRootCmd(&cobra.Command{
+		Use:   "logs",
+		Short: "View the most-recent deploy's logs",
+		RunE:  contextualize(handler.Logs, handler.Panic),
+	}).Flags().Int32P("lines", "n", 0, "Output a specific number of lines")
+
+	addRootCmd(&cobra.Command{
 		Use:   "docs",
 		Short: "Open Railway Documentation in default browser",
 		RunE:  contextualize(handler.Docs, handler.Panic),
@@ -215,6 +223,9 @@ func init() {
 }
 
 func main() {
+	if _, err := os.Stat("/proc/version"); !os.IsNotExist(err) && runtime.GOOS == "windows" {
+		fmt.Printf("%s : Running in Non standard shell!\n Please consider using something like WSL!\n", ui.YellowText(ui.Bold("[WARNING!]").String()).String())
+	}
 	if err := rootCmd.Execute(); err != nil {
 		if strings.Contains(err.Error(), "unknown command") {
 			suggStr := "\nS"
