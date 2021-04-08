@@ -182,13 +182,11 @@ func init() {
 		RunE:  contextualize(handler.Up, handler.Panic),
 	}).Flags().BoolP("detach", "d", false, "--detatch")
 
-	logsCmd := &cobra.Command{
+	addRootCmd(&cobra.Command{
 		Use:   "logs",
 		Short: "View the most-recent deploy's logs",
 		RunE:  contextualize(handler.Logs, handler.Panic),
-	}
-	logsCmd.Flags().Int32P("num_lines", "n", 0, "--lines")
-	addRootCmd(logsCmd)
+	}).Flags().Int32P("lines", "n", 0, "Output a specific number of lines")
 
 	addRootCmd(&cobra.Command{
 		Use:   "docs",
