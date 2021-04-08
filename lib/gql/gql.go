@@ -3,7 +3,6 @@ package gql
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -18,7 +17,6 @@ func AsGQL(ctx context.Context, req interface{}) (*string, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(mp)
 	fields := []string{}
 	for k, v := range mp {
 		if v {
