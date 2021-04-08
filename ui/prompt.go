@@ -37,12 +37,19 @@ func PromptText(text string) (string, error) {
 }
 
 func hasTeams(projects []*entity.Project) bool {
+	teamKeys := make(map[string]bool)
+	teams := []string{}
+
 	for _, project := range projects {
 		if project.Team != nil {
-			return true
+			if _, value := teamKeys[*project.Team]; !value {
+				teamKeys[*project.Team] = true
+				teams = append(teams, *project.Team)
+			}
 		}
 	}
-	return false
+
+	return len(teams) > 1
 }
 
 func promptTeams(projects []*entity.Project) (*string, error) {
@@ -67,6 +74,7 @@ func promptTeams(projects []*entity.Project) (*string, error) {
 		_, team, err := prompt.Run()
 		return &team, err
 	}
+
 	return nil, nil
 }
 
@@ -77,11 +85,17 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 		return nil, err
 	}
 	filteredProjects := make([]*entity.Project, 0)
-	for _, project := range projects {
-		if *project.Team == *team {
-			filteredProjects = append(filteredProjects, project)
+
+	if team == nil {
+		filteredProjects = projects
+	} else {
+		for _, project := range projects {
+			if *project.Team == *team {
+				filteredProjects = append(filteredProjects, project)
+			}
 		}
 	}
+
 	prompt := promptui.Select{
 		Label: "Select Project",
 		Items: filteredProjects,
