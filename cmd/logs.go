@@ -7,7 +7,7 @@ import (
 )
 
 func (h *Handler) Logs(ctx context.Context, req *entity.CommandRequest) error {
-	numLines, err := req.Cmd.Flags().GetInt32("num_lines")
+	numLines, err := req.Cmd.Flags().GetInt32("lines")
 	if err != nil {
 		return err
 	}

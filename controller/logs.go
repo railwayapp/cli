@@ -19,49 +19,53 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 	if err != nil {
 		return err
 	}
-	deployments, err := c.gtwy.GetDeploymentsForEnvironment(ctx, projectID, environmentID)
+	deployment, err := c.gtwy.GetLatestDeploymentForEnvironment(ctx, projectID, environmentID)
 	if err != nil {
 		return err
 	}
 
-	latestDeploy := deployments[0]
-	// Streaming
+	return c.LogsForDeployment(ctx, &entity.DeploymentLogsRequest{
+		DeploymentID: deployment.ID,
+		ProjectID:    projectID,
+		NumLines:     numLines,
+	})
+}
+
+func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.DeploymentLogsRequest) error {
+	// LogsForDeployment will do one of two things:
+	// 1) If numLines is provided, perform a single request and get the last n lines
+	// 2) If numLines is not provided, poll for deploymentLogs while keeping a pointer for the line number
+	//    This pointer will be used to determine what to send to stdout
+	//    e.g We fetch 10 lines initially. Subsequent fetch returns 12. We print the last 2 lines (delta)
 	prevIdx := 0
-	status := latestDeploy.Status
+	status := ""
 	for {
-		err := func() error {
-			if prevIdx != 0 {
-				time.Sleep(time.Second * 2)
-			}
-			deploy, err := c.gtwy.GetDeploymentByID(ctx, projectID, latestDeploy.ID)
-			if err != nil {
-				return err
-			}
-			if deploy.Status != status {
-				// Reset when moving states
-				prevIdx = 0
-				status = deploy.Status
-			}
-			logs := fetchCurrentLogs(*deploy)
-			partials := strings.Split(logs, "\n")
-			nextIdx := len(partials)
-			delimiter := prevIdx
-			if numLines != 0 {
-				// If num is provided do a walkback by n lines to get latest n logs
-				delimiter = int(math.Max(float64(len(partials)-int(numLines)), float64(prevIdx)))
-			}
-			delta := partials[delimiter:nextIdx]
-			if len(delta) == 0 {
-				return nil
-			}
-			fmt.Println(strings.Join(delta, "\n"))
-			prevIdx = nextIdx
-			return nil
-		}()
+		if prevIdx != 0 {
+			time.Sleep(time.Second * 2)
+		}
+		deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
 		if err != nil {
 			return err
 		}
-		if numLines != 0 {
+		if deploy.Status != status {
+			// Reset when moving states
+			prevIdx = 0
+			status = deploy.Status
+		}
+		logs := fetchCurrentLogs(*deploy)
+		partials := strings.Split(logs, "\n")
+		nextIdx := len(partials)
+		delimiter := prevIdx
+		if req.NumLines != 0 {
+			// If num is provided do a walkback by n lines to get latest n logs
+			delimiter = int(math.Max(float64(len(partials)-int(req.NumLines)), float64(prevIdx)))
+		}
+		delta := partials[delimiter:nextIdx]
+		if len(delta) == 0 {
+			return nil
+		}
+		fmt.Println(strings.Join(delta, "\n"))
+		if req.NumLines != 0 {
 			// Break if numlines provided
 			return nil
 		}
