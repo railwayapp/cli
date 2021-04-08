@@ -57,26 +57,13 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 				return err
 			}
 			currLogs := strings.Split(deploy.DeployLogs, "\n")
-			out := LogDiff(LogDiffReq{
-				Prev: prevLogs,
-				Next: currLogs,
-			})
-			if len(out) == 0 {
+			logDiff := currLogs[len(prevLogs)-1 : len(currLogs)-1]
+			if len(logDiff) == 0 {
 				continue
 			}
-			fmt.Print(strings.Join(out, "\n"))
+			fmt.Print(strings.Join(logDiff, "\n"))
 			prevLogs = currLogs
 		}
 	}
 	return nil
-}
-
-type LogDiffReq struct {
-	Prev  []string
-	Next  []string
-	Limit int32
-}
-
-func LogDiff(req LogDiffReq) []string {
-	return req.Next[len(req.Prev)-1 : len(req.Next)-1]
 }
