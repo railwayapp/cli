@@ -106,7 +106,7 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 		},
 	}
 	i, _, err := prompt.Run()
-	return projects[i], err
+	return filteredProjects[i], err
 }
 
 // PromptStarterTemplates fetches available templates and prompts the user to select one
