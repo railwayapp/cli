@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
+	gqlgen "github.com/railwayapp/cli/lib/gql"
 )
 
 func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId string, environmentId string) ([]*entity.Deployment, error) {
@@ -53,21 +55,22 @@ func (g *Gateway) GetLatestDeploymentForEnvironment(ctx context.Context, project
 	return nil, errors.NoDeploymentsFound
 }
 
-func (g *Gateway) GetDeploymentByID(ctx context.Context, projectId string, deploymentId string) (*entity.Deployment, error) {
-	gqlReq := gql.NewRequest(`
+func (g *Gateway) GetDeploymentByID(ctx context.Context, req *entity.DeploymentByIDRequest) (*entity.Deployment, error) {
+	gen, err := gqlgen.AsGQL(ctx, req.GQL)
+	if err != nil {
+		return nil, err
+	}
+	gqlReq := gql.NewRequest(fmt.Sprintf(`
 		query ($projectId: ID!, $deploymentId: ID!) {
 			deploymentById(projectId: $projectId, deploymentId: $deploymentId) {
-				id
-				buildLogs
-				deployLogs
-				status
+				%s
 			}
 		}
-	`)
-	gqlReq.Var("projectId", projectId)
-	gqlReq.Var("deploymentId", deploymentId)
+	`, *gen))
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("deploymentId", req.DeploymentID)
 
-	err := g.authorize(ctx, gqlReq.Header)
+	err = g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
