@@ -37,9 +37,9 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 	// 2) If numLines is not provided, poll for deploymentLogs while keeping a pointer for the line number
 	//    This pointer will be used to determine what to send to stdout
 	//    e.g We fetch 10 lines initially. Subsequent fetch returns 12. We print the last 2 lines (delta)
-	prevIdx := 0
+	prevIdx := 1
 	for {
-		if prevIdx != 0 {
+		if prevIdx != 1 {
 			time.Sleep(time.Second * 2)
 		}
 		deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
@@ -48,7 +48,7 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 		}
 		partials := strings.Split(deploy.DeployLogs, "\n")
 		nextIdx := len(partials)
-		delimiter := prevIdx // Go's slices aren't inclusive
+		delimiter := prevIdx - 1 // Go's slices aren't inclusive
 		if req.NumLines != 0 {
 			// If num is provided do a walkback by n lines to get latest n logs
 			delimiter = int(math.Max(float64(len(partials)-int(req.NumLines)), float64(prevIdx)))
