@@ -2,13 +2,12 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
+	gqlgen "github.com/railwayapp/cli/lib/gql"
 )
 
 func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId string, environmentId string) ([]*entity.Deployment, error) {
@@ -56,30 +55,8 @@ func (g *Gateway) GetLatestDeploymentForEnvironment(ctx context.Context, project
 	return nil, errors.NoDeploymentsFound
 }
 
-func reqToGQL(ctx context.Context, req interface{}) (*string, error) {
-	// Assume object is a flat keystruct
-	mp := make(map[string]bool)
-	bytes, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	err = json.Unmarshal(bytes, &mp)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Println(mp)
-	fields := []string{}
-	for k, v := range mp {
-		if v {
-			fields = append(fields, k)
-		}
-	}
-	q := strings.Join(fields, "\n")
-	return &q, nil
-}
-
 func (g *Gateway) GetDeploymentByID(ctx context.Context, req *entity.DeploymentByIDRequest) (*entity.Deployment, error) {
-	gen, err := reqToGQL(ctx, req.GQL)
+	gen, err := gqlgen.AsGQL(ctx, req.GQL)
 	if err != nil {
 		return nil, err
 	}
