@@ -36,6 +36,9 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 	query := entity.DeploymentGQL{
 		BuildLogs:  true,
 		DeployLogs: true,
+		Environment: entity.EnvironmentGQL{
+			ID: true,
+		},
 	}
 	deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
 		DeploymentID: req.DeploymentID,

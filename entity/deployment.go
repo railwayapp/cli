@@ -21,10 +21,15 @@ type DeploymentLogsRequest struct {
 }
 
 type DeploymentGQL struct {
-	ID         bool `json:"id"`
-	BuildLogs  bool `json:"buildLogs"`
-	DeployLogs bool `json:"deployLogs"`
-	Status     bool `json:"status"`
+	ID          bool           `json:"id"`
+	BuildLogs   bool           `json:"buildLogs"`
+	DeployLogs  bool           `json:"deployLogs"`
+	Status      bool           `json:"status"`
+	Environment EnvironmentGQL `json:"environment"`
+}
+
+type EnvironmentGQL struct {
+	ID bool `json:"id"`
 }
 
 type DeploymentByIDRequest struct {

@@ -60,7 +60,6 @@ func (g *Gateway) GetDeploymentByID(ctx context.Context, req *entity.DeploymentB
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(*gen, err)
 	gqlReq := gql.NewRequest(fmt.Sprintf(`
 		query ($projectId: ID!, $deploymentId: ID!) {
 			deploymentById(projectId: $projectId, deploymentId: $deploymentId) {
