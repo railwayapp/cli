@@ -176,21 +176,18 @@ func init() {
 		RunE:              contextualize(handler.Version, handler.Panic),
 	})
 
-	upCmd := &cobra.Command{
+	addRootCmd(&cobra.Command{
 		Use:   "up",
 		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
-	}
-	upCmd.Flags().BoolP("detach", "d", false, "--detatch")
-
-	addRootCmd(upCmd)
+	}).Flags().BoolP("detach", "d", false, "--detatch")
 
 	logsCmd := &cobra.Command{
 		Use:   "logs",
 		Short: "View the most-recent deploy's logs",
 		RunE:  contextualize(handler.Logs, handler.Panic),
 	}
-	logsCmd.Flags().Int32P("lines", "n", 0, "Output a specific number of lines")
+	logsCmd.Flags().Int32P("num_lines", "n", 0, "--lines")
 	addRootCmd(logsCmd)
 
 	addRootCmd(&cobra.Command{
