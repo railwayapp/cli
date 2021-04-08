@@ -37,31 +37,46 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 	// 2) If numLines is not provided, poll for deploymentLogs while keeping a pointer for the line number
 	//    This pointer will be used to determine what to send to stdout
 	//    e.g We fetch 10 lines initially. Subsequent fetch returns 12. We print the last 2 lines (delta)
-	prevIdx := 0
-	for {
-		if prevIdx != 0 {
+	deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
+	if err != nil {
+		return err
+	}
+	logLines := strings.Split(deploy.DeployLogs, "\n")
+	lineNums := int(req.NumLines)
+	if lineNums == 0 {
+		lineNums = len(logLines)
+	}
+	offset := math.Max(float64(len(logLines))-float64(lineNums)-1, 0.0)
+	fmt.Print(strings.Join(logLines[int(offset):], "\n"))
+	if req.NumLines == 0 {
+		prevLogs := strings.Split(deploy.DeployLogs, "\n")
+		for {
 			time.Sleep(time.Second * 2)
-		}
-		deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
-		if err != nil {
-			return err
-		}
-		partials := strings.Split(deploy.DeployLogs, "\n")
-		nextIdx := len(partials)
-		delimiter := prevIdx
-		if req.NumLines != 0 {
-			// If num is provided do a walkback by n lines to get latest n logs
-			delimiter = int(math.Max(float64(len(partials)-int(req.NumLines)), float64(prevIdx)))
-		}
-		delta := partials[delimiter:nextIdx]
-		if len(delta) == 0 {
-			continue
-		}
-		fmt.Println(strings.Join(delta, "\n"))
-		prevIdx = nextIdx
-		if req.NumLines != 0 {
-			// Break if numlines provided
-			return nil
+			deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
+			if err != nil {
+				return err
+			}
+			currLogs := strings.Split(deploy.DeployLogs, "\n")
+			out := LogDiff(LogDiffReq{
+				Prev: prevLogs,
+				Next: currLogs,
+			})
+			if len(out) == 0 {
+				continue
+			}
+			fmt.Print(strings.Join(out, "\n"))
+			prevLogs = currLogs
 		}
 	}
+	return nil
+}
+
+type LogDiffReq struct {
+	Prev  []string
+	Next  []string
+	Limit int32
+}
+
+func LogDiff(req LogDiffReq) []string {
+	return req.Next[len(req.Prev)-1 : len(req.Next)-1]
 }
