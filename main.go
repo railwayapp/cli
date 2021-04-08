@@ -181,7 +181,7 @@ func init() {
 		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
 	}
-	upCmd.Flags().BoolP("detach", "d", false, "--detatch")
+	upCmd.Flags().BoolP("detach", "d", false, "--detach")
 
 	addRootCmd(upCmd)
 
