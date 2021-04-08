@@ -30,4 +30,5 @@ var (
 	TelemetryFailed                     RailwayError = fmt.Errorf("%s", ui.RedText("One of our trains derailed. Any chance you can report this error on our Discord (https://railway.app/help)?"))
 	WorkflowFailed                      RailwayError = fmt.Errorf("%s", ui.RedText("There was a problem deploying the project. Any chance you can report this error on our Discord (https://railway.app/help)?"))
 	NoDeploymentsFound                  RailwayError = fmt.Errorf("%s", ui.RedText("No Deployments Found!"))
+	DeploymentFetchingFailed            RailwayError = fmt.Errorf("%s", "Failed to fetch deployments")
 )

@@ -6,7 +6,6 @@ import (
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
-	CLIErrors "github.com/railwayapp/cli/errors"
 )
 
 func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId string, environmentId string) ([]*entity.Deployment, error) {
@@ -33,7 +32,7 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId st
 		Deployments []*entity.Deployment `json:"allDeploymentsForEnvironment"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		return nil, errors.PluginGetFailed
+		return nil, errors.DeploymentFetchingFailed
 	}
 	return resp.Deployments, nil
 }
@@ -44,7 +43,7 @@ func (g *Gateway) GetLatestDeploymentForEnvironment(ctx context.Context, project
 		return nil, err
 	}
 	if len(deployments) == 0 {
-		return nil, CLIErrors.EnvironmentNotFound
+		return nil, errors.NoDeploymentsFound
 	}
 	return deployments[0], nil
 }
@@ -72,7 +71,7 @@ func (g *Gateway) GetDeploymentByID(ctx context.Context, projectId string, deplo
 		Deployment *entity.Deployment `json:"deploymentById"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		return nil, errors.PluginGetFailed
+		return nil, errors.DeploymentFetchingFailed
 	}
 	return resp.Deployment, nil
 }
