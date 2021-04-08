@@ -64,6 +64,7 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 		if len(delta) == 0 {
 			return nil
 		}
+		prevIdx = nextIdx
 		fmt.Println(strings.Join(delta, "\n"))
 		if req.NumLines != 0 {
 			// Break if numlines provided
