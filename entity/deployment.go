@@ -5,3 +5,9 @@ type Deployment struct {
 	BuildLogs  string `json:"buildLogs"`
 	DeployLogs string `json:"deployLogs"`
 }
+
+type DeploymentLogsRequest struct {
+	ProjectID    string `json:"projectId"`
+	DeploymentID string `json:"deploymentId"`
+	NumLines     int32  `json:"numLines"`
+}
