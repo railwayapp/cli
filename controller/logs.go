@@ -76,7 +76,7 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 				continue
 			}
 			// Output logs
-			fmt.Println(strings.Join(logDiff, "\n"))
+			fmt.Print(strings.Join(logDiff, "\n"))
 			// Set out walk pointer forward using the newest logs
 			prevLogs = currLogs
 		}
