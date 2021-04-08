@@ -45,7 +45,12 @@ func (g *Gateway) GetLatestDeploymentForEnvironment(ctx context.Context, project
 	if len(deployments) == 0 {
 		return nil, errors.NoDeploymentsFound
 	}
-	return deployments[0], nil
+	for _, deploy := range deployments {
+		if deploy.Status != entity.STATUS_REMOVED {
+			return deploy, nil
+		}
+	}
+	return nil, errors.NoDeploymentsFound
 }
 
 func (g *Gateway) GetDeploymentByID(ctx context.Context, projectId string, deploymentId string) (*entity.Deployment, error) {
