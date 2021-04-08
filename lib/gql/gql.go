@@ -9,7 +9,6 @@ import (
 )
 
 func AsGQL(ctx context.Context, req interface{}) (*string, error) {
-	// Assume object is a flat keystruct
 	mp := make(map[string]interface{})
 	bytes, err := json.Marshal(req)
 	if err != nil {
