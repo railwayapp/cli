@@ -32,23 +32,22 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 }
 
 func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.DeploymentLogsRequest) error {
-	// LogsForDeployment will do one of two things:
-	// 1) If numLines is provided, perform a single request and get the last n lines
-	// 2) If numLines is not provided, poll for deploymentLogs while keeping a pointer for the line number
-	//    This pointer will be used to determine what to send to stdout
-	//    e.g We fetch 10 lines initially. Subsequent fetch returns 12. We print the last 2 lines (delta)
+	// Fetch Initial Deployment Logs
 	deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
 	if err != nil {
 		return err
 	}
+	// Break them down line by line
 	logLines := strings.Split(deploy.DeployLogs, "\n")
-	lineNums := int(req.NumLines)
-	if lineNums == 0 {
-		lineNums = len(logLines)
+	offset := 0.0
+	if req.NumLines != 0 {
+		// If a limit is set, walk it back n steps (with a min of zero so no panics)
+		offset = math.Max(float64(len(logLines))-float64(req.NumLines)-1, 0.0)
 	}
-	offset := math.Max(float64(len(logLines))-float64(lineNums)-1, 0.0)
+	// Output Initial Logs
 	fmt.Print(strings.Join(logLines[int(offset):], "\n"))
 	if req.NumLines == 0 {
+		// If no log limit is set, we stream logs
 		prevLogs := strings.Split(deploy.DeployLogs, "\n")
 		for {
 			time.Sleep(time.Second * 2)
@@ -56,12 +55,17 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 			if err != nil {
 				return err
 			}
+			// Current Logs fetched from server
 			currLogs := strings.Split(deploy.DeployLogs, "\n")
+			// Diff logs using the line numbers as references
 			logDiff := currLogs[len(prevLogs)-1 : len(currLogs)-1]
+			// If no changes we continue
 			if len(logDiff) == 0 {
 				continue
 			}
+			// Output logs
 			fmt.Print(strings.Join(logDiff, "\n"))
+			// Set out walk pointer forward using the newest logs
 			prevLogs = currLogs
 		}
 	}
