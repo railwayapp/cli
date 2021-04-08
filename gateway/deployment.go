@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
@@ -53,21 +56,45 @@ func (g *Gateway) GetLatestDeploymentForEnvironment(ctx context.Context, project
 	return nil, errors.NoDeploymentsFound
 }
 
-func (g *Gateway) GetDeploymentByID(ctx context.Context, projectId string, deploymentId string) (*entity.Deployment, error) {
-	gqlReq := gql.NewRequest(`
+func reqToGQL(ctx context.Context, req interface{}) (*string, error) {
+	// Assume object is a flat keystruct
+	mp := make(map[string]bool)
+	bytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal(bytes, &mp)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(mp)
+	fields := []string{}
+	for k, v := range mp {
+		if v {
+			fields = append(fields, k)
+		}
+	}
+	q := strings.Join(fields, "\n")
+	return &q, nil
+}
+
+func (g *Gateway) GetDeploymentByID(ctx context.Context, req *entity.DeploymentByIDRequest) (*entity.Deployment, error) {
+	gen, err := reqToGQL(ctx, req.GQL)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(*gen, err)
+	gqlReq := gql.NewRequest(fmt.Sprintf(`
 		query ($projectId: ID!, $deploymentId: ID!) {
 			deploymentById(projectId: $projectId, deploymentId: $deploymentId) {
-				id
-				buildLogs
-				deployLogs
-				status
+				%s
 			}
 		}
-	`)
-	gqlReq.Var("projectId", projectId)
-	gqlReq.Var("deploymentId", deploymentId)
+	`, *gen))
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("deploymentId", req.DeploymentID)
 
-	err := g.authorize(ctx, gqlReq.Header)
+	err = g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}

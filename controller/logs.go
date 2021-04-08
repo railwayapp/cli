@@ -33,7 +33,15 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 
 func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.DeploymentLogsRequest) error {
 	// Fetch Initial Deployment Logs
-	deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
+	query := entity.DeploymentGQL{
+		BuildLogs:  true,
+		DeployLogs: true,
+	}
+	deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
+		DeploymentID: req.DeploymentID,
+		ProjectID:    req.ProjectID,
+		GQL:          query,
+	})
 	if err != nil {
 		return err
 	}
@@ -51,7 +59,11 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 		prevLogs := strings.Split(deploy.DeployLogs, "\n")
 		for {
 			time.Sleep(time.Second * 2)
-			deploy, err := c.gtwy.GetDeploymentByID(ctx, req.ProjectID, req.DeploymentID)
+			deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
+				DeploymentID: req.DeploymentID,
+				ProjectID:    req.ProjectID,
+				GQL:          query,
+			})
 			if err != nil {
 				return err
 			}
@@ -64,7 +76,7 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 				continue
 			}
 			// Output logs
-			fmt.Print(strings.Join(logDiff, "\n"))
+			fmt.Println(strings.Join(logDiff, "\n"))
 			// Set out walk pointer forward using the newest logs
 			prevLogs = currLogs
 		}

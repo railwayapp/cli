@@ -19,3 +19,16 @@ type DeploymentLogsRequest struct {
 	DeploymentID string `json:"deploymentId"`
 	NumLines     int32  `json:"numLines"`
 }
+
+type DeploymentGQL struct {
+	ID         bool `json:"id"`
+	BuildLogs  bool `json:"buildLogs"`
+	DeployLogs bool `json:"deployLogs"`
+	Status     bool `json:"status"`
+}
+
+type DeploymentByIDRequest struct {
+	ProjectID    string `json:"projectId"`
+	DeploymentID string `json:"deploymentId"`
+	GQL          DeploymentGQL
+}
