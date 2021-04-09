@@ -17,7 +17,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	} else {
-		ui.StopSpinner(fmt.Sprintf("☁️ Deploy available at %s\n", ui.GrayText(url)))
+		ui.StopSpinner(fmt.Sprintf("☁️ Build Logs available at %s\n", ui.GrayText(url)))
 	}
 	detach, err := req.Cmd.Flags().GetBool("detach")
 	if err != nil {
@@ -37,5 +37,12 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 
 	fmt.Printf("\n\n======= Build Completed ======\n\n")
 
-	return h.ctrl.GetActiveDeploymentLogs(ctx, 1000)
+	err = h.ctrl.GetActiveDeploymentLogs(ctx, 1000)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("☁️ Build Logs available at %s\n\n", ui.GrayText(url))
+	fmt.Printf("OR run `railway logs` to tail them here")
+	return nil
 }
