@@ -26,7 +26,17 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if detach {
 		return nil
 	}
-	fmt.Println("Attaching to cloud build...")
-	time.Sleep(1 * time.Second)
+
+	for i := 0; i < 3; i++ {
+		err = h.ctrl.GetActiveBuildLogs(ctx, 0)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Duration(i) * 250 * time.Millisecond)
+	}
+
+	// TODO ASK IF BUILD FAILED. IF SO DONT TAIL LOGS
+
+	fmt.Printf("\n\n======= Build Completed ======\n\n")
 	return h.ctrl.GetActiveDeploymentLogs(ctx, 0)
 }

@@ -5,6 +5,7 @@ const (
 	STATUS_DEPLOYING = "DEPLOYING"
 	STATUS_SUCCESS   = "SUCCESS"
 	STATUS_REMOVED   = "REMOVED"
+	STATUS_FAILED    = "FAILED"
 )
 
 type Deployment struct {
