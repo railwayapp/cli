@@ -29,7 +29,7 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 		return err
 	}
 
-	return c.LogsForState(ctx, &entity.DeploymentLogsRequest{
+	return c.logsForState(ctx, &entity.DeploymentLogsRequest{
 		DeploymentID: deployment.ID,
 		ProjectID:    projectID,
 		NumLines:     numLines,
@@ -50,16 +50,19 @@ func (c *Controller) GetActiveBuildLogs(ctx context.Context, numLines int32) err
 		return err
 	}
 
-	return c.LogsForState(ctx, &entity.DeploymentLogsRequest{
+	return c.logsForState(ctx, &entity.DeploymentLogsRequest{
 		DeploymentID: deployment.ID,
 		ProjectID:    projectID,
 		NumLines:     numLines,
 	})
 }
 
-/* Logs for state will get logs for a current state (Either building or not building)
- */
-func (c *Controller) LogsForState(ctx context.Context, req *entity.DeploymentLogsRequest) error {
+/* Logs for state will get logs for a current state (Either building or not building state)
+   It does this by capturing the initial state of the deploy, and looping while it stays in that state
+   The loop captures the previous deploy as well as the current and does log diffing on the unified state
+   When the state transitions from building to not building, the loop breaks
+*/
+func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLogsRequest) error {
 	// Stream on building -> Building until !Building then break
 	// Stream on not building -> !Building until Failed then break
 	deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
