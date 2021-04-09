@@ -34,7 +34,6 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.DeploymentLogsRequest) error {
 	// Fetch Initial Deployment Logs
 	query := entity.DeploymentGQL{
-		BuildLogs:  true,
 		DeployLogs: true,
 	}
 	deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
@@ -53,10 +52,11 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 		offset = math.Max(float64(len(logLines))-float64(req.NumLines)-1, 0.0)
 	}
 	// Output Initial Logs
-	fmt.Print(strings.Join(logLines[int(offset):], "\n"))
+	fmt.Println(strings.Join(logLines[int(offset):], "\n"))
 	if req.NumLines == 0 {
 		// If no log limit is set, we stream logs
-		prevLogs := strings.Split(deploy.DeployLogs, "\n")
+		idxMp := make(map[string][]string)
+		idxMp[deploy.Status] = strings.Split(deploy.DeployLogs, "\n")
 		for {
 			time.Sleep(time.Second * 2)
 			deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
@@ -70,15 +70,16 @@ func (c *Controller) LogsForDeployment(ctx context.Context, req *entity.Deployme
 			// Current Logs fetched from server
 			currLogs := strings.Split(fetchCurrentLogs(deploy), "\n")
 			// Diff logs using the line numbers as references
-			logDiff := currLogs[len(prevLogs)-1 : len(currLogs)-1]
+			idx := int(math.Max(float64(len(idxMp[deploy.Status])-1), 0.0))
+			logDiff := currLogs[idx : len(currLogs)-1]
 			// If no changes we continue
 			if len(logDiff) == 0 {
 				continue
 			}
 			// Output logs
-			fmt.Print(strings.Join(logDiff, "\n"))
+			fmt.Println(strings.Join(logDiff, "\n"))
 			// Set out walk pointer forward using the newest logs
-			prevLogs = currLogs
+			idxMp[deploy.Status] = currLogs
 		}
 	}
 	return nil

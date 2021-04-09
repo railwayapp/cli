@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
@@ -25,5 +26,6 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if detach {
 		return nil
 	}
+	time.Sleep(1 * time.Second)
 	return h.ctrl.GetActiveDeploymentLogs(ctx, 0)
 }
