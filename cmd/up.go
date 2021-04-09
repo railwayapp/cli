@@ -42,7 +42,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	fmt.Printf("☁️ Build Logs available at %s\n\n", ui.GrayText(url))
+	fmt.Printf("☁️ Deploy Logs available at %s\n\n", ui.GrayText(url))
 	fmt.Printf("OR run `railway logs` to tail them here")
 	return nil
 }
