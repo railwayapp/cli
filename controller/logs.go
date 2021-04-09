@@ -105,15 +105,6 @@ func (c *Controller) LogsForState(ctx context.Context, req *entity.DeploymentLog
 	return nil
 }
 
-func hasSoftError(logs []string) bool {
-	for _, s := range logs {
-		if s == "Error fetching build logs" {
-			return true
-		}
-	}
-	return false
-}
-
 func hasTransitioned(prev *entity.Deployment, curr *entity.Deployment) bool {
 	return prev != nil && curr != nil && prev.Status != curr.Status
 }
