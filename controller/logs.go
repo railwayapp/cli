@@ -123,7 +123,6 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 		fmt.Println(strings.Join(logDiff, "\n"))
 		// Set out walk pointer forward using the newest logs
 		deltaState = hasTransitioned(prevDeploy, currDeploy)
-		fmt.Println(deltaState)
 		prevDeploy = currDeploy
 	}
 	return nil
@@ -131,10 +130,6 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 
 func hasTransitioned(prev *entity.Deployment, curr *entity.Deployment) bool {
 	return prev != nil && curr != nil && prev.Status != curr.Status
-}
-
-func isBuilding(ctx context.Context, status string) bool {
-	return status == entity.STATUS_BUILDING
 }
 
 func (c *Controller) getQuery(ctx context.Context, status string) entity.DeploymentGQL {
@@ -145,8 +140,8 @@ func (c *Controller) getQuery(ctx context.Context, status string) entity.Deploym
 	}
 }
 
-func logsForState(ctx context.Context, state string, deploy *entity.Deployment) string {
-	if isBuilding(ctx, state) {
+func logsForState(ctx context.Context, status string, deploy *entity.Deployment) string {
+	if status == entity.STATUS_BUILDING {
 		return deploy.BuildLogs
 	}
 	return deploy.DeployLogs
