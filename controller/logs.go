@@ -2,12 +2,17 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/railwayapp/cli/entity"
+)
+
+const (
+	GQL_SOFT_ERROR = "Error fetching build logs"
 )
 
 func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32) error {
@@ -71,6 +76,13 @@ func (c *Controller) LogsForState(ctx context.Context, req *entity.DeploymentLog
 		// If a limit is set, walk it back n steps (with a min of zero so no panics)
 		offset = math.Max(float64(len(logLines))-float64(req.NumLines)-1, 0.0)
 	}
+	// GQL may return partial errors for build logs if not ready
+	// The response won't fail but will be a partial error. Check this.
+	err = errFromGQL(ctx, logLines)
+	if err != nil {
+		return err
+	}
+
 	// Output Initial Logs
 	fmt.Println(strings.Join(logLines[int(offset):], "\n"))
 
@@ -129,4 +141,13 @@ func logsForState(ctx context.Context, state string, deploy *entity.Deployment) 
 		return deploy.BuildLogs
 	}
 	return deploy.DeployLogs
+}
+
+func errFromGQL(ctx context.Context, logLines []string) error {
+	for _, l := range logLines {
+		if strings.Contains(l, GQL_SOFT_ERROR) {
+			return errors.New(GQL_SOFT_ERROR)
+		}
+	}
+	return nil
 }
