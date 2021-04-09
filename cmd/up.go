@@ -36,5 +36,6 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	fmt.Printf("\n\n======= Build Completed ======\n\n")
-	return h.ctrl.GetActiveDeploymentLogs(ctx, 0)
+
+	return h.ctrl.GetActiveDeploymentLogs(ctx, 1000)
 }
