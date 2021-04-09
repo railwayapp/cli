@@ -162,10 +162,3 @@ func (c *Controller) LogsForBuild(ctx context.Context, req *entity.DeploymentLog
 	}
 	return nil
 }
-
-func fetchCurrentLogs(deployment *entity.Deployment) string {
-	if deployment.Status == "BUILDING" {
-		return deployment.BuildLogs
-	}
-	return deployment.DeployLogs
-}
