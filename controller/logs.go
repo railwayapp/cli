@@ -153,11 +153,11 @@ func (c *Controller) LogsForBuild(ctx context.Context, req *entity.DeploymentLog
 			}
 			// Output logs
 			fmt.Println(strings.Join(logDiff, "\n"))
+			// Set out walk pointer forward using the newest logs
+			prevLogs = currLogs
 			if deploy.Status != entity.STATUS_BUILDING {
 				break
 			}
-			// Set out walk pointer forward using the newest logs
-			prevLogs = currLogs
 		}
 	}
 	return nil
