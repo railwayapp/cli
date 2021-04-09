@@ -57,6 +57,8 @@ func (c *Controller) GetActiveBuildLogs(ctx context.Context, numLines int32) err
 	})
 }
 
+/* Logs for state will get logs for a current state (Either building or not building)
+ */
 func (c *Controller) LogsForState(ctx context.Context, req *entity.DeploymentLogsRequest) error {
 	// Stream on building -> Building until !Building then break
 	// Stream on not building -> !Building until Failed then break
@@ -85,6 +87,10 @@ func (c *Controller) LogsForState(ctx context.Context, req *entity.DeploymentLog
 
 	// Output Initial Logs
 	fmt.Println(strings.Join(logLines[int(offset):], "\n"))
+
+	if deploy.Status == entity.STATUS_FAILED {
+		return errors.New("Build Failed! Please see output for more information")
+	}
 
 	prevDeploy := deploy
 	logState := deploy.Status
