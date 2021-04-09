@@ -83,15 +83,17 @@ func (c *Controller) LogsForState(ctx context.Context, req *entity.DeploymentLog
 		currDeploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
 			DeploymentID: req.DeploymentID,
 			ProjectID:    req.ProjectID,
-			GQL:          c.getQuery(ctx, prevDeploy.Status),
+			GQL:          c.getQuery(ctx, logState),
 		})
 		if err != nil {
 			return err
 		}
 		// Current Logs fetched from server
 		currLogs := strings.Split(logsForState(ctx, logState, currDeploy), "\n")
+		// Previous logs fetched from prevDeploy variable
+		prevLogs := strings.Split(logsForState(ctx, logState, prevDeploy), "\n")
 		// Diff logs using the line numbers as references
-		logDiff := currLogs[len(logsForState(ctx, logState, prevDeploy))-1 : len(currLogs)-1]
+		logDiff := currLogs[len(prevLogs)-1 : len(currLogs)-1]
 		// If no changes we continue
 		if len(logDiff) == 0 {
 			continue
@@ -100,6 +102,7 @@ func (c *Controller) LogsForState(ctx context.Context, req *entity.DeploymentLog
 		fmt.Println(strings.Join(logDiff, "\n"))
 		// Set out walk pointer forward using the newest logs
 		deltaState = hasTransitioned(prevDeploy, currDeploy)
+		fmt.Println(deltaState)
 		prevDeploy = currDeploy
 	}
 	return nil
