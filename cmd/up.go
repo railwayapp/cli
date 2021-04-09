@@ -26,6 +26,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if detach {
 		return nil
 	}
+	fmt.Println("Attaching to cloud build...")
 	time.Sleep(1 * time.Second)
 	return h.ctrl.GetActiveDeploymentLogs(ctx, 0)
 }
