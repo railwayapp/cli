@@ -35,8 +35,6 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		time.Sleep(time.Duration(i) * 250 * time.Millisecond)
 	}
 
-	// TODO ASK IF BUILD FAILED. IF SO DONT TAIL LOGS
-
 	fmt.Printf("\n\n======= Build Completed ======\n\n")
 	return h.ctrl.GetActiveDeploymentLogs(ctx, 0)
 }
