@@ -89,7 +89,10 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 	}
 
 	// Output Initial Logs
-	fmt.Println(strings.Join(logLines[int(offset):], "\n"))
+	currLogs := strings.Join(logLines[int(offset):], "\n")
+	if len(currLogs) > 0 {
+		fmt.Println(currLogs)
+	}
 
 	if deploy.Status == entity.STATUS_FAILED {
 		return errors.New("Build Failed! Please see output for more information")
