@@ -43,6 +43,6 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	fmt.Printf("☁️ Deploy Logs available at %s\n\n", ui.GrayText(url))
-	fmt.Printf("OR run `railway logs` to tail them here")
+	fmt.Printf("OR run `railway logs` to tail them here\n")
 	return nil
 }
