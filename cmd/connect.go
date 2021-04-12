@@ -59,7 +59,7 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 		return nil
 	}
 
-	cmd := exec.Command(command[0], command[1:]...)
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 
 	cmd.Env = os.Environ()
 	for k, v := range connectEnv {

@@ -41,7 +41,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return errors.CommandNotSpecified
 	}
 
-	cmd := exec.Command(req.Args[0], req.Args[1:]...)
+	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
 	cmd.Env = os.Environ()
 
 	// Inject railway envs
@@ -93,7 +93,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 		buildArgs = append(buildArgs, "--build-arg", fmt.Sprintf("%s=\"%+v\"", k, v))
 	}
 
-	buildCmd := exec.Command("docker", buildArgs...)
+	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: fmt.Sprintf("Building %s from Dockerfile... (this may take a bit)", ui.GreenText(image)),
 		Tokens:  ui.TrainEmojis,
@@ -122,7 +122,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	runArgs = append(runArgs, image)
 
 	// Run the container
-	runCmd := exec.Command("docker", runArgs...)
+	runCmd := exec.CommandContext(ctx, "docker", runArgs...)
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stdout
 	runCmd.Stdin = os.Stdin
