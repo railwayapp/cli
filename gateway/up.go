@@ -13,7 +13,7 @@ import (
 
 func constructReq(ctx context.Context, req *entity.UpRequest) (*http.Request, error) {
 	url := fmt.Sprintf("%s/project/%s/environment/%s/up", GetHost(), req.ProjectID, req.EnvironmentID)
-	httpReq, err := http.NewRequest("POST", url, &req.Data)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, &req.Data)
 	if err != nil {
 		return nil, err
 	}
