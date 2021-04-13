@@ -10,12 +10,14 @@ import (
 	gqlgen "github.com/railwayapp/cli/lib/gql"
 )
 
-func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId string, environmentId string) ([]*entity.Deployment, error) {
+func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId, environmentId string) ([]*entity.Deployment, error) {
 	gqlReq := gql.NewRequest(`
 		query ($projectId: ID!, $environmentId: ID!) {
 			allDeploymentsForEnvironment(projectId: $projectId, environmentId: $environmentId) {
 				id
 				status
+				projectId
+				meta
 			}
 		}
 	`)
@@ -37,7 +39,7 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId st
 	return resp.Deployments, nil
 }
 
-func (g *Gateway) GetLatestDeploymentForEnvironment(ctx context.Context, projectID string, environmentID string) (*entity.Deployment, error) {
+func (g *Gateway) GetLatestDeploymentForEnvironment(ctx context.Context, projectID, environmentID string) (*entity.Deployment, error) {
 	deployments, err := g.GetDeploymentsForEnvironment(ctx, projectID, environmentID)
 	if err != nil {
 		return nil, err

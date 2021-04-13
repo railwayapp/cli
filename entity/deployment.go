@@ -8,11 +8,20 @@ const (
 	STATUS_FAILED    = "FAILED"
 )
 
+type DeploymentMeta struct {
+	Repo          string `json:"repo"`
+	Branch        string `json:"branch"`
+	CommitHash    string `json:"commitHash"`
+	CommitMessage string `json:"commitMessage"`
+}
+
 type Deployment struct {
-	ID         string `json:"id"`
-	BuildLogs  string `json:"buildLogs"`
-	DeployLogs string `json:"deployLogs"`
-	Status     string `json:"status"`
+	ID         string          `json:"id"`
+	ProjectID  string          `json:"projectId"`
+	BuildLogs  string          `json:"buildLogs"`
+	DeployLogs string          `json:"deployLogs"`
+	Status     string          `json:"status"`
+	Meta       *DeploymentMeta `json:"meta"`
 }
 
 type DeploymentLogsRequest struct {

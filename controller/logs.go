@@ -16,22 +16,14 @@ const (
 )
 
 func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32) error {
-	projectID, err := c.cfg.GetProject()
-	if err != nil {
-		return err
-	}
-	environmentID, err := c.cfg.GetEnvironment()
-	if err != nil {
-		return err
-	}
-	deployment, err := c.gtwy.GetLatestDeploymentForEnvironment(ctx, projectID, environmentID)
+	deployment, err := c.GetActiveDeployment(ctx)
 	if err != nil {
 		return err
 	}
 
 	return c.logsForState(ctx, &entity.DeploymentLogsRequest{
 		DeploymentID: deployment.ID,
-		ProjectID:    projectID,
+		ProjectID:    deployment.ProjectID,
 		NumLines:     numLines,
 	})
 }
