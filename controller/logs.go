@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/railwayapp/cli/entity"
+	gen "github.com/railwayapp/cli/gen"
 )
 
 const (
@@ -65,9 +66,9 @@ func (c *Controller) GetActiveBuildLogs(ctx context.Context, numLines int32) err
 func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLogsRequest) error {
 	// Stream on building -> Building until !Building then break
 	// Stream on not building -> !Building until Failed then break
-	deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
-		DeploymentID: req.DeploymentID,
-		ProjectID:    req.ProjectID,
+	deploy, err := c.gtwy.BackboardClient.DeploymentById(ctx, &gen.DeploymentByIdRequest{
+		DeploymentId: req.DeploymentID,
+		ProjectId:    req.ProjectID,
 		GQL:          c.getQuery(ctx, ""),
 	})
 	if err != nil {
@@ -75,7 +76,7 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 	}
 
 	// Print Logs w/ Limit
-	logLines := strings.Split(logsForState(ctx, deploy.Status, deploy), "\n")
+	logLines := strings.Split(logsForState(ctx, *deploy.Status, deploy), "\n")
 	offset := 0.0
 	if req.NumLines != 0 {
 		// If a limit is set, walk it back n steps (with a min of zero so no panics)
@@ -91,19 +92,19 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 	// Output Initial Logs
 	fmt.Println(strings.Join(logLines[int(offset):], "\n"))
 
-	if deploy.Status == entity.STATUS_FAILED {
+	if *deploy.Status == gen.DeploymentStatus_FAILED {
 		return errors.New("Build Failed! Please see output for more information")
 	}
 
 	prevDeploy := deploy
-	logState := deploy.Status
+	logState := *deploy.Status
 	deltaState := hasTransitioned(nil, deploy)
 
 	for !deltaState && req.NumLines == 0 {
 		time.Sleep(2 * time.Second)
-		currDeploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
-			DeploymentID: req.DeploymentID,
-			ProjectID:    req.ProjectID,
+		currDeploy, err := c.gtwy.BackboardClient.DeploymentById(ctx, &gen.DeploymentByIdRequest{
+			DeploymentId: req.DeploymentID,
+			ProjectId:    req.ProjectID,
 			GQL:          c.getQuery(ctx, logState),
 		})
 		if err != nil {
@@ -128,19 +129,19 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 	return nil
 }
 
-func hasTransitioned(prev *entity.Deployment, curr *entity.Deployment) bool {
+func hasTransitioned(prev *gen.Deployment, curr *gen.Deployment) bool {
 	return prev != nil && curr != nil && prev.Status != curr.Status
 }
 
-func (c *Controller) getQuery(ctx context.Context, status string) entity.DeploymentGQL {
-	return entity.DeploymentGQL{
+func (c *Controller) getQuery(ctx context.Context, status gen.DeploymentStatus) gen.DeploymentGQL {
+	return gen.DeploymentGQL{
 		BuildLogs:  status == entity.STATUS_BUILDING || status == "",
 		DeployLogs: status != entity.STATUS_BUILDING || status == "",
 		Status:     true,
 	}
 }
 
-func logsForState(ctx context.Context, status string, deploy *entity.Deployment) string {
+func logsForState(ctx context.Context, status gen.DeploymentStatus, deploy *gen.Deployment) string {
 	if status == entity.STATUS_BUILDING {
 		return deploy.BuildLogs
 	}
