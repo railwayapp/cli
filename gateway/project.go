@@ -243,5 +243,9 @@ func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) e
 }
 
 func (g *Gateway) OpenProjectDeploymentsInBrowser(projectID string) error {
-	return browser.OpenURL(fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID))
+	return browser.OpenURL(g.GetProjectDeploymentsURL(projectID))
+}
+
+func (g *Gateway) GetProjectDeploymentsURL(projectID string) string {
+	return fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID)
 }

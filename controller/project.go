@@ -40,3 +40,8 @@ func (c *Controller) OpenProjectInBrowser(ctx context.Context, projectID string,
 func (c *Controller) OpenProjectDeploymentsInBrowser(ctx context.Context, projectID string) error {
 	return c.gtwy.OpenProjectDeploymentsInBrowser(projectID)
 }
+
+// GetProjectDeploymentsURL returns the URL to access project deployment in browser
+func (c *Controller) GetProjectDeploymentsURL(ctx context.Context, projectID string) string {
+	return c.gtwy.GetProjectDeploymentsURL(projectID)
+}
