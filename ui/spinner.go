@@ -16,8 +16,11 @@ var (
 )
 
 type SpinnerCfg struct {
-	Message  string
-	Tokens   []string
+	// Message specifies the text label that appears while loading
+	Message string
+	// Tokens is a list of emoji to rotate through, during loading
+	Tokens []string
+	// Duration is the amount of delay between each spinner "frame"
 	Duration time.Duration
 }
 
