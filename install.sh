@@ -93,6 +93,8 @@ get_machine() {
       echo "amd64" ;;
     "i386"|"i86pc"|"x86"|"i686")
       echo "i386" ;;
+    "armv6l"|"aarch64")
+      echo "arm64"
   esac
 }
 
@@ -161,14 +163,14 @@ main() {
 
   os=$(get_os)
   if test -z "$os"; then
-    fmt_error "$(uname -s) is not supported"
+    fmt_error "$(uname -s) os type is not supported"
     echo "Please create an issue so we can add support. $ISSUE_URL"
     exit 1
   fi
 
   machine=$(get_machine)
   if test -z "$machine"; then
-    fmt_error "$(uname -m) is not supported"
+    fmt_error "$(uname -m) machine type is not supported"
     echo "Please create an issue so we can add support. $ISSUE_URL"
     exit 1
   fi
