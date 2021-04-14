@@ -89,7 +89,7 @@ get_os() {
 
 get_machine() {
   case "$(uname -m)" in
-    "x86_64"|"amd64"|"x64")
+    "x86_64"|"amd64"|"x64"|"armv6l")
       echo "amd64" ;;
     "i386"|"i86pc"|"x86"|"i686")
       echo "i386" ;;
