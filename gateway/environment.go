@@ -10,14 +10,14 @@ import (
 )
 
 func (g *Gateway) CreateEnvironment(ctx context.Context, req *entity.CreateEnvironmentRequest) (*entity.Environment, error) {
-	gqlReq := gql.NewRequest(fmt.Sprintf((`
+	gqlReq := gql.NewRequest(`
 		mutation($name: String!, $projectId: String!) {
 			createEnvironment(name: $name, projectId: $projectId) {
 				id
 				name
 			}
 		}
-	`)))
+	`)
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("name", req.Name)
 
