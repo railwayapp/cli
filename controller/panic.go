@@ -10,6 +10,7 @@ import (
 )
 
 func (c *Controller) SendPanic(ctx context.Context, panicErr string, stacktrace string, command string) (bool, error) {
+	fmt.Println(panicErr, stacktrace)
 	confirmSendPanic()
 	projectCfg, err := c.cfg.GetProjectConfigs()
 	if err != nil {

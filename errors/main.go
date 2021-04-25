@@ -31,4 +31,5 @@ var (
 	WorkflowFailed                      RailwayError = fmt.Errorf("%s", ui.RedText("There was a problem deploying the project. Any chance you can report this error on our Discord (https://railway.app/help)?"))
 	NoDeploymentsFound                  RailwayError = fmt.Errorf("%s", ui.RedText("No Deployments Found!"))
 	DeploymentFetchingFailed            RailwayError = fmt.Errorf("%s", "Failed to fetch deployments")
+	CreateEnvironmentFailed             RailwayError = fmt.Errorf("%s", ui.RedText("Creating environment failed!"))
 )
