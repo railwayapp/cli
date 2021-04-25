@@ -29,7 +29,7 @@ func (h *Handler) Environment(ctx context.Context, req *entity.CommandRequest) e
 		if err != nil {
 			return err
 		}
-		fmt.Println("Environment: ", ui.BlueText(req.Args[0]))
+		fmt.Println("Created Environment ✅\nEnvironment: ", ui.BlueText(ui.Bold(req.Args[0]).String()))
 	} else {
 		// Existing environment
 		environment, err = ui.PromptEnvironments(project.Environments)
