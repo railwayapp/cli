@@ -111,9 +111,10 @@ func init() {
 	})
 
 	variablesCmd := addRootCmd(&cobra.Command{
-		Use:   "variables",
-		Short: "Show variables for active environment",
-		RunE:  contextualize(handler.Variables, handler.Panic),
+		Use:     "variables",
+		Aliases: []string{"vars"},
+		Short:   "Show variables for active environment",
+		RunE:    contextualize(handler.Variables, handler.Panic),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
 		Use:   "get",
@@ -183,12 +184,6 @@ func init() {
 		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
 	}).Flags().BoolP("detach", "d", false, "Detach from cloud build/deploy logs")
-
-	addRootCmd(&cobra.Command{
-		Use:   "logs",
-		Short: "View the most-recent deploy's logs",
-		RunE:  contextualize(handler.Logs, handler.Panic),
-	}).Flags().Int32P("lines", "n", 0, "Output a specific number of lines")
 
 	addRootCmd(&cobra.Command{
 		Use:   "logs",
