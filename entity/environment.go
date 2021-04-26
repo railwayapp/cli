@@ -9,3 +9,8 @@ type CreateEnvironmentRequest struct {
 	Name      string `json:"name,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
 }
+
+type DeleteEnvironmentRequest struct {
+	EnvironmentId string `json:"environmentId,omitempty"`
+	ProjectID     string `json:"projectId,omitempty"`
+}

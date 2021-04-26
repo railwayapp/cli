@@ -18,6 +18,35 @@ import (
 var RAIL_PORT = 4411
 
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
+	isEphemeral := false
+	for _, arg := range req.Args {
+		if (arg) == "--ephemeral" {
+			isEphemeral = true
+		}
+	}
+
+	projectId, err := h.cfg.GetProject()
+	if err != nil {
+		return err
+	}
+
+	// Get Current Environment for name
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Add something to the ephemeral env name
+	if isEphemeral {
+		// Create new environment for this run
+		environment, err = h.ctrl.CreateEnvironment(ctx, &entity.CreateEnvironmentRequest{
+			Name:      fmt.Sprintf("%s-ephemeral", environment.Name),
+			ProjectID: projectId,
+		})
+		if err != nil {
+			return err
+		}
+	}
 	envs, err := h.ctrl.GetEnvs(ctx)
 
 	if err != nil {
@@ -60,6 +89,17 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	printLooksGood()
+
+	if isEphemeral {
+		// Teardown Environment
+		err := h.ctrl.DeleteEnvironment(ctx, &entity.DeleteEnvironmentRequest{
+			EnvironmentId: environment.Id,
+			ProjectID:     projectId,
+		})
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }

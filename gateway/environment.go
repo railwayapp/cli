@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
@@ -29,8 +28,29 @@ func (g *Gateway) CreateEnvironment(ctx context.Context, req *entity.CreateEnvir
 		Environment *entity.Environment `json:"createEnvironment,omitempty"`
 	}
 	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
-		fmt.Println(err)
 		return nil, errors.CreateEnvironmentFailed
 	}
 	return resp.Environment, nil
+}
+
+func (g *Gateway) DeleteEnvironment(ctx context.Context, req *entity.DeleteEnvironmentRequest) error {
+	gqlReq := gql.NewRequest(`
+		mutation($environmentId: String!, $projectId: String!) {
+			deleteEnvironment(environmentId: $environmentId, projectId: $projectId)
+		}
+	`)
+	gqlReq.Var("environmentId", req.EnvironmentId)
+	gqlReq.Var("projectId", req.ProjectID)
+
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Created bool `json:"createEnvironment,omitempty"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return errors.CreateEnvironmentFailed
+	}
+	return nil
 }
