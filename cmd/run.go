@@ -55,8 +55,13 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	catchSignals(cmd)
 
 	err = cmd.Run()
+
 	if err != nil {
-		return err
+		if exitError, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitError.ExitCode())
+		}
+
+		os.Exit(1)
 	}
 
 	printLooksGood()
@@ -129,6 +134,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	catchSignals(runCmd)
 
 	err = runCmd.Run()
+
 	if err != nil {
 		return err
 	}
