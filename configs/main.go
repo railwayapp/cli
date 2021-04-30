@@ -27,6 +27,11 @@ func IsDevMode() bool {
 	return exists && environment == "develop"
 }
 
+func IsStagingMode() bool {
+	environment, exists := os.LookupEnv("RAILWAY_ENV")
+	return exists && environment == "staging"
+}
+
 func (c *Configs) CreatePathIfNotExist(path string) error {
 	dir := filepath.Dir(path)
 
@@ -73,6 +78,9 @@ func New() *Configs {
 	rootConfigPartialPath := ".railway/config.json"
 	if IsDevMode() {
 		rootConfigPartialPath = ".railway/dev-config.json"
+	}
+	if IsStagingMode() {
+		rootConfigPartialPath = "./railway/staging-config.json"
 	}
 	rootConfigPath := path.Join(os.Getenv("HOME"), rootConfigPartialPath)
 	rootViper.SetConfigFile(rootConfigPath)
