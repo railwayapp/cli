@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 
+	"github.com/railwayapp/cli/constants"
 	"github.com/spf13/viper"
 )
 
@@ -25,6 +26,14 @@ type Configs struct {
 func IsDevMode() bool {
 	environment, exists := os.LookupEnv("RAILWAY_ENV")
 	return exists && environment == "develop"
+}
+
+func GetRailwayURL() string {
+	url, exists := os.LookupEnv("RAILWAY_URL")
+	if !exists {
+		return constants.RAILWAY_URL
+	}
+	return url
 }
 
 func (c *Configs) CreatePathIfNotExist(path string) error {
