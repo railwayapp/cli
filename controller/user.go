@@ -254,8 +254,6 @@ func (c *Controller) ConfirmBrowserOpen(spinnerMsg string, url string) error {
 func getAPIURL() string {
 	if configs.IsDevMode() {
 		return baseLocalhostURL
-	} else if configs.IsStagingMode() {
-		return baseStagingURL
 	}
 	return baseRailwayURL
 }

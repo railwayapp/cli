@@ -233,8 +233,6 @@ func GetRailwayUrl() string {
 	url := "https://railway.app"
 	if configs.IsDevMode() {
 		url = "http://localhost:3000"
-	} else if configs.IsStagingMode() {
-		url = "https://railway-staging.app"
 	}
 
 	return url
