@@ -41,6 +41,11 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return errors.CommandNotSpecified
 	}
 
+	if _, err := exec.LookPath(req.Args[0]); err != nil {
+		fmt.Printf("%s is not in $PATH\n", req.Args[0])
+		os.Exit(1)
+	}
+
 	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
 	cmd.Env = os.Environ()
 
@@ -58,6 +63,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
+			fmt.Println(err.Error())
 			os.Exit(exitError.ExitCode())
 		}
 
