@@ -20,7 +20,6 @@ import (
 
 const (
 	baseRailwayURL   string = "https://railway.app"
-	baseStagingURL   string = "https://railway-staging.app"
 	baseLocalhostURL string = "http://localhost:3000"
 )
 
