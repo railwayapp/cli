@@ -39,9 +39,10 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	// Add something to the ephemeral env name
 	if isEphemeral {
 		// Create new environment for this run
-		environment, err = h.ctrl.CreateEnvironment(ctx, &entity.CreateEnvironmentRequest{
-			Name:      fmt.Sprintf("%s-ephemeral", environment.Name),
-			ProjectID: projectId,
+		environment, err = h.ctrl.CreateEphemeralEnvironment(ctx, &entity.CreateEphemeralEnvironmentRequest{
+			Name:              fmt.Sprintf("%s-ephemeral", environment.Name),
+			ProjectID:         projectId,
+			BaseEnvironmentID: environment.Id,
 		})
 		if err != nil {
 			return err

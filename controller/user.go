@@ -20,6 +20,7 @@ import (
 
 const (
 	baseRailwayURL   string = "https://railway.app"
+	baseStagingURL   string = "https://railway-staging.app"
 	baseLocalhostURL string = "http://localhost:3000"
 )
 
@@ -253,6 +254,8 @@ func (c *Controller) ConfirmBrowserOpen(spinnerMsg string, url string) error {
 func getAPIURL() string {
 	if configs.IsDevMode() {
 		return baseLocalhostURL
+	} else if configs.IsStagingMode() {
+		return baseStagingURL
 	}
 	return baseRailwayURL
 }

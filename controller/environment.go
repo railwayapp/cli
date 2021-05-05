@@ -31,6 +31,10 @@ func (c *Controller) CreateEnvironment(ctx context.Context, req *entity.CreateEn
 	return c.gtwy.CreateEnvironment(ctx, req)
 }
 
+func (c *Controller) CreateEphemeralEnvironment(ctx context.Context, req *entity.CreateEphemeralEnvironmentRequest) (*entity.Environment, error) {
+	return c.gtwy.CreateEphemeralEnvironment(ctx, req)
+}
+
 func (c *Controller) DeleteEnvironment(ctx context.Context, req *entity.DeleteEnvironmentRequest) error {
 	return c.gtwy.DeleteEnvironment(ctx, req)
 }

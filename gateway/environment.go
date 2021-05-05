@@ -33,6 +33,32 @@ func (g *Gateway) CreateEnvironment(ctx context.Context, req *entity.CreateEnvir
 	return resp.Environment, nil
 }
 
+func (g *Gateway) CreateEphemeralEnvironment(ctx context.Context, req *entity.CreateEphemeralEnvironmentRequest) (*entity.Environment, error) {
+	gqlReq := gql.NewRequest(`
+		mutation($name: String!, $projectId: String!, $baseEnvironmentId: String!) {
+			createEphemeralEnvironment(name: $name, projectId: $projectId, baseEnvironmentId: $baseEnvironmentId) {
+				id
+				name
+			}
+		}
+	`)
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("name", req.Name)
+	gqlReq.Var("baseEnvironmentId", req.BaseEnvironmentID)
+
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Environment *entity.Environment `json:"createEphemeralEnvironment,omitempty"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return nil, errors.CreateEnvironmentFailed
+	}
+	return resp.Environment, nil
+}
+
 func (g *Gateway) DeleteEnvironment(ctx context.Context, req *entity.DeleteEnvironmentRequest) error {
 	gqlReq := gql.NewRequest(`
 		mutation($environmentId: String!, $projectId: String!) {
