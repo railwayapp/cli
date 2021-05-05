@@ -70,6 +70,11 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return errors.CommandNotSpecified
 	}
 
+	if _, err := exec.LookPath(req.Args[0]); err != nil {
+		fmt.Printf("%s is not in $PATH\n", req.Args[0])
+		os.Exit(1)
+	}
+
 	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
 	cmd.Env = os.Environ()
 
@@ -84,8 +89,14 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	catchSignals(cmd)
 
 	err = cmd.Run()
+
 	if err != nil {
-		return err
+		if exitError, ok := err.(*exec.ExitError); ok {
+			fmt.Println(err.Error())
+			os.Exit(exitError.ExitCode())
+		}
+
+		os.Exit(1)
 	}
 
 	printLooksGood()
@@ -169,6 +180,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	catchSignals(runCmd)
 
 	err = runCmd.Run()
+
 	if err != nil {
 		return err
 	}
