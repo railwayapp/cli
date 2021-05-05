@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
@@ -18,9 +19,23 @@ func (h *Handler) Environment(ctx context.Context, req *entity.CommandRequest) e
 		return err
 	}
 
-	environment, err := ui.PromptEnvironments(project.Environments)
-	if err != nil {
-		return err
+	var environment *entity.Environment
+	if len(req.Args) > 0 {
+		// Create new environment
+		environment, err = h.ctrl.CreateEnvironment(ctx, &entity.CreateEnvironmentRequest{
+			Name:      req.Args[0],
+			ProjectID: project.Id,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Println("Created Environment ✅\nEnvironment: ", ui.BlueText(ui.Bold(req.Args[0]).String()))
+	} else {
+		// Existing environment
+		environment, err = ui.PromptEnvironments(project.Environments)
+		if err != nil {
+			return err
+		}
 	}
 
 	err = h.cfg.SetEnvironment(environment.Id)
