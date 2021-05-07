@@ -151,10 +151,19 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 		Tokens:  ui.TrainEmojis,
 	})
 
-	out, err := buildCmd.CombinedOutput()
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+
+	err = buildCmd.Start()
 	if err != nil {
-		ui.StopSpinner("")
-		return showCmdError(buildCmd.Args, out, err)
+		ui.StopSpinner("Failed to start cmd!")
+		return err
+	}
+
+	err = buildCmd.Wait()
+	if err != nil {
+		ui.StopSpinner("Failed to exec command!")
+		return err
 	}
 
 	ui.StopSpinner(fmt.Sprintf("🎉 Built %s", ui.GreenText(image)))
