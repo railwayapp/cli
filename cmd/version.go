@@ -10,7 +10,7 @@ import (
 )
 
 func (h *Handler) Version(ctx context.Context, req *entity.CommandRequest) error {
-	fmt.Printf("railway version %s", ui.MagentaText(constants.Version))
+	fmt.Printf("railway version %s\n", ui.MagentaText(constants.Version))
 	return nil
 }
 
