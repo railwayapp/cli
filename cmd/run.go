@@ -198,9 +198,13 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	}
 	// Listen for cancel to remove the container
 	catchSignals(ctx, logCmd, func() {
-		exec.Command("docker", "rm", "-f", string(containerId)).Run()
+		err = exec.Command("docker", "rm", "-f", string(containerId)).Run()
 	})
-	logCmd.Wait()
+	err = logCmd.Wait()
+	if !strings.Contains(err.Error(), "255") {
+		// 255 is a graceeful exit with ctrl + c
+		return err
+	}
 
 	printLooksGood()
 
