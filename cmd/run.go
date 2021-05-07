@@ -219,25 +219,6 @@ func isAvailable(port int) bool {
 	return true
 }
 
-func showCmdError(args []string, output []byte, err error) error {
-	if _, ok := err.(*exec.ExitError); ok {
-		// Full cmd for error logging
-		argstr := ""
-		for _, arg := range args {
-			argstr += arg + " "
-		}
-
-		fmt.Println(ui.RedText("exec error:"))
-		fmt.Println(ui.RedText("-- START OUTPUT --"))
-		fmt.Printf("%s\n", string(output))
-		fmt.Println(ui.RedText("-- END OUTPUT --"))
-		fmt.Println()
-		fmt.Println(ui.RedText("while running:"))
-		fmt.Printf("%+v\n", argstr)
-	}
-	return err
-}
-
 func catchSignals(cmd *exec.Cmd) {
 	sigs := make(chan os.Signal, 1)
 
