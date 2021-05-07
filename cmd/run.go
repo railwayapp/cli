@@ -75,9 +75,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return errors.CommandNotSpecified
 	}
 
-	childCtx, cancel := context.WithCancel(ctx)
-
-	cmd := exec.CommandContext(childCtx, req.Args[0], req.Args[1:]...)
+	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
 	cmd.Env = os.Environ()
 
 	// Inject railway envs
@@ -88,7 +86,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	cmd.Stdin = os.Stdin
-	catchSignals(childCtx, cmd, cancel)
+	catchSignals(ctx, cmd, nil)
 
 	err = cmd.Run()
 
@@ -230,14 +228,14 @@ func isAvailable(port int) bool {
 	return true
 }
 
-func catchSignals(ctx context.Context, cmd *exec.Cmd, cancelFunc context.CancelFunc) {
+func catchSignals(ctx context.Context, cmd *exec.Cmd, onSignal context.CancelFunc) {
 	sigs := make(chan os.Signal, 1)
 
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
 		err := cmd.Process.Signal(sig)
-		cancelFunc()
+		onSignal()
 		if err != nil {
 			fmt.Println("Child process error: \n", err)
 		}
