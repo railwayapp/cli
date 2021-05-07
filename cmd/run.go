@@ -86,17 +86,6 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 
 	err = cmd.Run()
 
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			fmt.Println(err.Error())
-			os.Exit(exitError.ExitCode())
-		}
-
-		os.Exit(1)
-	}
-
-	printLooksGood()
-
 	if isEphemeral {
 		// Teardown Environment
 		err := h.ctrl.DeleteEnvironment(ctx, &entity.DeleteEnvironmentRequest{
@@ -107,6 +96,17 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 			return err
 		}
 	}
+
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			fmt.Println(err.Error())
+			os.Exit(exitError.ExitCode())
+		}
+
+		os.Exit(1)
+	}
+
+	printLooksGood()
 
 	return nil
 }
