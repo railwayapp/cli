@@ -38,15 +38,18 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 
 	// Add something to the ephemeral env name
 	if isEphemeral {
+		environmentName := fmt.Sprintf("%s-ephemeral", environment.Name)
+		fmt.Printf("Spinning up Ephemeral Environment: %s\n", ui.BlueText(environmentName))
 		// Create new environment for this run
 		environment, err = h.ctrl.CreateEphemeralEnvironment(ctx, &entity.CreateEphemeralEnvironmentRequest{
-			Name:              fmt.Sprintf("%s-ephemeral", environment.Name),
+			Name:              environmentName,
 			ProjectID:         projectId,
 			BaseEnvironmentID: environment.Id,
 		})
 		if err != nil {
 			return err
 		}
+		fmt.Println("Done!")
 	}
 	envs, err := h.ctrl.GetEnvs(ctx)
 
@@ -88,6 +91,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 
 	if isEphemeral {
 		// Teardown Environment
+		fmt.Println("Tearing down ephemeral environment...")
 		err := h.ctrl.DeleteEnvironment(ctx, &entity.DeleteEnvironmentRequest{
 			EnvironmentId: environment.Id,
 			ProjectID:     projectId,
@@ -95,6 +99,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		if err != nil {
 			return err
 		}
+		fmt.Println("Done!")
 	}
 
 	if err != nil {
