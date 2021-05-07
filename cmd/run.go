@@ -235,7 +235,9 @@ func catchSignals(ctx context.Context, cmd *exec.Cmd, onSignal context.CancelFun
 	go func() {
 		sig := <-sigs
 		err := cmd.Process.Signal(sig)
-		onSignal()
+		if onSignal != nil {
+			onSignal()
+		}
 		if err != nil {
 			fmt.Println("Child process error: \n", err)
 		}
