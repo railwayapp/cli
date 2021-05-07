@@ -59,9 +59,7 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 		return nil
 	}
 
-	childCtx, cancel := context.WithCancel(ctx)
-
-	cmd := exec.CommandContext(childCtx, command[0], command[1:]...)
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 
 	cmd.Env = os.Environ()
 	for k, v := range connectEnv {
@@ -71,7 +69,7 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	cmd.Stdin = os.Stdin
-	catchSignals(childCtx, cmd, cancel)
+	catchSignals(ctx, cmd, nil)
 
 	err = cmd.Run()
 	if err != nil {
