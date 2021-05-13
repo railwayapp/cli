@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -162,14 +163,22 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	}
 	fmt.Printf("🎉 Built %s\n", ui.GreenText(image))
 
-	port, err := getAvailablePort()
+	// Attempt to use
+	internalPort := envs.Get("PORT")
+
+	externalPort, err := getAvailablePort()
 	if err != nil {
 		return err
 	}
-	// Start running the image
-	fmt.Printf("🚂 Running at %s\n\n", ui.GreenText(fmt.Sprintf("127.0.0.1:%d", port)))
 
-	runArgs := []string{"run", "--init", "--rm", "-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port), "-e", fmt.Sprintf("PORT=%d", port), "-d"}
+	if internalPort == "" {
+		internalPort = externalPort
+	}
+
+	// Start running the image
+	fmt.Printf("🚂 Running at %s\n\n", ui.GreenText(fmt.Sprintf("127.0.0.1:%s", externalPort)))
+
+	runArgs := []string{"run", "--init", "--rm", "-p", fmt.Sprintf("127.0.0.1:%s:%s", externalPort, internalPort), "-e", fmt.Sprintf("PORT=%s", internalPort), "-d"}
 	// Build up env
 	for k, v := range *envs {
 		runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%+v", k, v))
@@ -209,14 +218,14 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	return nil
 }
 
-func getAvailablePort() (int, error) {
+func getAvailablePort() (string, error) {
 	searchRange := 64
 	for i := RAIL_PORT; i < RAIL_PORT+searchRange; i++ {
 		if isAvailable(i) {
-			return i, nil
+			return strconv.Itoa(i), nil
 		}
 	}
-	return -1, fmt.Errorf("Couldn't find available port between %d and %d", RAIL_PORT, RAIL_PORT+searchRange)
+	return "", fmt.Errorf("Couldn't find available port between %d and %d", RAIL_PORT, RAIL_PORT+searchRange)
 }
 
 func isAvailable(port int) bool {
