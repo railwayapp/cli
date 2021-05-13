@@ -18,6 +18,39 @@ import (
 var RAIL_PORT = 4411
 
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
+	isEphemeral := false
+	for _, arg := range req.Args {
+		if (arg) == "--ephemeral" {
+			isEphemeral = true
+		}
+	}
+
+	projectId, err := h.cfg.GetProject()
+	if err != nil {
+		return err
+	}
+
+	// Get Current Environment for name
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Add something to the ephemeral env name
+	if isEphemeral {
+		environmentName := fmt.Sprintf("%s-ephemeral", environment.Name)
+		fmt.Printf("Spinning up Ephemeral Environment: %s\n", ui.BlueText(environmentName))
+		// Create new environment for this run
+		environment, err = h.ctrl.CreateEphemeralEnvironment(ctx, &entity.CreateEphemeralEnvironmentRequest{
+			Name:              environmentName,
+			ProjectID:         projectId,
+			BaseEnvironmentID: environment.Id,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Println("Done!")
+	}
 	envs, err := h.ctrl.GetEnvs(ctx)
 
 	if err != nil {
@@ -41,11 +74,6 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return errors.CommandNotSpecified
 	}
 
-	if _, err := exec.LookPath(req.Args[0]); err != nil {
-		fmt.Printf("%s is not in $PATH\n", req.Args[0])
-		os.Exit(1)
-	}
-
 	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
 	cmd.Env = os.Environ()
 
@@ -60,6 +88,19 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	catchSignals(cmd)
 
 	err = cmd.Run()
+
+	if isEphemeral {
+		// Teardown Environment
+		fmt.Println("Tearing down ephemeral environment...")
+		err := h.ctrl.DeleteEnvironment(ctx, &entity.DeleteEnvironmentRequest{
+			EnvironmentId: environment.Id,
+			ProjectID:     projectId,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Println("Done!")
+	}
 
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {

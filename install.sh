@@ -93,7 +93,7 @@ get_machine() {
       echo "amd64" ;;
     "i386"|"i86pc"|"x86"|"i686")
       echo "i386" ;;
-    "armv6l"|"aarch64")
+    "arm64"|"armv6l"|"aarch64")
       echo "arm64"
   esac
 }
