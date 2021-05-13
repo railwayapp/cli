@@ -10,7 +10,7 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X github.com/railwayapp/cli/constants.Version={{.Version}} -X github.com/railwayapp/cli/constants.RAILWAY_URL={{"https://railway.app"}}
+      - -s -w -X github.com/railwayapp/cli/constants.Version={{.Version}}
     goos:
       - linux
       - windows
