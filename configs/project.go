@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"runtime"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
@@ -21,7 +22,7 @@ func (c *Configs) MigrateLocalProjectConfig() error {
 	}
 
 	// Avoid deleting ~/.railway
-	if projectDir == os.Getenv("HOME") {
+	if projectDir == os.Getenv("HOME") || (runtime.GOOS == "windows" && projectDir == os.Getenv("APPDATA") {
 		return nil
 	}
 

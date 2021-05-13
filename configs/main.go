@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime"
 
 	"github.com/railwayapp/cli/constants"
 	"github.com/spf13/viper"
@@ -84,6 +85,11 @@ func New() *Configs {
 		rootConfigPartialPath = ".railway/dev-config.json"
 	}
 	rootConfigPath := path.Join(os.Getenv("HOME"), rootConfigPartialPath)
+	
+	if (runtime.GOOS == "windows") {
+		rootConfigPath = path.Join(os.Getenv("APPDATA"), rootConfigPartialPath)
+	}
+
 	rootViper.SetConfigFile(rootConfigPath)
 	err := rootViper.ReadInConfig()
 	if os.IsNotExist(err) {
