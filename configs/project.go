@@ -22,7 +22,7 @@ func (c *Configs) MigrateLocalProjectConfig() error {
 	}
 
 	// Avoid deleting ~/.railway
-	if projectDir == os.Getenv("HOME") || (runtime.GOOS == "windows" && projectDir == os.Getenv("APPDATA") {
+	if projectDir == os.Getenv("HOME") || (runtime.GOOS == "windows" && projectDir == os.Getenv("APPDATA")) {
 		return nil
 	}
 
