@@ -21,7 +21,12 @@ func (c *Configs) MigrateLocalProjectConfig() error {
 	}
 
 	// Avoid deleting ~/.railway
-	if projectDir == os.Getenv("HOME") {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	if projectDir == homeDir {
 		return nil
 	}
 

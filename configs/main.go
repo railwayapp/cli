@@ -83,9 +83,16 @@ func New() *Configs {
 	if IsDevMode() {
 		rootConfigPartialPath = ".railway/dev-config.json"
 	}
-	rootConfigPath := path.Join(os.Getenv("HOME"), rootConfigPartialPath)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		panic(err)
+	}
+	
+	rootConfigPath := path.Join(homeDir, rootConfigPartialPath)
+	
 	rootViper.SetConfigFile(rootConfigPath)
-	err := rootViper.ReadInConfig()
+	err = rootViper.ReadInConfig()
 	if os.IsNotExist(err) {
 		// That's okay, configs are created as needed
 	} else if err != nil {
