@@ -87,7 +87,7 @@ func init() {
 
 	addRootCmd(&cobra.Command{
 		Use:               "link",
-		Short:             "Associate existing project with current directory",
+		Short:             "Associate existing project with current directory, may specify projectId as an argument",
 		PersistentPreRunE: contextualize(handler.CheckVersion, handler.Panic),
 		RunE:              contextualize(handler.Link, handler.Panic),
 	})
