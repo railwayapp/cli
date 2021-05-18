@@ -36,6 +36,11 @@ func (c *Controller) OpenProjectInBrowser(ctx context.Context, projectID string,
 	return c.gtwy.OpenProjectInBrowser(projectID, environmentID)
 }
 
+// OpenProjectPathInBrowser opens the provided projectId with the provided path in the browser
+func (c *Controller) OpenProjectPathInBrowser(ctx context.Context, projectID string, environmentID string, path string) error {
+	return c.gtwy.OpenProjectPathInBrowser(projectID, environmentID, path)
+}
+
 // OpenProjectDeploymentsInBrowser opens the provided projectId's depolyments in the browser
 func (c *Controller) OpenProjectDeploymentsInBrowser(ctx context.Context, projectID string) error {
 	return c.gtwy.OpenProjectDeploymentsInBrowser(projectID)
@@ -44,4 +49,13 @@ func (c *Controller) OpenProjectDeploymentsInBrowser(ctx context.Context, projec
 // GetProjectDeploymentsURL returns the URL to access project deployment in browser
 func (c *Controller) GetProjectDeploymentsURL(ctx context.Context, projectID string) string {
 	return c.gtwy.GetProjectDeploymentsURL(projectID)
+}
+
+// GetProjectDeploymentsURL returns the URL to access project deployment in browser
+func (c *Controller) GetLatestDeploymentForEnvironment(ctx context.Context, projectID string, environmentID string) (*entity.Deployment, error) {
+	return c.gtwy.GetLatestDeploymentForEnvironment(ctx, projectID, environmentID)
+}
+
+func (c *Controller) OpenStaticUrlInBrowser(staticUrl string) error {
+	return c.gtwy.OpenStaticUrlInBrowser(staticUrl)
 }

@@ -26,7 +26,7 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 				environments {
 					id,
 					name
-				}, 
+				},
 			}
 		}
 	`)
@@ -168,7 +168,7 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 		environments {
 			id,
 			name
-		}, 
+		},
 	`
 
 	gqlReq := gql.NewRequest(fmt.Sprintf(`
@@ -242,10 +242,18 @@ func (g *Gateway) OpenProjectInBrowser(projectID string, environmentID string) e
 	return browser.OpenURL(fmt.Sprintf("%s/project/%s?environmentId=%s", GetRailwayUrl(), projectID, environmentID))
 }
 
+func (g *Gateway) OpenProjectPathInBrowser(projectID string, environmentID string, path string) error {
+	return browser.OpenURL(fmt.Sprintf("%s/project/%s/%s?environmentId=%s", GetRailwayUrl(), projectID, path, environmentID))
+}
+
 func (g *Gateway) OpenProjectDeploymentsInBrowser(projectID string) error {
 	return browser.OpenURL(g.GetProjectDeploymentsURL(projectID))
 }
 
 func (g *Gateway) GetProjectDeploymentsURL(projectID string) string {
 	return fmt.Sprintf("%s/project/%s/deployments?open=true", GetRailwayUrl(), projectID)
+}
+
+func (g *Gateway) OpenStaticUrlInBrowser(staticUrl string) error {
+	return browser.OpenURL("https://" + staticUrl)
 }
