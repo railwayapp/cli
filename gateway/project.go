@@ -255,5 +255,5 @@ func (g *Gateway) GetProjectDeploymentsURL(projectID string) string {
 }
 
 func (g *Gateway) OpenStaticUrlInBrowser(staticUrl string) error {
-	return browser.OpenURL("https://" + staticUrl)
+	return browser.OpenURL(fmt.Sprintf("https://%s", staticUrl))
 }
