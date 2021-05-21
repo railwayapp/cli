@@ -86,9 +86,6 @@ func compress(src string, buf io.Writer) error {
 }
 
 func (c *Controller) Up(ctx context.Context) (string, error) {
-	if c.cfg.RailwayProductionToken != "" {
-
-	}
 	projectID, err := c.cfg.GetProject()
 	if err != nil {
 		return "", err
