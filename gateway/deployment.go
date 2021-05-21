@@ -18,6 +18,7 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId, e
 				status
 				projectId
 				meta
+				staticUrl
 			}
 		}
 	`)

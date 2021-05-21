@@ -146,10 +146,28 @@ func init() {
 		RunE:  contextualize(handler.Environment, handler.Panic),
 	})
 
-	addRootCmd(&cobra.Command{
+	openCmd := addRootCmd(&cobra.Command{
 		Use:   "open",
-		Short: "Open project dashboard in default browser",
+		Short: "Open your project dashboard",
 		RunE:  contextualize(handler.Open, handler.Panic),
+	})
+	openCmd.AddCommand(&cobra.Command{
+		Use: "metrics",
+		Short: "Open project metrics",
+		Aliases: []string{"m"},
+		RunE:  contextualize(handler.Open, handler.Panic),
+	})
+	openCmd.AddCommand(&cobra.Command{
+		Use: "settings",
+		Short: "Open project settings",
+		Aliases: []string{"s"},
+		RunE:  contextualize(handler.Open, handler.Panic),
+	})
+	openCmd.AddCommand(&cobra.Command{
+		Use: "live",
+		Short: "Open the deployed application",
+		Aliases: []string{"l"},
+		RunE:  contextualize(handler.OpenApp, handler.Panic),
 	})
 
 	addRootCmd(&cobra.Command{

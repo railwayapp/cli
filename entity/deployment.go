@@ -21,6 +21,7 @@ type Deployment struct {
 	BuildLogs  string          `json:"buildLogs"`
 	DeployLogs string          `json:"deployLogs"`
 	Status     string          `json:"status"`
+	StaticUrl  string          `json:"staticUrl"`
 	Meta       *DeploymentMeta `json:"meta"`
 }
 
