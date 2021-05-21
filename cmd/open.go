@@ -16,11 +16,16 @@ func (h *Handler) Open(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	if (req.Cmd.Use != "open") {
-		return h.ctrl.OpenProjectPathInBrowser(ctx, projectId, environmentId, req.Cmd.Use)
+	// If an unknown subcommand is used, show help
+	if (len(req.Args) > 0) {
+		return req.Cmd.Help()
 	}
 
-	return h.ctrl.OpenProjectInBrowser(ctx, projectId, environmentId)
+	if (req.Cmd.Use == "open") {
+		return h.ctrl.OpenProjectInBrowser(ctx, projectId, environmentId)
+	}
+
+	return h.ctrl.OpenProjectPathInBrowser(ctx, projectId, environmentId, req.Cmd.Use)
 }
 
 func (h *Handler) OpenApp(ctx context.Context, req *entity.CommandRequest) error {
