@@ -25,7 +25,7 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId, e
 	gqlReq.Var("projectId", projectId)
 	gqlReq.Var("environmentId", environmentId)
 
-	err := g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +70,7 @@ func (g *Gateway) GetDeploymentByID(ctx context.Context, req *entity.DeploymentB
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("deploymentId", req.DeploymentID)
 
-	err = g.authorize(ctx, gqlReq.Header)
+	err = g.authorize(ctx, gqlReq)
 	if err != nil {
 		return nil, err
 	}

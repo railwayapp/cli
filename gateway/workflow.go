@@ -2,6 +2,7 @@ package gateway
 
 import (
 	context "context"
+
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
@@ -16,7 +17,7 @@ func (g *Gateway) GetWorkflowStatus(ctx context.Context, workflowID string) (ent
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq)
 	if err != nil {
 		return "", err
 	}

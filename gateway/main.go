@@ -3,11 +3,9 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"net/http"
 
 	gql "github.com/machinebox/graphql"
 	configs "github.com/railwayapp/cli/configs"
-	"github.com/railwayapp/cli/errors"
 )
 
 const (
@@ -19,22 +17,16 @@ type Gateway struct {
 	gqlClient *gql.Client
 }
 
-func (g *Gateway) authorize(ctx context.Context, header http.Header) error {
+func (g *Gateway) authorize(ctx context.Context, req *gql.Request) error {
 	user, err := g.cfg.GetUserConfigs()
 	if err != nil {
 		return err
 	}
-	header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
-	header.Add("x-source", CLI_SOURCE_HEADER)
-	return nil
-}
-
-func (g *Gateway) setProjectToken(ctx context.Context, req *gql.Request) error {
+	req.Header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
+	req.Header.Add("x-source", CLI_SOURCE_HEADER)
 	if g.cfg.RailwayProductionToken == "" {
-		return errors.ProductionTokenNotSet
+		req.Header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	}
-
-	req.Header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	return nil
 }
 

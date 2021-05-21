@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 )
@@ -13,7 +14,7 @@ func (g *Gateway) DeployEnvironmentTriggers(ctx context.Context, req *entity.Dep
 	  	}
 	`)
 
-	err := g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq)
 	if err != nil {
 		return err
 	}

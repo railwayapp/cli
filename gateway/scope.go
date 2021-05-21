@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/errors"
 )
@@ -14,7 +15,7 @@ func (g *Gateway) GetWritableGithubScopes(ctx context.Context) ([]string, error)
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq.Header)
+	err := g.authorize(ctx, gqlReq)
 
 	if err != nil {
 		return nil, err
