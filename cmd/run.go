@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/railwayapp/cli/entity"
@@ -18,6 +20,39 @@ import (
 var RAIL_PORT = 4411
 
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
+	isEphemeral := false
+	for _, arg := range req.Args {
+		if (arg) == "--ephemeral" {
+			isEphemeral = true
+		}
+	}
+
+	projectId, err := h.cfg.GetProject()
+	if err != nil {
+		return err
+	}
+
+	// Get Current Environment for name
+	environment, err := h.ctrl.GetEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Add something to the ephemeral env name
+	if isEphemeral {
+		environmentName := fmt.Sprintf("%s-ephemeral", environment.Name)
+		fmt.Printf("Spinning up Ephemeral Environment: %s\n", ui.BlueText(environmentName))
+		// Create new environment for this run
+		environment, err = h.ctrl.CreateEphemeralEnvironment(ctx, &entity.CreateEphemeralEnvironmentRequest{
+			Name:              environmentName,
+			ProjectID:         projectId,
+			BaseEnvironmentID: environment.Id,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Println("Done!")
+	}
 	envs, err := h.ctrl.GetEnvs(ctx)
 
 	if err != nil {
@@ -41,11 +76,6 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return errors.CommandNotSpecified
 	}
 
-	if _, err := exec.LookPath(req.Args[0]); err != nil {
-		fmt.Printf("%s is not in $PATH\n", req.Args[0])
-		os.Exit(1)
-	}
-
 	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
 	cmd.Env = os.Environ()
 
@@ -57,9 +87,22 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	cmd.Stdin = os.Stdin
-	catchSignals(cmd)
+	catchSignals(ctx, cmd, nil)
 
 	err = cmd.Run()
+
+	if isEphemeral {
+		// Teardown Environment
+		fmt.Println("Tearing down ephemeral environment...")
+		err := h.ctrl.DeleteEnvironment(ctx, &entity.DeleteEnvironmentRequest{
+			EnvironmentId: environment.Id,
+			ProjectID:     projectId,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Println("Done!")
+	}
 
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
@@ -105,27 +148,37 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	}
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
-	ui.StartSpinner(&ui.SpinnerCfg{
-		Message: fmt.Sprintf("Building %s from Dockerfile... (this may take a bit)", ui.GreenText(image)),
-		Tokens:  ui.TrainEmojis,
-	})
+	fmt.Printf("Building %s from Dockerfile...\n", ui.GreenText(image))
 
-	out, err := buildCmd.CombinedOutput()
-	if err != nil {
-		ui.StopSpinner("")
-		return showCmdError(buildCmd.Args, out, err)
-	}
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
 
-	ui.StopSpinner(fmt.Sprintf("🎉 Built %s", ui.GreenText(image)))
-
-	port, err := getAvailablePort()
+	err = buildCmd.Start()
 	if err != nil {
 		return err
 	}
-	// Start running the image
-	fmt.Printf("🚂 Running at %s\n\n", ui.GreenText(fmt.Sprintf("127.0.0.1:%d", port)))
+	err = buildCmd.Wait()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("🎉 Built %s\n", ui.GreenText(image))
 
-	runArgs := []string{"run", "--init", "--rm", "-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port), "-e", fmt.Sprintf("PORT=%d", port)}
+	// Attempt to use
+	internalPort := envs.Get("PORT")
+
+	externalPort, err := getAvailablePort()
+	if err != nil {
+		return err
+	}
+
+	if internalPort == "" {
+		internalPort = externalPort
+	}
+
+	// Start running the image
+	fmt.Printf("🚂 Running at %s\n\n", ui.GreenText(fmt.Sprintf("127.0.0.1:%s", externalPort)))
+
+	runArgs := []string{"run", "--init", "--rm", "-p", fmt.Sprintf("127.0.0.1:%s:%s", externalPort, internalPort), "-e", fmt.Sprintf("PORT=%s", internalPort), "-d"}
 	// Build up env
 	for k, v := range *envs {
 		runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%+v", k, v))
@@ -133,15 +186,30 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	runArgs = append(runArgs, image)
 
 	// Run the container
-	runCmd := exec.CommandContext(ctx, "docker", runArgs...)
-	runCmd.Stdout = os.Stdout
-	runCmd.Stderr = os.Stdout
-	runCmd.Stdin = os.Stdin
-	catchSignals(runCmd)
-
-	err = runCmd.Run()
-
+	rawContainerId, err := exec.CommandContext(ctx, "docker", runArgs...).Output()
 	if err != nil {
+		return err
+	}
+
+	// Get the container ID
+	containerId := strings.TrimSpace(string(rawContainerId))
+
+	// Attach to the container
+	logCmd := exec.CommandContext(ctx, "docker", "logs", "-f", containerId)
+	logCmd.Stdout = os.Stdout
+	logCmd.Stderr = os.Stderr
+
+	err = logCmd.Start()
+	if err != nil {
+		return err
+	}
+	// Listen for cancel to remove the container
+	catchSignals(ctx, logCmd, func() {
+		err = exec.Command("docker", "rm", "-f", string(containerId)).Run()
+	})
+	err = logCmd.Wait()
+	if err != nil && !strings.Contains(err.Error(), "255") {
+		// 255 is a graceeful exit with ctrl + c
 		return err
 	}
 
@@ -150,14 +218,14 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	return nil
 }
 
-func getAvailablePort() (int, error) {
+func getAvailablePort() (string, error) {
 	searchRange := 64
 	for i := RAIL_PORT; i < RAIL_PORT+searchRange; i++ {
 		if isAvailable(i) {
-			return i, nil
+			return strconv.Itoa(i), nil
 		}
 	}
-	return -1, fmt.Errorf("Couldn't find available port between %d and %d", RAIL_PORT, RAIL_PORT+searchRange)
+	return "", fmt.Errorf("Couldn't find available port between %d and %d", RAIL_PORT, RAIL_PORT+searchRange)
 }
 
 func isAvailable(port int) bool {
@@ -169,32 +237,16 @@ func isAvailable(port int) bool {
 	return true
 }
 
-func showCmdError(args []string, output []byte, err error) error {
-	if _, ok := err.(*exec.ExitError); ok {
-		// Full cmd for error logging
-		argstr := ""
-		for _, arg := range args {
-			argstr += arg + " "
-		}
-
-		fmt.Println(ui.RedText("exec error:"))
-		fmt.Println(ui.RedText("-- START OUTPUT --"))
-		fmt.Printf("%s\n", string(output))
-		fmt.Println(ui.RedText("-- END OUTPUT --"))
-		fmt.Println()
-		fmt.Println(ui.RedText("while running:"))
-		fmt.Printf("%+v\n", argstr)
-	}
-	return err
-}
-
-func catchSignals(cmd *exec.Cmd) {
+func catchSignals(ctx context.Context, cmd *exec.Cmd, onSignal context.CancelFunc) {
 	sigs := make(chan os.Signal, 1)
 
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
 		err := cmd.Process.Signal(sig)
+		if onSignal != nil {
+			onSignal()
+		}
 		if err != nil {
 			fmt.Println("Child process error: \n", err)
 		}

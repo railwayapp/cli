@@ -69,7 +69,7 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	cmd.Stdin = os.Stdin
-	catchSignals(cmd)
+	catchSignals(ctx, cmd, nil)
 
 	err = cmd.Run()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 
+	"github.com/railwayapp/cli/constants"
 	"github.com/spf13/viper"
 )
 
@@ -25,6 +26,14 @@ type Configs struct {
 func IsDevMode() bool {
 	environment, exists := os.LookupEnv("RAILWAY_ENV")
 	return exists && environment == "develop"
+}
+
+func GetRailwayURL() string {
+	url, exists := os.LookupEnv("RAILWAY_URL")
+	if !exists {
+		return constants.RAILWAY_URL
+	}
+	return url
 }
 
 func (c *Configs) CreatePathIfNotExist(path string) error {
@@ -74,9 +83,16 @@ func New() *Configs {
 	if IsDevMode() {
 		rootConfigPartialPath = ".railway/dev-config.json"
 	}
-	rootConfigPath := path.Join(os.Getenv("HOME"), rootConfigPartialPath)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		panic(err)
+	}
+	
+	rootConfigPath := path.Join(homeDir, rootConfigPartialPath)
+	
 	rootViper.SetConfigFile(rootConfigPath)
-	err := rootViper.ReadInConfig()
+	err = rootViper.ReadInConfig()
 	if os.IsNotExist(err) {
 		// That's okay, configs are created as needed
 	} else if err != nil {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+
 	"github.com/railwayapp/cli/entity"
 	CLIErrors "github.com/railwayapp/cli/errors"
 )
@@ -24,4 +25,16 @@ func (c *Controller) GetEnvironment(ctx context.Context) (*entity.Environment, e
 		}
 	}
 	return nil, CLIErrors.EnvironmentNotFound
+}
+
+func (c *Controller) CreateEnvironment(ctx context.Context, req *entity.CreateEnvironmentRequest) (*entity.Environment, error) {
+	return c.gtwy.CreateEnvironment(ctx, req)
+}
+
+func (c *Controller) CreateEphemeralEnvironment(ctx context.Context, req *entity.CreateEphemeralEnvironmentRequest) (*entity.Environment, error) {
+	return c.gtwy.CreateEphemeralEnvironment(ctx, req)
+}
+
+func (c *Controller) DeleteEnvironment(ctx context.Context, req *entity.DeleteEnvironmentRequest) error {
+	return c.gtwy.DeleteEnvironment(ctx, req)
 }

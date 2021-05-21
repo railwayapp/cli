@@ -44,6 +44,13 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 	})
 }
 
+func (c *Controller) GetEnvsForEnvironment(ctx context.Context, req *entity.GetEnvsRequest) (*entity.Envs, error) {
+	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{
+		ProjectID:     req.ProjectID,
+		EnvironmentID: req.EnvironmentID,
+	})
+}
+
 func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
 	envs, err := c.GetEnvs(ctx)
 	if err != nil {
