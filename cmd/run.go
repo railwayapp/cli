@@ -199,7 +199,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 		err = exec.Command("docker", "rm", "-f", string(containerId)).Run()
 	})
 	err = logCmd.Wait()
-	if !strings.Contains(err.Error(), "255") {
+	if err != nil && !strings.Contains(err.Error(), "255") {
 		// 255 is a graceeful exit with ctrl + c
 		return err
 	}
