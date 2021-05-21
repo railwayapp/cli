@@ -14,7 +14,7 @@ func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) (bool
 			sendTelemetry(command: $command, error: $error, stacktrace: $stacktrace, projectId: $projectId, environmentId: $environmentId)
 		}
 	`)
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return false, err
 	}

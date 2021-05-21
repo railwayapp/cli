@@ -17,7 +17,7 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("environmentId", req.EnvironmentID)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func (g *Gateway) GetEnvsForPlugin(ctx context.Context, req *entity.GetEnvsForPl
 	gqlReq.Var("environmentId", req.EnvironmentID)
 	gqlReq.Var("pluginId", req.PluginID)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, er
 	  	}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +84,7 @@ func (g *Gateway) UpdateEnvsForPlugin(ctx context.Context, req *entity.UpdateEnv
 	  	}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}

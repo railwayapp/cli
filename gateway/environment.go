@@ -20,7 +20,7 @@ func (g *Gateway) CreateEnvironment(ctx context.Context, req *entity.CreateEnvir
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("name", req.Name)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +46,7 @@ func (g *Gateway) CreateEphemeralEnvironment(ctx context.Context, req *entity.Cr
 	gqlReq.Var("name", req.Name)
 	gqlReq.Var("baseEnvironmentId", req.BaseEnvironmentID)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func (g *Gateway) DeleteEnvironment(ctx context.Context, req *entity.DeleteEnvir
 	gqlReq.Var("environmentId", req.EnvironmentId)
 	gqlReq.Var("projectId", req.ProjectID)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return err
 	}

@@ -17,7 +17,7 @@ func (g *Gateway) GetAvailablePlugins(ctx context.Context, projectId string) ([]
 
 	gqlReq.Var("projectId", projectId)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func (g *Gateway) CreatePlugin(ctx context.Context, req *entity.CreatePluginRequ
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}

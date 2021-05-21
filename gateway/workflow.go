@@ -17,7 +17,7 @@ func (g *Gateway) GetWorkflowStatus(ctx context.Context, workflowID string) (ent
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return "", err
 	}

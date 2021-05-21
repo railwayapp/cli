@@ -15,7 +15,7 @@ func (g *Gateway) GetWritableGithubScopes(ctx context.Context) ([]string, error)
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 
 	if err != nil {
 		return nil, err

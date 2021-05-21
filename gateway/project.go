@@ -33,7 +33,7 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 
 	gqlReq.Var("projectId", projectId)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.Cre
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRe
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 
 	if err != nil {
 		return nil, err
@@ -141,7 +141,7 @@ func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
 		}
 	`)
 
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 
 	if err != nil {
 		return err
@@ -189,7 +189,7 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 	`, projectFrag, projectFrag))
 
 	// TODO build this into the GQL client
-	err := g.authorize(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 
 	if err != nil {
 		return nil, err
