@@ -8,6 +8,7 @@ import (
 	gql "github.com/machinebox/graphql"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/errors"
+	gqlgen "github.com/railwayapp/cli/gen"
 )
 
 const (
@@ -15,8 +16,9 @@ const (
 )
 
 type Gateway struct {
-	cfg       *configs.Configs
-	gqlClient *gql.Client
+	cfg             *configs.Configs
+	gqlClient       *gql.Client
+	BackboardClient *gqlgen.Client
 }
 
 func (g *Gateway) authorize(ctx context.Context, header http.Header) error {
@@ -58,7 +60,8 @@ func New() *Gateway {
 		// fmt.Println(s)
 	}
 	return &Gateway{
-		cfg:       configs.New(),
-		gqlClient: gqlClient,
+		cfg:             configs.New(),
+		gqlClient:       gqlClient,
+		BackboardClient: gqlgen.NewClient(GetHost()),
 	}
 }
