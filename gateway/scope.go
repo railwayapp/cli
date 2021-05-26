@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+
 	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/errors"
 )

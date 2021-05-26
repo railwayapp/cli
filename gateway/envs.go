@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+
 	gql "github.com/machinebox/graphql"
 
 	"github.com/railwayapp/cli/entity"
@@ -61,7 +62,7 @@ func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, er
 	  	}
 	`)
 
-	err := g.setProjectToken(ctx, gqlReq)
+	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}

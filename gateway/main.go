@@ -7,7 +7,6 @@ import (
 
 	gql "github.com/machinebox/graphql"
 	configs "github.com/railwayapp/cli/configs"
-	"github.com/railwayapp/cli/errors"
 )
 
 const (
@@ -26,15 +25,9 @@ func (g *Gateway) authorize(ctx context.Context, header http.Header) error {
 	}
 	header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
 	header.Add("x-source", CLI_SOURCE_HEADER)
-	return nil
-}
-
-func (g *Gateway) setProjectToken(ctx context.Context, req *gql.Request) error {
-	if g.cfg.RailwayProductionToken == "" {
-		return errors.ProductionTokenNotSet
+	if g.cfg.RailwayProductionToken != "" {
+		header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	}
-
-	req.Header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	return nil
 }
 
