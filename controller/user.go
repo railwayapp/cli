@@ -199,6 +199,11 @@ func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error)
 }
 
 func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
+	// Invalidate current session if it exists
+	if err := c.gtwy.Logout(ctx); err != nil {
+		return nil, err
+	}
+
 	if isBrowserless || isSSH() || isCodeSpaces() {
 		return c.browserlessLogin(ctx)
 	}
@@ -216,10 +221,17 @@ func (c *Controller) Logout(ctx context.Context) error {
 		fmt.Printf("🚪  %s\n", ui.YellowText("Already logged out"))
 		return nil
 	}
+
+	err = c.gtwy.Logout(ctx)
+	if err != nil {
+		return err
+	}
+
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{})
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("👋 %s\n", ui.YellowText("Logged out"))
 	return nil
 }
