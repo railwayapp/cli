@@ -117,13 +117,13 @@ func init() {
 		RunE:    contextualize(handler.Variables, handler.Panic),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "get",
+		Use:   "get <key>",
 		Short: "Get the value of a variable",
 		RunE:  contextualize(handler.VariablesGet, handler.Panic),
 		Args:  cobra.MinimumNArgs(1),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "set",
+		Use:   "set <key>=<value>",
 		Short: "Create or update the value of a variable",
 		RunE:  contextualize(handler.VariablesSet, handler.Panic),
 		Args:  cobra.MinimumNArgs(1),
@@ -152,22 +152,22 @@ func init() {
 		RunE:  contextualize(handler.Open, handler.Panic),
 	})
 	openCmd.AddCommand(&cobra.Command{
-		Use: "metrics",
-		Short: "Open project metrics",
+		Use:     "metrics",
+		Short:   "Open project metrics",
 		Aliases: []string{"m"},
-		RunE:  contextualize(handler.Open, handler.Panic),
+		RunE:    contextualize(handler.Open, handler.Panic),
 	})
 	openCmd.AddCommand(&cobra.Command{
-		Use: "settings",
-		Short: "Open project settings",
+		Use:     "settings",
+		Short:   "Open project settings",
 		Aliases: []string{"s"},
-		RunE:  contextualize(handler.Open, handler.Panic),
+		RunE:    contextualize(handler.Open, handler.Panic),
 	})
 	openCmd.AddCommand(&cobra.Command{
-		Use: "live",
-		Short: "Open the deployed application",
+		Use:     "live",
+		Short:   "Open the deployed application",
 		Aliases: []string{"l"},
-		RunE:  contextualize(handler.OpenApp, handler.Panic),
+		RunE:    contextualize(handler.OpenApp, handler.Panic),
 	})
 
 	addRootCmd(&cobra.Command{

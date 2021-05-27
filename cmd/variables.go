@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/railwayapp/cli/ui"
 	"strings"
+
+	"github.com/railwayapp/cli/ui"
 
 	"github.com/railwayapp/cli/entity"
 )
@@ -49,6 +51,9 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 	updatedEnvNames := make([]string, 0)
 	for _, kvPair := range req.Args {
 		parts := strings.SplitN(kvPair, "=", 2)
+		if len(parts) != 2 {
+			return errors.New("Invalid variables invokation. See --help")
+		}
 		key := parts[0]
 		value := parts[1]
 
