@@ -20,14 +20,22 @@ type Gateway struct {
 
 func (g *Gateway) authorize(ctx context.Context, header http.Header) error {
 	user, err := g.cfg.GetUserConfigs()
-	if err != nil {
+
+	// Only error if no user and no project token
+	if err != nil && g.cfg.RailwayProductionToken == "" {
 		return err
 	}
-	header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
+
 	header.Add("x-source", CLI_SOURCE_HEADER)
+
+	if user != nil {
+		header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
+	}
+
 	if g.cfg.RailwayProductionToken != "" {
 		header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	}
+
 	return nil
 }
 
