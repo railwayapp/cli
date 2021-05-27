@@ -200,8 +200,10 @@ func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error)
 
 func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
 	// Invalidate current session if it exists
-	if err := c.gtwy.Logout(ctx); err != nil {
-		return nil, err
+	if loggedIn, _ := c.IsLoggedIn(ctx); loggedIn {
+		if err := c.gtwy.Logout(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	if isBrowserless || isSSH() || isCodeSpaces() {

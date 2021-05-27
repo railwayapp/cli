@@ -69,8 +69,9 @@ func (g *Gateway) Logout(ctx context.Context) error {
 	gqlReq := gql.NewRequest(`mutation { logout }`)
 
 	err := g.authorize(ctx, gqlReq.Header)
+	// If we can't authorize the request then we are already logged out
 	if err != nil {
-		return err
+		return nil
 	}
 
 	if err := g.gqlClient.Run(ctx, gqlReq, nil); err != nil {
