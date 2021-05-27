@@ -271,14 +271,26 @@ func getAPIURL() string {
 	return baseRailwayURL
 }
 
+func getHostName() string {
+	name, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+
+	return name
+}
+
 func getBrowserBasedLoginURL(port int, code string) string {
-	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("port=%d&code=%s", port, code)))
+	hostname := getHostName()
+	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("port=%d&code=%s&hostname=%s", port, code, hostname)))
 	url := fmt.Sprintf("%s/cli-login?d=%s", getAPIURL(), buffer)
 	return url
 }
 
 func getBrowserlessLoginURL(wordCode string) string {
-	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("wordCode=%s", wordCode)))
+	hostname := getHostName()
+	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("wordCode=%s&hostname=%s", wordCode, hostname)))
+
 	url := fmt.Sprintf("%s/cli-login?d=%s", getAPIURL(), buffer)
 	return url
 }
