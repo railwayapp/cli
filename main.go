@@ -117,19 +117,19 @@ func init() {
 		RunE:    contextualize(handler.Variables, handler.Panic),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "get <key>",
+		Use:   "get key",
 		Short: "Get the value of a variable",
 		RunE:  contextualize(handler.VariablesGet, handler.Panic),
 		Args:  cobra.MinimumNArgs(1),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "set <key>=<value>",
+		Use:   "set key=value",
 		Short: "Create or update the value of a variable",
 		RunE:  contextualize(handler.VariablesSet, handler.Panic),
 		Args:  cobra.MinimumNArgs(1),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "delete",
+		Use:   "delete key",
 		Short: "Delete a variable",
 		RunE:  contextualize(handler.VariablesDelete, handler.Panic),
 	})
