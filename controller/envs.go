@@ -12,17 +12,7 @@ import (
 )
 
 func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
-	// Get envs through production token if it exists
-	if c.cfg.RailwayProductionToken != "" {
-		envs, err := c.gtwy.GetEnvsWithProjectToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		return envs, err
-	}
-
-	projectCfg, err := c.cfg.GetProjectConfigs()
+	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -76,10 +66,11 @@ func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
 }
 
 func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.Envs) (*entity.Envs, error) {
-	projectCfg, err := c.cfg.GetProjectConfigs()
+	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return nil, err
 	}
+
 	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
 		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
 		confirm, err := ui.PromptYesNo("Continue updating variables?")
@@ -127,7 +118,7 @@ func (c *Controller) GetEnvsForEnvPlugin(ctx context.Context) (*entity.Envs, err
 		return envs, err
 	}
 
-	projectCfg, err := c.cfg.GetProjectConfigs()
+	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return nil, err
 	}

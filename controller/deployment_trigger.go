@@ -2,11 +2,12 @@ package controller
 
 import (
 	"context"
+
 	"github.com/railwayapp/cli/entity"
 )
 
 func (c *Controller) DeployEnvironmentTriggers(ctx context.Context) error {
-	projectCfg, err := c.cfg.GetProjectConfigs()
+	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}

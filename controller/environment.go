@@ -9,7 +9,7 @@ import (
 
 // GetEnvironment returns the currently active environment for the Railway project
 func (c *Controller) GetEnvironment(ctx context.Context) (*entity.Environment, error) {
-	projectCfg, err := c.cfg.GetProjectConfigs()
+	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -11,6 +11,35 @@ import (
 	"github.com/railwayapp/cli/errors"
 )
 
+// GetProjectToken looks up a project and environment by the RAILWAY_TOKEN
+func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, error) {
+	if g.cfg.RailwayProductionToken == "" {
+		return nil, errors.ProjectTokenNotFound
+	}
+
+	gqlReq := gql.NewRequest(`
+		query {
+			projectToken {
+				projectId
+				environmentId
+			}
+		}
+	`)
+
+	err := g.authorize(ctx, gqlReq.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		ProjectToken *entity.ProjectToken `json:"projectToken"`
+	}
+	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+		return nil, errors.ProjectTokenNotFound
+	}
+	return resp.ProjectToken, nil
+}
+
 // GetProject returns the project associated with the projectId, as well as
 // it's environments, plugins, etc
 func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Project, error) {

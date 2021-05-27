@@ -3,8 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"github.com/railwayapp/cli/ui"
 	"strings"
+
+	"github.com/railwayapp/cli/ui"
 
 	"github.com/railwayapp/cli/entity"
 )

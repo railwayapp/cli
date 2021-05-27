@@ -7,7 +7,7 @@ import (
 )
 
 func (h *Handler) Protect(ctx context.Context, req *entity.CommandRequest) error {
-	projectConfigs, err := h.cfg.GetProjectConfigs()
+	projectConfigs, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}

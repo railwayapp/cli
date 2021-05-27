@@ -11,6 +11,7 @@ import (
 
 func (c *Controller) SendPanic(ctx context.Context, panicErr string, stacktrace string, command string) (bool, error) {
 	confirmSendPanic()
+
 	projectCfg, err := c.cfg.GetProjectConfigs()
 	if err != nil {
 		return c.gtwy.SendPanic(ctx, &entity.PanicRequest{

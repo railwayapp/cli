@@ -88,9 +88,9 @@ func New() *Configs {
 	if err != nil {
 		panic(err)
 	}
-	
+
 	rootConfigPath := path.Join(homeDir, rootConfigPartialPath)
-	
+
 	rootViper.SetConfigFile(rootConfigPath)
 	err = rootViper.ReadInConfig()
 	if os.IsNotExist(err) {
