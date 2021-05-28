@@ -94,14 +94,9 @@ func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.En
 		}
 	}
 
-	environment, err := c.cfg.GetEnvironment()
-	if err != nil {
-		return nil, err
-	}
-
 	return c.gtwy.UpdateEnvsForPlugin(ctx, &entity.UpdateEnvsRequest{
 		ProjectID:     projectCfg.Project,
-		EnvironmentID: environment,
+		EnvironmentID: projectCfg.Environment,
 		PluginID:      pluginID,
 		Envs:          envs,
 	})
