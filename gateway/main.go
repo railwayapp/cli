@@ -19,16 +19,19 @@ type Gateway struct {
 }
 
 func (g *Gateway) authorize(ctx context.Context, header http.Header) error {
+	header.Add("x-source", CLI_SOURCE_HEADER)
+	if g.cfg.RailwayProductionToken != "" {
+		header.Add("project-access-token", g.cfg.RailwayProductionToken)
+		return nil
+	}
+
 	user, err := g.cfg.GetUserConfigs()
 	if err != nil {
 		return err
 	}
 
 	header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
-	header.Add("x-source", CLI_SOURCE_HEADER)
-	if g.cfg.RailwayProductionToken != "" {
-		header.Add("project-access-token", g.cfg.RailwayProductionToken)
-	}
+
 	return nil
 }
 

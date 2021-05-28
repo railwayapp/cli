@@ -29,22 +29,19 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 }
 
 func (c *Controller) GetActiveBuildLogs(ctx context.Context, numLines int32) error {
-	projectID, err := c.cfg.GetProject()
+	projectConfig, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
-	environmentID, err := c.cfg.GetEnvironment()
-	if err != nil {
-		return err
-	}
-	deployment, err := c.gtwy.GetLatestDeploymentForEnvironment(ctx, projectID, environmentID)
+
+	deployment, err := c.gtwy.GetLatestDeploymentForEnvironment(ctx, projectConfig.Project, projectConfig.Environment)
 	if err != nil {
 		return err
 	}
 
 	return c.logsForState(ctx, &entity.DeploymentLogsRequest{
 		DeploymentID: deployment.ID,
-		ProjectID:    projectID,
+		ProjectID:    projectConfig.Project,
 		NumLines:     numLines,
 	})
 }

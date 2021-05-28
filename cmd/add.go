@@ -9,7 +9,7 @@ import (
 )
 
 func (h *Handler) Add(ctx context.Context, req *entity.CommandRequest) error {
-	projectCfg, err := h.cfg.GetProjectConfigs()
+	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}

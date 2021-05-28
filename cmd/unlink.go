@@ -9,7 +9,7 @@ import (
 )
 
 func (h *Handler) Unlink(ctx context.Context, req *entity.CommandRequest) error {
-	projectCfg, _ := h.cfg.GetProjectConfigs()
+	projectCfg, _ := h.ctrl.GetProjectConfigs(ctx)
 
 	project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
 	if err != nil {

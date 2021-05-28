@@ -11,7 +11,7 @@ import (
 )
 
 func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error {
-	projectCfg, _ := h.cfg.GetProjectConfigs()
+	projectCfg, _ := h.ctrl.GetProjectConfigs(ctx)
 
 	project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
 	if err != nil {

@@ -33,3 +33,8 @@ type Project struct {
 	Plugins      []*Plugin      `json:"plugins,omitempty"`
 	Team         *string        `json:"team,omitempty"`
 }
+
+type ProjectToken struct {
+	ProjectId     string `json:"projectId"`
+	EnvironmentId string `json:"environmentId"`
+}
