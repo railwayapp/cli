@@ -117,21 +117,24 @@ func init() {
 		RunE:    contextualize(handler.Variables, handler.Panic),
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "get",
-		Short: "Get the value of a variable",
-		RunE:  contextualize(handler.VariablesGet, handler.Panic),
-		Args:  cobra.MinimumNArgs(1),
+		Use:     "get key",
+		Short:   "Get the value of a variable",
+		RunE:    contextualize(handler.VariablesGet, handler.Panic),
+		Args:    cobra.MinimumNArgs(1),
+		Example: "  railway variables get MY_KEY",
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "set",
-		Short: "Create or update the value of a variable",
-		RunE:  contextualize(handler.VariablesSet, handler.Panic),
-		Args:  cobra.MinimumNArgs(1),
+		Use:     "set key=value",
+		Short:   "Create or update the value of a variable",
+		RunE:    contextualize(handler.VariablesSet, handler.Panic),
+		Args:    cobra.MinimumNArgs(1),
+		Example: "  railway variables set NODE_ENV=prod NODE_VERSION=12",
 	})
 	variablesCmd.AddCommand(&cobra.Command{
-		Use:   "delete",
-		Short: "Delete a variable",
-		RunE:  contextualize(handler.VariablesDelete, handler.Panic),
+		Use:     "delete key",
+		Short:   "Delete a variable",
+		RunE:    contextualize(handler.VariablesDelete, handler.Panic),
+		Example: "  railway variables delete MY_KEY",
 	})
 
 	addRootCmd(&cobra.Command{
@@ -152,22 +155,22 @@ func init() {
 		RunE:  contextualize(handler.Open, handler.Panic),
 	})
 	openCmd.AddCommand(&cobra.Command{
-		Use: "metrics",
-		Short: "Open project metrics",
+		Use:     "metrics",
+		Short:   "Open project metrics",
 		Aliases: []string{"m"},
-		RunE:  contextualize(handler.Open, handler.Panic),
+		RunE:    contextualize(handler.Open, handler.Panic),
 	})
 	openCmd.AddCommand(&cobra.Command{
-		Use: "settings",
-		Short: "Open project settings",
+		Use:     "settings",
+		Short:   "Open project settings",
 		Aliases: []string{"s"},
-		RunE:  contextualize(handler.Open, handler.Panic),
+		RunE:    contextualize(handler.Open, handler.Panic),
 	})
 	openCmd.AddCommand(&cobra.Command{
-		Use: "live",
-		Short: "Open the deployed application",
+		Use:     "live",
+		Short:   "Open the deployed application",
 		Aliases: []string{"l"},
-		RunE:  contextualize(handler.OpenApp, handler.Panic),
+		RunE:    contextualize(handler.OpenApp, handler.Panic),
 	})
 
 	addRootCmd(&cobra.Command{
