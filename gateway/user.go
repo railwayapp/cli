@@ -19,7 +19,6 @@ func (g *Gateway) GetUser(ctx context.Context) (*entity.User, error) {
 	`)
 
 	err := g.authorize(ctx, gqlReq.Header)
-
 	if err != nil {
 		return nil, err
 	}
@@ -64,4 +63,20 @@ func (g *Gateway) ConsumeLoginSession(ctx context.Context, code string) (string,
 	}
 
 	return resp.Token, nil
+}
+
+func (g *Gateway) Logout(ctx context.Context) error {
+	gqlReq := gql.NewRequest(`mutation { logout }`)
+
+	err := g.authorize(ctx, gqlReq.Header)
+	// If we can't authorize the request then we are already logged out
+	if err != nil {
+		return nil
+	}
+
+	if err := g.gqlClient.Run(ctx, gqlReq, nil); err != nil {
+		return err
+	}
+
+	return nil
 }

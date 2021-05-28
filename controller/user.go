@@ -199,6 +199,13 @@ func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error)
 }
 
 func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.User, error) {
+	// Invalidate current session if it exists
+	if loggedIn, _ := c.IsLoggedIn(ctx); loggedIn {
+		if err := c.gtwy.Logout(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	if isBrowserless || isSSH() || isCodeSpaces() {
 		return c.browserlessLogin(ctx)
 	}
@@ -216,10 +223,17 @@ func (c *Controller) Logout(ctx context.Context) error {
 		fmt.Printf("🚪  %s\n", ui.YellowText("Already logged out"))
 		return nil
 	}
+
+	err = c.gtwy.Logout(ctx)
+	if err != nil {
+		return err
+	}
+
 	err = c.cfg.SetUserConfigs(&entity.UserConfig{})
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("👋 %s\n", ui.YellowText("Logged out"))
 	return nil
 }
@@ -257,14 +271,26 @@ func getAPIURL() string {
 	return baseRailwayURL
 }
 
+func getHostName() string {
+	name, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+
+	return name
+}
+
 func getBrowserBasedLoginURL(port int, code string) string {
-	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("port=%d&code=%s", port, code)))
+	hostname := getHostName()
+	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("port=%d&code=%s&hostname=%s", port, code, hostname)))
 	url := fmt.Sprintf("%s/cli-login?d=%s", getAPIURL(), buffer)
 	return url
 }
 
 func getBrowserlessLoginURL(wordCode string) string {
-	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("wordCode=%s", wordCode)))
+	hostname := getHostName()
+	buffer := b64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("wordCode=%s&hostname=%s", wordCode, hostname)))
+
 	url := fmt.Sprintf("%s/cli-login?d=%s", getAPIURL(), buffer)
 	return url
 }
