@@ -131,7 +131,7 @@ do_install_binary() {
   }
 
   command_exists tar || {
-    fmt_error "tar is not install"
+    fmt_error "tar is not installed"
     exit 1
   }
 
