@@ -137,7 +137,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	}
 
 	sanitiser := regexp.MustCompile(`[^A-Za-z0-9_-]`)
-	imageNameWithoutNsOrTag := sanitiser.ReplaceAllString(project.Name, "") + "-" + sanitiser.ReplaceAllString(environment.Name, "")
+	imageNameWithoutNsOrTag := strings.ToLower(sanitiser.ReplaceAllString(project.Name, "") + "-" + sanitiser.ReplaceAllString(environment.Name, ""))
 	image := fmt.Sprintf("railway-local/%s:latest", imageNameWithoutNsOrTag)
 
 	buildArgs := []string{"build", "-q", "-t", image, pwd}
