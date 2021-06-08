@@ -33,7 +33,14 @@ func addRootCmd(cmd *cobra.Command) *cobra.Command {
 func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) entity.CobraFunction {
 	return func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
+
 		defer func() {
+			// Skip recover during development, so we can see the panic stack traces instead of going
+			// through the "send to Railway" flow and hiding the stack from the user
+			if constants.IsDevVersion() {
+				return
+			}
+
 			if r := recover(); r != nil {
 				err := panicFn(ctx, fmt.Sprint(r), string(debug.Stack()), cmd.Name(), args)
 				if err != nil {
@@ -50,6 +57,7 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		if err != nil {
 			// TODO: Make it *pretty*
 			fmt.Println(err.Error())
+			os.Exit(1) // Set non-success exit code on error
 		}
 		return nil
 	}

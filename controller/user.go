@@ -175,7 +175,7 @@ func (c *Controller) browserlessLogin(ctx context.Context) (*entity.User, error)
 
 	url := getBrowserlessLoginURL(wordCode)
 
-	fmt.Printf("Your pairing code is: %s\n", wordCode)
+	fmt.Printf("Your pairing code is: %s\n", ui.MagentaText(wordCode))
 	fmt.Printf("To authenticate with Railway, please go to \n    %s\n", url)
 
 	token, err := c.pollForToken(ctx, wordCode)
@@ -214,17 +214,12 @@ func (c *Controller) Login(ctx context.Context, isBrowserless bool) (*entity.Use
 }
 
 func (c *Controller) Logout(ctx context.Context) error {
-	// Logout by wiping user configs
-	userCfg, err := c.cfg.GetUserConfigs()
-	if err != nil {
-		return err
-	}
-	if userCfg.Token == "" {
+	if loggedIn, _ := c.IsLoggedIn(ctx); !loggedIn {
 		fmt.Printf("🚪  %s\n", ui.YellowText("Already logged out"))
 		return nil
 	}
 
-	err = c.gtwy.Logout(ctx)
+	err := c.gtwy.Logout(ctx)
 	if err != nil {
 		return err
 	}
