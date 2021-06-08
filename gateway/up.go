@@ -26,7 +26,7 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
-	err = g.authorize(ctx, httpReq.Header)
+	err = g.authorize(httpReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -35,6 +35,7 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
+
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -42,6 +43,7 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		return nil, errors.New(string(bodyBytes))
 	}
+
 	var res entity.UpResponse
 	if err := json.Unmarshal(bodyBytes, &res); err != nil {
 		return nil, err
