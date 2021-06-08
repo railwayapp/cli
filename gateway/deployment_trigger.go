@@ -7,7 +7,7 @@ import (
 )
 
 func (g *Gateway) DeployEnvironmentTriggers(ctx context.Context, req *entity.DeployEnvironmentTriggersRequest) error {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 	  	mutation($projectId: String!, $environmentId: String!) {
 			deployEnvironmentTriggers(projectId: $projectId, environmentId: $environmentId)
 	  	}
@@ -23,7 +23,7 @@ func (g *Gateway) DeployEnvironmentTriggers(ctx context.Context, req *entity.Dep
 		// Nothing useful here
 	}
 
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return err
 	}
 

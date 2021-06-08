@@ -8,7 +8,7 @@ import (
 )
 
 func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) (bool, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		mutation($command: String!, $error: String!, $stacktrace: String!, $projectId: String, $environmentId: String) {
 			sendTelemetry(command: $command, error: $error, stacktrace: $stacktrace, projectId: $projectId, environmentId: $environmentId)
 		}
@@ -26,7 +26,7 @@ func (g *Gateway) SendPanic(ctx context.Context, req *entity.PanicRequest) (bool
 	var resp struct {
 		Status bool `json:"sendTelemetry"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return false, errors.TelemetryFailed
 	}
 	return resp.Status, nil

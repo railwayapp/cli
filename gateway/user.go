@@ -7,7 +7,7 @@ import (
 )
 
 func (g *Gateway) GetUser(ctx context.Context) (*entity.User, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		query {
 			me {
 				id,
@@ -23,20 +23,20 @@ func (g *Gateway) GetUser(ctx context.Context) (*entity.User, error) {
 	var resp struct {
 		User *entity.User `json:"me"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
 	return resp.User, nil
 }
 
 func (g *Gateway) CreateLoginSession(ctx context.Context) (string, error) {
-	gqlReq := g.NewRequestWithoutAuth(ctx, `mutation { createLoginSession } `)
+	gqlReq := g.NewRequestWithoutAuth(`mutation { createLoginSession } `)
 
 	var resp struct {
 		Code string `json:"createLoginSession"`
 	}
 
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return "", err
 	}
 
@@ -44,10 +44,10 @@ func (g *Gateway) CreateLoginSession(ctx context.Context) (string, error) {
 }
 
 func (g *Gateway) ConsumeLoginSession(ctx context.Context, code string) (string, error) {
-	gqlReq := g.NewRequestWithoutAuth(ctx, `
-  	mutation($code: String!) { 
-  		consumeLoginSession(code: $code) 
-  	}
+	gqlReq := g.NewRequestWithoutAuth(`
+		mutation($code: String!) { 
+			consumeLoginSession(code: $code) 
+		}
 	`)
 	gqlReq.Var("code", code)
 
@@ -55,7 +55,7 @@ func (g *Gateway) ConsumeLoginSession(ctx context.Context, code string) (string,
 		Token string `json:"consumeLoginSession"`
 	}
 
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return "", err
 	}
 
@@ -63,12 +63,12 @@ func (g *Gateway) ConsumeLoginSession(ctx context.Context, code string) (string,
 }
 
 func (g *Gateway) Logout(ctx context.Context) error {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `mutation { logout }`)
+	gqlReq, err := g.NewRequestWithAuth(`mutation { logout }`)
 	if err != nil {
 		return err
 	}
 
-	if err := gqlReq.Run(nil); err != nil {
+	if err := gqlReq.Run(ctx, nil); err != nil {
 		return err
 	}
 

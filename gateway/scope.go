@@ -8,7 +8,7 @@ import (
 
 // GetWritableGithubScopes returns scopes associated with Railway user
 func (g *Gateway) GetWritableGithubScopes(ctx context.Context) ([]string, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		query {
 			getWritableGithubScopes 
 		}
@@ -20,7 +20,7 @@ func (g *Gateway) GetWritableGithubScopes(ctx context.Context) ([]string, error)
 	var resp struct {
 		Scopes []string `json:"getWritableGithubScopes"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.ProblemFetchingWritableGithubScopes
 	}
 	return resp.Scopes, nil

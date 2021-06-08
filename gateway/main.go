@@ -43,7 +43,6 @@ func New() *Gateway {
 type GQLRequest struct {
 	q          string
 	vars       map[string]interface{}
-	ctx        context.Context
 	header     http.Header
 	httpClient *http.Client
 }
@@ -78,18 +77,17 @@ func (g *Gateway) authorize(header http.Header) error {
 	return nil
 }
 
-func (g *Gateway) NewRequestWithoutAuth(ctx context.Context, query string) *GQLRequest {
+func (g *Gateway) NewRequestWithoutAuth(query string) *GQLRequest {
 	return &GQLRequest{
 		q:          query,
 		header:     http.Header{},
 		httpClient: g.httpClient,
-		ctx:        ctx,
 		vars:       make(map[string]interface{}),
 	}
 }
 
-func (g *Gateway) NewRequestWithAuth(ctx context.Context, query string) (*GQLRequest, error) {
-	gqlReq := g.NewRequestWithoutAuth(ctx, query)
+func (g *Gateway) NewRequestWithAuth(query string) (*GQLRequest, error) {
+	gqlReq := g.NewRequestWithoutAuth(query)
 
 	err := g.authorize(gqlReq.header)
 	if err != nil {
@@ -99,7 +97,7 @@ func (g *Gateway) NewRequestWithAuth(ctx context.Context, query string) (*GQLReq
 	return gqlReq, nil
 }
 
-func (r *GQLRequest) Run(resp interface{}) error {
+func (r *GQLRequest) Run(ctx context.Context, resp interface{}) error {
 	var requestBody bytes.Buffer
 	requestBodyObj := struct {
 		Query     string                 `json:"query"`
@@ -117,6 +115,7 @@ func (r *GQLRequest) Run(resp interface{}) error {
 		return err
 	}
 
+	req = req.WithContext(ctx)
 	req.Header = r.header
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json; charset=utf-8")

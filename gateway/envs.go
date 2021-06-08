@@ -7,7 +7,7 @@ import (
 )
 
 func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*entity.Envs, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		query ($projectId: String!, $environmentId: String!) {
 			allEnvsForEnvironment(projectId: $projectId, environmentId: $environmentId)
 		}
@@ -22,14 +22,14 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	var resp struct {
 		Envs *entity.Envs `json:"allEnvsForEnvironment"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Envs, nil
 }
 
 func (g *Gateway) GetEnvsForPlugin(ctx context.Context, req *entity.GetEnvsForPluginRequest) (*entity.Envs, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		query ($projectId: String!, $environmentId: String!, $pluginId: String!) {
 			allEnvsForPlugin(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId)
 		}
@@ -45,14 +45,14 @@ func (g *Gateway) GetEnvsForPlugin(ctx context.Context, req *entity.GetEnvsForPl
 	var resp struct {
 		Envs *entity.Envs `json:"allEnvsForPlugin"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Envs, nil
 }
 
 func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 	  	query {
 			allEnvsForProjectToken
 	  	}
@@ -64,7 +64,7 @@ func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, er
 	var resp struct {
 		Envs *entity.Envs `json:"allEnvsForProjectToken"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
 
@@ -72,7 +72,7 @@ func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, er
 }
 
 func (g *Gateway) UpdateEnvsForPlugin(ctx context.Context, req *entity.UpdateEnvsRequest) (*entity.Envs, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $envs: Json!) {
 			updateEnvsForPlugin(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, envs: $envs)
 	  	}
@@ -89,7 +89,7 @@ func (g *Gateway) UpdateEnvsForPlugin(ctx context.Context, req *entity.UpdateEnv
 	var resp struct {
 		Envs *entity.Envs `json:"updateEnvsForPlugin"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
 

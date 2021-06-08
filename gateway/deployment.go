@@ -10,7 +10,7 @@ import (
 )
 
 func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId, environmentId string) ([]*entity.Deployment, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		query ($projectId: ID!, $environmentId: ID!) {
 			allDeploymentsForEnvironment(projectId: $projectId, environmentId: $environmentId) {
 				id
@@ -31,7 +31,7 @@ func (g *Gateway) GetDeploymentsForEnvironment(ctx context.Context, projectId, e
 	var resp struct {
 		Deployments []*entity.Deployment `json:"allDeploymentsForEnvironment"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.DeploymentFetchingFailed
 	}
 	return resp.Deployments, nil
@@ -58,7 +58,7 @@ func (g *Gateway) GetDeploymentByID(ctx context.Context, req *entity.DeploymentB
 	if err != nil {
 		return nil, err
 	}
-	gqlReq, err := g.NewRequestWithAuth(ctx, fmt.Sprintf(`
+	gqlReq, err := g.NewRequestWithAuth(fmt.Sprintf(`
 		query ($projectId: ID!, $deploymentId: ID!) {
 			deploymentById(projectId: $projectId, deploymentId: $deploymentId) {
 				%s
@@ -75,7 +75,7 @@ func (g *Gateway) GetDeploymentByID(ctx context.Context, req *entity.DeploymentB
 	var resp struct {
 		Deployment *entity.Deployment `json:"deploymentById"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.DeploymentFetchingFailed
 	}
 	return resp.Deployment, nil

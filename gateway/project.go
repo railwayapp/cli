@@ -16,7 +16,7 @@ func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, er
 		return nil, errors.ProjectTokenNotFound
 	}
 
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		query {
 			projectToken {
 				projectId
@@ -31,7 +31,7 @@ func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, er
 	var resp struct {
 		ProjectToken *entity.ProjectToken `json:"projectToken"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.ProjectTokenNotFound
 	}
 	return resp.ProjectToken, nil
@@ -40,7 +40,7 @@ func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, er
 // GetProject returns the project associated with the projectId, as well as
 // it's environments, plugins, etc
 func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Project, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		query ($projectId: ID!) {
 			projectById(projectId: $projectId) {
 				id,
@@ -65,14 +65,14 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 	var resp struct {
 		Project *entity.Project `json:"projectById"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.ProjectConfigNotFound
 	}
 	return resp.Project, nil
 }
 
 func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRequest) (*entity.Project, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		mutation($name: String) {
 			createProject(name: $name) {
 				id,
@@ -93,14 +93,14 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 	var resp struct {
 		Project *entity.Project `json:"createProject"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.ProjectCreateFailed
 	}
 	return resp.Project, nil
 }
 
 func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.CreateProjectFromTemplateRequest) (*entity.CreateProjectFromTemplateResult, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		mutation($name: String!, $owner: String!, $template: String!, $isPrivate: Boolean, $plugins: [String!], $variables: Json) {
 			createProjectFromTemplate(name: $name, owner: $owner, template: $template, isPrivate: $isPrivate, plugins: $plugins, variables: $variables) {
 				projectId
@@ -122,14 +122,14 @@ func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.Cre
 	var resp struct {
 		Result *entity.CreateProjectFromTemplateResult `json:"createProjectFromTemplate"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.ProjectCreateFromTemplateFailed
 	}
 	return resp.Result, nil
 }
 
 func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRequest) (*entity.Project, error) {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		mutation($projectId: ID!) {
 			updateProject(projectId: $projectId) {
 				id,
@@ -145,14 +145,14 @@ func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRe
 	var resp struct {
 		Project *entity.Project `json:"createProject"`
 	}
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Project, nil
 }
 
 func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
-	gqlReq, err := g.NewRequestWithAuth(ctx, `
+	gqlReq, err := g.NewRequestWithAuth(`
 		mutation($projectId: ID!) {
 			deleteProject(projectId: $projectId)
 		}
@@ -165,7 +165,7 @@ func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
 	var resp struct {
 		Deleted bool `json:"deleteProject"`
 	}
-	return gqlReq.Run(&resp)
+	return gqlReq.Run(ctx, &resp)
 }
 
 // GetProjects returns all projects associated with the user, as well as
@@ -185,7 +185,7 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 		},
 	`
 
-	gqlReq, err := g.NewRequestWithAuth(ctx, fmt.Sprintf(`
+	gqlReq, err := g.NewRequestWithAuth(fmt.Sprintf(`
 		query {
 			me {
 				name
@@ -216,7 +216,7 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 		} `json:"me"`
 	}
 
-	if err := gqlReq.Run(&resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, errors.ProblemFetchingProjects
 	}
 
