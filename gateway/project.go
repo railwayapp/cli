@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	gql "github.com/machinebox/graphql"
 	"github.com/pkg/browser"
 	configs "github.com/railwayapp/cli/configs"
 	"github.com/railwayapp/cli/entity"
@@ -17,7 +16,7 @@ func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, er
 		return nil, errors.ProjectTokenNotFound
 	}
 
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		query {
 			projectToken {
 				projectId
@@ -25,8 +24,6 @@ func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, er
 			}
 		}
 	`)
-
-	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +31,7 @@ func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, er
 	var resp struct {
 		ProjectToken *entity.ProjectToken `json:"projectToken"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, errors.ProjectTokenNotFound
 	}
 	return resp.ProjectToken, nil
@@ -43,7 +40,7 @@ func (g *Gateway) GetProjectToken(ctx context.Context) (*entity.ProjectToken, er
 // GetProject returns the project associated with the projectId, as well as
 // it's environments, plugins, etc
 func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Project, error) {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		query ($projectId: ID!) {
 			projectById(projectId: $projectId) {
 				id,
@@ -59,25 +56,23 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 			}
 		}
 	`)
-
-	gqlReq.Var("projectId", projectId)
-
-	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
 
+	gqlReq.Var("projectId", projectId)
+
 	var resp struct {
 		Project *entity.Project `json:"projectById"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, errors.ProjectConfigNotFound
 	}
 	return resp.Project, nil
 }
 
 func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRequest) (*entity.Project, error) {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		mutation($name: String) {
 			createProject(name: $name) {
 				id,
@@ -89,8 +84,6 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 			}
 		}
 	`)
-
-	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -100,14 +93,14 @@ func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRe
 	var resp struct {
 		Project *entity.Project `json:"createProject"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, errors.ProjectCreateFailed
 	}
 	return resp.Project, nil
 }
 
 func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.CreateProjectFromTemplateRequest) (*entity.CreateProjectFromTemplateResult, error) {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		mutation($name: String!, $owner: String!, $template: String!, $isPrivate: Boolean, $plugins: [String!], $variables: Json) {
 			createProjectFromTemplate(name: $name, owner: $owner, template: $template, isPrivate: $isPrivate, plugins: $plugins, variables: $variables) {
 				projectId
@@ -115,8 +108,6 @@ func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.Cre
 			}
 		}
 	`)
-
-	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -131,14 +122,14 @@ func (g *Gateway) CreateProjectFromTemplate(ctx context.Context, req *entity.Cre
 	var resp struct {
 		Result *entity.CreateProjectFromTemplateResult `json:"createProjectFromTemplate"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, errors.ProjectCreateFromTemplateFailed
 	}
 	return resp.Result, nil
 }
 
 func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRequest) (*entity.Project, error) {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		mutation($projectId: ID!) {
 			updateProject(projectId: $projectId) {
 				id,
@@ -146,9 +137,6 @@ func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRe
 			}
 		}
 	`)
-
-	err := g.authorize(ctx, gqlReq.Header)
-
 	if err != nil {
 		return nil, err
 	}
@@ -157,21 +145,18 @@ func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRe
 	var resp struct {
 		Project *entity.Project `json:"createProject"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, err
 	}
 	return resp.Project, nil
 }
 
 func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		mutation($projectId: ID!) {
 			deleteProject(projectId: $projectId)
 		}
 	`)
-
-	err := g.authorize(ctx, gqlReq.Header)
-
 	if err != nil {
 		return err
 	}
@@ -180,7 +165,7 @@ func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
 	var resp struct {
 		Deleted bool `json:"deleteProject"`
 	}
-	return g.gqlClient.Run(ctx, gqlReq, &resp)
+	return gqlReq.Run(&resp)
 }
 
 // GetProjects returns all projects associated with the user, as well as
@@ -200,7 +185,7 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 		},
 	`
 
-	gqlReq := gql.NewRequest(fmt.Sprintf(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, fmt.Sprintf(`
 		query {
 			me {
 				name
@@ -216,10 +201,6 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 			}
 		}
 	`, projectFrag, projectFrag))
-
-	// TODO build this into the GQL client
-	err := g.authorize(ctx, gqlReq.Header)
-
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +216,7 @@ func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 		} `json:"me"`
 	}
 
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, errors.ProblemFetchingProjects
 	}
 

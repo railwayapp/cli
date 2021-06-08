@@ -3,13 +3,12 @@ package gateway
 import (
 	"context"
 
-	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
 )
 
 func (g *Gateway) CreateEnvironment(ctx context.Context, req *entity.CreateEnvironmentRequest) (*entity.Environment, error) {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		mutation($name: String!, $projectId: String!) {
 			createEnvironment(name: $name, projectId: $projectId) {
 				id
@@ -17,24 +16,24 @@ func (g *Gateway) CreateEnvironment(ctx context.Context, req *entity.CreateEnvir
 			}
 		}
 	`)
-	gqlReq.Var("projectId", req.ProjectID)
-	gqlReq.Var("name", req.Name)
-
-	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
+
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("name", req.Name)
+
 	var resp struct {
 		Environment *entity.Environment `json:"createEnvironment,omitempty"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, errors.CreateEnvironmentFailed
 	}
 	return resp.Environment, nil
 }
 
 func (g *Gateway) CreateEphemeralEnvironment(ctx context.Context, req *entity.CreateEphemeralEnvironmentRequest) (*entity.Environment, error) {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		mutation($name: String!, $projectId: String!, $baseEnvironmentId: String!) {
 			createEphemeralEnvironment(name: $name, projectId: $projectId, baseEnvironmentId: $baseEnvironmentId) {
 				id
@@ -42,40 +41,40 @@ func (g *Gateway) CreateEphemeralEnvironment(ctx context.Context, req *entity.Cr
 			}
 		}
 	`)
+	if err != nil {
+		return nil, err
+	}
+
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("name", req.Name)
 	gqlReq.Var("baseEnvironmentId", req.BaseEnvironmentID)
 
-	err := g.authorize(ctx, gqlReq.Header)
-	if err != nil {
-		return nil, err
-	}
 	var resp struct {
 		Environment *entity.Environment `json:"createEphemeralEnvironment,omitempty"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return nil, errors.CreateEnvironmentFailed
 	}
 	return resp.Environment, nil
 }
 
 func (g *Gateway) DeleteEnvironment(ctx context.Context, req *entity.DeleteEnvironmentRequest) error {
-	gqlReq := gql.NewRequest(`
+	gqlReq, err := g.NewRequestWithAuth(ctx, `
 		mutation($environmentId: String!, $projectId: String!) {
 			deleteEnvironment(environmentId: $environmentId, projectId: $projectId)
 		}
 	`)
-	gqlReq.Var("environmentId", req.EnvironmentId)
-	gqlReq.Var("projectId", req.ProjectID)
-
-	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return err
 	}
+
+	gqlReq.Var("environmentId", req.EnvironmentId)
+	gqlReq.Var("projectId", req.ProjectID)
+
 	var resp struct {
 		Created bool `json:"createEnvironment,omitempty"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(&resp); err != nil {
 		return errors.CreateEnvironmentFailed
 	}
 	return nil
