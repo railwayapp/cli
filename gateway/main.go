@@ -58,7 +58,6 @@ func (e GQLError) Error() string {
 type GQLResponse struct {
 	Errors []GQLError  `json:"errors"`
 	Data   interface{} `json:"data"`
-	resp   *http.Response
 }
 
 func (g *Gateway) authorize(header http.Header) error {
