@@ -33,7 +33,13 @@ func addRootCmd(cmd *cobra.Command) *cobra.Command {
 func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) entity.CobraFunction {
 	return func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
+
 		defer func() {
+			// Let CLI fail if we're runnign the dev version
+			if !constants.IsDevVersion() {
+				return
+			}
+
 			if r := recover(); r != nil {
 				err := panicFn(ctx, fmt.Sprint(r), string(debug.Stack()), cmd.Name(), args)
 				if err != nil {
@@ -50,6 +56,7 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		if err != nil {
 			// TODO: Make it *pretty*
 			fmt.Println(err.Error())
+			os.Exit(1) // Set non-success exit code on error
 		}
 		return nil
 	}

@@ -181,9 +181,11 @@ func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 		return h.Link(ctx, req)
 	}
 
-	isLoggedIn, _ := h.ctrl.IsLoggedIn(ctx)
-
-	if !isLoggedIn {
+	// Since init can be called by guests, ensure we can fetch a user first before calling. This prevents
+	// us accidentally creating a temporary (guest) project if we have a token locally but our remote
+	// session was deleted.
+	_, err := h.ctrl.GetUser(ctx)
+	if err != nil {
 		return fmt.Errorf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login"))
 	}
 
