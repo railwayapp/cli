@@ -35,8 +35,9 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		ctx := context.Background()
 
 		defer func() {
-			// Let CLI fail if we're runnign the dev version
-			if !constants.IsDevVersion() {
+			// Skip recover during development, so we can see the panic stack traces instead of going
+			// through the "send to Railway" flow and hiding the stack from the user
+			if constants.IsDevVersion() {
 				return
 			}
 

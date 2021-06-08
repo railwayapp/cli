@@ -186,7 +186,7 @@ func (h *Handler) Init(ctx context.Context, req *entity.CommandRequest) error {
 	// session was deleted.
 	_, err := h.ctrl.GetUser(ctx)
 	if err != nil {
-		return fmt.Errorf("%s\nRun %s", ui.RedText("Account require to init project"), ui.Bold("railway login"))
+		return fmt.Errorf("%s\nRun %s", ui.RedText("Account required to init project"), ui.Bold("railway login"))
 	}
 
 	selection, err := ui.PromptInit()
