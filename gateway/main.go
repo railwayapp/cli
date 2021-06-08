@@ -8,6 +8,7 @@ import (
 	"github.com/pkg/errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	configs "github.com/railwayapp/cli/configs"
@@ -141,8 +142,11 @@ func (r *GQLRequest) Run(ctx context.Context, resp interface{}) error {
 		return errors.Wrap(err, "decoding response")
 	}
 	if len(gr.Errors) > 0 {
-		// return first error
-		return gr.Errors[0]
+		messages := make([]string, len(gr.Errors))
+		for i, err := range gr.Errors {
+			messages[i] = err.Error()
+		}
+		return fmt.Errorf("GraphQL query failed with %d errors: %s", len(gr.Errors), strings.Join(messages, ", "))
 	}
 
 	return nil
