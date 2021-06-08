@@ -3,22 +3,19 @@ package gateway
 import (
 	"context"
 
-	gql "github.com/machinebox/graphql"
 	"github.com/railwayapp/cli/entity"
 )
 
 func (g *Gateway) GetUser(ctx context.Context) (*entity.User, error) {
-	gqlReq := gql.NewRequest(`
-	query {
-		me {
-			id,
-			email,
-			name
+	gqlReq, err := g.NewRequestWithAuth(`
+		query {
+			me {
+				id,
+				email,
+				name
+			}
 		}
-	}
 	`)
-
-	err := g.authorize(ctx, gqlReq.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -26,20 +23,20 @@ func (g *Gateway) GetUser(ctx context.Context) (*entity.User, error) {
 	var resp struct {
 		User *entity.User `json:"me"`
 	}
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
 	return resp.User, nil
 }
 
 func (g *Gateway) CreateLoginSession(ctx context.Context) (string, error) {
-	gqlReq := gql.NewRequest(`mutation { createLoginSession } `)
+	gqlReq := g.NewRequestWithoutAuth(`mutation { createLoginSession } `)
 
 	var resp struct {
 		Code string `json:"createLoginSession"`
 	}
 
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return "", err
 	}
 
@@ -47,10 +44,10 @@ func (g *Gateway) CreateLoginSession(ctx context.Context) (string, error) {
 }
 
 func (g *Gateway) ConsumeLoginSession(ctx context.Context, code string) (string, error) {
-	gqlReq := gql.NewRequest(`
-  	mutation($code: String!) { 
-  		consumeLoginSession(code: $code) 
-  	}
+	gqlReq := g.NewRequestWithoutAuth(`
+		mutation($code: String!) { 
+			consumeLoginSession(code: $code) 
+		}
 	`)
 	gqlReq.Var("code", code)
 
@@ -58,7 +55,7 @@ func (g *Gateway) ConsumeLoginSession(ctx context.Context, code string) (string,
 		Token string `json:"consumeLoginSession"`
 	}
 
-	if err := g.gqlClient.Run(ctx, gqlReq, &resp); err != nil {
+	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return "", err
 	}
 
@@ -66,15 +63,12 @@ func (g *Gateway) ConsumeLoginSession(ctx context.Context, code string) (string,
 }
 
 func (g *Gateway) Logout(ctx context.Context) error {
-	gqlReq := gql.NewRequest(`mutation { logout }`)
-
-	err := g.authorize(ctx, gqlReq.Header)
-	// If we can't authorize the request then we are already logged out
+	gqlReq, err := g.NewRequestWithAuth(`mutation { logout }`)
 	if err != nil {
-		return nil
+		return err
 	}
 
-	if err := g.gqlClient.Run(ctx, gqlReq, nil); err != nil {
+	if err := gqlReq.Run(ctx, nil); err != nil {
 		return err
 	}
 
