@@ -228,8 +228,8 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 		Label: "Select Environment",
 		Items: environments,
 		Templates: &promptui.SelectTemplates{
-			Active:   `{{ .Name | underline }}`,
-			Inactive: `{{ .Name }}`,
+			Active:   `▸ {{ .Name | underline }}`,
+			Inactive: `  {{ .Name }}`,
 			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", promptui.IconGood),
 		},
 	}
