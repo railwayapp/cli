@@ -242,8 +242,8 @@ func PromptPlugins(plugins []string) (string, error) {
 		Label: "Select Plugin",
 		Items: plugins,
 		Templates: &promptui.SelectTemplates{
-			Active:   `{{ . | underline }}`,
-			Inactive: `{{ . }}`,
+			Active:   `▸ {{ . | underline }}`,
+			Inactive: `  {{ . }}`,
 			Selected: fmt.Sprintf("%s Plugin: {{ . | blue | bold }} ", promptui.IconGood),
 		},
 	}
