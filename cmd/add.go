@@ -17,13 +17,18 @@ func (h *Handler) Add(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
-	selection, err := ui.PromptPlugins(plugins)
+	selectedPlugin, err := ui.PromptPlugins(plugins)
 	if err != nil {
 		return err
 	}
+	ui.StartSpinner(&ui.SpinnerCfg{
+		Message: fmt.Sprintf("Adding %s plugin", selectedPlugin),
+	})
+	defer ui.StopSpinner("")
+
 	plugin, err := h.ctrl.CreatePlugin(ctx, &entity.CreatePluginRequest{
 		ProjectID: projectCfg.Project,
-		Plugin:    selection,
+		Plugin:    selectedPlugin,
 	})
 	if err != nil {
 		return err
