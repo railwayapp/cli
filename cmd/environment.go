@@ -42,7 +42,7 @@ func (h *Handler) Environment(ctx context.Context, req *entity.CommandRequest) e
 			if err != nil {
 				return err
 			}
-			fmt.Println("Created Environment ✅\nEnvironment: ", ui.BlueText(ui.Bold(name).String()))
+			fmt.Printf("Created Environment %s\nEnvironment: %s\n", promptui.IconGood, ui.BlueText(ui.Bold(name).String()))
 		}
 	} else {
 		// Existing environment selector
