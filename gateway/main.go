@@ -5,11 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/pkg/errors"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/pkg/errors"
 
 	configs "github.com/railwayapp/cli/configs"
 )
@@ -27,6 +28,9 @@ func GetHost() string {
 	baseURL := "https://backboard.railway.app"
 	if configs.IsDevMode() {
 		baseURL = "http://localhost:8082"
+	}
+	if configs.IsStagingMode() {
+		baseURL = "https://backboard.railway-staging.app"
 	}
 	return baseURL
 }
