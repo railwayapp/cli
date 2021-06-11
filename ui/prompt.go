@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/manifoldco/promptui"
@@ -15,17 +16,12 @@ type Prompt string
 type Selection string
 
 const (
-	InitPrompt       Prompt    = "What would you like to do?"
-	InitNew          Selection = "Create new Project"
-	InitFromTemplate Selection = "Select starter template"
+	InitNew          Selection = "Empty Project"
+	InitFromTemplate Selection = "Starter Template"
 )
 
 func PromptInit() (Selection, error) {
-	selectPrompt := promptui.Select{
-		Label: InitPrompt,
-		Items: []Selection{InitNew, InitFromTemplate},
-	}
-	_, selection, err := selectPrompt.Run()
+	_, selection, err := selectString("Starting Point", []string{string(InitNew), string(InitFromTemplate)})
 	return Selection(selection), err
 }
 
@@ -38,7 +34,7 @@ func PromptText(text string) (string, error) {
 
 func hasTeams(projects []*entity.Project) bool {
 	teamKeys := make(map[string]bool)
-	teams := []string{}
+	teams := make([]string, 0)
 
 	for _, project := range projects {
 		if project.Team != nil {
@@ -54,24 +50,21 @@ func hasTeams(projects []*entity.Project) bool {
 
 func promptTeams(projects []*entity.Project) (*string, error) {
 	if hasTeams(projects) {
-		tm := make(map[string]bool)
+		teams := make([]string, 0)
+		teamCheck := make(map[string]bool)
 		for _, project := range projects {
-			if project.Team != nil {
-				tm[*project.Team] = true
+			if project.Team == nil {
+				continue
+			}
+
+			// Ensure teams are only appended once by checking teamCheck
+			if _, hasSeenTeam := teamCheck[*project.Team]; !hasSeenTeam {
+				teams = append(teams, *project.Team)
+				teamCheck[*project.Team] = true
 			}
 		}
-		teams := make([]string, 0)
-		for team := range tm {
-			teams = append(teams, team)
-		}
-		prompt := promptui.Select{
-			Label: "Select Team",
-			Items: teams,
-			Templates: &promptui.SelectTemplates{
-				Selected: fmt.Sprintf("%s Team: {{ .Name | green | bold }} ", promptui.IconGood),
-			},
-		}
-		_, team, err := prompt.Run()
+
+		_, team, err := selectString("Team", teams)
 		return &team, err
 	}
 
@@ -96,16 +89,9 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 		}
 	}
 
-	prompt := promptui.Select{
-		Label: "Select Project",
-		Items: filteredProjects,
-		Templates: &promptui.SelectTemplates{
-			Active:   `{{ .Name | underline }}`,
-			Inactive: `{{ .Name }}`,
-			Selected: fmt.Sprintf("%s Project: {{ .Name | magenta | bold }} ", promptui.IconGood),
-		},
-	}
-	i, _, err := prompt.Run()
+	i, _, err := selectCustom("Project", filteredProjects, func(index int) string {
+		return filteredProjects[index].Name
+	})
 	return filteredProjects[i], err
 }
 
@@ -131,25 +117,14 @@ func PromptStarterTemplates() (*entity.Template, error) {
 
 	StopSpinner("")
 
-	prompt := promptui.Select{
-		Label: "Select Starter Template",
-		Items: data.Templates,
-		Templates: &promptui.SelectTemplates{
-			Active:   fmt.Sprintf("%s {{ .Text | underline }}", promptui.IconSelect),
-			Inactive: `  {{ .Text }}`,
-			Selected: fmt.Sprintf("%s Template: {{ .Text | magenta | bold }} ", GreenText("✔")),
-		},
-	}
-	i, _, err := prompt.Run()
+	i, _, err := selectCustom("Starter", data.Templates, func(index int) string {
+		return data.Templates[index].Text
+	})
 	return &data.Templates[i], err
 }
 
 func PromptIsRepoPrivate() (bool, error) {
-	prompt := promptui.Select{
-		Label: "Select repo visibility",
-		Items: []string{"Public", "Private"},
-	}
-	_, visibility, err := prompt.Run()
+	_, visibility, err := selectString("Visibility", []string{"Public", "Private"})
 	return visibility == "Private", err
 }
 
@@ -205,16 +180,7 @@ func PromptGitHubScopes(scopes []string) (string, error) {
 		return scopes[0], nil
 	}
 
-	prompt := promptui.Select{
-		Label: "Select GitHub Owner",
-		Items: scopes,
-		Templates: &promptui.SelectTemplates{
-			Active:   fmt.Sprintf("%s {{ . | underline }}", promptui.IconSelect),
-			Inactive: `  {{ . }}`,
-			Selected: fmt.Sprintf("%s GitHub: {{ . | magenta | bold }} ", GreenText("✔")),
-		},
-	}
-	_, scope, err := prompt.Run()
+	_, scope, err := selectString("GitHub Owner", scopes)
 	return scope, err
 }
 
@@ -224,30 +190,18 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 		fmt.Printf("%s Environment: %s\n", promptui.IconGood, BlueText(environment.Name))
 		return environment, nil
 	}
-	prompt := promptui.Select{
-		Label: "Select Environment",
-		Items: environments,
-		Templates: &promptui.SelectTemplates{
-			Active:   `{{ .Name | underline }}`,
-			Inactive: `{{ .Name }}`,
-			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", promptui.IconGood),
-		},
+	i, _, err := selectCustom("Environment", environments, func(index int) string {
+		return environments[index].Name
+	})
+	if err != nil {
+		return nil, err
 	}
-	i, _, err := prompt.Run()
-	return environments[i], err
+
+	return environments[i], nil
 }
 
 func PromptPlugins(plugins []string) (string, error) {
-	prompt := promptui.Select{
-		Label: "Select Plugin",
-		Items: plugins,
-		Templates: &promptui.SelectTemplates{
-			Active:   `{{ . | underline }}`,
-			Inactive: `{{ . }}`,
-			Selected: fmt.Sprintf("%s Plugin: {{ . | blue | bold }} ", promptui.IconGood),
-		},
-	}
-	i, _, err := prompt.Run()
+	i, _, err := selectString("Plugin", plugins)
 	return plugins[i], err
 }
 
@@ -281,4 +235,60 @@ func validatorRequired(errorMsg string) func(s string) error {
 		}
 		return nil
 	}
+}
+
+// selectWrapper wraps an arbitrary stringify function + associated index, used by the select
+// helpers so it can accept an arbitrary slice. It also implements the Stringer interface so
+// it can automatically be printed by %s
+type selectItemWrapper struct {
+	stringify func(index int) string
+	index     int
+}
+
+// String adheres to the Stringer interface and returns the string representation from the
+// stringify function
+func (w selectItemWrapper) String() string {
+	return w.stringify(w.index)
+}
+
+// selectString prompts the user to select a string from the provided slice
+func selectString(label string, items []string) (int, string, error) {
+	return selectCustom(label, items, func(index int) string {
+		return fmt.Sprintf("%v", items[index])
+	})
+}
+
+// selectCustom prompts the user to select an item from the provided slice. A stringify function is passed, which
+// is responsible for returning a label for the item, when called.
+func selectCustom(label string, items interface{}, stringify func(index int) string) (int, string, error) {
+	v := reflect.ValueOf(items)
+	if v.Kind() != reflect.Slice {
+		panic(fmt.Errorf("forEachValue: expected slice type, found %q", v.Kind().String()))
+	}
+	wrappedItems := make([]selectItemWrapper, 0)
+	for i := 0; i < v.Len(); i++ {
+		wrappedItems = append(wrappedItems, selectItemWrapper{
+			stringify: stringify,
+			index:     i,
+		})
+	}
+
+	options := &promptui.Select{
+		Label: fmt.Sprintf("Select %s", label),
+		Items: wrappedItems,
+		Size:  10,
+		Templates: &promptui.SelectTemplates{
+			Active:   fmt.Sprintf(`%s {{ . | underline }}`, promptui.IconSelect),
+			Inactive: `  {{ . }}`,
+			Selected: fmt.Sprintf("%s %s: {{ . | magenta | bold }} ", promptui.IconGood, label),
+		},
+		Searcher: func(input string, i int) bool {
+			return strings.Contains(
+				strings.ToLower(stringify(i)),
+				strings.ToLower(input),
+			)
+		},
+	}
+
+	return options.Run()
 }
