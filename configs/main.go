@@ -89,6 +89,10 @@ func New() *Configs {
 		rootConfigPartialPath = ".railway/dev-config.json"
 	}
 
+	if IsStagingMode() {
+		rootConfigPartialPath = ".railway/staging-config.json"
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		panic(err)
