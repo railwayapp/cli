@@ -28,6 +28,11 @@ func IsDevMode() bool {
 	return exists && environment == "develop"
 }
 
+func IsStagingMode() bool {
+	environment, exists := os.LookupEnv("RAILWAY_ENV")
+	return exists && environment == "staging"
+}
+
 func GetRailwayURL() string {
 	url, exists := os.LookupEnv("RAILWAY_URL")
 	if !exists {
