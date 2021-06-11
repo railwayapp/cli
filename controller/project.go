@@ -11,6 +11,11 @@ func (c *Controller) GetProject(ctx context.Context, projectId string) (*entity.
 	return c.gtwy.GetProject(ctx, projectId)
 }
 
+// GetProjectByName returns a project for the user of name projectName, error otherwise
+func (c *Controller) GetProjectByName(ctx context.Context, projectName string) (*entity.Project, error) {
+	return c.gtwy.GetProjectByName(ctx, projectName)
+}
+
 // CreateProject creates a project specified by the project request, error otherwise
 func (c *Controller) CreateProject(ctx context.Context, req *entity.CreateProjectRequest) (*entity.Project, error) {
 	return c.gtwy.CreateProject(ctx, req)

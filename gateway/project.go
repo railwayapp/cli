@@ -71,6 +71,49 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 	return resp.Project, nil
 }
 
+func (g *Gateway) GetProjectByName(ctx context.Context, projectName string) (*entity.Project, error) {
+	gqlReq, err := g.NewRequestWithAuth(`
+		query ($projectName: String!) {
+			me {
+				projects(where: { name: { equals: $projectName } }) {
+					id,
+					name,
+					plugins {
+						id,
+						name,
+					},
+					environments {
+						id,
+						name
+					},
+				}
+			}
+		}
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	gqlReq.Var("projectName", projectName)
+
+	var resp struct {
+		Me struct {
+			Projects []*entity.Project `json:"projects"`
+		} `json:"me"`
+	}
+
+	if err := gqlReq.Run(ctx, &resp); err != nil {
+		return nil, errors.ProjectConfigNotFound
+	}
+
+	projects := resp.Me.Projects
+	if (len(projects) == 0) {
+		return nil, errors.ProjectConfigNotFound
+	}
+
+	return projects[0], nil
+}
+
 func (g *Gateway) CreateProject(ctx context.Context, req *entity.CreateProjectRequest) (*entity.Project, error) {
 	gqlReq, err := g.NewRequestWithAuth(`
 		mutation($name: String) {
