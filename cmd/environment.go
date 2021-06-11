@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/manifoldco/promptui"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
 )
@@ -21,17 +22,30 @@ func (h *Handler) Environment(ctx context.Context, req *entity.CommandRequest) e
 
 	var environment *entity.Environment
 	if len(req.Args) > 0 {
-		// Create new environment
-		environment, err = h.ctrl.CreateEnvironment(ctx, &entity.CreateEnvironmentRequest{
-			Name:      req.Args[0],
-			ProjectID: project.Id,
-		})
-		if err != nil {
-			return err
+		var name = req.Args[0]
+
+		// Look for existing environment with name
+		for _, projectEnvironment := range project.Environments {
+			if name == projectEnvironment.Name {
+				environment = projectEnvironment
+			}
 		}
-		fmt.Println("Created Environment ✅\nEnvironment: ", ui.BlueText(ui.Bold(req.Args[0]).String()))
+
+		if (environment != nil) {
+			fmt.Printf("%s Environment: %s\n", promptui.IconGood, ui.BlueText(environment.Name))
+		} else {
+			// Create new environment
+			environment, err = h.ctrl.CreateEnvironment(ctx, &entity.CreateEnvironmentRequest{
+				Name:      name,
+				ProjectID: project.Id,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Created Environment %s\nEnvironment: %s\n", promptui.IconGood, ui.BlueText(ui.Bold(name).String()))
+		}
 	} else {
-		// Existing environment
+		// Existing environment selector
 		environment, err = ui.PromptEnvironments(project.Environments)
 		if err != nil {
 			return err

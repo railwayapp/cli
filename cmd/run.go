@@ -27,7 +27,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		}
 	}
 
-	projectId, err := h.cfg.GetProject()
+	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		// Create new environment for this run
 		environment, err = h.ctrl.CreateEphemeralEnvironment(ctx, &entity.CreateEphemeralEnvironmentRequest{
 			Name:              environmentName,
-			ProjectID:         projectId,
+			ProjectID:         projectCfg.Project,
 			BaseEnvironmentID: environment.Id,
 		})
 		if err != nil {
@@ -96,7 +96,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		fmt.Println("Tearing down ephemeral environment...")
 		err := h.ctrl.DeleteEnvironment(ctx, &entity.DeleteEnvironmentRequest{
 			EnvironmentId: environment.Id,
-			ProjectID:     projectId,
+			ProjectID:     projectCfg.Project,
 		})
 		if err != nil {
 			return err

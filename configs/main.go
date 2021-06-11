@@ -28,6 +28,11 @@ func IsDevMode() bool {
 	return exists && environment == "develop"
 }
 
+func IsStagingMode() bool {
+	environment, exists := os.LookupEnv("RAILWAY_ENV")
+	return exists && environment == "staging"
+}
+
 func GetRailwayURL() string {
 	url, exists := os.LookupEnv("RAILWAY_URL")
 	if !exists {
@@ -82,6 +87,10 @@ func New() *Configs {
 	rootConfigPartialPath := ".railway/config.json"
 	if IsDevMode() {
 		rootConfigPartialPath = ".railway/dev-config.json"
+	}
+
+	if IsStagingMode() {
+		rootConfigPartialPath = ".railway/staging-config.json"
 	}
 
 	homeDir, err := os.UserHomeDir()
