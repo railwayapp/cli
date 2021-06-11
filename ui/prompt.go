@@ -228,8 +228,8 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 		Label: "Select Environment",
 		Items: environments,
 		Templates: &promptui.SelectTemplates{
-			Active:   `{{ .Name | underline }}`,
-			Inactive: `{{ .Name }}`,
+			Active:   `▸ {{ .Name | underline }}`,
+			Inactive: `  {{ .Name }}`,
 			Selected: fmt.Sprintf("%s Environment: {{ .Name | blue | bold }} ", promptui.IconGood),
 		},
 	}
@@ -242,8 +242,8 @@ func PromptPlugins(plugins []string) (string, error) {
 		Label: "Select Plugin",
 		Items: plugins,
 		Templates: &promptui.SelectTemplates{
-			Active:   `{{ . | underline }}`,
-			Inactive: `{{ . }}`,
+			Active:   `▸ {{ . | underline }}`,
+			Inactive: `  {{ . }}`,
 			Selected: fmt.Sprintf("%s Plugin: {{ . | blue | bold }} ", promptui.IconGood),
 		},
 	}
