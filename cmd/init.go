@@ -150,13 +150,8 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	return h.ctrl.OpenProjectDeploymentsInBrowser(ctx, project.Id)
 }
 
-func (h *Handler) saveProjectWithID(ctx context.Context, projectID string) error {
-	project, err := h.ctrl.GetProject(ctx, projectID)
-	if err != nil {
-		return err
-	}
-
-	err = h.cfg.SetNewProject(project.Id)
+func (h *Handler) setProject(ctx context.Context, project *entity.Project) error {
+	err := h.cfg.SetNewProject(project.Id)
 	if err != nil {
 		return err
 	}

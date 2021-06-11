@@ -6,13 +6,29 @@ import (
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
+	"github.com/railwayapp/cli/uuid"
 )
 
 func (h *Handler) Link(ctx context.Context, req *entity.CommandRequest) error {
 	if len(req.Args) > 0 {
 		// projectID provided as argument
-		projectID := req.Args[0]
-		return h.saveProjectWithID(ctx, projectID)
+		arg := req.Args[0]
+
+		if (uuid.IsValidUUID(arg)) {
+			project, err := h.ctrl.GetProject(ctx, arg)
+			if (err != nil) {
+				return err
+			}
+
+			return h.setProject(ctx, project)
+		}
+
+		project, err := h.ctrl.GetProjectByName(ctx, arg)
+		if (err != nil) {
+			return err
+		}
+
+		return h.setProject(ctx, project)
 	}
 
 	isLoggedIn, err := h.ctrl.IsLoggedIn(ctx)
@@ -43,22 +59,7 @@ func (h *Handler) linkFromAccount(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	err = h.cfg.SetNewProject(project.Id)
-	if err != nil {
-		return err
-	}
-
-	environment, err := ui.PromptEnvironments(project.Environments)
-	if err != nil {
-		return err
-	}
-
-	err = h.cfg.SetEnvironment(environment.Id)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return h.setProject(ctx, project)
 }
 
 func (h *Handler) linkFromID(ctx context.Context, req *entity.CommandRequest) error {
@@ -67,5 +68,10 @@ func (h *Handler) linkFromID(ctx context.Context, req *entity.CommandRequest) er
 		return err
 	}
 
-	return h.saveProjectWithID(ctx, projectID)
+	project, err := h.ctrl.GetProject(ctx, projectID)
+	if (err != nil) {
+		return err
+	}
+
+	return h.setProject(ctx, project)
 }
