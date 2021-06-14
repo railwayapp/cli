@@ -20,7 +20,7 @@ import (
 
 const (
 	baseRailwayURL   string = "https://railway.app"
-	baseStagingURL   string = "https://railway-staging.app"
+	baseStagingURL   string = "https://railway-web-git-cooper-magic-port-railwayapp.vercel.app"
 	baseLocalhostURL string = "http://localhost:3000"
 )
 

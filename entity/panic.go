@@ -6,4 +6,5 @@ type PanicRequest struct {
 	Stacktrace    string
 	ProjectID     string
 	EnvironmentID string
+	Version       string
 }
