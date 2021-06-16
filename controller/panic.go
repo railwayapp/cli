@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
 )
@@ -20,6 +21,7 @@ func (c *Controller) SendPanic(ctx context.Context, panicErr string, stacktrace 
 			Stacktrace:    stacktrace,
 			ProjectID:     "",
 			EnvironmentID: "",
+			Version:       constants.Version,
 		})
 
 	}
@@ -29,6 +31,7 @@ func (c *Controller) SendPanic(ctx context.Context, panicErr string, stacktrace 
 		Stacktrace:    stacktrace,
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
+		Version:       constants.Version,
 	})
 
 }
