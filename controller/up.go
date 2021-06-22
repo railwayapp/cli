@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -88,15 +89,15 @@ func compress(src string, buf io.Writer) error {
 	return nil
 }
 
-func (c *Controller) Up(ctx context.Context) (string, error) {
+func (c *Controller) Up(ctx context.Context) (*entity.UpResponse, error) {
 	projectConfig, err := c.GetProjectConfigs(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	var buf bytes.Buffer
 	if err := compress(".", &buf); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
@@ -105,7 +106,12 @@ func (c *Controller) Up(ctx context.Context) (string, error) {
 		EnvironmentID: projectConfig.Environment,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return res.URL, nil
+
+	return res, nil
+}
+
+func (c *Controller) GetFullUrlFromStaticUrl(staticUrl string) string {
+	return fmt.Sprintf("https://%s", staticUrl)
 }
