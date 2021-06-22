@@ -57,5 +57,6 @@ func (h *Handler) Environment(ctx context.Context, req *entity.CommandRequest) e
 		return err
 	}
 
+	fmt.Printf("%s ProTip: You can view the active environment by running %s\n", promptui.IconInitial, ui.BlueText("railway status"))
 	return err
 }
