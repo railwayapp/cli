@@ -10,4 +10,5 @@ type UpRequest struct {
 
 type UpResponse struct {
 	URL string
+	DeploymentDomain string
 }

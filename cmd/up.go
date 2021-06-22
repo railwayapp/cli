@@ -13,11 +13,11 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Laying tracks in the clouds...",
 	})
-	url, err := h.ctrl.Up(ctx)
+	res, err := h.ctrl.Up(ctx)
 	if err != nil {
 		return err
 	} else {
-		ui.StopSpinner(fmt.Sprintf("☁️ Build Logs available at %s\n", ui.GrayText(url)))
+		ui.StopSpinner(fmt.Sprintf("☁️ Build logs available at %s\n", ui.GrayText(res.URL)))
 	}
 	detach, err := req.Cmd.Flags().GetBool("detach")
 	if err != nil {
@@ -42,7 +42,10 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	fmt.Printf("☁️ Deploy Logs available at %s\n\n", ui.GrayText(url))
-	fmt.Printf("OR run `railway logs` to tail them here\n")
+	fmt.Printf("☁️ Deployment logs available at %s\n", ui.GrayText(res.URL))
+	fmt.Printf("OR run `railway logs` to tail them here\n\n")
+
+	fmt.Printf("☁️ Deployment live at %s\n", ui.GrayText(h.ctrl.GetFullUrlFromStaticUrl(res.DeploymentDomain)))
+
 	return nil
 }
