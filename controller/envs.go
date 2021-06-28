@@ -102,6 +102,43 @@ func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.En
 	})
 }
 
+func (c *Controller) UpsertEnvsForPlugin(ctx context.Context, envs *entity.Envs) error {
+	projectCfg, err := c.GetProjectConfigs(ctx)
+	if err != nil {
+		return err
+	}
+
+	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
+		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
+		confirm, err := ui.PromptYesNo("Continue updating variables?")
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+	}
+
+	project, err := c.GetProject(ctx, projectCfg.Project)
+	if err != nil {
+		return err
+	}
+
+	pluginID := ""
+	for _, p := range project.Plugins {
+		if p.Name == "env" {
+			pluginID = p.ID
+		}
+	}
+
+	return c.gtwy.UpsertVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
+		ProjectID:     projectCfg.Project,
+		EnvironmentID: projectCfg.Environment,
+		PluginID:      pluginID,
+		Envs:          envs,
+	})
+}
+
 func (c *Controller) GetEnvsForEnvPlugin(ctx context.Context) (*entity.Envs, error) {
 	// Get envs through project token if it exists
 	if c.cfg.RailwayProductionToken != "" {

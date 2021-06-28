@@ -95,3 +95,47 @@ func (g *Gateway) UpdateEnvsForPlugin(ctx context.Context, req *entity.UpdateEnv
 
 	return resp.Envs, nil
 }
+
+func (g *Gateway) UpsertVariablesFromObject(ctx context.Context, req *entity.UpdateEnvsRequest) error {
+	gqlReq, err := g.NewRequestWithAuth(`
+	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $variables: Json!) {
+				upsertVariablesFromObject(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, variables: $variables)
+	  	}
+	`)
+	if err != nil {
+		return err
+	}
+
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("environmentId", req.EnvironmentID)
+	gqlReq.Var("pluginId", req.PluginID)
+	gqlReq.Var("variables", req.Envs)
+
+	if err := gqlReq.Run(ctx, nil); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (g *Gateway) DeleteVariable(ctx context.Context, req *entity.DeleteVariableRequest) error {
+	gqlReq, err := g.NewRequestWithAuth(`
+	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $variables: Json!) {
+				upsertVariablesFromObject(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, variables: $variables)
+	  	}
+	`)
+	if err != nil {
+		return err
+	}
+
+	gqlReq.Var("projectId", req.ProjectID)
+	gqlReq.Var("environmentId", req.EnvironmentID)
+	gqlReq.Var("pluginId", req.PluginID)
+	gqlReq.Var("name", req.Name)
+
+	if err := gqlReq.Run(ctx, nil); err != nil {
+		return err
+	}
+
+	return nil
+}
