@@ -9,7 +9,7 @@ import (
 func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*entity.Envs, error) {
 	gqlReq, err := g.NewRequestWithAuth(`
 		query ($projectId: String!, $environmentId: String!) {
-			allEnvsForEnvironment(projectId: $projectId, environmentId: $environmentId)
+			decryptedVariables(projectId: $projectId, environmentId: $environmentId)
 		}
 	`)
 	if err != nil {
@@ -20,54 +20,11 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	gqlReq.Var("environmentId", req.EnvironmentID)
 
 	var resp struct {
-		Envs *entity.Envs `json:"allEnvsForEnvironment"`
+		Envs *entity.Envs `json:"decryptedVariables"`
 	}
 	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err
 	}
-	return resp.Envs, nil
-}
-
-func (g *Gateway) GetEnvsForPlugin(ctx context.Context, req *entity.GetEnvsForPluginRequest) (*entity.Envs, error) {
-	gqlReq, err := g.NewRequestWithAuth(`
-		query ($projectId: String!, $environmentId: String!, $pluginId: String!) {
-			allEnvsForPlugin(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId)
-		}
-	`)
-	if err != nil {
-		return nil, err
-	}
-
-	gqlReq.Var("projectId", req.ProjectID)
-	gqlReq.Var("environmentId", req.EnvironmentID)
-	gqlReq.Var("pluginId", req.PluginID)
-
-	var resp struct {
-		Envs *entity.Envs `json:"allEnvsForPlugin"`
-	}
-	if err := gqlReq.Run(ctx, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Envs, nil
-}
-
-func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, error) {
-	gqlReq, err := g.NewRequestWithAuth(`
-	  	query {
-			allEnvsForProjectToken
-	  	}
-	`)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp struct {
-		Envs *entity.Envs `json:"allEnvsForProjectToken"`
-	}
-	if err := gqlReq.Run(ctx, &resp); err != nil {
-		return nil, err
-	}
-
 	return resp.Envs, nil
 }
 
