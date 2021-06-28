@@ -57,7 +57,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		updatedEnvNames = append(updatedEnvNames, key)
 	}
 
-	err := h.ctrl.UpsertEnvsForPlugin(ctx, variables)
+	err := h.ctrl.UpsertEnvsForEnvPlugin(ctx, variables)
 
 	if err != nil {
 		return err
@@ -80,18 +80,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 }
 
 func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandRequest) error {
-	envs, err := h.ctrl.GetEnvsForEnvPlugin(ctx)
-	if err != nil {
-		return err
-	}
-
-	updatedEnvNames := make([]string, 0)
-	for _, key := range req.Args {
-		updatedEnvNames = append(updatedEnvNames, key)
-		envs.Delete(key)
-	}
-
-	_, err = h.ctrl.UpdateEnvsForEnvPlugin(ctx, envs)
+	err := h.ctrl.DeleteEnvsForEnvPlugin(ctx, req.Args)
 	if err != nil {
 		return err
 	}
@@ -101,7 +90,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
+	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(req.Args, ", "), environment.Name)))
 
 	err = h.redeployAfterVariablesChange(ctx, environment)
 	if err != nil {

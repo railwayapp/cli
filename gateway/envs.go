@@ -71,31 +71,6 @@ func (g *Gateway) GetEnvsWithProjectToken(ctx context.Context) (*entity.Envs, er
 	return resp.Envs, nil
 }
 
-func (g *Gateway) UpdateEnvsForPlugin(ctx context.Context, req *entity.UpdateEnvsRequest) (*entity.Envs, error) {
-	gqlReq, err := g.NewRequestWithAuth(`
-	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $envs: Json!) {
-			updateEnvsForPlugin(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, envs: $envs)
-	  	}
-	`)
-	if err != nil {
-		return nil, err
-	}
-
-	gqlReq.Var("projectId", req.ProjectID)
-	gqlReq.Var("environmentId", req.EnvironmentID)
-	gqlReq.Var("pluginId", req.PluginID)
-	gqlReq.Var("envs", req.Envs)
-
-	var resp struct {
-		Envs *entity.Envs `json:"updateEnvsForPlugin"`
-	}
-	if err := gqlReq.Run(ctx, &resp); err != nil {
-		return nil, err
-	}
-
-	return resp.Envs, nil
-}
-
 func (g *Gateway) UpsertVariablesFromObject(ctx context.Context, req *entity.UpdateEnvsRequest) error {
 	gqlReq, err := g.NewRequestWithAuth(`
 	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $variables: Json!) {
@@ -120,8 +95,8 @@ func (g *Gateway) UpsertVariablesFromObject(ctx context.Context, req *entity.Upd
 
 func (g *Gateway) DeleteVariable(ctx context.Context, req *entity.DeleteVariableRequest) error {
 	gqlReq, err := g.NewRequestWithAuth(`
-	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $variables: Json!) {
-				upsertVariablesFromObject(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, variables: $variables)
+	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $name: String!) {
+				deleteVariable(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, name: $name)
 	  	}
 	`)
 	if err != nil {

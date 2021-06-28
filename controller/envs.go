@@ -102,22 +102,13 @@ func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.En
 	})
 }
 
-func (c *Controller) UpsertEnvsForPlugin(ctx context.Context, envs *entity.Envs) error {
+func (c *Controller) UpsertEnvsForEnvPlugin(ctx context.Context, envs *entity.Envs) error {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
 
-	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
-		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
-		confirm, err := ui.PromptYesNo("Continue updating variables?")
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-	}
+	c.PromptIfProtectedEnvironment(ctx)
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
@@ -137,6 +128,39 @@ func (c *Controller) UpsertEnvsForPlugin(ctx context.Context, envs *entity.Envs)
 		PluginID:      pluginID,
 		Envs:          envs,
 	})
+}
+
+func (c *Controller) DeleteEnvsForEnvPlugin(ctx context.Context, names []string) error {
+	projectCfg, err := c.GetProjectConfigs(ctx)
+	if err != nil {
+		return err
+	}
+
+	c.PromptIfProtectedEnvironment(ctx)
+
+	project, err := c.GetProject(ctx, projectCfg.Project)
+	if err != nil {
+		return err
+	}
+
+	pluginID := ""
+	for _, p := range project.Plugins {
+		if p.Name == "env" {
+			pluginID = p.ID
+		}
+	}
+
+	// Delete each variable one by one
+	for _, name := range names {
+		c.gtwy.DeleteVariable(ctx, &entity.DeleteVariableRequest{
+			ProjectID:     projectCfg.Project,
+			EnvironmentID: projectCfg.Environment,
+			PluginID:      pluginID,
+			Name:          name,
+		})
+	}
+
+	return nil
 }
 
 func (c *Controller) GetEnvsForEnvPlugin(ctx context.Context) (*entity.Envs, error) {
