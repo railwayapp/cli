@@ -71,7 +71,10 @@ func (c *Controller) UpsertEnvsForEnvPlugin(ctx context.Context, envs *entity.En
 		return err
 	}
 
-	c.PromptIfProtectedEnvironment(ctx)
+	err = c.PromptIfProtectedEnvironment(ctx)
+	if err != nil {
+		return err
+	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
@@ -99,7 +102,10 @@ func (c *Controller) DeleteEnvsForEnvPlugin(ctx context.Context, names []string)
 		return err
 	}
 
-	c.PromptIfProtectedEnvironment(ctx)
+	err = c.PromptIfProtectedEnvironment(ctx)
+	if err != nil {
+		return err
+	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
@@ -115,12 +121,16 @@ func (c *Controller) DeleteEnvsForEnvPlugin(ctx context.Context, names []string)
 
 	// Delete each variable one by one
 	for _, name := range names {
-		c.gtwy.DeleteVariable(ctx, &entity.DeleteVariableRequest{
+		err = c.gtwy.DeleteVariable(ctx, &entity.DeleteVariableRequest{
 			ProjectID:     projectCfg.Project,
 			EnvironmentID: projectCfg.Environment,
 			PluginID:      pluginID,
 			Name:          name,
 		})
+
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
