@@ -51,6 +51,9 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	})
 
 	starters, err := h.ctrl.GetStarters(ctx)
+	if err != nil {
+		return err
+	}
 	ui.StopSpinner("")
 
 	template, err := ui.PromptStarterTemplates(starters)
