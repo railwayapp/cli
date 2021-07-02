@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/railwayapp/cli/entity"
@@ -44,15 +46,52 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 }
 
 func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandRequest) error {
-	// Prompt for a template to use
+	ui.StartSpinner(&ui.SpinnerCfg{
+		Message: "Fetching starter templates",
+	})
 
-	template, err := ui.PromptStarterTemplates()
+	starters, err := h.ctrl.GetStarters(ctx)
+	ui.StopSpinner("")
+
+	template, err := ui.PromptStarterTemplates(starters)
 	if err != nil {
 		return err
 	}
 
-	// Select GitHub owner
+	// Parse to get query params
+	parsedUrl, err := url.ParseQuery(template.Url)
+	if err != nil {
+		return err
+	}
 
+	optionalEnvVars := parsedUrl.Get("optionalEnvs")
+	envVars := strings.Split(parsedUrl.Get("envs"), ",")
+	plugins := strings.Split(parsedUrl.Get("plugins"), ",")
+
+	// Prepare environment variables for prompt
+	starterEnvVars := make([]*entity.StarterEnvVar, 0)
+	for _, variable := range envVars {
+		if (variable != "") {
+			var envVar = new(entity.StarterEnvVar)
+			envVar.Name = variable
+			envVar.Desc = parsedUrl.Get(variable + "Desc")
+			envVar.Default = parsedUrl.Get(variable + "Default")
+			envVar.Optional = strings.Contains(optionalEnvVars, variable)
+
+			starterEnvVars = append(starterEnvVars, envVar)
+		}
+	}
+
+	// Prepare plugins for creation
+	starterPlugins := make([]string, 0)
+	for _, plugin := range plugins {
+		if (plugin != "") {
+			starterPlugins = append(starterPlugins, plugin)
+		}
+	}
+
+
+	// Select GitHub owner
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Fetching GitHub scopes",
 	})
@@ -71,7 +110,6 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	}
 
 	// Enter project name
-
 	name, err := ui.PromptProjectName()
 	if err != nil {
 		return err
@@ -83,23 +121,21 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	}
 
 	// Prompt for env vars (if required)
-
-	variables, err := ui.PromptEnvVars(template.EnvVars)
+	variables, err := ui.PromptEnvVars(starterEnvVars)
 	if err != nil {
 		return err
 	}
 
 	// Create Railway project
-
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Creating project",
 	})
 	creationResult, err := h.ctrl.CreateProjectFromTemplate(ctx, &entity.CreateProjectFromTemplateRequest{
 		Name:      name,
 		Owner:     owner,
-		Template:  template.Href,
+		Template:  template.Source,
 		IsPrivate: isPrivate,
-		Plugins:   template.Plugins,
+		Plugins:   starterPlugins,
 		Variables: variables,
 	})
 	if err != nil {
@@ -111,9 +147,9 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 		return err
 	}
 
-	// Wait for workflow to complete
-
 	ui.StopSpinner("")
+
+	// Wait for workflow to complete
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Deploying project",
 	})
@@ -135,7 +171,6 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	}
 
 	// Select environment to activate
-
 	environment, err := ui.PromptEnvironments(project.Environments)
 	if err != nil {
 		return err
