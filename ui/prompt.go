@@ -1,10 +1,8 @@
 package ui
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"strings"
 
@@ -95,32 +93,13 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 	return filteredProjects[i], err
 }
 
-// PromptStarterTemplates fetches available templates and prompts the user to select one
-func PromptStarterTemplates() (*entity.Template, error) {
-	StartSpinner(&SpinnerCfg{
-		Message: "Fetching starter templates",
+// PromptStarterTemplates prompts the user to select one of the provided starter templates
+func PromptStarterTemplates(starters []*entity.Starter) (*entity.Starter, error) {
+	i, _, err := selectCustom("Starter", starters, func(index int) string {
+		return starters[index].Title
 	})
-	resp, err := http.Get("https://raw.githubusercontent.com/railwayapp/starters/master/featured.json")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
 
-	var data struct {
-		Templates []entity.Template `json:"examples"`
-	}
-	dec := json.NewDecoder(resp.Body)
-	err = dec.Decode(&data)
-	if err != nil {
-		return nil, err
-	}
-
-	StopSpinner("")
-
-	i, _, err := selectCustom("Starter", data.Templates, func(index int) string {
-		return data.Templates[index].Text
-	})
-	return &data.Templates[i], err
+	return starters[i], err
 }
 
 func PromptIsRepoPrivate() (bool, error) {
@@ -128,7 +107,7 @@ func PromptIsRepoPrivate() (bool, error) {
 	return visibility == "Private", err
 }
 
-func PromptEnvVars(envVars []entity.TemplateEnvVar) (map[string]string, error) {
+func PromptEnvVars(envVars []*entity.StarterEnvVar) (map[string]string, error) {
 	variables := make(map[string]string)
 	if len(envVars) > 0 {
 		fmt.Printf("\n%s\n", Bold("Environment Variables"))
@@ -137,7 +116,7 @@ func PromptEnvVars(envVars []entity.TemplateEnvVar) (map[string]string, error) {
 	for _, envVar := range envVars {
 		prompt := promptui.Prompt{
 			Label:   envVar.Name,
-			Default: envVar.DefaultValue,
+			Default: envVar.Default,
 		}
 		if envVar.Optional {
 			fmt.Printf("\n%s %s\n", envVar.Desc, GrayText("(Optional)"))
