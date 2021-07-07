@@ -42,27 +42,23 @@ func (h *Handler) VariablesGet(ctx context.Context, req *entity.CommandRequest) 
 }
 
 func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) error {
-	envs, err := h.ctrl.GetEnvsForEnvPlugin(ctx)
-	if err != nil {
-		return err
-	}
-
-	updatedEnvs := &entity.Envs{}
+	variables := &entity.Envs{}
 	updatedEnvNames := make([]string, 0)
+
 	for _, kvPair := range req.Args {
 		parts := strings.SplitN(kvPair, "=", 2)
 		if len(parts) != 2 {
-			return errors.New("Invalid variables invokation. See --help")
+			return errors.New("invalid variables invocation. See --help")
 		}
 		key := parts[0]
 		value := parts[1]
 
-		envs.Set(key, value)
-		updatedEnvs.Set(key, value)
+		variables.Set(key, value)
 		updatedEnvNames = append(updatedEnvNames, key)
 	}
 
-	_, err = h.ctrl.UpdateEnvsForEnvPlugin(ctx, envs)
+	err := h.ctrl.UpsertEnvsForEnvPlugin(ctx, variables)
+
 	if err != nil {
 		return err
 	}
@@ -73,7 +69,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 	}
 
 	fmt.Print(ui.Heading(fmt.Sprintf("Updated %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
-	fmt.Print(ui.KeyValues(*updatedEnvs))
+	fmt.Print(ui.KeyValues(*variables))
 
 	err = h.redeployAfterVariablesChange(ctx, environment)
 	if err != nil {
@@ -84,18 +80,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 }
 
 func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandRequest) error {
-	envs, err := h.ctrl.GetEnvsForEnvPlugin(ctx)
-	if err != nil {
-		return err
-	}
-
-	updatedEnvNames := make([]string, 0)
-	for _, key := range req.Args {
-		updatedEnvNames = append(updatedEnvNames, key)
-		envs.Delete(key)
-	}
-
-	_, err = h.ctrl.UpdateEnvsForEnvPlugin(ctx, envs)
+	err := h.ctrl.DeleteEnvsForEnvPlugin(ctx, req.Args)
 	if err != nil {
 		return err
 	}
@@ -105,7 +90,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
+	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(req.Args, ", "), environment.Name)))
 
 	err = h.redeployAfterVariablesChange(ctx, environment)
 	if err != nil {

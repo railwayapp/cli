@@ -65,26 +65,20 @@ func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.Envs) (*entity.Envs, error) {
+func (c *Controller) UpsertEnvsForEnvPlugin(ctx context.Context, envs *entity.Envs) error {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
-		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
-		confirm, err := ui.PromptYesNo("Continue updating variables?")
-		if err != nil {
-			return nil, err
-		}
-		if !confirm {
-			return nil, nil
-		}
+	err = c.PromptIfProtectedEnvironment(ctx)
+	if err != nil {
+		return err
 	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	pluginID := ""
@@ -94,7 +88,7 @@ func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.En
 		}
 	}
 
-	return c.gtwy.UpdateEnvsForPlugin(ctx, &entity.UpdateEnvsRequest{
+	return c.gtwy.UpsertVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
 		PluginID:      pluginID,
@@ -102,25 +96,20 @@ func (c *Controller) UpdateEnvsForEnvPlugin(ctx context.Context, envs *entity.En
 	})
 }
 
-func (c *Controller) GetEnvsForEnvPlugin(ctx context.Context) (*entity.Envs, error) {
-	// Get envs through project token if it exists
-	if c.cfg.RailwayProductionToken != "" {
-		envs, err := c.gtwy.GetEnvsWithProjectToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		return envs, err
-	}
-
+func (c *Controller) DeleteEnvsForEnvPlugin(ctx context.Context, names []string) error {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	err = c.PromptIfProtectedEnvironment(ctx)
+	if err != nil {
+		return err
 	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	pluginID := ""
@@ -130,20 +119,19 @@ func (c *Controller) GetEnvsForEnvPlugin(ctx context.Context) (*entity.Envs, err
 		}
 	}
 
-	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
-		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
-		confirm, err := ui.PromptYesNo("Continue fetching variables?")
+	// Delete each variable one by one
+	for _, name := range names {
+		err = c.gtwy.DeleteVariable(ctx, &entity.DeleteVariableRequest{
+			ProjectID:     projectCfg.Project,
+			EnvironmentID: projectCfg.Environment,
+			PluginID:      pluginID,
+			Name:          name,
+		})
+
 		if err != nil {
-			return nil, err
-		}
-		if !confirm {
-			return nil, nil
+			return err
 		}
 	}
 
-	return c.gtwy.GetEnvsForPlugin(ctx, &entity.GetEnvsForPluginRequest{
-		ProjectID:     projectCfg.Project,
-		EnvironmentID: projectCfg.Environment,
-		PluginID:      pluginID,
-	})
+	return nil
 }

@@ -18,6 +18,13 @@ type UpdateEnvsRequest struct {
 	Envs          *Envs
 }
 
+type DeleteVariableRequest struct {
+	ProjectID     string
+	EnvironmentID string
+	PluginID      string
+	Name          string
+}
+
 type Envs map[string]string
 
 func (e Envs) Get(name string) string {
