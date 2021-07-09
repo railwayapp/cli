@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	goErr "errors"
 	"fmt"
 	"net"
 	"os"
@@ -27,15 +28,51 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		}
 	}
 
+	rgx, err := regexp.Compile("--environment=(.*)")
+	if err != nil {
+		return err
+	}
+
+	targetEnvironment := (*string)(nil)
+	for _, arg := range req.Args {
+		if matched := rgx.FindStringSubmatch(arg); matched != nil {
+			if len(matched) < 2 {
+				return goErr.New("Missing environment selection! \n(e.g --enviroment=production)")
+			}
+			targetEnvironment = &matched[1]
+		}
+	}
+
 	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Get Current Environment for name
-	environment, err := h.ctrl.GetEnvironment(ctx)
-	if err != nil {
-		return err
+	var environment *entity.Environment
+	if targetEnvironment != nil {
+		project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
+		if err != nil {
+			return err
+		}
+
+		environment, err = func() (*entity.Environment, error) {
+			for _, environment := range project.Environments {
+				if environment.Name == *targetEnvironment {
+					return environment, nil
+				}
+			}
+			return nil, goErr.New(ui.AlertDanger(fmt.Sprintf("Environment %s does not exist in project", *targetEnvironment)))
+		}()
+		if err != nil {
+			return err
+		}
+
+	} else {
+		// Get Current Environment for name
+		environment, err = h.ctrl.GetEnvironment(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Add something to the ephemeral env name
