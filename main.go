@@ -187,13 +187,16 @@ func init() {
 		RunE:  contextualize(handler.List, handler.Panic),
 	})
 
-	addRootCmd(&cobra.Command{
+	runCmd := addRootCmd(&cobra.Command{
 		Use:                "run",
 		Short:              "Run a local command using variables from the active environment",
 		PersistentPreRunE:  contextualize(handler.CheckVersion, handler.Panic),
 		RunE:               contextualize(handler.Run, handler.Panic),
 		DisableFlagParsing: true,
 	})
+
+	runCmd.Flags().Bool("ephemeral", false, "Run using a throwaway ephemeral environment")
+	runCmd.Flags().StringP("environment", "-e", "", "Select a given environment to run in")
 
 	addRootCmd(&cobra.Command{
 		Use:   "protect",

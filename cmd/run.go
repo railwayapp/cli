@@ -21,26 +21,14 @@ import (
 var RAIL_PORT = 4411
 
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
-	isEphemeral := false
-	for _, arg := range req.Args {
-		if (arg) == "--ephemeral" {
-			isEphemeral = true
-		}
-	}
-
-	rgx, err := regexp.Compile("--environment=(.*)")
+	isEphemeral, err := req.Cmd.Flags().GetBool("ephemeral")
 	if err != nil {
 		return err
 	}
 
-	targetEnvironment := (*string)(nil)
-	for _, arg := range req.Args {
-		if matched := rgx.FindStringSubmatch(arg); matched != nil {
-			if len(matched) < 2 {
-				return goErr.New("Missing environment selection! \n(e.g --enviroment=production)")
-			}
-			targetEnvironment = &matched[1]
-		}
+	targetEnvironment, err := req.Cmd.Flags().GetString("environment")
+	if err != nil {
+		return err
 	}
 
 	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
@@ -49,7 +37,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	var environment *entity.Environment
-	if targetEnvironment != nil {
+	if targetEnvironment != "" {
 		project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
 		if err != nil {
 			return err
@@ -57,7 +45,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 
 		environment, err = func() (*entity.Environment, error) {
 			for _, environment := range project.Environments {
-				if environment.Name == *targetEnvironment {
+				if environment.Name == targetEnvironment {
 					return environment, nil
 				}
 			}
