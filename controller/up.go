@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -96,16 +95,16 @@ func (c *Controller) Upload(ctx context.Context, req *entity.UploadRequest) (*en
 		return nil, err
 	}
 
-	// res, err := c.gtwy.Up(ctx, &entity.UpRequest{
-	// 	Data:          buf,
-	// 	ProjectID:     req.ProjectID,
-	// 	EnvironmentID: req.EnvironmentID,
-	// })
-	// if err != nil {
-	// 	return nil, err
-	// }
+	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
+		Data:          buf,
+		ProjectID:     req.ProjectID,
+		EnvironmentID: req.EnvironmentID,
+	})
+	if err != nil {
+		return nil, err
+	}
 
-	return nil, errors.New("THAT WOULD HAV EWORKED")
+	return res, nil
 }
 
 func (c *Controller) GetFullUrlFromStaticUrl(staticUrl string) string {
