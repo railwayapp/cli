@@ -129,11 +129,10 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	if err != nil {
+		fmt.Println(err.Error())
 		if exitError, ok := err.(*exec.ExitError); ok {
-			fmt.Println(err.Error())
 			os.Exit(exitError.ExitCode())
 		}
-
 		os.Exit(1)
 	}
 
