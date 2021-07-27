@@ -10,10 +10,26 @@ import (
 )
 
 func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
+	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
+	if err != nil {
+		return err
+	}
+	environmentName, err := req.Cmd.Flags().GetString("environment")
+	if err != nil {
+		return err
+	}
+
+	environment, err := h.getEnvironment(ctx, environmentName)
+	if err != nil {
+		return err
+	}
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Laying tracks in the clouds...",
 	})
-	res, err := h.ctrl.Up(ctx)
+	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
+		ProjectID:     projectConfig.Project,
+		EnvironmentID: environment.Id,
+	})
 	if err != nil {
 		return err
 	} else {

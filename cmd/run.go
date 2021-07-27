@@ -20,6 +20,13 @@ import (
 
 var RAIL_PORT = 4411
 
+func (h *Handler) getEnvironment(ctx context.Context, environmentName string) (*entity.Environment, error) {
+	if environmentName == "" {
+		return h.ctrl.GetCurrentEnvironment(ctx)
+	}
+	return h.ctrl.GetEnvironmentByName(ctx, environmentName)
+}
+
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	isEphemeral := false
 	for _, arg := range req.Args {
@@ -33,13 +40,16 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	targetEnvironment := (*string)(nil)
+	targetEnvironment := ""
+	parsedArgs := make([]string, 0)
 	for _, arg := range req.Args {
 		if matched := rgx.FindStringSubmatch(arg); matched != nil {
 			if len(matched) < 2 {
 				return goErr.New("Missing environment selection! \n(e.g --enviroment=production)")
 			}
-			targetEnvironment = &matched[1]
+			targetEnvironment = matched[1]
+		} else {
+			parsedArgs = append(parsedArgs, arg)
 		}
 	}
 
@@ -48,33 +58,10 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	var environment *entity.Environment
-	if targetEnvironment != nil {
-		project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
-		if err != nil {
-			return err
-		}
-
-		environment, err = func() (*entity.Environment, error) {
-			for _, environment := range project.Environments {
-				if environment.Name == *targetEnvironment {
-					return environment, nil
-				}
-			}
-			return nil, goErr.New(ui.AlertDanger(fmt.Sprintf("Environment %s does not exist in project", *targetEnvironment)))
-		}()
-		if err != nil {
-			return err
-		}
-
-	} else {
-		// Get Current Environment for name
-		environment, err = h.ctrl.GetEnvironment(ctx)
-		if err != nil {
-			return err
-		}
+	environment, err := h.getEnvironment(ctx, targetEnvironment)
+	if err != nil {
+		return err
 	}
-
 	// Add something to the ephemeral env name
 	if isEphemeral {
 		environmentName := fmt.Sprintf("%s-ephemeral", environment.Name)
@@ -107,13 +94,13 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		hasDockerfile = false
 	}
 
-	if len(req.Args) == 0 && hasDockerfile {
+	if len(parsedArgs) == 0 && hasDockerfile {
 		return h.runInDocker(ctx, pwd, envs)
-	} else if len(req.Args) == 0 {
+	} else if len(parsedArgs) == 0 {
 		return errors.CommandNotSpecified
 	}
 
-	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
+	cmd := exec.CommandContext(ctx, parsedArgs[0], parsedArgs[1:]...)
 	cmd.Env = os.Environ()
 
 	// Inject railway envs
@@ -168,7 +155,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	}
 
 	// Strip characters not allowed in Docker image names
-	environment, err := h.ctrl.GetEnvironment(ctx)
+	environment, err := h.ctrl.GetCurrentEnvironment(ctx)
 	if err != nil {
 		return err
 	}

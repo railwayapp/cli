@@ -11,17 +11,17 @@ func (h *Handler) Open(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
-	environmentId, err := h.cfg.GetEnvironment()
+	environmentId, err := h.cfg.GetCurrentEnvironment()
 	if err != nil {
 		return err
 	}
 
 	// If an unknown subcommand is used, show help
-	if (len(req.Args) > 0) {
+	if len(req.Args) > 0 {
 		return req.Cmd.Help()
 	}
 
-	if (req.Cmd.Use == "open") {
+	if req.Cmd.Use == "open" {
 		return h.ctrl.OpenProjectInBrowser(ctx, projectId, environmentId)
 	}
 
@@ -33,7 +33,7 @@ func (h *Handler) OpenApp(ctx context.Context, req *entity.CommandRequest) error
 	if err != nil {
 		return err
 	}
-	environmentId, err := h.cfg.GetEnvironment()
+	environmentId, err := h.cfg.GetCurrentEnvironment()
 	if err != nil {
 		return err
 	}

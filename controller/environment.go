@@ -7,8 +7,8 @@ import (
 	CLIErrors "github.com/railwayapp/cli/errors"
 )
 
-// GetEnvironment returns the currently active environment for the Railway project
-func (c *Controller) GetEnvironment(ctx context.Context) (*entity.Environment, error) {
+// GetCurrentEnvironment returns the currently active environment for the Railway project
+func (c *Controller) GetCurrentEnvironment(ctx context.Context) (*entity.Environment, error) {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return nil, err
@@ -21,6 +21,25 @@ func (c *Controller) GetEnvironment(ctx context.Context) (*entity.Environment, e
 
 	for _, environment := range project.Environments {
 		if environment.Id == projectCfg.Environment {
+			return environment, nil
+		}
+	}
+	return nil, CLIErrors.EnvironmentNotSet
+}
+
+func (c *Controller) GetEnvironmentByName(ctx context.Context, environmentName string) (*entity.Environment, error) {
+	projectCfg, err := c.GetProjectConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	project, err := c.GetProject(ctx, projectCfg.Project)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, environment := range project.Environments {
+		if environment.Name == environmentName {
 			return environment, nil
 		}
 	}
