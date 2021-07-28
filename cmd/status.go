@@ -23,7 +23,7 @@ func (h *Handler) Status(ctx context.Context, req *entity.CommandRequest) error 
 	if project != nil {
 		fmt.Printf("Project: %s\n", ui.Bold(fmt.Sprint(ui.MagentaText(project.Name))))
 
-		environment, err := h.ctrl.GetEnvironment(ctx)
+		environment, err := h.ctrl.GetCurrentEnvironment(ctx)
 		if err != nil {
 			return err
 		}

@@ -195,7 +195,7 @@ func (c *Configs) GetProject() (string, error) {
 	return projectCfg.Project, nil
 }
 
-func (c *Configs) GetEnvironment() (string, error) {
+func (c *Configs) GetCurrentEnvironment() (string, error) {
 	projectCfg, err := c.GetProjectConfigs()
 	if err != nil {
 		return "", err

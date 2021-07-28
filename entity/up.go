@@ -2,6 +2,11 @@ package entity
 
 import "bytes"
 
+type UploadRequest struct {
+	ProjectID     string
+	EnvironmentID string
+}
+
 type UpRequest struct {
 	Data          bytes.Buffer
 	ProjectID     string
@@ -9,6 +14,6 @@ type UpRequest struct {
 }
 
 type UpResponse struct {
-	URL string
+	URL              string
 	DeploymentDomain string
 }

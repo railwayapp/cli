@@ -89,12 +89,7 @@ func compress(src string, buf io.Writer) error {
 	return nil
 }
 
-func (c *Controller) Up(ctx context.Context) (*entity.UpResponse, error) {
-	projectConfig, err := c.GetProjectConfigs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
+func (c *Controller) Upload(ctx context.Context, req *entity.UploadRequest) (*entity.UpResponse, error) {
 	var buf bytes.Buffer
 	if err := compress(".", &buf); err != nil {
 		return nil, err
@@ -102,8 +97,8 @@ func (c *Controller) Up(ctx context.Context) (*entity.UpResponse, error) {
 
 	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
 		Data:          buf,
-		ProjectID:     projectConfig.Project,
-		EnvironmentID: projectConfig.Environment,
+		ProjectID:     req.ProjectID,
+		EnvironmentID: req.EnvironmentID,
 	})
 	if err != nil {
 		return nil, err

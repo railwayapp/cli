@@ -17,7 +17,7 @@ func (h *Handler) Variables(ctx context.Context, _ *entity.CommandRequest) error
 		return err
 	}
 
-	environment, err := h.ctrl.GetEnvironment(ctx)
+	environment, err := h.ctrl.GetCurrentEnvironment(ctx)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		return err
 	}
 
-	environment, err := h.ctrl.GetEnvironment(ctx)
+	environment, err := h.ctrl.GetCurrentEnvironment(ctx)
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	environment, err := h.ctrl.GetEnvironment(ctx)
+	environment, err := h.ctrl.GetCurrentEnvironment(ctx)
 	if err != nil {
 		return err
 	}

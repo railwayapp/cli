@@ -18,7 +18,7 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 		return err
 	}
 
-	environment, err := h.ctrl.GetEnvironment(ctx)
+	environment, err := h.ctrl.GetCurrentEnvironment(ctx)
 	if err != nil {
 		return err
 	}
