@@ -29,6 +29,7 @@ type CreateProjectFromTemplateResult struct {
 type Project struct {
 	Id           string         `json:"id,omitempty"`
 	Name         string         `json:"name,omitempty"`
+	UpdatedAt    string         `json:"updatedAt,omitempty"`
 	Environments []*Environment `json:"environments,omitempty"`
 	Plugins      []*Plugin      `json:"plugins,omitempty"`
 	Team         *string        `json:"team,omitempty"`

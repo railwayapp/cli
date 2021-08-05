@@ -107,7 +107,7 @@ func (g *Gateway) GetProjectByName(ctx context.Context, projectName string) (*en
 	}
 
 	projects := resp.Me.Projects
-	if (len(projects) == 0) {
+	if len(projects) == 0 {
 		return nil, errors.ProjectConfigNotFound
 	}
 
@@ -217,6 +217,7 @@ func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
 func (g *Gateway) GetProjects(ctx context.Context) ([]*entity.Project, error) {
 	projectFrag := `
 		id,
+		updatedAt,
 		name,
 		plugins {
 			id,
