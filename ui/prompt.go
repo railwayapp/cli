@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/manifoldco/promptui"
@@ -86,6 +87,10 @@ func PromptProjects(projects []*entity.Project) (*entity.Project, error) {
 			}
 		}
 	}
+
+	sort.Slice(filteredProjects, func(i int, j int) bool {
+		return filteredProjects[i].UpdatedAt > filteredProjects[j].UpdatedAt
+	})
 
 	i, _, err := selectCustom("Project", filteredProjects, func(index int) string {
 		return filteredProjects[index].Name
