@@ -29,6 +29,9 @@ npm i -g @railway/cli
 sh -c "$(curl -sSL https://raw.githubusercontent.com/railwayapp/cli/master/install.sh)"
 ```
 
+### From source
+See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
+
 ## Documentation
 
 [View the full documentation](https://docs.railway.app)
@@ -37,4 +40,4 @@ sh -c "$(curl -sSL https://raw.githubusercontent.com/railwayapp/cli/master/insta
 
 We would love to hear your feedback or suggestions. The best way to reach us is on [Discord](https://discord.gg/xAm2w6g).
 
-We also welcome pull requests into this repo. See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) information on setting up this repo locally.
+We also welcome pull requests into this repo. See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
