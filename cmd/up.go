@@ -10,6 +10,14 @@ import (
 )
 
 func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
+	var src string
+
+	if len(req.Args) == 0 {
+		src = "."
+	} else {
+		src = req.Args[0]
+	}
+
 	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
@@ -29,7 +37,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
-	})
+	}, src)
 	if err != nil {
 		return err
 	} else {
