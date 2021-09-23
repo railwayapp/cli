@@ -15,7 +15,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if len(req.Args) == 0 {
 		src = "."
 	} else {
-		src = req.Args[0]
+		src = "./" + req.Args[0]
 	}
 
 	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
