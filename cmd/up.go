@@ -37,7 +37,8 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
-	}, src)
+		RootDir:       src,
+	})
 	if err != nil {
 		return err
 	} else {
