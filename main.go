@@ -214,7 +214,7 @@ func init() {
 		RunE:  contextualize(handler.Up, handler.Panic),
 	})
 	upCmd.Flags().BoolP("detach", "d", false, "Detach from cloud build/deploy logs")
-	upCmd.Flags().StringP("environment", "e", "", "Specify an environment o up onto")
+	upCmd.Flags().StringP("environment", "e", "", "Specify an environment to up onto")
 
 	addRootCmd(&cobra.Command{
 		Use:   "logs",
