@@ -15,9 +15,7 @@ func (h *Handler) Delete(ctx context.Context, req *entity.CommandRequest) error 
 		arg := req.Args[0]
 
 		if uuid.IsValidUUID(arg) {
-			fmt.Printf("Looks good")
 			project, err := h.ctrl.GetProject(ctx, arg)
-			fmt.Printf(project.Id)
 			if err != nil {
 				return err
 			}
@@ -33,8 +31,6 @@ func (h *Handler) Delete(ctx context.Context, req *entity.CommandRequest) error 
 		return h.ctrl.DeleteProject(ctx, project.Id)
 	}
 
-	h.Unlink(ctx, req)
-
 	isLoggedIn, err := h.ctrl.IsLoggedIn(ctx)
 	if err != nil {
 		return err
@@ -49,7 +45,6 @@ func (h *Handler) Delete(ctx context.Context, req *entity.CommandRequest) error 
 }
 
 func (h *Handler) deleteFromAccount(ctx context.Context, req *entity.CommandRequest) error {
-	fmt.Printf("Looks good")
 	projects, err := h.ctrl.GetProjects(ctx)
 	if err != nil {
 		return err

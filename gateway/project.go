@@ -196,7 +196,7 @@ func (g *Gateway) UpdateProject(ctx context.Context, req *entity.UpdateProjectRe
 
 func (g *Gateway) DeleteProject(ctx context.Context, projectId string) error {
 	gqlReq, err := g.NewRequestWithAuth(`
-		mutation($projectId: ID!) {
+		mutation($projectId: String!) {
 			deleteProject(projectId: $projectId)
 		}
 	`)
