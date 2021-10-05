@@ -10,6 +10,15 @@ import (
 )
 
 func (h *Handler) Delete(ctx context.Context, req *entity.CommandRequest) error {
+	user, err := h.ctrl.GetUser(ctx)
+	if err != nil {
+		return err
+	}
+	if user.Has2FA {
+		fmt.Printf("Your account has 2FA enabled, you must delete your project on the Dashboard.")
+		return nil
+	}
+
 	if len(req.Args) > 0 {
 		// projectID provided as argument
 		arg := req.Args[0]
@@ -38,10 +47,9 @@ func (h *Handler) Delete(ctx context.Context, req *entity.CommandRequest) error 
 
 	if isLoggedIn {
 		return h.deleteFromAccount(ctx, req)
-	} else {
-		return h.deleteFromID(ctx, req)
 	}
 
+	return h.deleteFromID(ctx, req)
 }
 
 func (h *Handler) deleteFromAccount(ctx context.Context, req *entity.CommandRequest) error {
@@ -59,7 +67,15 @@ func (h *Handler) deleteFromAccount(ctx context.Context, req *entity.CommandRequ
 	if err != nil {
 		return err
 	}
-
+	name, err := ui.PromptConfirmProjectName()
+	if err != nil {
+		return err
+	}
+	if project.Name != name {
+		fmt.Printf("You ust have mistyped the name, try again.")
+		return nil
+	}
+	fmt.Printf("🔥 Deleting project %s\n", ui.MagentaText(name))
 	return h.ctrl.DeleteProject(ctx, project.Id)
 }
 
@@ -75,6 +91,6 @@ func (h *Handler) deleteFromID(ctx context.Context, req *entity.CommandRequest) 
 	if err != nil {
 		return err
 	}
-
+	fmt.Printf("🔥 Deleting project %s\n", ui.MagentaText(project.Name))
 	return h.ctrl.DeleteProject(ctx, project.Id)
 }

@@ -12,7 +12,8 @@ func (g *Gateway) GetUser(ctx context.Context) (*entity.User, error) {
 			me {
 				id,
 				email,
-				name
+				name,
+				has2FA
 			}
 		}
 	`)
