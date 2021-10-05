@@ -72,11 +72,13 @@ func (h *Handler) deleteFromAccount(ctx context.Context, req *entity.CommandRequ
 		return err
 	}
 	if project.Name != name {
-		fmt.Printf("You ust have mistyped the name, try again.")
+		fmt.Printf("The project name typed doesn't match the selected project to be deleted.")
 		return nil
 	}
 	fmt.Printf("🔥 Deleting project %s\n", ui.MagentaText(name))
-	return h.ctrl.DeleteProject(ctx, project.Id)
+	h.deleteById(ctx, project.Id)
+	fmt.Printf("✅ Deleted project %s\n", ui.MagentaText(name))
+	return nil
 }
 
 func (h *Handler) deleteFromID(ctx context.Context, req *entity.CommandRequest) error {
@@ -92,5 +94,15 @@ func (h *Handler) deleteFromID(ctx context.Context, req *entity.CommandRequest) 
 		return err
 	}
 	fmt.Printf("🔥 Deleting project %s\n", ui.MagentaText(project.Name))
-	return h.ctrl.DeleteProject(ctx, project.Id)
+	h.deleteById(ctx, project.Id)
+	fmt.Printf("✅ Deleted project %s\n", ui.MagentaText(project.Name))
+	return nil
+}
+
+func (h *Handler) deleteById(ctx context.Context, projectId string) error {
+	err := h.ctrl.DeleteProject(ctx, projectId)
+	if err != nil {
+		return err
+	}
+	return nil
 }
