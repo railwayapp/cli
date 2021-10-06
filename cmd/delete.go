@@ -59,7 +59,7 @@ func (h *Handler) deleteFromAccount(ctx context.Context, req *entity.CommandRequ
 	}
 
 	if len(projects) == 0 {
-		fmt.Printf("No Projects could be deleted.")
+		fmt.Printf("No Projects found.")
 		return nil
 	}
 
@@ -91,7 +91,6 @@ func (h *Handler) deleteFromID(ctx context.Context, req *entity.CommandRequest) 
 	}
 
 	project, err := h.ctrl.GetProject(ctx, projectID)
-	print("Looks good")
 
 	if err != nil {
 		return err
