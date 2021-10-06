@@ -76,7 +76,14 @@ func (h *Handler) deleteFromAccount(ctx context.Context, req *entity.CommandRequ
 		return nil
 	}
 	fmt.Printf("🔥 Deleting project %s\n", ui.MagentaText(name))
-	h.deleteById(ctx, project.Id)
+
+	defer h.deleteById(ctx, project.Id)
+	{
+		if err := h.deleteById(ctx, project.Id); err != nil {
+			return err
+		}
+	}
+
 	fmt.Printf("✅ Deleted project %s\n", ui.MagentaText(name))
 	return nil
 }
@@ -94,7 +101,12 @@ func (h *Handler) deleteFromID(ctx context.Context, req *entity.CommandRequest) 
 		return err
 	}
 	fmt.Printf("🔥 Deleting project %s\n", ui.MagentaText(project.Name))
-	h.deleteById(ctx, project.Id)
+	defer h.deleteById(ctx, project.Id)
+	{
+		if err := h.deleteById(ctx, project.Id); err != nil {
+			return err
+		}
+	}
 	fmt.Printf("✅ Deleted project %s\n", ui.MagentaText(project.Name))
 	return nil
 }
