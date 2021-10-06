@@ -64,3 +64,7 @@ func (c *Controller) GetLatestDeploymentForEnvironment(ctx context.Context, proj
 func (c *Controller) OpenStaticUrlInBrowser(staticUrl string) error {
 	return c.gtwy.OpenStaticUrlInBrowser(staticUrl)
 }
+
+func (c *Controller) DeleteProject(ctx context.Context, projectID string) error {
+	return c.gtwy.DeleteProject(ctx, projectID)
+}

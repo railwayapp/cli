@@ -107,6 +107,12 @@ func init() {
 	})
 
 	addRootCmd(&cobra.Command{
+		Use:   "delete",
+		Short: "Delete Project, may specify projectId as an argument",
+		RunE:  contextualize(handler.Delete, handler.Panic),
+	})
+
+	addRootCmd(&cobra.Command{
 		Use:        "disconnect",
 		RunE:       contextualize(handler.Unlink, handler.Panic),
 		Deprecated: "Please use 'railway unlink' instead", /**/

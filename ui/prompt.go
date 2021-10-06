@@ -158,6 +158,19 @@ func PromptProjectName() (string, error) {
 	return prompt.Run()
 }
 
+func PromptConfirmProjectName() (string, error) {
+	prompt := promptui.Prompt{
+		Label: "Confirm project name",
+		Templates: &promptui.PromptTemplates{
+			Prompt:  "{{ . }} ",
+			Valid:   fmt.Sprintf("%s {{ . | bold }}: ", promptui.IconGood),
+			Invalid: fmt.Sprintf("%s {{ . | bold }}: ", promptui.IconBad),
+			Success: fmt.Sprintf("%s {{ . | magenta | bold }}: ", promptui.IconGood),
+		},
+	}
+	return prompt.Run()
+}
+
 // PromptGitHubScopes prompts the user to select one of the provides scopes
 func PromptGitHubScopes(scopes []string) (string, error) {
 	if len(scopes) == 1 {
