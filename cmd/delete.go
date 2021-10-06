@@ -76,14 +76,10 @@ func (h *Handler) deleteFromAccount(ctx context.Context, req *entity.CommandRequ
 		return nil
 	}
 	fmt.Printf("🔥 Deleting project %s\n", ui.MagentaText(name))
-
-	defer h.deleteById(ctx, project.Id)
-	{
-		if err := h.deleteById(ctx, project.Id); err != nil {
-			return err
-		}
+	err = h.deleteById(ctx, project.Id)
+	if err != nil {
+		return err
 	}
-
 	fmt.Printf("✅ Deleted project %s\n", ui.MagentaText(name))
 	return nil
 }
