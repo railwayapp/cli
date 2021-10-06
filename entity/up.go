@@ -5,6 +5,7 @@ import "bytes"
 type UploadRequest struct {
 	ProjectID     string
 	EnvironmentID string
+	RootDir       string
 }
 
 type UpRequest struct {

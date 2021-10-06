@@ -91,7 +91,8 @@ func compress(src string, buf io.Writer) error {
 
 func (c *Controller) Upload(ctx context.Context, req *entity.UploadRequest) (*entity.UpResponse, error) {
 	var buf bytes.Buffer
-	if err := compress(".", &buf); err != nil {
+
+	if err := compress(req.RootDir, &buf); err != nil {
 		return nil, err
 	}
 
