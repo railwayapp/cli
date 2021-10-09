@@ -107,9 +107,10 @@ func init() {
 	})
 
 	addRootCmd(&cobra.Command{
-		Use:   "delete",
+		Use:   "delete [projectId]",
 		Short: "Delete Project, may specify projectId as an argument",
 		RunE:  contextualize(handler.Delete, handler.Panic),
+		Args:  cobra.MinimumNArgs(1),
 	})
 
 	addRootCmd(&cobra.Command{
@@ -215,7 +216,7 @@ func init() {
 	})
 
 	upCmd := addRootCmd(&cobra.Command{
-		Use:   "up",
+		Use:   "up [path]",
 		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
 	})
