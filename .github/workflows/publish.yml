@@ -1,9 +1,8 @@
 name: Publish
 
 on:
-  push:
-    tags:
-      - "*"
+  repository_dispatch:
+    types: [publish-event]
 
 jobs:
   release_and_brew:
