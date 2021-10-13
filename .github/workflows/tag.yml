@@ -8,21 +8,19 @@ on:
 jobs:
   tag:
     runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.PAT }}
     steps:
       - uses: actions/checkout@v2
 
       - uses: actions-ecosystem/action-get-merged-pull-request@v1
         id: get-merged-pull-request
         with:
-          github_token: ${{ secrets.PAT }}
+          github_token: ${{ secrets.GH_PAT }}
 
       - uses: actions-ecosystem/action-release-label@v1
         id: release-label
         if: ${{ steps.get-merged-pull-request.outputs.title != null }}
         with:
-          github_token: ${{ secrets.PAT }}
+          github_token: ${{ secrets.GH_PAT }}
           labels: ${{ steps.get-merged-pull-request.outputs.labels }}
 
       - uses: actions-ecosystem/action-get-latest-tag@v1
@@ -54,7 +52,7 @@ jobs:
       - uses: peter-evans/repository-dispatch@v1
         if: ${{ steps.bump-semver.outputs.new_version != null }}
         with:
-          token: ${{ secrets.PAT }}
-          repository: ndneighbor/expressjs-postgres
+          token: ${{ secrets.GH_PAT }}
+          repository: railwayapp/cli
           event-type: publish-event
           client-payload: '{"new-tag": "${{ steps.bump-semver.outputs.new_version }}", "release-notes": "${{ steps.regex-match.outputs.group1 }}"}'
