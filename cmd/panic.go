@@ -9,7 +9,7 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func (h *Handler) Panic(ctx context.Context, panicErr string, stacktrace string, cmd string, args []string) error {
+func (h *Handler) Panic(ctx context.Context, panicErr, stacktrace, cmd string, args []string) error {
 	cmd = cmd + " " + strings.Join(args, " ")
 	for _, arg := range args {
 		if arg == "-v" {
