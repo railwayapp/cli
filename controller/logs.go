@@ -120,7 +120,7 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 	return nil
 }
 
-func hasTransitioned(prev *entity.Deployment, curr *entity.Deployment) bool {
+func hasTransitioned(prev, curr *entity.Deployment) bool {
 	return prev != nil && curr != nil && prev.Status != curr.Status
 }
 
