@@ -21,7 +21,7 @@ import (
 const (
 	baseRailwayURL   string = "https://railway.app"
 	baseStagingURL   string = "https://railway-staging.app"
-	baseLocalhostURL string = "http://railway-develop.app"
+	baseLocalhostURL string = "https://railway-develop.app"
 )
 
 const (
