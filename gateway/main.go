@@ -27,7 +27,7 @@ type Gateway struct {
 func GetHost() string {
 	baseURL := "https://backboard.railway.app"
 	if configs.IsDevMode() {
-		baseURL = "http://backboard.railway-develop.app"
+		baseURL = "https://backboard.railway-develop.app"
 	}
 	if configs.IsStagingMode() {
 		baseURL = "https://backboard.railway-staging.app"
