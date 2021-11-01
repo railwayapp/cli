@@ -43,4 +43,3 @@ See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING
 We would love to hear your feedback or suggestions. The best way to reach us is on [Discord](https://discord.gg/xAm2w6g).
 
 We also welcome pull requests into this repo. See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
-
