@@ -34,6 +34,11 @@ func compress(src string, buf io.Writer) error {
 		if fi.IsDir() {
 			return nil
 		}
+		if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
+			// Skip symlinks
+			// TODO: Follow em and detect cycles
+			return nil
+		}
 
 		if strings.HasPrefix(file, ".git") || strings.HasPrefix(file, "node_modules") {
 			return nil
