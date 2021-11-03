@@ -8,7 +8,8 @@ jobs:
   label-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: NathanielHill/check-pr-label-action@v4.0.0
+      - uses: jesusvasquez333/verify-pr-label-action@v1.4.0
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
           valid-labels: "release/patch, release/minor, release/major"
+          pull-request-number: '${{ github.event.pull_request.number }}'
