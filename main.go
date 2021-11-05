@@ -223,11 +223,13 @@ func init() {
 	upCmd.Flags().BoolP("detach", "d", false, "Detach from cloud build/deploy logs")
 	upCmd.Flags().StringP("environment", "e", "", "Specify an environment to up onto")
 
-	addRootCmd(&cobra.Command{
+	logsCmd := addRootCmd(&cobra.Command{
 		Use:   "logs",
 		Short: "View the most-recent deploy's logs",
 		RunE:  contextualize(handler.Logs, handler.Panic),
-	}).Flags().Int32P("lines", "n", 0, "Output a specific number of lines")
+	})
+	logsCmd.Flags().Int32P("lines", "n", 0, "Output a specific number of lines")
+	logsCmd.Flags().BoolP("download", "d", false, "Download logs to a local file")
 
 	addRootCmd(&cobra.Command{
 		Use:   "docs",

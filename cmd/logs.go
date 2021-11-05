@@ -7,9 +7,13 @@ import (
 )
 
 func (h *Handler) Logs(ctx context.Context, req *entity.CommandRequest) error {
-	numLines, err := req.Cmd.Flags().GetInt32("lines")
-	if err != nil {
-		return err
+	numLines, linesErr := req.Cmd.Flags().GetInt32("lines")
+	if linesErr != nil {
+		return linesErr
 	}
-	return h.ctrl.GetActiveDeploymentLogs(ctx, numLines)
+	shouldDownload, shouldDownloadErr := req.Cmd.Flags().GetBool("download")
+	if shouldDownloadErr != nil {
+		return shouldDownloadErr
+	}
+	return h.ctrl.GetActiveDeploymentLogs(ctx, numLines, shouldDownload)
 }

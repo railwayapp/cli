@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	"os"
+
 	"strings"
 	"time"
 
@@ -15,7 +18,7 @@ const (
 	GQL_SOFT_ERROR = "Error fetching build logs"
 )
 
-func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32) error {
+func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32, shouldDownload bool) error {
 	deployment, err := c.GetActiveDeployment(ctx)
 	if err != nil {
 		return err
@@ -25,7 +28,7 @@ func (c *Controller) GetActiveDeploymentLogs(ctx context.Context, numLines int32
 		DeploymentID: deployment.ID,
 		ProjectID:    deployment.ProjectID,
 		NumLines:     numLines,
-	})
+	}, shouldDownload)
 }
 
 func (c *Controller) GetActiveBuildLogs(ctx context.Context, numLines int32) error {
@@ -43,7 +46,7 @@ func (c *Controller) GetActiveBuildLogs(ctx context.Context, numLines int32) err
 		DeploymentID: deployment.ID,
 		ProjectID:    projectConfig.Project,
 		NumLines:     numLines,
-	})
+	}, false)
 }
 
 /* Logs for state will get logs for a current state (Either building or not building state)
@@ -51,7 +54,7 @@ func (c *Controller) GetActiveBuildLogs(ctx context.Context, numLines int32) err
    The loop captures the previous deploy as well as the current and does log diffing on the unified state
    When the state transitions from building to not building, the loop breaks
 */
-func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLogsRequest) error {
+func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLogsRequest, shouldDownload bool) error {
 	// Stream on building -> Building until !Building then break
 	// Stream on not building -> !Building until Failed then break
 	deploy, err := c.gtwy.GetDeploymentByID(ctx, &entity.DeploymentByIDRequest{
@@ -79,6 +82,23 @@ func (c *Controller) logsForState(ctx context.Context, req *entity.DeploymentLog
 
 	// Output Initial Logs
 	currLogs := strings.Join(logLines[int(offset):], "\n")
+	if shouldDownload {
+		f, err := os.Create("./" + req.DeploymentID + ".log")
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = f.WriteString(currLogs)
+		if err != nil {
+			return err
+		}
+		err = f.Sync()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Logs downloaded to %s.log\n", req.DeploymentID)
+		return nil
+	}
 	if len(currLogs) > 0 {
 		fmt.Println(currLogs)
 	}

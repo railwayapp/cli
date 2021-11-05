@@ -62,7 +62,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 
 	fmt.Printf("\n\n======= Build Completed ======\n\n")
 
-	err = h.ctrl.GetActiveDeploymentLogs(ctx, 1000)
+	err = h.ctrl.GetActiveDeploymentLogs(ctx, 1000, false)
 	if err != nil {
 		return err
 	}
