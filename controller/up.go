@@ -25,10 +25,6 @@ func compress(src string, buf io.Writer) error {
 		return err
 	}
 
-	if err != nil {
-		return err
-	}
-
 	// walk through every file in the folder
 	err = filepath.WalkDir(src, func(file string, de os.DirEntry, passedErr error) error {
 		if passedErr != nil {
