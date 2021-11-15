@@ -19,7 +19,6 @@ func compress(src string, buf io.Writer) error {
 	// tar > gzip > buf
 	zr := gzip.NewWriter(buf)
 	tw := tar.NewWriter(zr)
-
 	ignore, err := gitignore.CompileIgnoreFile(".gitignore")
 
 	if err != nil {
@@ -27,13 +26,19 @@ func compress(src string, buf io.Writer) error {
 	}
 
 	// walk through every file in the folder
-	err = filepath.Walk(src, func(file string, fi os.FileInfo, passedErr error) error {
+	err = filepath.WalkDir(src, func(file string, de os.DirEntry, passedErr error) error {
 		if passedErr != nil {
 			return err
 		}
-		if fi.IsDir() {
+		if de.IsDir() {
 			return nil
 		}
+
+		fi, err := de.Info()
+		if err != nil {
+			return err
+		}
+
 		if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
 			// Skip symlinks
 			// TODO: Follow em and detect cycles
@@ -48,35 +53,39 @@ func compress(src string, buf io.Writer) error {
 			return nil
 		}
 
-		// generate tar header
+		// read file into a buffer to prevent tar overwrites
+		data := bytes.NewBuffer(nil)
+		f, err := os.Open(file)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(data, f)
+		if err != nil {
+			return err
+		}
+
+		// generate tar headers
 		header, err := tar.FileInfoHeader(fi, file)
 		if err != nil {
 			return err
 		}
 
-		if err != nil {
-			return err
-		}
 		// must provide real name
 		// (see https://golang.org/src/archive/tar/common.go?#L626)
 		header.Name = filepath.ToSlash(file)
+
+		// size when we first observed the file
+		header.Size = int64(data.Len())
 
 		// write header
 		if err := tw.WriteHeader(header); err != nil {
 			return err
 		}
-		// if not a dir, write file content
-		if !fi.IsDir() {
-			data, err := os.Open(file)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(tw, data); err != nil {
-				return err
-			}
+		// not a dir, write file content
+		if _, err := io.Copy(tw, data); err != nil {
+			return err
 		}
-
-		return nil
+		return err
 	})
 
 	if err != nil {
