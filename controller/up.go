@@ -114,6 +114,7 @@ func (c *Controller) Upload(ctx context.Context, req *entity.UploadRequest) (*en
 		Data:          buf,
 		ProjectID:     req.ProjectID,
 		EnvironmentID: req.EnvironmentID,
+		ServiceID:     req.ServiceID,
 	})
 	if err != nil {
 		return nil, err

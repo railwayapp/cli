@@ -33,7 +33,19 @@ func (h *Handler) Status(ctx context.Context, req *entity.CommandRequest) error 
 		if len(project.Plugins) > 0 {
 			fmt.Printf("Plugins:\n")
 			for i := range project.Plugins {
-				fmt.Printf("%s\n", ui.Bold(fmt.Sprint(ui.GrayText(project.Plugins[i].Name))))
+				plugin := project.Plugins[i]
+				if plugin.Name == "env" {
+					// legacy plugin
+					continue
+				}
+				fmt.Printf("%s\n", ui.Bold(fmt.Sprint(ui.GrayText(plugin.Name))))
+			}
+		}
+
+		if len(project.Services) > 0 {
+			fmt.Printf("Services:\n")
+			for i := range project.Services {
+				fmt.Printf("%s\n", ui.Bold(fmt.Sprint(ui.GrayText(project.Services[i].Name))))
 			}
 		}
 	} else {

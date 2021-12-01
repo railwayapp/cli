@@ -53,6 +53,10 @@ func (g *Gateway) GetProject(ctx context.Context, projectId string) (*entity.Pro
 					id,
 					name
 				},
+				services {
+					id,
+					name
+				},
 			}
 		}
 	`)

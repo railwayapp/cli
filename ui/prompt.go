@@ -197,6 +197,20 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 	return environments[i], nil
 }
 
+func PromptServices(services []*entity.Service) (*entity.Service, error) {
+	if len(services) == 1 {
+		return services[0], nil
+	}
+	i, _, err := selectCustom("Service", services, func(index int) string {
+		return services[index].Name
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return services[i], nil
+}
+
 func PromptPlugins(plugins []string) (string, error) {
 	i, _, err := selectString("Plugin", plugins)
 	return plugins[i], err
