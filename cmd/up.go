@@ -22,6 +22,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
+
 	environmentName, err := req.Cmd.Flags().GetString("environment")
 	if err != nil {
 		return err
@@ -31,12 +32,24 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
+
+	project, err := h.ctrl.GetProject(ctx, projectConfig.Project)
+	if err != nil {
+		return err
+	}
+
+	service, err := ui.PromptServices(project.Services)
+	if err != nil {
+		return err
+	}
+
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Laying tracks in the clouds...",
 	})
 	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
+		ServiceID:     service.ID,
 		RootDir:       src,
 	})
 	if err != nil {
