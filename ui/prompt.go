@@ -198,6 +198,9 @@ func PromptEnvironments(environments []*entity.Environment) (*entity.Environment
 }
 
 func PromptServices(services []*entity.Service) (*entity.Service, error) {
+	if len(services) == 0 {
+		return &entity.Service{}, nil
+	}
 	if len(services) == 1 {
 		return services[0], nil
 	}
