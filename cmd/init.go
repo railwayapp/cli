@@ -41,7 +41,14 @@ func (h *Handler) initNew(ctx context.Context, req *entity.CommandRequest) error
 		return err
 	}
 
+	// Check if a .env exists, if so prompt uploading it
+	err = h.ctrl.AutoImportDotEnv(ctx)
+	if err != nil {
+		return err
+	}
+
 	fmt.Printf("🎉 Created project %s\n", ui.MagentaText(name))
+
 	return h.ctrl.OpenProjectInBrowser(ctx, project.Id, environment.Id)
 }
 
@@ -74,7 +81,7 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	// Prepare environment variables for prompt
 	starterEnvVars := make([]*entity.StarterEnvVar, 0)
 	for _, variable := range envVars {
-		if (variable != "") {
+		if variable != "" {
 			var envVar = new(entity.StarterEnvVar)
 			envVar.Name = variable
 			envVar.Desc = parsedUrl.Get(variable + "Desc")
@@ -88,11 +95,10 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	// Prepare plugins for creation
 	starterPlugins := make([]string, 0)
 	for _, plugin := range plugins {
-		if (plugin != "") {
+		if plugin != "" {
 			starterPlugins = append(starterPlugins, plugin)
 		}
 	}
-
 
 	// Select GitHub owner
 	ui.StartSpinner(&ui.SpinnerCfg{
@@ -180,6 +186,12 @@ func (h *Handler) initFromTemplate(ctx context.Context, req *entity.CommandReque
 	}
 
 	err = h.cfg.SetEnvironment(environment.Id)
+	if err != nil {
+		return err
+	}
+
+	// Check if a .env exists, if so prompt uploading it
+	err = h.ctrl.AutoImportDotEnv(ctx)
 	if err != nil {
 		return err
 	}
