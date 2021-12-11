@@ -1,10 +1,9 @@
 package entity
 
 type CreateProjectRequest struct {
-	Name                 *string           // Optional
-	Description          *string           // Optional
-	Plugins              []string          // Optional
-	EnvironmentVariables map[string]string // Optional
+	Name        *string  // Optional
+	Description *string  // Optional
+	Plugins     []string // Optional
 }
 
 type CreateProjectFromTemplateRequest struct {
