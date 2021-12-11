@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 
+	"github.com/joho/godotenv"
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
 )
@@ -39,6 +40,39 @@ func (c *Controller) GetEnvsForEnvironment(ctx context.Context, req *entity.GetE
 		ProjectID:     req.ProjectID,
 		EnvironmentID: req.EnvironmentID,
 	})
+}
+
+func (c *Controller) AutoImportDotEnv(ctx context.Context) error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	envFileLocation := fmt.Sprintf("%s/.env", dir)
+	if _, err := os.Stat(envFileLocation); err == nil {
+		// path/to/whatever does not exist
+		shouldImportEnvs, err := ui.PromptYesNo("\n.env detected!\nImport your variables into Railway?")
+		if err != nil {
+			return err
+		}
+		// If the user doesn't want to import envs skip
+		if !shouldImportEnvs {
+			return nil
+		}
+		// Otherwise read .env and set envs
+		err = godotenv.Load()
+		if err != nil {
+			return err
+		}
+		envMap, err := godotenv.Read()
+		if err != nil {
+			return err
+		}
+		if len(envMap) > 0 {
+			return c.UpsertEnvsForEnvPlugin(ctx, (*entity.Envs)(&envMap))
+		}
+	}
+	return nil
 }
 
 func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
