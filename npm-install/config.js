@@ -33,7 +33,8 @@ export const CONFIG = {
 export const ARCH_MAPPING = {
   ia32: "386",
   x64: "amd64",
-  arm: "arm",
+  // Re-add when railwayapp/cli#173 gets merged
+  // arm: "arm",
   arm64: "arm64",
 };
 
@@ -44,5 +45,5 @@ export const PLATFORM_MAPPING = {
   darwin: "darwin",
   linux: "linux",
   win32: "windows",
-  freebsd: "freebsd",
+  // freebsd: "freebsd",
 };
