@@ -13,11 +13,6 @@
   "scripts": {
     "postinstall": "node ./npm-install/postinstall.js"
   },
-  "goBinary": {
-    "name": "railway",
-    "path": "./bin",
-    "url": "https://github.com/railwayapp/cli/releases/download/v{{version}}/railway_{{version}}_{{platform}}_{{arch}}.tar.gz"
-  },
   "bin": {
     "railway": "bin/railway"
   },
