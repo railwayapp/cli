@@ -45,7 +45,7 @@ func compress(src string, buf io.Writer) error {
 			return nil
 		}
 
-		if strings.HasPrefix(file, ".git") || strings.HasPrefix(file, "node_modules") {
+		if strings.Match(file, ".git") || strings.Match(file, "node_modules") {
 			return nil
 		}
 
