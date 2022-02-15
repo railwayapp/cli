@@ -2,7 +2,7 @@
   "name": "@railway/cli",
   "version": "0.0.0",
   "description": "Develop and deploy code with zero configuration",
-  "main": "index.js",
+  "type": "module",
   "author": "Jake Runzer",
   "license": "ISC",
   "homepage": "https://github.com/railwayapp/cli/blob/master/README.md",
@@ -11,16 +11,16 @@
     "url": "https://github.com/railwayapp/cli.git"
   },
   "scripts": {
-    "postinstall": "go-npm install",
-    "preuninstall": "go-npm uninstall"
+    "postinstall": "node ./npm-install/postinstall.js"
   },
-  "goBinary": {
-    "name": "railway",
-    "path": "./bin",
-    "url": "https://github.com/railwayapp/cli/releases/download/v{{version}}/railway_{{version}}_{{platform}}_{{arch}}.tar.gz"
+  "bin": {
+    "railway": "bin/railway"
   },
-  "files": [],
+  "files": [
+    "npm-install"
+  ],
   "dependencies": {
-    "go-npm": "^0.1.9"
+    "node-fetch": "^3.1.0",
+    "tar": "^6.1.11"
   }
 }
