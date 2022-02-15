@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/railwayapp/cli/entity"
 	gitignore "github.com/railwayapp/cli/gateway"
@@ -23,6 +22,15 @@ func compress(src string, buf io.Writer) error {
 
 	if err != nil {
 		return err
+	}
+
+	rwIgnore, err := gitignore.CompileIgnoreFile(".railwayignore")
+
+	if err != nil {
+		rwIgnore, err = gitignore.CompileIgnoreLines(".git/", "node_modules/")
+		if err != nil {
+			return err
+		}
 	}
 
 	// walk through every file in the folder
@@ -45,11 +53,7 @@ func compress(src string, buf io.Writer) error {
 			return nil
 		}
 
-		if strings.HasPrefix(file, ".git") || strings.HasPrefix(file, "node_modules") {
-			return nil
-		}
-
-		if ignore.MatchesPath(file) {
+		if rwIgnore.MatchesPath(file) || ignore.MatchesPath(file) {
 			return nil
 		}
 
