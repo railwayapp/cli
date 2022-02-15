@@ -25,6 +25,12 @@ brew install railway
 npm i -g @railway/cli
 ```
 
+### Yarn
+
+```shell
+yarn add global @railway/cli
+```
+
 ### curl
 
 ```shell
