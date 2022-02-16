@@ -2,10 +2,11 @@ package ui
 
 import (
 	"fmt"
-	_aurora "github.com/logrusorgru/aurora"
 	"math"
 	"sort"
 	"strings"
+
+	_aurora "github.com/logrusorgru/aurora"
 )
 
 var aurora = _aurora.NewAurora(true)
@@ -60,6 +61,14 @@ func AlertWarning(text string) string {
 
 func AlertInfo(text string) string {
 	return _aurora.Sprintf(GrayText(Bold("💁 %s\n").String()), text)
+}
+
+func AlertVerbose(isVerbose bool, text string) string {
+	if isVerbose {
+		return _aurora.Sprintf(MagentaText("💁 %s\n"), text)
+	} else {
+		return ""
+	}
 }
 
 func Truncate(text string, maxLength int) string {

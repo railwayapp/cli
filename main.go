@@ -67,6 +67,8 @@ func init() {
 	// Initializes all commands
 	handler := cmd.New()
 
+	rootCmd.PersistentFlags().Bool("verbose", false, "--verbose")
+
 	loginCmd := addRootCmd(&cobra.Command{
 		Use:   "login",
 		Short: "Login to your Railway account",
