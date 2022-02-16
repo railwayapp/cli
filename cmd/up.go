@@ -60,7 +60,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 
 	_, err = ioutil.ReadFile(".railwayignore")
 	if err == nil {
-		fmt.Print(ui.AlertInfo("Using ignore file .railwayignore"))
+		fmt.Print(ui.AlertVerbose(isVerbose, "Using ignore file .railwayignore"))
 	}
 
 	ui.StartSpinner(&ui.SpinnerCfg{
