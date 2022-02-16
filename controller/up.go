@@ -42,15 +42,15 @@ func compress(src string, buf io.Writer) error {
 			return nil
 		}
 
-		fi, err := de.Info()
+		// follow symlinks by default
+		ln, err := filepath.EvalSymlinks(file)
 		if err != nil {
 			return err
 		}
-
-		if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
-			// Skip symlinks
-			// TODO: Follow em and detect cycles
-			return nil
+		// get info about the file the link points at
+		fi, err := os.Lstat(ln)
+		if err != nil {
+			return err
 		}
 
 		if rwIgnore.MatchesPath(file) || ignore.MatchesPath(file) {
@@ -59,7 +59,7 @@ func compress(src string, buf io.Writer) error {
 
 		// read file into a buffer to prevent tar overwrites
 		data := bytes.NewBuffer(nil)
-		f, err := os.Open(file)
+		f, err := os.Open(ln)
 		if err != nil {
 			return err
 		}
@@ -69,7 +69,7 @@ func compress(src string, buf io.Writer) error {
 		}
 
 		// generate tar headers
-		header, err := tar.FileInfoHeader(fi, file)
+		header, err := tar.FileInfoHeader(fi, ln)
 		if err != nil {
 			return err
 		}
@@ -77,7 +77,6 @@ func compress(src string, buf io.Writer) error {
 		// must provide real name
 		// (see https://golang.org/src/archive/tar/common.go?#L626)
 		header.Name = filepath.ToSlash(file)
-
 		// size when we first observed the file
 		header.Size = int64(data.Len())
 
