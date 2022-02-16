@@ -67,7 +67,7 @@ func init() {
 	// Initializes all commands
 	handler := cmd.New()
 
-	rootCmd.PersistentFlags().Bool("verbose", false, "--verbose")
+	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Print verbose output")
 
 	loginCmd := addRootCmd(&cobra.Command{
 		Use:   "login",
