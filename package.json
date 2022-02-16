@@ -17,7 +17,7 @@
     "postinstall": "node ./npm-install/postinstall.js"
   },
   "bin": {
-    "railway": "bin/railway"
+    "railway": "bin/railway.js"
   },
   "files": [
     "npm-install"
