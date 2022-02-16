@@ -10,11 +10,14 @@
     "type": "git",
     "url": "https://github.com/railwayapp/cli.git"
   },
+  "engines": {
+    "node": ">=16.0.0"
+  },
   "scripts": {
     "postinstall": "node ./npm-install/postinstall.js"
   },
   "bin": {
-    "railway": "bin/railway"
+    "railway": "bin/railway.js"
   },
   "files": [
     "npm-install"

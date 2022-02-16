@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"time"
 
 	"github.com/railwayapp/cli/entity"
@@ -55,6 +56,11 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	service, err := ui.PromptServices(project.Services)
 	if err != nil {
 		return err
+	}
+
+	_, err = ioutil.ReadFile(".railwayignore")
+	if err == nil {
+		fmt.Print(ui.AlertInfo("Using ignore file .railwayignore"))
 	}
 
 	ui.StartSpinner(&ui.SpinnerCfg{
