@@ -63,7 +63,7 @@ func AlertInfo(text string) string {
 	return _aurora.Sprintf(GrayText(Bold("💁 %s\n").String()), text)
 }
 
-func AlertVerbose(isVerbose bool, text string) string {
+func VerboseInfo(isVerbose bool, text string) string {
 	if isVerbose {
 		return _aurora.Sprintf(MagentaText("💁 %s\n"), text)
 	} else {
