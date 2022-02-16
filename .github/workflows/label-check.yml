@@ -13,4 +13,4 @@ jobs:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
           valid-labels: "release/patch, release/minor, release/major"
           pull-request-number: '${{ github.event.pull_request.number }}'
-          disable-reviews: true
+          disable-reviews: 'true'
