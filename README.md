@@ -28,7 +28,7 @@ npm i -g @railway/cli
 ### Yarn
 
 ```shell
-yarn add global @railway/cli
+yarn global add @railway/cli
 ```
 
 ### curl
