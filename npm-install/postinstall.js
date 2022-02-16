@@ -16,6 +16,7 @@ async function install() {
 
   if (version[0] === "v") version = version.slice(1);
 
+  // Fetch Static Config
   let { name: binName, path: binPath, url } = CONFIG;
 
   // Binary name on Windows has .exe suffix
