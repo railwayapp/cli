@@ -6,8 +6,6 @@ This is the command line interface for [Railway](https://railway.app). Use it to
 
 [View the docs](https://docs.railway.app/cli)
 
-*We recommend using Brew for M1 Macs*
-
 ## Installation
 
 The Railway CLI is available through [Homebrew](https://brew.sh/), [NPM](https://www.npmjs.com/package/@railway/cli), or as a curl.
