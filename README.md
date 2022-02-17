@@ -34,7 +34,7 @@ yarn global add @railway/cli
 ### curl
 
 ```shell
-sh -c "$(curl -sSL https://raw.githubusercontent.com/railwayapp/cli/master/install.sh)"
+curl -fsSL https://railway-develop.app/install.sh | sh
 ```
 
 ### From source
