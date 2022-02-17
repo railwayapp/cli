@@ -225,11 +225,13 @@ func init() {
 	upCmd.Flags().BoolP("detach", "d", false, "Detach from cloud build/deploy logs")
 	upCmd.Flags().StringP("environment", "e", "", "Specify an environment to up onto")
 
-	addRootCmd(&cobra.Command{
+	downCmd := addRootCmd(&cobra.Command{
 		Use:   "down",
 		Short: "Remove the latest deployment for the current project",
 		RunE:  contextualize(handler.Down, handler.Panic),
 	})
+
+	downCmd.Flags().StringP("environment", "e", "", "Specify an environment to delete from")
 
 	addRootCmd(&cobra.Command{
 		Use:   "logs",
