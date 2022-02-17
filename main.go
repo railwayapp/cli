@@ -226,6 +226,12 @@ func init() {
 	upCmd.Flags().StringP("environment", "e", "", "Specify an environment to up onto")
 
 	addRootCmd(&cobra.Command{
+		Use:   "down",
+		Short: "Remove the latest deployment for the current project",
+		RunE:  contextualize(handler.Down, handler.Panic),
+	})
+
+	addRootCmd(&cobra.Command{
 		Use:   "logs",
 		Short: "View the most-recent deploy's logs",
 		RunE:  contextualize(handler.Logs, handler.Panic),
