@@ -227,7 +227,7 @@ func init() {
 
 	downCmd := addRootCmd(&cobra.Command{
 		Use:   "down",
-		Short: "Remove the latest deployment for the current project",
+		Short: "Remove the most recent deployment",
 		RunE:  contextualize(handler.Down, handler.Panic),
 	})
 
