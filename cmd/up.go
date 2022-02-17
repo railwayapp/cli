@@ -19,11 +19,22 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		src = "./" + req.Args[0]
 	}
 
+	isVerbose, err := req.Cmd.Flags().GetBool("verbose")
+
+	if err != nil {
+		// Verbose mode isn't a necessary flag; just default to false.
+		isVerbose = false
+	}
+
+	fmt.Print(ui.VerboseInfo(isVerbose, "Using verbose mode"))
+
+	fmt.Print(ui.VerboseInfo(isVerbose, "Loading project configuration"))
 	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
 
+	fmt.Print(ui.VerboseInfo(isVerbose, "Loading environment"))
 	environmentName, err := req.Cmd.Flags().GetString("environment")
 	if err != nil {
 		return err
@@ -33,12 +44,15 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
+	fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf("Using environment %s", ui.Bold(environment.Name))))
 
+	fmt.Print(ui.VerboseInfo(isVerbose, "Loading project"))
 	project, err := h.ctrl.GetProject(ctx, projectConfig.Project)
 	if err != nil {
 		return err
 	}
 
+	fmt.Print(ui.VerboseInfo(isVerbose, "Loading services"))
 	service, err := ui.PromptServices(project.Services)
 	if err != nil {
 		return err
@@ -46,7 +60,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 
 	_, err = ioutil.ReadFile(".railwayignore")
 	if err == nil {
-		fmt.Print(ui.AlertInfo("Using ignore file .railwayignore"))
+		fmt.Print(ui.VerboseInfo(isVerbose, "Using ignore file .railwayignore"))
 	}
 
 	ui.StartSpinner(&ui.SpinnerCfg{
