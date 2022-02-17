@@ -25,6 +25,11 @@ export const CONFIG = {
    * @type {string}
    */
   url: "https://github.com/railwayapp/cli/releases/download/v{{version}}/{{bin_name}}_{{version}}_{{platform}}_{{arch}}.tar.gz",
+
+  /**
+   * The URL for the latest release on GitHub
+   */
+  releasesUrl: "https://api.github.com/repos/railwayapp/cli/releases/latest"
 };
 
 /**

@@ -1,5 +1,5 @@
 import { createWriteStream } from "fs";
-import * as fs from "fs/promises";
+import { mkdir, rm } from "fs/promises";
 import fetch from "node-fetch";
 import { pipeline } from "stream/promises";
 import tar from "tar";
@@ -7,26 +7,15 @@ import tar from "tar";
 import { ARCH_MAPPING, CONFIG, PLATFORM_MAPPING } from "./config.js";
 
 async function install() {
-  const packageJson = await fs.readFile("package.json").then(JSON.parse);
-  let version = packageJson.version;
+  const latestRelease = await fetch(CONFIG.releasesUrl).then(res => res.json())
+  let version = latestRelease.tag_name?.replace("v", "");
 
   if (typeof version !== "string") {
-    throw new Error("Missing version in package.json");
+    throw new Error("Missing version!");
   }
-
-  if (version[0] === "v") version = version.slice(1);
 
   // Fetch Static Config
   let { name: binName, path: binPath, url } = CONFIG;
-
-  // Binary name on Windows has .exe suffix
-  if (process.platform === "win32") {
-    binName += ".exe";
-
-    url = url.replace(/{{win_ext}}/g, ".exe");
-  } else {
-    url = url.replace(/{{win_ext}}/g, "");
-  }
 
   url = url.replace(/{{arch}}/g, ARCH_MAPPING[process.arch]);
   url = url.replace(/{{platform}}/g, PLATFORM_MAPPING[process.platform]);
@@ -40,10 +29,12 @@ async function install() {
 
   const tarFile = "downloaded.tar.gz";
 
-  await fs.mkdir(binPath, { recursive: true });
+  await mkdir(binPath, { recursive: true });
   await pipeline(response.body, createWriteStream(tarFile));
   await tar.x({ file: tarFile, cwd: binPath });
-  await fs.rm(tarFile);
+  await rm(tarFile);
+
+  console.info(`Railway CLI v${version} installed`)
 }
 
 install()
