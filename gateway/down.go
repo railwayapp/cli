@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"context"
+
+	"github.com/railwayapp/cli/entity"
 )
 
-func (g *Gateway) Down(ctx context.Context, projectId, environmentId string) error {
-	deployment, err := g.GetLatestDeploymentForEnvironment(ctx, projectId, environmentId)
+func (g *Gateway) Down(ctx context.Context, req *entity.DownRequest) error {
+	deployment, err := g.GetLatestDeploymentForEnvironment(ctx, req.ProjectID, req.EnvironmentID)
 
 	if err != nil {
 		return err
@@ -21,7 +23,7 @@ func (g *Gateway) Down(ctx context.Context, projectId, environmentId string) err
 		return err
 	}
 
-	gqlReq.Var("projectId", projectId)
+	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("deploymentId", deployment.ID)
 
 	if err = gqlReq.Run(ctx, nil); err != nil {
