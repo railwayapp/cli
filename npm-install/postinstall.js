@@ -19,15 +19,6 @@ async function install() {
   // Fetch Static Config
   let { name: binName, path: binPath, url } = CONFIG;
 
-  // Binary name on Windows has .exe suffix
-  if (process.platform === "win32") {
-    binName += ".exe";
-
-    url = url.replace(/{{win_ext}}/g, ".exe");
-  } else {
-    url = url.replace(/{{win_ext}}/g, "");
-  }
-
   url = url.replace(/{{arch}}/g, ARCH_MAPPING[process.arch]);
   url = url.replace(/{{platform}}/g, PLATFORM_MAPPING[process.platform]);
   url = url.replace(/{{version}}/g, version);
