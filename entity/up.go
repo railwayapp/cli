@@ -1,12 +1,17 @@
 package entity
 
-import "bytes"
+import (
+	"bytes"
+
+	"github.com/railwayapp/cli/lib/git"
+)
 
 type UploadRequest struct {
 	ProjectID     string
 	EnvironmentID string
 	ServiceID     string
 	RootDir       string
+	GitInfo       git.GitMetadata
 }
 
 type UpRequest struct {
@@ -14,6 +19,7 @@ type UpRequest struct {
 	ProjectID     string
 	EnvironmentID string
 	ServiceID     string
+	GitInfo       git.GitMetadata
 }
 
 type UpResponse struct {

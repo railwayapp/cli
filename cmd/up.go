@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/railwayapp/cli/entity"
+	"github.com/railwayapp/cli/lib/git"
 	"github.com/railwayapp/cli/ui"
 )
 
@@ -63,6 +64,24 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		fmt.Print(ui.VerboseInfo(isVerbose, "Using ignore file .railwayignore"))
 	}
 
+	fmt.Print(ui.VerboseInfo(isVerbose, "Getting Git information"))
+	gitInfo, err := git.GetAllMetadata(src)
+
+	if !gitInfo.IsRepo {
+		fmt.Print(ui.VerboseInfo(isVerbose, "No Git repository found"))
+		fmt.Print(err)
+	}
+	{
+		fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf(`Git information:
+   Repository name: %s
+   Branch: %s
+   Latest commit:
+	   Hash: %s
+	   Message: %s
+	   Author: %s
+		`, gitInfo.RepoName, gitInfo.Branch, gitInfo.Commit.Hash, gitInfo.Commit.Message, gitInfo.Commit.Author)))
+	}
+
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Laying tracks in the clouds...",
 	})
@@ -71,6 +90,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		EnvironmentID: environment.Id,
 		ServiceID:     service.ID,
 		RootDir:       src,
+		GitInfo:       gitInfo,
 	})
 	if err != nil {
 		return err
