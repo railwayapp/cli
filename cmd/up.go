@@ -67,20 +67,17 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	fmt.Print(ui.VerboseInfo(isVerbose, "Getting Git information"))
 	gitInfo, err := git.GetAllMetadata(src)
 
-	if !gitInfo.IsRepo {
+	if !gitInfo.IsRepo || err != nil {
 		fmt.Print(ui.VerboseInfo(isVerbose, "No Git repository found"))
-		fmt.Print(err)
 	}
-	{
-		fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf(`Git information:
-   Repository name: %s
-   Branch: %s
-   Latest commit:
-	   Hash: %s
-	   Message: %s
-	   Author: %s
-		`, gitInfo.RepoName, gitInfo.Branch, gitInfo.Commit.Hash, gitInfo.Commit.Message, gitInfo.Commit.Author)))
-	}
+	fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf(`Git information:
+	Repository name: %s
+	Branch: %s
+	Latest commit:
+		Hash: %s
+		Message: %s
+		Author: %s
+	`, gitInfo.RepoName, gitInfo.Branch, gitInfo.Commit.Hash, gitInfo.Commit.Message, gitInfo.Commit.Author)))
 
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Laying tracks in the clouds...",
