@@ -40,7 +40,7 @@ func IsRepo(path string) bool {
 }
 
 func RepoName(path string) (string, error) {
-	remoteRegex := `(?:(?:.*?\@(?:.*?\.)+\:)|(?:https\:\/\/.*?\..*?\/))(?P<User>.*?)\/(?P<Repo>.*?)\.git`
+	remoteRegex := `(?:(?:.*\:)|(?:https\:\/\/.*?\..*?\/))(?P<User>.*?)\/(?P<Repo>.*?)\.git`
 	remotes, err := execGit(path, "remote")
 	useRemotes := true
 	if err != nil || strings.Trim(string(remotes), " \n") == "" {
