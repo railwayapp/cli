@@ -146,7 +146,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	return nil
 }
 
-func (h *Handler) runInDocker(ctx context.Context, pwd string, dockerfile string, envs *entity.Envs) error {
+func (h *Handler) runInDocker(ctx context.Context, pwd, dockerfile string, envs *entity.Envs) error {
 	// Start building the image
 	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
