@@ -58,6 +58,9 @@ func RepoName(path string) (string, error) {
 					remoteUrl += ".git"
 				}
 				match := getParams(remoteRegex, remoteUrl)
+				if len(match) == 0 {
+					break
+				}
 				return match["User"] + "/" + match["Repo"], nil
 			}
 		}
@@ -72,7 +75,7 @@ func RepoName(path string) (string, error) {
 
 func GetBranch(path string) (string, error) {
 	branch, err := execGit(path, "branch", "--show-current")
-	return string(branch), err
+	return strings.Trim(string(branch), " \n"), err
 }
 
 func GetCommit(path string) (CommitInfo, error) {
@@ -90,7 +93,7 @@ func GetCommit(path string) (CommitInfo, error) {
 	}
 	return CommitInfo{
 		Hash:    string(hash),
-		Message: string(message),
+		Message: strings.Trim(string(message), " \n"),
 		Author:  string(author),
 	}, nil
 }
