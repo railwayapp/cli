@@ -89,13 +89,18 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	hasDockerfile := true
+	dockerfile := "Dockerfile.dev"
+
+	if _, err := os.Stat(fmt.Sprintf("%s/Dockerfile.dev", pwd)); os.IsNotExist(err) {
+		dockerfile = "Dockerfile"
+	}
 
 	if _, err := os.Stat(fmt.Sprintf("%s/Dockerfile", pwd)); os.IsNotExist(err) {
 		hasDockerfile = false
 	}
 
 	if len(parsedArgs) == 0 && hasDockerfile {
-		return h.runInDocker(ctx, pwd, envs)
+		return h.runInDocker(ctx, pwd, dockerfile, envs)
 	} else if len(parsedArgs) == 0 {
 		return errors.CommandNotSpecified
 	}
@@ -141,7 +146,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	return nil
 }
 
-func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs) error {
+func (h *Handler) runInDocker(ctx context.Context, pwd string, dockerfile string, envs *entity.Envs) error {
 	// Start building the image
 	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
@@ -163,7 +168,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	imageNameWithoutNsOrTag := strings.ToLower(sanitiser.ReplaceAllString(project.Name, "") + "-" + sanitiser.ReplaceAllString(environment.Name, ""))
 	image := fmt.Sprintf("railway-local/%s:latest", imageNameWithoutNsOrTag)
 
-	buildArgs := []string{"build", "-q", "-t", image, pwd}
+	buildArgs := []string{"build", "-q", "-t", image, "-f", dockerfile, pwd}
 
 	// Build up env
 	for k, v := range *envs {
@@ -171,7 +176,7 @@ func (h *Handler) runInDocker(ctx context.Context, pwd string, envs *entity.Envs
 	}
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
-	fmt.Printf("Building %s from Dockerfile...\n", ui.GreenText(image))
+	fmt.Printf("Building %s from %s...\n", ui.GreenText(image), dockerfile)
 
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
