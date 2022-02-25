@@ -9,10 +9,11 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/railwayapp/cli/entity"
+	CLIErrors "github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
 
-func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
+func (c *Controller) GetEnvsForService(ctx context.Context, serviceName *string) (*entity.Envs, error) {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return nil, err
@@ -23,9 +24,27 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 		return nil, err
 	}
 
-	service, err := ui.PromptServices(project.Services)
-	if err != nil {
-		return nil, err
+	// Get service id from name
+	serviceId := ""
+
+	if serviceName != nil {
+		for _, service := range project.Services {
+			if service.Name == *serviceName {
+				serviceId = service.ID
+			}
+		}
+
+		if serviceId == "" {
+			return nil, CLIErrors.ServiceNotFound
+		}
+	}
+
+	if serviceId == "" {
+		service, err := ui.PromptServices(project.Services)
+		serviceId = service.ID
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
@@ -42,8 +61,12 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
-		ServiceID:     service.ID,
+		ServiceID:     serviceId,
 	})
+}
+
+func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
+	return c.GetEnvsForService(ctx, nil)
 }
 
 func (c *Controller) AutoImportDotEnv(ctx context.Context) error {
