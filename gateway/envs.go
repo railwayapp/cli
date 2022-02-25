@@ -34,8 +34,8 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 
 func (g *Gateway) UpsertVariablesFromObject(ctx context.Context, req *entity.UpdateEnvsRequest) error {
 	gqlReq, err := g.NewRequestWithAuth(`
-	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $variables: Json!) {
-				upsertVariablesFromObject(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, variables: $variables)
+	  	mutation($projectId: String!, $environmentId: String!, $pluginId: String, $serviceId: String, $variables: Json!) {
+				upsertVariablesFromObject(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, serviceId: $serviceId, variables: $variables)
 	  	}
 	`)
 	if err != nil {
@@ -44,7 +44,13 @@ func (g *Gateway) UpsertVariablesFromObject(ctx context.Context, req *entity.Upd
 
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("environmentId", req.EnvironmentID)
-	gqlReq.Var("pluginId", req.PluginID)
+	if req.PluginID != "" {
+		gqlReq.Var("pluginId", req.PluginID)
+	}
+	if req.ServiceID != "" {
+		gqlReq.Var("serviceId", req.ServiceID)
+	}
+
 	gqlReq.Var("variables", req.Envs)
 
 	if err := gqlReq.Run(ctx, nil); err != nil {
@@ -56,8 +62,8 @@ func (g *Gateway) UpsertVariablesFromObject(ctx context.Context, req *entity.Upd
 
 func (g *Gateway) DeleteVariable(ctx context.Context, req *entity.DeleteVariableRequest) error {
 	gqlReq, err := g.NewRequestWithAuth(`
-	  	mutation($projectId: String!, $environmentId: String! $pluginId: String! $name: String!) {
-				deleteVariable(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, name: $name)
+	  	mutation($projectId: String!, $environmentId: String!, $pluginId: String, $serviceId: String, $name: String!) {
+				deleteVariable(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, serviceId: $serviceId, name: $name)
 	  	}
 	`)
 	if err != nil {
@@ -66,8 +72,13 @@ func (g *Gateway) DeleteVariable(ctx context.Context, req *entity.DeleteVariable
 
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("environmentId", req.EnvironmentID)
-	gqlReq.Var("pluginId", req.PluginID)
 	gqlReq.Var("name", req.Name)
+	if req.PluginID != "" {
+		gqlReq.Var("pluginId", req.PluginID)
+	}
+	if req.ServiceID != "" {
+		gqlReq.Var("serviceId", req.ServiceID)
+	}
 
 	if err := gqlReq.Run(ctx, nil); err != nil {
 		return err

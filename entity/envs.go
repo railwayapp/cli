@@ -16,6 +16,7 @@ type UpdateEnvsRequest struct {
 	ProjectID     string
 	EnvironmentID string
 	PluginID      string
+	ServiceID     string
 	Envs          *Envs
 }
 
@@ -23,6 +24,7 @@ type DeleteVariableRequest struct {
 	ProjectID     string
 	EnvironmentID string
 	PluginID      string
+	ServiceID     string
 	Name          string
 }
 
