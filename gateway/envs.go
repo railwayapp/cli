@@ -8,8 +8,8 @@ import (
 
 func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*entity.Envs, error) {
 	gqlReq, err := g.NewRequestWithAuth(`
-		query ($projectId: String!, $environmentId: String!) {
-			decryptedVariables(projectId: $projectId, environmentId: $environmentId)
+		query ($projectId: String!, $environmentId: String!, $serviceId: String) {
+			decryptedVariablesForService(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
 		}
 	`)
 	if err != nil {
@@ -19,8 +19,12 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	gqlReq.Var("projectId", req.ProjectID)
 	gqlReq.Var("environmentId", req.EnvironmentID)
 
+	if req.ServiceID != "" {
+		gqlReq.Var("serviceId", req.ServiceID)
+	}
+
 	var resp struct {
-		Envs *entity.Envs `json:"decryptedVariables"`
+		Envs *entity.Envs `json:"decryptedVariablesForService"`
 	}
 	if err := gqlReq.Run(ctx, &resp); err != nil {
 		return nil, err

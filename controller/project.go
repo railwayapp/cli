@@ -6,6 +6,21 @@ import (
 	"github.com/railwayapp/cli/entity"
 )
 
+// GetCurrentProject returns the currently active project
+func (c *Controller) GetCurrentProject(ctx context.Context) (*entity.Project, error) {
+	projectCfg, err := c.GetProjectConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	project, err := c.GetProject(ctx, projectCfg.Project)
+	if err != nil {
+		return nil, err
+	}
+
+	return project, nil
+}
+
 // GetProject returns a project of id projectId, error otherwise
 func (c *Controller) GetProject(ctx context.Context, projectId string) (*entity.Project, error) {
 	return c.gtwy.GetProject(ctx, projectId)

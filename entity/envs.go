@@ -3,6 +3,7 @@ package entity
 type GetEnvsRequest struct {
 	ProjectID     string
 	EnvironmentID string
+	ServiceID     string
 }
 
 type GetEnvsForPluginRequest struct {

@@ -18,6 +18,16 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 		return nil, err
 	}
 
+	project, err := c.GetCurrentProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	service, err := ui.PromptServices(project.Services)
+	if err != nil {
+		return nil, err
+	}
+
 	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
 		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
 		confirm, err := ui.PromptYesNo("Continue fetching variables?")
@@ -32,13 +42,7 @@ func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
 	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
-	})
-}
-
-func (c *Controller) GetEnvsForEnvironment(ctx context.Context, req *entity.GetEnvsRequest) (*entity.Envs, error) {
-	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{
-		ProjectID:     req.ProjectID,
-		EnvironmentID: req.EnvironmentID,
+		ServiceID:     service.ID,
 	})
 }
 
