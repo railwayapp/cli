@@ -236,6 +236,7 @@ func init() {
 	})
 	upCmd.Flags().BoolP("detach", "d", false, "Detach from cloud build/deploy logs")
 	upCmd.Flags().StringP("environment", "e", "", "Specify an environment to up onto")
+	upCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
 
 	addRootCmd(&cobra.Command{
 		Use:   "logs",

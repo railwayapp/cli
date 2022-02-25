@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/railwayapp/cli/entity"
+	CLIErrors "github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
 
@@ -20,10 +21,14 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	isVerbose, err := req.Cmd.Flags().GetBool("verbose")
-
 	if err != nil {
 		// Verbose mode isn't a necessary flag; just default to false.
 		isVerbose = false
+	}
+
+	serviceName, err := req.Cmd.Flags().GetString("service")
+	if err != nil {
+		return err
 	}
 
 	fmt.Print(ui.VerboseInfo(isVerbose, "Using verbose mode"))
@@ -52,10 +57,30 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	fmt.Print(ui.VerboseInfo(isVerbose, "Loading services"))
-	service, err := ui.PromptServices(project.Services)
-	if err != nil {
-		return err
+	serviceId := ""
+	if serviceName != "" {
+		for _, service := range project.Services {
+			if service.Name == serviceName {
+				serviceId = service.ID
+			}
+		}
+
+		if serviceId == "" {
+			return CLIErrors.ServiceNotFound
+		}
+	}
+
+	// If service has not been provided via flag, prompt for it
+	if serviceId == "" {
+		fmt.Print(ui.VerboseInfo(isVerbose, "Loading services"))
+		service, err := ui.PromptServices(project.Services)
+		if err != nil {
+			return err
+		}
+
+		if service != nil {
+			serviceId = service.ID
+		}
 	}
 
 	_, err = ioutil.ReadFile(".railwayignore")
@@ -69,7 +94,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
-		ServiceID:     service.ID,
+		ServiceID:     serviceId,
 		RootDir:       src,
 	})
 	if err != nil {
