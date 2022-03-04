@@ -29,25 +29,40 @@ func (h *Handler) getEnvironment(ctx context.Context, environmentName string) (*
 
 func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	isEphemeral := false
+
 	for _, arg := range req.Args {
-		if (arg) == "--ephemeral" {
+		if arg == "--ephemeral" {
 			isEphemeral = true
 		}
 	}
 
-	rgx, err := regexp.Compile("--environment=(.*)")
+	parsedArgs := make([]string, 0)
+
+	rgxEnvironment, err := regexp.Compile("--environment=(.*)")
+	if err != nil {
+		return err
+	}
+
+	rgxService, err := regexp.Compile("--service=(.*)")
 	if err != nil {
 		return err
 	}
 
 	targetEnvironment := ""
-	parsedArgs := make([]string, 0)
+	var targetServiceName *string
+
+	// Parse --environment={ENV} and --service={SERVICE} from args
 	for _, arg := range req.Args {
-		if matched := rgx.FindStringSubmatch(arg); matched != nil {
+		if matched := rgxEnvironment.FindStringSubmatch(arg); matched != nil {
 			if len(matched) < 2 {
-				return goErr.New("Missing environment selection! \n(e.g --enviroment=production)")
+				return goErr.New("missing environment selection! \n(e.g --environment=production)")
 			}
 			targetEnvironment = matched[1]
+		} else if matched := rgxService.FindStringSubmatch(arg); matched != nil {
+			if len(matched) < 2 {
+				return goErr.New("missing service selection! \n(e.g --service=serviceName)")
+			}
+			targetServiceName = &matched[1]
 		} else {
 			parsedArgs = append(parsedArgs, arg)
 		}
@@ -77,7 +92,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		}
 		fmt.Println("Done!")
 	}
-	envs, err := h.ctrl.GetEnvs(ctx)
+	envs, err := h.ctrl.GetEnvsForService(ctx, targetServiceName)
 
 	if err != nil {
 		return err

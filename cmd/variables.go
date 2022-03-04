@@ -11,8 +11,13 @@ import (
 	"github.com/railwayapp/cli/entity"
 )
 
-func (h *Handler) Variables(ctx context.Context, _ *entity.CommandRequest) error {
-	envs, err := h.ctrl.GetEnvs(ctx)
+func (h *Handler) Variables(ctx context.Context, req *entity.CommandRequest) error {
+	serviceName, err := req.Cmd.Flags().GetString("service")
+	if err != nil {
+		return err
+	}
+
+	envs, err := h.ctrl.GetEnvsForService(ctx, &serviceName)
 	if err != nil {
 		return err
 	}
@@ -29,7 +34,12 @@ func (h *Handler) Variables(ctx context.Context, _ *entity.CommandRequest) error
 }
 
 func (h *Handler) VariablesGet(ctx context.Context, req *entity.CommandRequest) error {
-	envs, err := h.ctrl.GetEnvs(ctx)
+	serviceName, err := req.Cmd.Flags().GetString("service")
+	if err != nil {
+		return err
+	}
+
+	envs, err := h.ctrl.GetEnvsForService(ctx, &serviceName)
 	if err != nil {
 		return err
 	}
@@ -42,6 +52,11 @@ func (h *Handler) VariablesGet(ctx context.Context, req *entity.CommandRequest) 
 }
 
 func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) error {
+	serviceName, err := req.Cmd.Flags().GetString("service")
+	if err != nil {
+		return err
+	}
+
 	variables := &entity.Envs{}
 	updatedEnvNames := make([]string, 0)
 
@@ -57,7 +72,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		updatedEnvNames = append(updatedEnvNames, key)
 	}
 
-	err := h.ctrl.UpsertEnvsForEnvPlugin(ctx, variables)
+	err = h.ctrl.UpsertEnvs(ctx, variables, &serviceName)
 
 	if err != nil {
 		return err
@@ -80,7 +95,12 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 }
 
 func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandRequest) error {
-	err := h.ctrl.DeleteEnvsForEnvPlugin(ctx, req.Args)
+	serviceName, err := req.Cmd.Flags().GetString("service")
+	if err != nil {
+		return err
+	}
+
+	err = h.ctrl.DeleteEnvs(ctx, req.Args, &serviceName)
 	if err != nil {
 		return err
 	}
