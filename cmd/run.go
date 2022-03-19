@@ -40,6 +40,12 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
+	dockerfileRegex, err := regexp.Compile("--dockerfile=(.*)")
+	dockerfile := "Dockerfile.dev"
+	if err != nil {
+		return err
+	}
+
 	targetEnvironment := ""
 	parsedArgs := make([]string, 0)
 	for _, arg := range req.Args {
@@ -48,6 +54,11 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 				return goErr.New("Missing environment selection! \n(e.g --enviroment=production)")
 			}
 			targetEnvironment = matched[1]
+		} else if matched := dockerfileRegex.FindStringSubmatch(arg); matched != nil {
+			if len(matched) < 2 {
+				return goErr.New("Missing dockerfile selection! \n(e.g. --dockerfile=Dockerfile.local)")
+			}
+			dockerfile = matched[1]
 		} else {
 			parsedArgs = append(parsedArgs, arg)
 		}
@@ -89,9 +100,8 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	hasDockerfile := true
-	dockerfile := "Dockerfile.dev"
 
-	if _, err := os.Stat(fmt.Sprintf("%s/Dockerfile.dev", pwd)); os.IsNotExist(err) {
+	if _, err := os.Stat(fmt.Sprintf("%s/%s", pwd, dockerfile)); os.IsNotExist(err) {
 		dockerfile = "Dockerfile"
 	}
 
