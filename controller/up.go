@@ -32,7 +32,7 @@ type ignoreFile struct {
 }
 
 func scanIgnoreFiles(src string) ([]ignoreFile, error) {
-	ret := []ignoreFile{}
+	ignoreFiles := []ignoreFile{}
 
 	if err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -62,7 +62,7 @@ func scanIgnoreFiles(src string) ([]ignoreFile, error) {
 				prefix = "" // Handle root dir properly.
 			}
 
-			ret = append(ret, ignoreFile{
+			ignoreFiles = append(ignoreFiles, ignoreFile{
 				prefix: prefix,
 				ignore: igf,
 			})
@@ -73,7 +73,7 @@ func scanIgnoreFiles(src string) ([]ignoreFile, error) {
 		return nil, err
 	}
 
-	return ret, nil
+	return ignoreFiles, nil
 }
 
 func compress(src string, buf io.Writer) error {
@@ -136,7 +136,9 @@ func compress(src string, buf io.Writer) error {
 		}
 
 		// close the file to avoid hitting fd limit
-		_ = f.Close()
+		if err := f.Close(); err != nil {
+			return err
+		}
 
 		// generate tar headers
 		header, err := tar.FileInfoHeader(fi, ln)
