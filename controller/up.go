@@ -7,30 +7,84 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/railwayapp/cli/entity"
 	gitignore "github.com/railwayapp/cli/gateway"
 )
 
+var validIgnoreFile = map[string]bool{
+	".gitignore":     true,
+	".railwayignore": true,
+}
+
+var skipDirs = []string{
+	".git",
+	"node_modules",
+}
+
+type ignoreFile struct {
+	prefix string
+	ignore *gitignore.GitIgnore
+}
+
+func scanIgnoreFiles(src string) ([]ignoreFile, error) {
+	ignoreFiles := []ignoreFile{}
+
+	if err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			// no sense scanning for ignore files in skipped dirs
+			for _, s := range skipDirs {
+				if filepath.Base(path) == s {
+					return filepath.SkipDir
+				}
+			}
+
+			return nil
+		}
+
+		fname := filepath.Base(path)
+		if validIgnoreFile[fname] {
+			igf, err := gitignore.CompileIgnoreFile(path)
+			if err != nil {
+				return err
+			}
+
+			prefix := filepath.Dir(path)
+			if prefix == "." {
+				prefix = "" // Handle root dir properly.
+			}
+
+			ignoreFiles = append(ignoreFiles, ignoreFile{
+				prefix: prefix,
+				ignore: igf,
+			})
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return ignoreFiles, nil
+}
+
 func compress(src string, buf io.Writer) error {
 	// tar > gzip > buf
 	zr := gzip.NewWriter(buf)
 	tw := tar.NewWriter(zr)
-	ignore, err := gitignore.CompileIgnoreFile(".gitignore")
 
+	// find all ignore files, including those in subdirs
+	ignoreFiles, err := scanIgnoreFiles(src)
 	if err != nil {
 		return err
-	}
-
-	rwIgnore, err := gitignore.CompileIgnoreFile(".railwayignore")
-
-	if err != nil {
-		rwIgnore, err = gitignore.CompileIgnoreLines(".git/", "node_modules/")
-		if err != nil {
-			return err
-		}
 	}
 
 	// walk through every file in the folder
@@ -39,6 +93,14 @@ func compress(src string, buf io.Writer) error {
 			return err
 		}
 		if de.IsDir() {
+			// skip directories if we can (for perf)
+			// e.g., want to avoid walking node_modules dir
+			for _, s := range skipDirs {
+				if filepath.Base(file) == s {
+					return filepath.SkipDir
+				}
+			}
+
 			return nil
 		}
 
@@ -53,8 +115,13 @@ func compress(src string, buf io.Writer) error {
 			return err
 		}
 
-		if rwIgnore.MatchesPath(file) || ignore.MatchesPath(file) {
-			return nil
+		for _, igf := range ignoreFiles {
+			if strings.HasPrefix(file, igf.prefix) { // if ignore file applicable
+				trimmed := strings.TrimPrefix(file, igf.prefix)
+				if igf.ignore.MatchesPath(trimmed) {
+					return nil
+				}
+			}
 		}
 
 		// read file into a buffer to prevent tar overwrites
@@ -65,6 +132,11 @@ func compress(src string, buf io.Writer) error {
 		}
 		_, err = io.Copy(data, f)
 		if err != nil {
+			return err
+		}
+
+		// close the file to avoid hitting fd limit
+		if err := f.Close(); err != nil {
 			return err
 		}
 
@@ -106,7 +178,10 @@ func compress(src string, buf io.Writer) error {
 	return nil
 }
 
-func (c *Controller) Upload(ctx context.Context, req *entity.UploadRequest) (*entity.UpResponse, error) {
+func (c *Controller) Upload(
+	ctx context.Context,
+	req *entity.UploadRequest,
+) (*entity.UpResponse, error) {
 	var buf bytes.Buffer
 
 	if err := compress(req.RootDir, &buf); err != nil {
