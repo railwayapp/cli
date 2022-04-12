@@ -18,7 +18,14 @@ func (h *Handler) Whoami(ctx context.Context, req *entity.CommandRequest) error 
 	if user.Name != "" {
 		userText = fmt.Sprintf("%s (%s)", user.Name, ui.MagentaText(user.Email))
 	}
-	fmt.Printf("👋 Hey %s\n", userText)
+
+	project, projectError := h.ctrl.GetCurrentProject(ctx)
+	projectText := ""
+	if projectError == nil {
+		projectText = fmt.Sprintf("Current Project Id: %s\n", ui.MagentaText(project.Id))
+	}
+
+	fmt.Printf("👋 Hey %s\n  %s", userText, projectText)
 
 	// Todo, more info, also more fun
 	return nil
