@@ -25,7 +25,7 @@ func (h *Handler) Whoami(ctx context.Context, req *entity.CommandRequest) error 
 		projectText = fmt.Sprintf("Current Project Id: %s\n", ui.MagentaText(project.Id))
 	}
 
-	fmt.Printf("👋 Hey %s\n  %s", userText, projectText)
+	fmt.Printf("👋 Hey %s\n%s", userText, projectText)
 
 	// Todo, more info, also more fun
 	return nil
