@@ -29,7 +29,7 @@ func (h *Handler) Shell(ctx context.Context, req *entity.CommandRequest) error {
 	shellVar := os.Getenv("SHELL")
 	if shellVar == "" {
 		// Use bash by default
-		shellVar = "/bin/bash"
+		shellVar = "bash"
 	}
 
 	fmt.Print(ui.Paragraph(fmt.Sprintf("Loading subshell with variables from %s", environment.Name)))
