@@ -270,6 +270,13 @@ func init() {
 		RunE:  contextualize(handler.Connect, handler.Panic),
 	})
 
+	shellCmd := addRootCmd(&cobra.Command{
+		Use:   "shell",
+		Short: "Open a subshell with Railway variables available",
+		RunE:  contextualize(handler.Shell, handler.Panic),
+	})
+	shellCmd.Flags().StringP("service", "s", "", "Use variables accessible to a specific service")
+
 	addRootCmd(&cobra.Command{
 		Hidden: true,
 		Use:    "design",
