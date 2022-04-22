@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
@@ -28,8 +29,12 @@ func (h *Handler) Shell(ctx context.Context, req *entity.CommandRequest) error {
 
 	shellVar := os.Getenv("SHELL")
 	if shellVar == "" {
-		// Use bash by default
-		shellVar = "bash"
+		// Fallback shell to use
+		if isWindows() {
+			shellVar = "cmd"
+		} else {
+			shellVar = "bash"
+		}
 	}
 
 	fmt.Print(ui.Paragraph(fmt.Sprintf("Loading subshell with variables from %s", environment.Name)))
@@ -48,4 +53,8 @@ func (h *Handler) Shell(ctx context.Context, req *entity.CommandRequest) error {
 	err = subShellCmd.Run()
 
 	return err
+}
+
+func isWindows() bool {
+	return runtime.GOOS == "windows"
 }
