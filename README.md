@@ -32,7 +32,7 @@ yarn global add @railway/cli
 ### curl
 
 ```shell
-curl -fsSL https://railway-develop.app/install.sh | sh
+curl -fsSL https://railway.app/install.sh | sh
 ```
 
 ### From source
