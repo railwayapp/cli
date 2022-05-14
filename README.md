@@ -4,7 +4,7 @@
 
 This is the command line interface for [Railway](https://railway.app). Use it to connect your code to Railways infrastructure without needing to worry about environment variables or configuration.
 
-[View the docs](https://docs.railway.app/develop/cli)
+[View the docs](https://docs.railway.app/develop/cli).
 
 ## Installation
 
