@@ -8,19 +8,13 @@ before:
 builds:
   - binary: railway
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     ldflags:
       - -s -w -X github.com/railwayapp/cli/constants.Version={{.Version}}
     goos:
       - linux
       - windows
       - darwin
-      - android
-    goarch:
-      - amd64
-      - arm
-      - arm64
-      - 386
 
 brews:
   - tap:
