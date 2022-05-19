@@ -4,7 +4,7 @@
 
 This is the command line interface for [Railway](https://railway.app). Use it to connect your code to Railways infrastructure without needing to worry about environment variables or configuration.
 
-[View the docs](https://docs.railway.app/cli)
+[View the docs](https://docs.railway.app/develop/cli).
 
 ## Installation
 
@@ -32,7 +32,7 @@ yarn global add @railway/cli
 ### curl
 
 ```shell
-curl -fsSL https://railway-develop.app/install.sh | sh
+curl -fsSL https://railway.app/install.sh | sh
 ```
 
 ### From source
