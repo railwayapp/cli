@@ -48,7 +48,7 @@ func (h *Handler) Connect(ctx context.Context, req *entity.CommandRequest) error
 	if !isPluginValid(plugin) {
 		return fmt.Errorf("Invalid plugin: %s", plugin)
 	}
-	envs, err := h.ctrl.GetEnvs(ctx)
+	envs, err := h.ctrl.GetEnvsForCurrentEnvironment(ctx, nil)
 	if err != nil {
 		return err
 	}

@@ -17,7 +17,7 @@ func (h *Handler) Variables(ctx context.Context, req *entity.CommandRequest) err
 		return err
 	}
 
-	envs, err := h.ctrl.GetEnvsForService(ctx, &serviceName)
+	envs, err := h.ctrl.GetEnvsForCurrentEnvironment(ctx, &serviceName)
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func (h *Handler) VariablesGet(ctx context.Context, req *entity.CommandRequest) 
 		return err
 	}
 
-	envs, err := h.ctrl.GetEnvsForService(ctx, &serviceName)
+	envs, err := h.ctrl.GetEnvsForCurrentEnvironment(ctx, &serviceName)
 	if err != nil {
 		return err
 	}
