@@ -1,8 +1,6 @@
 name: Release Label Check
 
 on:
-  pull_request:
-    types: [opened, labeled, unlabeled, synchronize]
   pull_request_target:
     types: [opened, labeled, unlabeled, synchronize]
 
@@ -15,3 +13,4 @@ jobs:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
           valid-labels: "release/patch, release/minor, release/major"
           pull-request-number: '${{ github.event.pull_request.number }}'
+          disable-reviews: true

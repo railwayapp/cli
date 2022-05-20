@@ -4,9 +4,7 @@
 
 This is the command line interface for [Railway](https://railway.app). Use it to connect your code to Railways infrastructure without needing to worry about environment variables or configuration.
 
-[View the docs](https://docs.railway.app/cli)
-
-*We recommend using Brew for M1 Macs*
+[View the docs](https://docs.railway.app/develop/cli).
 
 ## Installation
 
@@ -25,10 +23,16 @@ brew install railway
 npm i -g @railway/cli
 ```
 
+### Yarn
+
+```shell
+yarn global add @railway/cli
+```
+
 ### curl
 
 ```shell
-sh -c "$(curl -sSL https://raw.githubusercontent.com/railwayapp/cli/master/install.sh)"
+curl -fsSL https://railway.app/install.sh | sh
 ```
 
 ### From source

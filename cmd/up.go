@@ -3,9 +3,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"time"
 
 	"github.com/railwayapp/cli/entity"
+	CLIErrors "github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
 
@@ -18,10 +20,26 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		src = "./" + req.Args[0]
 	}
 
+	isVerbose, err := req.Cmd.Flags().GetBool("verbose")
+	if err != nil {
+		// Verbose mode isn't a necessary flag; just default to false.
+		isVerbose = false
+	}
+
+	serviceName, err := req.Cmd.Flags().GetString("service")
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(ui.VerboseInfo(isVerbose, "Using verbose mode"))
+
+	fmt.Print(ui.VerboseInfo(isVerbose, "Loading project configuration"))
 	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
+
+	fmt.Print(ui.VerboseInfo(isVerbose, "Loading environment"))
 	environmentName, err := req.Cmd.Flags().GetString("environment")
 	if err != nil {
 		return err
@@ -31,12 +49,52 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
+	fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf("Using environment %s", ui.Bold(environment.Name))))
+
+	fmt.Print(ui.VerboseInfo(isVerbose, "Loading project"))
+	project, err := h.ctrl.GetProject(ctx, projectConfig.Project)
+	if err != nil {
+		return err
+	}
+
+	serviceId := ""
+	if serviceName != "" {
+		for _, service := range project.Services {
+			if service.Name == serviceName {
+				serviceId = service.ID
+			}
+		}
+
+		if serviceId == "" {
+			return CLIErrors.ServiceNotFound
+		}
+	}
+
+	// If service has not been provided via flag, prompt for it
+	if serviceId == "" {
+		fmt.Print(ui.VerboseInfo(isVerbose, "Loading services"))
+		service, err := ui.PromptServices(project.Services)
+		if err != nil {
+			return err
+		}
+
+		if service != nil {
+			serviceId = service.ID
+		}
+	}
+
+	_, err = ioutil.ReadFile(".railwayignore")
+	if err == nil {
+		fmt.Print(ui.VerboseInfo(isVerbose, "Using ignore file .railwayignore"))
+	}
+
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Laying tracks in the clouds...",
 	})
 	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
+		ServiceID:     serviceId,
 		RootDir:       src,
 	})
 	if err != nil {

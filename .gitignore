@@ -134,7 +134,8 @@ dist
 # End of https://www.toptal.com/developers/gitignore/api/go,node
 
 # Build directory
-bin
+bin/*
+!bin/*.js
 
 # NPM token
 .npmrc

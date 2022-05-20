@@ -34,4 +34,5 @@ var (
 	NoDeploymentsFound                  RailwayError = fmt.Errorf("%s", ui.RedText("No Deployments Found!"))
 	DeploymentFetchingFailed            RailwayError = fmt.Errorf("%s", "Failed to fetch deployments")
 	CreateEnvironmentFailed             RailwayError = fmt.Errorf("%s", ui.RedText("Creating environment failed!"))
+	ServiceNotFound                     RailwayError = fmt.Errorf("%s", ui.RedText("Service not found in project"))
 )
