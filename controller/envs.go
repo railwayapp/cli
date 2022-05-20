@@ -13,7 +13,16 @@ import (
 	"github.com/railwayapp/cli/ui"
 )
 
-func (c *Controller) GetEnvsForService(ctx context.Context, serviceName *string) (*entity.Envs, error) {
+func (c *Controller) GetEnvsForCurrentEnvironment(ctx context.Context, serviceName *string) (*entity.Envs, error) {
+	environment, err := c.GetCurrentEnvironment(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.GetEnvs(ctx, environment, serviceName)
+}
+
+func (c *Controller) GetEnvs(ctx context.Context, environment *entity.Environment, serviceName *string) (*entity.Envs, error) {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return nil, err
@@ -50,7 +59,7 @@ func (c *Controller) GetEnvsForService(ctx context.Context, serviceName *string)
 		}
 	}
 
-	if val, ok := projectCfg.LockedEnvsNames[projectCfg.Environment]; ok && val {
+	if val, ok := projectCfg.LockedEnvsNames[environment.Id]; ok && val {
 		fmt.Println(ui.Bold(ui.RedText("Protected Environment Detected!").String()))
 		confirm, err := ui.PromptYesNo("Continue fetching variables?")
 		if err != nil {
@@ -63,13 +72,9 @@ func (c *Controller) GetEnvsForService(ctx context.Context, serviceName *string)
 
 	return c.gtwy.GetEnvs(ctx, &entity.GetEnvsRequest{
 		ProjectID:     projectCfg.Project,
-		EnvironmentID: projectCfg.Environment,
+		EnvironmentID: environment.Id,
 		ServiceID:     serviceId,
 	})
-}
-
-func (c *Controller) GetEnvs(ctx context.Context) (*entity.Envs, error) {
-	return c.GetEnvsForService(ctx, nil)
 }
 
 func (c *Controller) AutoImportDotEnv(ctx context.Context) error {
@@ -106,7 +111,7 @@ func (c *Controller) AutoImportDotEnv(ctx context.Context) error {
 }
 
 func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
-	envs, err := c.GetEnvs(ctx)
+	envs, err := c.GetEnvsForCurrentEnvironment(ctx, nil)
 	if err != nil {
 		return err
 	}

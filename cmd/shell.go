@@ -17,7 +17,7 @@ func (h *Handler) Shell(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	envs, err := h.ctrl.GetEnvsForService(ctx, &serviceName)
+	envs, err := h.ctrl.GetEnvsForCurrentEnvironment(ctx, &serviceName)
 	if err != nil {
 		return err
 	}

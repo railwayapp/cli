@@ -92,7 +92,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 		}
 		fmt.Println("Done!")
 	}
-	envs, err := h.ctrl.GetEnvsForService(ctx, targetServiceName)
+	envs, err := h.ctrl.GetEnvs(ctx, environment, targetServiceName)
 
 	if err != nil {
 		return err
