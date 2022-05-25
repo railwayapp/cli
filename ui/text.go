@@ -11,17 +11,12 @@ import (
 	_aurora "github.com/logrusorgru/aurora"
 )
 
-var aurora = _aurora.NewAurora(true)
+var aurora _aurora.Aurora
 
 func init() {
-	// Disable colors if no TTY detected
-	if !isatty.IsTerminal(os.Stdout.Fd()) {
-		DisableTextStyles()
-	}
-}
-
-func DisableTextStyles() {
-	aurora = _aurora.NewAurora(false)
+	// Disable colors automatically if no TTY detected
+	enableColors := isatty.IsTerminal(os.Stdout.Fd())
+	aurora = _aurora.NewAurora(enableColors)
 }
 
 func Bold(payload string) _aurora.Value {
