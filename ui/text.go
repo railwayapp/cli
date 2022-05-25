@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"github.com/mattn/go-isatty"
 	"math"
+	"os"
 	"sort"
 	"strings"
 
@@ -10,6 +12,13 @@ import (
 )
 
 var aurora = _aurora.NewAurora(true)
+
+func init() {
+	// Disable colors if no TTY detected
+	if !isatty.IsTerminal(os.Stdout.Fd()) {
+		DisableTextStyles()
+	}
+}
 
 func DisableTextStyles() {
 	aurora = _aurora.NewAurora(false)
