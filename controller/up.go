@@ -104,6 +104,15 @@ func compress(src string, buf io.Writer) error {
 			return nil
 		}
 
+		for _, igf := range ignoreFiles {
+			if strings.HasPrefix(file, igf.prefix) { // if ignore file applicable
+				trimmed := strings.TrimPrefix(file, igf.prefix)
+				if igf.ignore.MatchesPath(trimmed) {
+					return nil
+				}
+			}
+		}
+
 		// follow symlinks by default
 		ln, err := filepath.EvalSymlinks(file)
 		if err != nil {
@@ -113,15 +122,6 @@ func compress(src string, buf io.Writer) error {
 		fi, err := os.Lstat(ln)
 		if err != nil {
 			return err
-		}
-
-		for _, igf := range ignoreFiles {
-			if strings.HasPrefix(file, igf.prefix) { // if ignore file applicable
-				trimmed := strings.TrimPrefix(file, igf.prefix)
-				if igf.ignore.MatchesPath(trimmed) {
-					return nil
-				}
-			}
 		}
 
 		// read file into a buffer to prevent tar overwrites
