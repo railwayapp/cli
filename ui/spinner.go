@@ -52,5 +52,8 @@ func StopSpinner(msg string) {
 		s.FinalMSG = msg + "\n"
 	}
 
-	s.Stop()
+	// NOTE: Running Stop() when not active triggers a nil pointer
+	if s.Active() {
+		s.Stop()
+	}
 }
