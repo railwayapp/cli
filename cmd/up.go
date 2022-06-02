@@ -128,7 +128,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	fmt.Printf("☁️ Deployment logs available at %s\n", ui.GrayText(res.URL))
 	fmt.Printf("OR run `railway logs` to tail them here\n\n")
 
-	if res.DeploymentDomain == "" {
+	if res.DeploymentDomain != "" {
 		fmt.Printf("☁️ Deployment live at %s\n", ui.GrayText(h.ctrl.GetFullUrlFromStaticUrl(res.DeploymentDomain)))
 	} else {
 		fmt.Printf("☁️ Deployment is live\n")
