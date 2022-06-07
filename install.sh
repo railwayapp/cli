@@ -154,6 +154,11 @@ do_install_binary() {
   rm -rf $tmp_dir
 }
 
+install_termux() {
+  echo "Installing, this may take a few minutes..."
+  pkg upgrade && pkg install golang git -y && git clone https://github.com/railwayapp/cli.git && cd cli/ && go build -o $PREFIX/bin/railway
+}
+
 main() {
   setup_color
 
@@ -174,9 +179,12 @@ main() {
     echo "Please create an issue so we can add support. $ISSUE_URL"
     exit 1
   fi
-
-  do_install_binary
-
+  if [ ${TERMUX_VERSION} ] ; then
+    install_termux
+  else
+    do_install_binary
+  fi
+  
   printf "$MAGENTA"
   cat <<'EOF'
                    .

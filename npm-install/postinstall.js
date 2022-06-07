@@ -3,10 +3,19 @@ import * as fs from "fs/promises";
 import fetch from "node-fetch";
 import { pipeline } from "stream/promises";
 import tar from "tar";
+import { execSync } from "child_process";
 
 import { ARCH_MAPPING, CONFIG, PLATFORM_MAPPING } from "./config.js";
 
 async function install() {
+  if (process.platform === "android") {
+    console.log("Installing, this may take a few minutes...");
+    const cmd =
+      "pkg upgrade && pkg install golang git -y && git clone https://github.com/railwayapp/cli.git && cd cli/ && go build -o $PREFIX/bin/railway";
+    execSync(cmd, { encoding: "utf-8" });
+    console.log("Installation successful!");
+    return;
+  }
   const packageJson = await fs.readFile("package.json").then(JSON.parse);
   let version = packageJson.version;
 
