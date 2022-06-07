@@ -41,7 +41,7 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	dockerfileRegex, err := regexp.Compile("--dockerfile=(.*)")
-	dockerfile := "Dockerfile.dev"
+	dockerfile := "Dockerfile"
 	if err != nil {
 		return err
 	}
@@ -102,10 +102,6 @@ func (h *Handler) Run(ctx context.Context, req *entity.CommandRequest) error {
 	hasDockerfile := true
 
 	if _, err := os.Stat(fmt.Sprintf("%s/%s", pwd, dockerfile)); os.IsNotExist(err) {
-		dockerfile = "Dockerfile"
-	}
-
-	if _, err := os.Stat(fmt.Sprintf("%s/Dockerfile", pwd)); os.IsNotExist(err) {
 		hasDockerfile = false
 	}
 
