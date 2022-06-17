@@ -3,57 +3,11 @@ package configs
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/errors"
 )
-
-// MigrateLocalProjectConfig moves a local project config
-// to the global config and removes the local .railway directory
-// if it exists
-func (c *Configs) MigrateLocalProjectConfig() error {
-	// Get local config directory
-	projectDir, err := filepath.Abs(filepath.Dir(filepath.Dir(c.projectConfigs.configPath)))
-	if err != nil {
-		return err
-	}
-
-	// Avoid deleting ~/.railway
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	if projectDir == homeDir {
-		return nil
-	}
-
-	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
-		// Local project directory does not exist
-		return nil
-	}
-
-	// Read local project config
-	var cfg entity.ProjectConfig
-	if err := c.unmarshalConfig(c.projectConfigs, &cfg); err != nil {
-		return err
-	}
-
-	// Save project config to root config
-	cfg.ProjectPath = strings.ToLower(projectDir)
-	if err = c.SetProjectConfigs(&cfg); err != nil {
-		return err
-	}
-
-	// Delete local config directory
-	if err = os.RemoveAll(fmt.Sprintf("%s/.railway", projectDir)); err != nil {
-		return err
-	}
-
-	return nil
-}
 
 func (c *Configs) getCWD() (string, error) {
 	cwd, err := os.Getwd()
@@ -66,10 +20,6 @@ func (c *Configs) getCWD() (string, error) {
 }
 
 func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
-	_ = c.MigrateLocalProjectConfig()
-	// Ignore error because the config probably doesn't exist yet
-	// TODO: Better error handling here
-
 	userCfg, err := c.GetRootConfigs()
 	if err != nil {
 		return nil, errors.ProjectConfigNotFound
