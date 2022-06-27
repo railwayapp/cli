@@ -214,7 +214,7 @@ func init() {
 		DisableFlagParsing: true,
 	})
 	runCmd.Flags().Bool("ephemeral", false, "Run the local command in an ephemeral environment")
-	runCmd.Flags().String("service", "", "Run the local command in an ephemeral environment")
+	runCmd.Flags().String("service", "", "Run the command using variables from the specified service")
 
 	addRootCmd(&cobra.Command{
 		Use:   "protect",
