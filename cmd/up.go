@@ -98,6 +98,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		RootDir:       src,
 	})
 	if err != nil {
+		ui.StopSpinner("")
 		return err
 	} else {
 		ui.StopSpinner(fmt.Sprintf("☁️ Build logs available at %s\n", ui.GrayText(res.URL)))

@@ -188,17 +188,12 @@ func (c *Controller) Upload(
 		return nil, err
 	}
 
-	res, err := c.gtwy.Up(ctx, &entity.UpRequest{
+	return c.gtwy.Up(ctx, &entity.UpRequest{
 		Data:          buf,
 		ProjectID:     req.ProjectID,
 		EnvironmentID: req.EnvironmentID,
 		ServiceID:     req.ServiceID,
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return res, nil
 }
 
 func (c *Controller) GetFullUrlFromStaticUrl(staticUrl string) string {
