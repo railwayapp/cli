@@ -152,9 +152,8 @@ func (r *GQLRequest) Run(ctx context.Context, resp interface{}) error {
 		}
 		if len(gr.Errors) > 1 {
 			return fmt.Errorf("%d Errors: %s", len(gr.Errors), strings.Join(messages, ", "))
-		} else {
-			return errors.New(gr.Errors[0].Message)
 		}
+		return errors.New(gr.Errors[0].Message)
 	}
 
 	return nil
