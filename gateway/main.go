@@ -150,7 +150,10 @@ func (r *GQLRequest) Run(ctx context.Context, resp interface{}) error {
 		for i, err := range gr.Errors {
 			messages[i] = err.Error()
 		}
-		return fmt.Errorf("GraphQL query failed with %d errors: %s", len(gr.Errors), strings.Join(messages, ", "))
+		if len(gr.Errors) > 1 {
+			return fmt.Errorf("%d Errors: %s", len(gr.Errors), strings.Join(messages, ", "))
+		}
+		return errors.New(gr.Errors[0].Message)
 	}
 
 	return nil

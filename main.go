@@ -55,8 +55,7 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		}
 		err := fn(ctx, req)
 		if err != nil {
-			// TODO: Make it *pretty*
-			fmt.Println(err.Error())
+			fmt.Println(ui.AlertDanger(err.Error()))
 			os.Exit(1) // Set non-success exit code on error
 		}
 		return nil

@@ -40,8 +40,14 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return nil, errors.New(string(bodyBytes))
+		var res entity.UpErrorResponse
+		// Try decoding up's error response and fallback to sending body as text if decoding fails
+		if err := json.Unmarshal(bodyBytes, &res); err != nil {
+			return nil, errors.New(string(bodyBytes))
+		}
+		return nil, errors.New("This is an example message to let you know something bad happened")
 	}
 
 	var res entity.UpResponse
