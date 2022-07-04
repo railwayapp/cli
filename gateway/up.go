@@ -47,7 +47,7 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 		if err := json.Unmarshal(bodyBytes, &res); err != nil {
 			return nil, errors.New(string(bodyBytes))
 		}
-		return nil, errors.New("This is an example message to let you know something bad happened")
+		return nil, errors.New(res.Message)
 	}
 
 	var res entity.UpResponse
