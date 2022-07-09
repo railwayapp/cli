@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"os/exec"
 )
 
 func (c *Controller) GetLatestVersion() (string, error) {
@@ -10,4 +11,8 @@ func (c *Controller) GetLatestVersion() (string, error) {
 		return "", err
 	}
 	return *rep.TagName, nil
+}
+func (c *Controller) RunUpdateCommand(updateCommand *exec.Cmd) error {
+	err := updateCommand.Run()
+	return err
 }
