@@ -8,7 +8,7 @@ This is the command line interface for [Railway](https://railway.app). Use it to
 
 ## Installation
 
-The Railway CLI is available through [Homebrew](https://brew.sh/), [NPM](https://www.npmjs.com/package/@railway/cli), or as a curl.
+The Railway CLI is available through [Homebrew](https://brew.sh/), [NPM](https://www.npmjs.com/package/@railway/cli), curl, or as a [Nixpkg](https://nixos.org).
 
 ### Brew
 
@@ -33,6 +33,15 @@ yarn global add @railway/cli
 
 ```shell
 curl -fsSL https://railway.app/install.sh | sh
+```
+
+### Nixpkg
+Note: This installation method is not supported by Railway and is maintained by the community.
+```shell
+# On NixOS
+nix-env -iA nixos.railway
+# On non-NixOS
+nix-env -iA nixpkgs.railway
 ```
 
 ### From source
