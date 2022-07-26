@@ -7,7 +7,7 @@ set -e
 # See https://railway.docs/cli for installation instructions
 #
 # This script is meant for quick installs via sh
-#   sh -c "$(curl -sSL https://github.com/railwayapp/cli/blob/master/install.sh)"
+#   sh -c "$(curl -sSL https://raw.githubusercontent.com/railwayapp/cli/master/install.sh)"
 #
 
 INSTALL_DIR=${INSTALL_DIR:-"/usr/local/bin"}
