@@ -153,7 +153,7 @@ func compress(src string, buf io.Writer) error {
 
 		// must provide real name
 		// (see https://golang.org/src/archive/tar/common.go?#L626)
-		header.Name = filepath.ToSlash(absoluteFile)
+		header.Name = filepath.ToSlash(relativeFile)
 		// size when we first observed the file
 		header.Size = int64(data.Len())
 
