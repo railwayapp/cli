@@ -31,8 +31,7 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
+	resp, err := g.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

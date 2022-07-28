@@ -36,10 +36,26 @@ func GetHost() string {
 	return baseURL
 }
 
+type attachCommonHeadersTransport struct{}
+
+func (t *attachCommonHeadersTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	fmt.Printf("FUCK\n\n")
+	req.Header.Add("x-source", CLI_SOURCE_HEADER)
+
+	version := constants.Version
+	if constants.IsDevVersion() {
+		version = "dev"
+	}
+	req.Header.Set("X-Railway-Version", version)
+	return http.DefaultTransport.RoundTrip(req)
+}
+
 func New() *Gateway {
 	httpClient := &http.Client{
-		Timeout: time.Second * 30,
+		Timeout:   time.Second * 30,
+		Transport: &attachCommonHeadersTransport{},
 	}
+
 	return &Gateway{
 		cfg:        configs.New(),
 		httpClient: httpClient,
@@ -87,14 +103,6 @@ func (g *Gateway) NewRequestWithoutAuth(query string) *GQLRequest {
 		httpClient: g.httpClient,
 		vars:       make(map[string]interface{}),
 	}
-
-	gqlReq.header.Add("x-source", CLI_SOURCE_HEADER)
-
-	version := constants.Version
-	if constants.IsDevVersion() {
-		version = "dev"
-	}
-	gqlReq.header.Set("X-Railway-Version", version)
 
 	return gqlReq
 }
