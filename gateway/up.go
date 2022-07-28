@@ -31,7 +31,13 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
-	resp, err := g.httpClient.Do(httpReq)
+
+	// The `up` command uses a custom HTTP Client so there is no timeout on the requests
+	client := &http.Client{
+		Transport: &AttachCommonHeadersTransport{},
+	}
+
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

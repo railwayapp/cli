@@ -36,10 +36,9 @@ func GetHost() string {
 	return baseURL
 }
 
-type attachCommonHeadersTransport struct{}
+type AttachCommonHeadersTransport struct{}
 
-func (t *attachCommonHeadersTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	fmt.Printf("FUCK\n\n")
+func (t *AttachCommonHeadersTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Add("x-source", CLI_SOURCE_HEADER)
 
 	version := constants.Version
@@ -53,7 +52,7 @@ func (t *attachCommonHeadersTransport) RoundTrip(req *http.Request) (*http.Respo
 func New() *Gateway {
 	httpClient := &http.Client{
 		Timeout:   time.Second * 30,
-		Transport: &attachCommonHeadersTransport{},
+		Transport: &AttachCommonHeadersTransport{},
 	}
 
 	return &Gateway{
