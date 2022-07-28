@@ -67,8 +67,6 @@ type GQLResponse struct {
 }
 
 func (g *Gateway) authorize(header http.Header) error {
-	header.Add("x-source", CLI_SOURCE_HEADER)
-
 	if g.cfg.RailwayProductionToken != "" {
 		header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	} else {
@@ -79,22 +77,26 @@ func (g *Gateway) authorize(header http.Header) error {
 		header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
 	}
 
-	version := constants.Version
-	if constants.IsDevVersion() {
-		version = "dev"
-	}
-	header.Set("X-Railway-Version", version)
-
 	return nil
 }
 
 func (g *Gateway) NewRequestWithoutAuth(query string) *GQLRequest {
-	return &GQLRequest{
+	gqlReq := &GQLRequest{
 		q:          query,
 		header:     http.Header{},
 		httpClient: g.httpClient,
 		vars:       make(map[string]interface{}),
 	}
+
+	gqlReq.header.Add("x-source", CLI_SOURCE_HEADER)
+
+	version := constants.Version
+	if constants.IsDevVersion() {
+		version = "dev"
+	}
+	gqlReq.header.Set("X-Railway-Version", version)
+
+	return gqlReq
 }
 
 func (g *Gateway) NewRequestWithAuth(query string) (*GQLRequest, error) {
