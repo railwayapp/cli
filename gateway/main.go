@@ -13,6 +13,7 @@ import (
 	"github.com/pkg/errors"
 
 	configs "github.com/railwayapp/cli/configs"
+	"github.com/railwayapp/cli/constants"
 )
 
 const (
@@ -77,6 +78,12 @@ func (g *Gateway) authorize(header http.Header) error {
 		}
 		header.Add("authorization", fmt.Sprintf("Bearer %s", user.Token))
 	}
+
+	version := constants.Version
+	if constants.IsDevVersion() {
+		version = "dev"
+	}
+	header.Set("X-Railway-Version", version)
 
 	return nil
 }

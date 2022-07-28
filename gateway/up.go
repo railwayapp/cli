@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"net/http"
 
-	"github.com/railwayapp/cli/constants"
 	"github.com/railwayapp/cli/entity"
 )
 
@@ -19,12 +18,6 @@ func constructReq(ctx context.Context, req *entity.UpRequest) (*http.Request, er
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "multipart/form-data")
-
-	version := constants.Version
-	if constants.IsDevVersion() {
-		version = "dev"
-	}
-	httpReq.Header.Set("X-Railway-Version", version)
 
 	return httpReq, nil
 }
