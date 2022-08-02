@@ -13,6 +13,7 @@ import (
 	"github.com/pkg/errors"
 
 	configs "github.com/railwayapp/cli/configs"
+	"github.com/railwayapp/cli/constants"
 )
 
 const (
@@ -35,10 +36,25 @@ func GetHost() string {
 	return baseURL
 }
 
+type AttachCommonHeadersTransport struct{}
+
+func (t *AttachCommonHeadersTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Add("x-source", CLI_SOURCE_HEADER)
+
+	version := constants.Version
+	if constants.IsDevVersion() {
+		version = "dev"
+	}
+	req.Header.Set("X-Railway-Version", version)
+	return http.DefaultTransport.RoundTrip(req)
+}
+
 func New() *Gateway {
 	httpClient := &http.Client{
-		Timeout: time.Second * 30,
+		Timeout:   time.Second * 30,
+		Transport: &AttachCommonHeadersTransport{},
 	}
+
 	return &Gateway{
 		cfg:        configs.New(),
 		httpClient: httpClient,
@@ -66,8 +82,6 @@ type GQLResponse struct {
 }
 
 func (g *Gateway) authorize(header http.Header) error {
-	header.Add("x-source", CLI_SOURCE_HEADER)
-
 	if g.cfg.RailwayProductionToken != "" {
 		header.Add("project-access-token", g.cfg.RailwayProductionToken)
 	} else {
@@ -82,12 +96,14 @@ func (g *Gateway) authorize(header http.Header) error {
 }
 
 func (g *Gateway) NewRequestWithoutAuth(query string) *GQLRequest {
-	return &GQLRequest{
+	gqlReq := &GQLRequest{
 		q:          query,
 		header:     http.Header{},
 		httpClient: g.httpClient,
 		vars:       make(map[string]interface{}),
 	}
+
+	return gqlReq
 }
 
 func (g *Gateway) NewRequestWithAuth(query string) (*GQLRequest, error) {

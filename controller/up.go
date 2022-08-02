@@ -88,7 +88,12 @@ func compress(src string, buf io.Writer) error {
 	}
 
 	// walk through every file in the folder
-	err = filepath.WalkDir(src, func(file string, de os.DirEntry, passedErr error) error {
+	err = filepath.WalkDir(src, func(absoluteFile string, de os.DirEntry, passedErr error) error {
+		relativeFile, err := filepath.Rel(src, absoluteFile)
+		if err != nil {
+			return err
+		}
+
 		if passedErr != nil {
 			return err
 		}
@@ -96,7 +101,7 @@ func compress(src string, buf io.Writer) error {
 			// skip directories if we can (for perf)
 			// e.g., want to avoid walking node_modules dir
 			for _, s := range skipDirs {
-				if filepath.Base(file) == s {
+				if filepath.Base(relativeFile) == s {
 					return filepath.SkipDir
 				}
 			}
@@ -105,8 +110,8 @@ func compress(src string, buf io.Writer) error {
 		}
 
 		for _, igf := range ignoreFiles {
-			if strings.HasPrefix(file, igf.prefix) { // if ignore file applicable
-				trimmed := strings.TrimPrefix(file, igf.prefix)
+			if strings.HasPrefix(relativeFile, igf.prefix) { // if ignore file applicable
+				trimmed := strings.TrimPrefix(relativeFile, igf.prefix)
 				if igf.ignore.MatchesPath(trimmed) {
 					return nil
 				}
@@ -114,7 +119,7 @@ func compress(src string, buf io.Writer) error {
 		}
 
 		// follow symlinks by default
-		ln, err := filepath.EvalSymlinks(file)
+		ln, err := filepath.EvalSymlinks(absoluteFile)
 		if err != nil {
 			return err
 		}
@@ -148,7 +153,7 @@ func compress(src string, buf io.Writer) error {
 
 		// must provide real name
 		// (see https://golang.org/src/archive/tar/common.go?#L626)
-		header.Name = filepath.ToSlash(file)
+		header.Name = filepath.ToSlash(relativeFile)
 		// size when we first observed the file
 		header.Size = int64(data.Len())
 

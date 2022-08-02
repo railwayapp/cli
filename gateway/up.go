@@ -18,6 +18,7 @@ func constructReq(ctx context.Context, req *entity.UpRequest) (*http.Request, er
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "multipart/form-data")
+
 	return httpReq, nil
 }
 
@@ -30,7 +31,12 @@ func (g *Gateway) Up(ctx context.Context, req *entity.UpRequest) (*entity.UpResp
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{}
+
+	// The `up` command uses a custom HTTP Client so there is no timeout on the requests
+	client := &http.Client{
+		Transport: &AttachCommonHeadersTransport{},
+	}
+
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err

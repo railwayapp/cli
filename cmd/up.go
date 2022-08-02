@@ -12,14 +12,6 @@ import (
 )
 
 func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
-	var src string
-
-	if len(req.Args) == 0 {
-		src = "."
-	} else {
-		src = "./" + req.Args[0]
-	}
-
 	isVerbose, err := req.Cmd.Flags().GetBool("verbose")
 	if err != nil {
 		// Verbose mode isn't a necessary flag; just default to false.
@@ -33,11 +25,11 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 
 	fmt.Print(ui.VerboseInfo(isVerbose, "Using verbose mode"))
 
-	fmt.Print(ui.VerboseInfo(isVerbose, "Loading project configuration"))
 	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
+	fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf("Loaded project configuration for %s", projectConfig.ProjectPath)))
 
 	fmt.Print(ui.VerboseInfo(isVerbose, "Loading environment"))
 	environmentName, err := req.Cmd.Flags().GetString("environment")
@@ -95,7 +87,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
 		ServiceID:     serviceId,
-		RootDir:       src,
+		RootDir:       projectConfig.ProjectPath,
 	})
 	if err != nil {
 		ui.StopSpinner("")
