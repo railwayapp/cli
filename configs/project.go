@@ -14,7 +14,6 @@ func (c *Configs) getCWD() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cwd = strings.ToLower(cwd)
 
 	return cwd, nil
 }
