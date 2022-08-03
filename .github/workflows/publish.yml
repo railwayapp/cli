@@ -34,6 +34,7 @@ jobs:
         with:
           token: ${{ secrets.GH_PAT }}
           formula: railway
+          tag: ${{github.ref}}
           
   publish_npm:
     name: Publish to NPM
