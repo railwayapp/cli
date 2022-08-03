@@ -30,7 +30,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
       - name: Bump Homebrew Core
-      - uses: dawidd6/action-homebrew-bump-formula@v3
+        uses: dawidd6/action-homebrew-bump-formula@v3
         with:
           token: ${{ secrets.GH_PAT }}
           formula: railway
