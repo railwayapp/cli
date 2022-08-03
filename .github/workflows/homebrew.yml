@@ -10,6 +10,6 @@ jobs:
       - uses: mislav/bump-homebrew-formula-action@v2
         with:
           # A PR will be sent to github.com/Homebrew/homebrew-core to update this formula:
-          formula-name: my_formula
+          formula-name: railway
         env:
           COMMITTER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
