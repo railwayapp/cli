@@ -35,6 +35,7 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           formula: railway
           tag: ${{ github.event.client_payload.new-tag }}
+          revision: ${{ github.event.client_payload.sha }}
           
   publish_npm:
     name: Publish to NPM
