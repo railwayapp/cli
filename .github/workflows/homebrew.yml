@@ -1,0 +1,17 @@
+on:
+  push:
+    tags: 
+    - '*'
+
+jobs:
+  homebrew:
+    name: Bump Homebrew formula
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dawidd6/action-homebrew-bump-formula@v3
+        with:
+          token: ${{ secrets.GH_PAT }}
+          formula: railway
+          org: railwayapp
+          tag: ${{ github.event.inputs.version }}
+          revision: ${{ github.event.inputs.sha }}
