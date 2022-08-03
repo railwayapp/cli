@@ -1,15 +1,17 @@
 on:
   push:
-    tags: 'v*'
+    tags: 
+    - '*'
 
 jobs:
   homebrew:
     name: Bump Homebrew formula
     runs-on: ubuntu-latest
     steps:
-      - uses: mislav/bump-homebrew-formula-action@v2
+      - uses: dawidd6/action-homebrew-bump-formula@v3
         with:
-          # A PR will be sent to github.com/Homebrew/homebrew-core to update this formula:
-          formula-name: railway
-        env:
-          COMMITTER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          formula: railway
+          org: railwayapp
+          tag: ${{ github.event.inputs.version }}
+          revision: ${{ github.event.inputs.sha }}
