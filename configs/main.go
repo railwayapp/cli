@@ -54,14 +54,6 @@ func (c *Configs) CreatePathIfNotExist(path string) error {
 	return nil
 }
 
-func (c *Configs) unmarshalConfig(config *Config, data interface{}) error {
-	err := config.viper.ReadInConfig()
-	if err != nil {
-		return err
-	}
-	return config.viper.Unmarshal(&data)
-}
-
 func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 	reflectCfg := reflect.ValueOf(cfg)
 	for i := 0; i < reflectCfg.NumField(); i++ {
