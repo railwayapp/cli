@@ -13,7 +13,6 @@ The Railway CLI is available through [Homebrew](https://brew.sh/), [NPM](https:/
 ### Brew
 
 ```shell
-brew tap railwayapp/railway
 brew install railway
 ```
 
