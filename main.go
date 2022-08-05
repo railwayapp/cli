@@ -229,7 +229,7 @@ func init() {
 	})
 
 	upCmd := addRootCmd(&cobra.Command{
-		Use:   "up [path]",
+		Use:   "up",
 		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
 	})

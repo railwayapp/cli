@@ -29,7 +29,14 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf("Loaded project configuration for %s", projectConfig.ProjectPath)))
+
+	src := projectConfig.ProjectPath
+	if src == "" {
+		// When deploying with a project token, the project path is empty
+		src = "."
+	}
+
+	fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf("Uploading directory %s", src)))
 
 	fmt.Print(ui.VerboseInfo(isVerbose, "Loading environment"))
 	environmentName, err := req.Cmd.Flags().GetString("environment")
@@ -87,7 +94,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
 		ServiceID:     serviceId,
-		RootDir:       projectConfig.ProjectPath,
+		RootDir:       src,
 	})
 	if err != nil {
 		ui.StopSpinner("")
