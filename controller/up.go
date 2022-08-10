@@ -110,8 +110,8 @@ func compress(src string, buf io.Writer) error {
 		}
 
 		for _, igf := range ignoreFiles {
-			if strings.HasPrefix(relativeFile, igf.prefix) { // if ignore file applicable
-				trimmed := strings.TrimPrefix(relativeFile, igf.prefix)
+			if strings.HasPrefix(absoluteFile, igf.prefix) { // if ignore file applicable
+				trimmed := strings.TrimPrefix(absoluteFile, igf.prefix)
 				if igf.ignore.MatchesPath(trimmed) {
 					return nil
 				}
