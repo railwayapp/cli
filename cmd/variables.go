@@ -63,6 +63,12 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		skipRedeploy = false
 	}
 
+	replace, err := req.Cmd.Flags().GetBool("replace")
+	if err != nil {
+		// The flag is optional; default to false.
+		replace = false
+	}
+
 	variables := &entity.Envs{}
 	updatedEnvNames := make([]string, 0)
 
@@ -78,7 +84,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		updatedEnvNames = append(updatedEnvNames, key)
 	}
 
-	err = h.ctrl.UpsertEnvs(ctx, variables, &serviceName)
+	err = h.ctrl.UpdateEnvs(ctx, variables, &serviceName, replace)
 
 	if err != nil {
 		return err
@@ -89,7 +95,12 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		return err
 	}
 
-	fmt.Print(ui.Heading(fmt.Sprintf("Updated %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
+	operation := "Updated"
+	if replace {
+		operation = "Replaced existing variables with"
+	}
+
+	fmt.Print(ui.Heading(fmt.Sprintf("%s %s for \"%s\"", operation, strings.Join(updatedEnvNames, ", "), environment.Name)))
 	fmt.Print(ui.KeyValues(*variables))
 
 	if !skipRedeploy {
