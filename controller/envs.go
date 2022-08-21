@@ -104,7 +104,8 @@ func (c *Controller) AutoImportDotEnv(ctx context.Context) error {
 			return err
 		}
 		if len(envMap) > 0 {
-			return c.UpsertEnvs(ctx, (*entity.Envs)(&envMap), nil)
+			_, err := c.UpsertEnvs(ctx, (*entity.Envs)(&envMap), nil)
+			return err
 		}
 	}
 	return nil
@@ -134,50 +135,50 @@ func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceName *string) error {
+func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceName *string) (*string, error) {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	err = c.PromptIfProtectedEnvironment(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Get service id from name
-	serviceId := ""
+	serviceID := ""
 	if serviceName != nil && *serviceName != "" {
 		for _, service := range project.Services {
 			if service.Name == *serviceName {
-				serviceId = service.ID
+				serviceID = service.ID
 			}
 		}
 
-		if serviceId == "" {
-			return CLIErrors.ServiceNotFound
+		if serviceID == "" {
+			return nil, CLIErrors.ServiceNotFound
 		}
 	}
 
-	if serviceId == "" {
+	if serviceID == "" {
 		service, err := ui.PromptServices(project.Services)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if service != nil {
-			serviceId = service.ID
+			serviceID = service.ID
 		}
 	}
 
 	pluginID := ""
 
 	// If there is no service, use the env plugin
-	if serviceId == "" {
+	if serviceID == "" {
 		for _, p := range project.Plugins {
 			if p.Name == "env" {
 				pluginID = p.ID
@@ -185,59 +186,59 @@ func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceN
 		}
 	}
 
-	return c.gtwy.UpsertVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
+	return &serviceID, c.gtwy.UpsertVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
 		PluginID:      pluginID,
-		ServiceID:     serviceId,
+		ServiceID:     serviceID,
 		Envs:          envs,
 	})
 }
 
-func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName *string) error {
+func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName *string) (*string, error) {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	err = c.PromptIfProtectedEnvironment(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Get service id from name
-	serviceId := ""
+	serviceID := ""
 	if serviceName != nil && *serviceName != "" {
 		for _, service := range project.Services {
 			if service.Name == *serviceName {
-				serviceId = service.ID
+				serviceID = service.ID
 			}
 		}
 
-		if serviceId == "" {
-			return CLIErrors.ServiceNotFound
+		if serviceID == "" {
+			return nil, CLIErrors.ServiceNotFound
 		}
 	}
 
-	if serviceId == "" {
+	if serviceID == "" {
 		service, err := ui.PromptServices(project.Services)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if service != nil {
-			serviceId = service.ID
+			serviceID = service.ID
 		}
 	}
 
 	pluginID := ""
 
 	// If there is no service, use the env plugin
-	if serviceId == "" {
+	if serviceID == "" {
 		for _, p := range project.Plugins {
 			if p.Name == "env" {
 				pluginID = p.ID
@@ -251,14 +252,14 @@ func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName
 			ProjectID:     projectCfg.Project,
 			EnvironmentID: projectCfg.Environment,
 			PluginID:      pluginID,
-			ServiceID:     serviceId,
+			ServiceID:     serviceID,
 			Name:          name,
 		})
 
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return &serviceID, nil
 }

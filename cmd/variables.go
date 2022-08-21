@@ -72,7 +72,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		updatedEnvNames = append(updatedEnvNames, key)
 	}
 
-	err = h.ctrl.UpsertEnvs(ctx, variables, &serviceName)
+	serviceID, err := h.ctrl.UpsertEnvs(ctx, variables, &serviceName)
 
 	if err != nil {
 		return err
@@ -86,7 +86,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 	fmt.Print(ui.Heading(fmt.Sprintf("Updated %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
 	fmt.Print(ui.KeyValues(*variables))
 
-	err = h.redeployAfterVariablesChange(ctx, environment)
+	err = h.redeployAfterVariablesChange(ctx, environment, serviceID)
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	err = h.ctrl.DeleteEnvs(ctx, req.Args, &serviceName)
+	serviceID, err := h.ctrl.DeleteEnvs(ctx, req.Args, &serviceName)
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 
 	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(req.Args, ", "), environment.Name)))
 
-	err = h.redeployAfterVariablesChange(ctx, environment)
+	err = h.redeployAfterVariablesChange(ctx, environment, serviceID)
 	if err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 	return nil
 }
 
-func (h *Handler) redeployAfterVariablesChange(ctx context.Context, environment *entity.Environment) error {
+func (h *Handler) redeployAfterVariablesChange(ctx context.Context, environment *entity.Environment, serviceID *string) error {
 	deployments, err := h.ctrl.GetDeployments(ctx)
 	if err != nil {
 		return err
@@ -142,12 +142,13 @@ func (h *Handler) redeployAfterVariablesChange(ctx context.Context, environment 
 		Message: fmt.Sprintf("Redeploying \"%s\" with new variables", environment.Name),
 	})
 
-	err = h.ctrl.DeployEnvironmentTriggers(ctx)
+	err = h.ctrl.DeployEnvironmentTriggers(ctx, serviceID)
 	if err != nil {
 		return err
 	}
 
 	ui.StopSpinner("Deploy triggered")
+	// TODO: This link is outdated and requires the ID of the deployment in progress and the service ID. Maybe DeployEnvironmentTriggers could return it to build the correct URL.
 	fmt.Printf("☁️ Deploy Logs available at %s\n", ui.GrayText(h.ctrl.GetProjectDeploymentsURL(ctx, latestDeploy.ProjectID)))
 	return nil
 }
