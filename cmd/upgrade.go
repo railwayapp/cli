@@ -41,8 +41,8 @@ func getUpdateCommand(installationMethod string) (*exec.Cmd, error) {
 }
 
 func (h *Handler) Upgrade(ctx context.Context, req *entity.CommandRequest) error {
-	currentVersion, _ := h.ctrl.GetLatestVersion()
-	if currentVersion == constants.Version {
+	latestVersion, _ := h.ctrl.GetLatestVersion()
+	if latestVersion == constants.Version {
 		fmt.Printf("\nYou are currently up to date")
 		return nil
 	}
