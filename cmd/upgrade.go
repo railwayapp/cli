@@ -58,7 +58,7 @@ func (h *Handler) Upgrade(ctx context.Context, req *entity.CommandRequest) error
 		fmt.Printf("Error when we try to run upgrade command")
 		return nil
 	}
-	fmt.Printf("upload run sucressfuly")
+	fmt.Printf("Upgrade run sucressfuly")
 
 	return nil
 }
