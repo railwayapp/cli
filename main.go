@@ -134,15 +134,15 @@ func init() {
 	})
 	variablesCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
 
-	variablesAddCmd := &cobra.Command{
+	variablesGetCmd := &cobra.Command{
 		Use:     "get key",
 		Short:   "Get the value of a variable",
 		RunE:    contextualize(handler.VariablesGet, handler.Panic),
 		Args:    cobra.MinimumNArgs(1),
 		Example: "  railway variables get MY_KEY",
 	}
-	variablesCmd.AddCommand(variablesAddCmd)
-	variablesAddCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+	variablesCmd.AddCommand(variablesGetCmd)
+	variablesGetCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
 
 	variablesSetCmd := &cobra.Command{
 		Use:     "set key=value",
@@ -153,6 +153,7 @@ func init() {
 	}
 	variablesCmd.AddCommand(variablesSetCmd)
 	variablesSetCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+	variablesSetCmd.Flags().Bool("no-redeploy", false, "Skip redeploying the specified service after changing the variables")
 
 	variablesDeleteCmd := &cobra.Command{
 		Use:     "delete key",
@@ -162,6 +163,7 @@ func init() {
 	}
 	variablesCmd.AddCommand(variablesDeleteCmd)
 	variablesDeleteCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+	variablesDeleteCmd.Flags().Bool("no-redeploy", false, "Skip redeploying the specified service after changing the variables")
 
 	addRootCmd(&cobra.Command{
 		Use:   "status",
