@@ -55,7 +55,7 @@ func (h *Handler) Upgrade(ctx context.Context, req *entity.CommandRequest) error
 	}
 
 	if h.ctrl.RunUpdateCommand(updateCommand) == nil {
-		fmt.Printf("Error when we try to run upload command")
+		fmt.Printf("Error when we try to run upgrade command")
 		return nil
 	}
 	fmt.Printf("upload run sucressfuly")
