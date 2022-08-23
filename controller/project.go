@@ -71,7 +71,12 @@ func (c *Controller) GetProjectDeploymentsURL(ctx context.Context, projectID str
 	return c.gtwy.GetProjectDeploymentsURL(projectID)
 }
 
-// GetProjectDeploymentsURL returns the URL to access project deployment in browser
+// GetServiceDeploymentsURL returns the URL to access service deployments in the browser
+func (c *Controller) GetServiceDeploymentsURL(ctx context.Context, projectID string, serviceID string, deploymentID string) string {
+	return c.gtwy.GetServiceDeploymentsURL(projectID, serviceID, deploymentID)
+}
+
+// GetLatestDeploymentForEnvironment returns the URL to access project deployment in browser
 func (c *Controller) GetLatestDeploymentForEnvironment(ctx context.Context, projectID string, environmentID string) (*entity.Deployment, error) {
 	return c.gtwy.GetLatestDeploymentForEnvironment(ctx, projectID, environmentID)
 }

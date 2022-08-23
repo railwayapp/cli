@@ -148,7 +148,12 @@ func (h *Handler) redeployAfterVariablesChange(ctx context.Context, environment 
 	}
 
 	ui.StopSpinner("Deploy triggered")
-	// TODO: This link is outdated and requires the ID of the deployment in progress and the service ID. Maybe DeployEnvironmentTriggers could return it to build the correct URL.
-	fmt.Printf("☁️ Deploy Logs available at %s\n", ui.GrayText(h.ctrl.GetProjectDeploymentsURL(ctx, latestDeploy.ProjectID)))
+
+	deployment, err := h.ctrl.GetLatestDeploymentForEnvironment(ctx, latestDeploy.ProjectID, environment.Id)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("☁️ Deploy Logs available at %s\n", ui.GrayText(h.ctrl.GetServiceDeploymentsURL(ctx, latestDeploy.ProjectID, *serviceID, deployment.ID)))
 	return nil
 }
