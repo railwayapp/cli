@@ -57,10 +57,10 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		return err
 	}
 
-	noRedeploy, err := req.Cmd.Flags().GetBool("no-redeploy")
+	skipRedeploy, err := req.Cmd.Flags().GetBool("skip-redeploy")
 	if err != nil {
 		// The flag is optional; default to false.
-		noRedeploy = false
+		skipRedeploy = false
 	}
 
 	variables := &entity.Envs{}
@@ -92,9 +92,11 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 	fmt.Print(ui.Heading(fmt.Sprintf("Updated %s for \"%s\"", strings.Join(updatedEnvNames, ", "), environment.Name)))
 	fmt.Print(ui.KeyValues(*variables))
 
-	err = h.redeployAfterVariablesChange(ctx, environment, serviceID, noRedeploy)
-	if err != nil {
-		return err
+	if !skipRedeploy {
+		err = h.redeployAfterVariablesChange(ctx, environment, serviceID)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -106,10 +108,10 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 		return err
 	}
 
-	noRedeploy, err := req.Cmd.Flags().GetBool("no-redeploy")
+	skipRedeploy, err := req.Cmd.Flags().GetBool("skip-redeploy")
 	if err != nil {
 		// The flag is optional; default to false.
-		noRedeploy = false
+		skipRedeploy = false
 	}
 
 	serviceID, err := h.ctrl.DeleteEnvs(ctx, req.Args, &serviceName)
@@ -124,15 +126,17 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 
 	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(req.Args, ", "), environment.Name)))
 
-	err = h.redeployAfterVariablesChange(ctx, environment, serviceID, noRedeploy)
-	if err != nil {
-		return err
+	if !skipRedeploy {
+		err = h.redeployAfterVariablesChange(ctx, environment, serviceID)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (h *Handler) redeployAfterVariablesChange(ctx context.Context, environment *entity.Environment, serviceID *string, noRedeploy bool) error {
+func (h *Handler) redeployAfterVariablesChange(ctx context.Context, environment *entity.Environment, serviceID *string) error {
 	deployments, err := h.ctrl.GetDeployments(ctx)
 	if err != nil {
 		return err
@@ -145,7 +149,7 @@ func (h *Handler) redeployAfterVariablesChange(ctx context.Context, environment 
 
 	// Don't redeploy if the latest deploy for environment came from up
 	latestDeploy := deployments[0]
-	if latestDeploy.Meta == nil || latestDeploy.Meta.Repo == "" || noRedeploy {
+	if latestDeploy.Meta == nil || latestDeploy.Meta.Repo == "" {
 		fmt.Printf(ui.AlertInfo("Run %s to redeploy your project"), ui.MagentaText("railway up").Underline())
 		return nil
 	}

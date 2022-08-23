@@ -153,7 +153,7 @@ func init() {
 	}
 	variablesCmd.AddCommand(variablesSetCmd)
 	variablesSetCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
-	variablesSetCmd.Flags().Bool("no-redeploy", false, "Skip redeploying the specified service after changing the variables")
+	variablesSetCmd.Flags().Bool("skip-redeploy", false, "Skip redeploying the specified service after changing the variables")
 
 	variablesDeleteCmd := &cobra.Command{
 		Use:     "delete key",
@@ -163,7 +163,7 @@ func init() {
 	}
 	variablesCmd.AddCommand(variablesDeleteCmd)
 	variablesDeleteCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
-	variablesDeleteCmd.Flags().Bool("no-redeploy", false, "Skip redeploying the specified service after changing the variables")
+	variablesDeleteCmd.Flags().Bool("skip-redeploy", false, "Skip redeploying the specified service after changing the variables")
 
 	addRootCmd(&cobra.Command{
 		Use:   "status",
