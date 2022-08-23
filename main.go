@@ -132,7 +132,7 @@ func init() {
 	addRootCmd(&cobra.Command{
 		Use:   "upgrade",
 		RunE:  contextualize(handler.Upgrade, handler.Panic),
-		Short: "upgrade railway cil version if new one",
+		Short: "Upgrades the railway cli to the latest version",
 	})
 
 	variablesCmd := addRootCmd(&cobra.Command{
