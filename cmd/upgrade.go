@@ -37,7 +37,7 @@ func getUpdateCommand(installationMethod string) (*exec.Cmd, error) {
 			return exec.Command("yarn", "global", "add", "@railway/cli"), nil
 		}
 	}
-	return nil, errors.New("installation methodes is not recognized")
+	return nil, errors.New("installation method not recognized")
 }
 
 func (h *Handler) Upgrade(ctx context.Context, req *entity.CommandRequest) error {
