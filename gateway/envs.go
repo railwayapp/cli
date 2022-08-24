@@ -33,10 +33,11 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	return resp.Envs, nil
 }
 
-func (g *Gateway) UpdateVariablesFromObject(ctx context.Context, req *entity.UpdateEnvsRequest, replace bool) error {
+func (g *Gateway) UpdateVariablesFromObject(ctx context.Context, req *entity.UpdateEnvsRequest) error {
 	queryName := "upsertVariablesFromObject"
 
-	if replace {
+	if req.Replace {
+		// When replacing, use the set query which will blow away all old variables and only set the ones in this query
 		queryName = "variablesSetFromObject"
 	}
 

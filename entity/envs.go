@@ -18,6 +18,7 @@ type UpdateEnvsRequest struct {
 	PluginID      string
 	ServiceID     string
 	Envs          *Envs
+	Replace       bool
 }
 
 type DeleteVariableRequest struct {

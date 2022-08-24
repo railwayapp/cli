@@ -191,7 +191,8 @@ func (c *Controller) UpdateEnvs(ctx context.Context, envs *entity.Envs, serviceN
 		PluginID:      pluginID,
 		ServiceID:     serviceID,
 		Envs:          envs,
-	}, replace)
+		Replace:       replace,
+	})
 }
 
 func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName *string) error {
