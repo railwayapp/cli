@@ -69,6 +69,23 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		replace = false
 	}
 
+	yes, err := req.Cmd.Flags().GetBool("yes")
+	if err != nil {
+		// The flag is optional; default to false.
+		yes = false
+	}
+
+	if replace && !yes {
+		fmt.Println(ui.Bold(ui.RedText(fmt.Sprintf("Warning! You are about to fully replace all your variables for the service '%s'.", serviceName)).String()))
+		confirm, err := ui.PromptYesNo("Continue?")
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+	}
+
 	variables := &entity.Envs{}
 	updatedEnvNames := make([]string, 0)
 
