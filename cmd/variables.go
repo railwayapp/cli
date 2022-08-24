@@ -78,7 +78,7 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 		updatedEnvNames = append(updatedEnvNames, key)
 	}
 
-	serviceID, err := h.ctrl.UpsertEnvs(ctx, variables, &serviceName)
+	err = h.ctrl.UpsertEnvs(ctx, variables, &serviceName)
 
 	if err != nil {
 		return err
@@ -93,6 +93,11 @@ func (h *Handler) VariablesSet(ctx context.Context, req *entity.CommandRequest) 
 	fmt.Print(ui.KeyValues(*variables))
 
 	if !skipRedeploy {
+		serviceID, err := h.ctrl.GetServiceIdByName(ctx, &serviceName)
+		if err != nil {
+			return err
+		}
+
 		err = h.redeployAfterVariablesChange(ctx, environment, serviceID)
 		if err != nil {
 			return err
@@ -114,7 +119,7 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 		skipRedeploy = false
 	}
 
-	serviceID, err := h.ctrl.DeleteEnvs(ctx, req.Args, &serviceName)
+	err = h.ctrl.DeleteEnvs(ctx, req.Args, &serviceName)
 	if err != nil {
 		return err
 	}
@@ -127,6 +132,11 @@ func (h *Handler) VariablesDelete(ctx context.Context, req *entity.CommandReques
 	fmt.Print(ui.Heading(fmt.Sprintf("Deleted %s for \"%s\"", strings.Join(req.Args, ", "), environment.Name)))
 
 	if !skipRedeploy {
+		serviceID, err := h.ctrl.GetServiceIdByName(ctx, &serviceName)
+		if err != nil {
+			return err
+		}
+
 		err = h.redeployAfterVariablesChange(ctx, environment, serviceID)
 		if err != nil {
 			return err

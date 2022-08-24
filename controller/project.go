@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	CLIErrors "github.com/railwayapp/cli/errors"
+	"github.com/railwayapp/cli/ui"
 
 	"github.com/railwayapp/cli/entity"
 )
@@ -29,6 +31,49 @@ func (c *Controller) GetProject(ctx context.Context, projectId string) (*entity.
 // GetProjectByName returns a project for the user of name projectName, error otherwise
 func (c *Controller) GetProjectByName(ctx context.Context, projectName string) (*entity.Project, error) {
 	return c.gtwy.GetProjectByName(ctx, projectName)
+}
+
+func (c *Controller) GetServiceIdByName(ctx context.Context, serviceName *string) (*string, error) {
+	projectCfg, err := c.GetProjectConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	err = c.PromptIfProtectedEnvironment(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	project, err := c.GetProject(ctx, projectCfg.Project)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get service id from name
+	serviceID := ""
+	if serviceName != nil && *serviceName != "" {
+		for _, service := range project.Services {
+			if service.Name == *serviceName {
+				serviceID = service.ID
+			}
+		}
+
+		if serviceID == "" {
+			return nil, CLIErrors.ServiceNotFound
+		}
+	}
+
+	if serviceID == "" {
+		service, err := ui.PromptServices(project.Services)
+		if err != nil {
+			return nil, err
+		}
+		if service != nil {
+			serviceID = service.ID
+		}
+	}
+
+	return &serviceID, nil
 }
 
 // CreateProject creates a project specified by the project request, error otherwise

@@ -104,8 +104,7 @@ func (c *Controller) AutoImportDotEnv(ctx context.Context) error {
 			return err
 		}
 		if len(envMap) > 0 {
-			_, err := c.UpsertEnvs(ctx, (*entity.Envs)(&envMap), nil)
-			return err
+			return c.UpsertEnvs(ctx, (*entity.Envs)(&envMap), nil)
 		}
 	}
 	return nil
@@ -135,20 +134,20 @@ func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceName *string) (*string, error) {
+func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceName *string) error {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	err = c.PromptIfProtectedEnvironment(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Get service id from name
@@ -161,14 +160,14 @@ func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceN
 		}
 
 		if serviceID == "" {
-			return nil, CLIErrors.ServiceNotFound
+			return CLIErrors.ServiceNotFound
 		}
 	}
 
 	if serviceID == "" {
 		service, err := ui.PromptServices(project.Services)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if service != nil {
 			serviceID = service.ID
@@ -186,7 +185,7 @@ func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceN
 		}
 	}
 
-	return &serviceID, c.gtwy.UpsertVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
+	return c.gtwy.UpsertVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
 		PluginID:      pluginID,
@@ -195,20 +194,20 @@ func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceN
 	})
 }
 
-func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName *string) (*string, error) {
+func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName *string) error {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	err = c.PromptIfProtectedEnvironment(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	project, err := c.GetProject(ctx, projectCfg.Project)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Get service id from name
@@ -221,14 +220,14 @@ func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName
 		}
 
 		if serviceID == "" {
-			return nil, CLIErrors.ServiceNotFound
+			return CLIErrors.ServiceNotFound
 		}
 	}
 
 	if serviceID == "" {
 		service, err := ui.PromptServices(project.Services)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if service != nil {
 			serviceID = service.ID
@@ -257,9 +256,9 @@ func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName
 		})
 
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return &serviceID, nil
+	return nil
 }
