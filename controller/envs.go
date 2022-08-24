@@ -151,33 +151,33 @@ func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceN
 	}
 
 	// Get service id from name
-	serviceId := ""
+	serviceID := ""
 	if serviceName != nil && *serviceName != "" {
 		for _, service := range project.Services {
 			if service.Name == *serviceName {
-				serviceId = service.ID
+				serviceID = service.ID
 			}
 		}
 
-		if serviceId == "" {
+		if serviceID == "" {
 			return CLIErrors.ServiceNotFound
 		}
 	}
 
-	if serviceId == "" {
+	if serviceID == "" {
 		service, err := ui.PromptServices(project.Services)
 		if err != nil {
 			return err
 		}
 		if service != nil {
-			serviceId = service.ID
+			serviceID = service.ID
 		}
 	}
 
 	pluginID := ""
 
 	// If there is no service, use the env plugin
-	if serviceId == "" {
+	if serviceID == "" {
 		for _, p := range project.Plugins {
 			if p.Name == "env" {
 				pluginID = p.ID
@@ -189,7 +189,7 @@ func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceN
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
 		PluginID:      pluginID,
-		ServiceID:     serviceId,
+		ServiceID:     serviceID,
 		Envs:          envs,
 	})
 }
@@ -211,33 +211,33 @@ func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName
 	}
 
 	// Get service id from name
-	serviceId := ""
+	serviceID := ""
 	if serviceName != nil && *serviceName != "" {
 		for _, service := range project.Services {
 			if service.Name == *serviceName {
-				serviceId = service.ID
+				serviceID = service.ID
 			}
 		}
 
-		if serviceId == "" {
+		if serviceID == "" {
 			return CLIErrors.ServiceNotFound
 		}
 	}
 
-	if serviceId == "" {
+	if serviceID == "" {
 		service, err := ui.PromptServices(project.Services)
 		if err != nil {
 			return err
 		}
 		if service != nil {
-			serviceId = service.ID
+			serviceID = service.ID
 		}
 	}
 
 	pluginID := ""
 
 	// If there is no service, use the env plugin
-	if serviceId == "" {
+	if serviceID == "" {
 		for _, p := range project.Plugins {
 			if p.Name == "env" {
 				pluginID = p.ID
@@ -251,7 +251,7 @@ func (c *Controller) DeleteEnvs(ctx context.Context, names []string, serviceName
 			ProjectID:     projectCfg.Project,
 			EnvironmentID: projectCfg.Environment,
 			PluginID:      pluginID,
-			ServiceID:     serviceId,
+			ServiceID:     serviceID,
 			Name:          name,
 		})
 
