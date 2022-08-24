@@ -154,6 +154,8 @@ func init() {
 	variablesCmd.AddCommand(variablesSetCmd)
 	variablesSetCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
 	variablesSetCmd.Flags().Bool("skip-redeploy", false, "Skip redeploying the specified service after changing the variables")
+	variablesSetCmd.Flags().Bool("replace", false, "Fully replace all previous variables instead of updating them")
+	variablesSetCmd.Flags().Bool("yes", false, "Skip all confirmation dialogs")
 
 	variablesDeleteCmd := &cobra.Command{
 		Use:     "delete key",

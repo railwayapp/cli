@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/railwayapp/cli/entity"
 )
@@ -32,12 +33,19 @@ func (g *Gateway) GetEnvs(ctx context.Context, req *entity.GetEnvsRequest) (*ent
 	return resp.Envs, nil
 }
 
-func (g *Gateway) UpsertVariablesFromObject(ctx context.Context, req *entity.UpdateEnvsRequest) error {
-	gqlReq, err := g.NewRequestWithAuth(`
+func (g *Gateway) UpdateVariablesFromObject(ctx context.Context, req *entity.UpdateEnvsRequest) error {
+	queryName := "upsertVariablesFromObject"
+
+	if req.Replace {
+		// When replacing, use the set query which will blow away all old variables and only set the ones in this query
+		queryName = "variablesSetFromObject"
+	}
+
+	gqlReq, err := g.NewRequestWithAuth(fmt.Sprintf(`
 	  	mutation($projectId: String!, $environmentId: String!, $pluginId: String, $serviceId: String, $variables: Json!) {
-				upsertVariablesFromObject(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, serviceId: $serviceId, variables: $variables)
+				%s(projectId: $projectId, environmentId: $environmentId, pluginId: $pluginId, serviceId: $serviceId, variables: $variables)
 	  	}
-	`)
+	`, queryName))
 	if err != nil {
 		return err
 	}

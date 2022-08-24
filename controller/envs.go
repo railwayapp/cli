@@ -104,7 +104,7 @@ func (c *Controller) AutoImportDotEnv(ctx context.Context) error {
 			return err
 		}
 		if len(envMap) > 0 {
-			return c.UpsertEnvs(ctx, (*entity.Envs)(&envMap), nil)
+			return c.UpdateEnvs(ctx, (*entity.Envs)(&envMap), nil, false)
 		}
 	}
 	return nil
@@ -134,7 +134,7 @@ func (c *Controller) SaveEnvsToFile(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceName *string) error {
+func (c *Controller) UpdateEnvs(ctx context.Context, envs *entity.Envs, serviceName *string, replace bool) error {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
@@ -185,12 +185,13 @@ func (c *Controller) UpsertEnvs(ctx context.Context, envs *entity.Envs, serviceN
 		}
 	}
 
-	return c.gtwy.UpsertVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
+	return c.gtwy.UpdateVariablesFromObject(ctx, &entity.UpdateEnvsRequest{
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
 		PluginID:      pluginID,
 		ServiceID:     serviceID,
 		Envs:          envs,
+		Replace:       replace,
 	})
 }
 
