@@ -3,6 +3,7 @@ package entity
 type GetEnvsRequest struct {
 	ProjectID     string
 	EnvironmentID string
+	ServiceID     string
 }
 
 type GetEnvsForPluginRequest struct {
@@ -15,13 +16,16 @@ type UpdateEnvsRequest struct {
 	ProjectID     string
 	EnvironmentID string
 	PluginID      string
+	ServiceID     string
 	Envs          *Envs
+	Replace       bool
 }
 
 type DeleteVariableRequest struct {
 	ProjectID     string
 	EnvironmentID string
 	PluginID      string
+	ServiceID     string
 	Name          string
 }
 

@@ -29,6 +29,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
+      - name: Bump Homebrew Core
+        uses: dawidd6/action-homebrew-bump-formula@v3
+        with:
+          token: ${{ secrets.GH_PAT }}
+          formula: railway
+          tag: ${{ github.event.client_payload.new-tag }}
+          revision: ${{ github.event.client_payload.sha }}
+          
   publish_npm:
     name: Publish to NPM
     needs: release_and_brew

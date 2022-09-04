@@ -7,32 +7,36 @@ import (
 	"time"
 
 	"github.com/railwayapp/cli/entity"
+	CLIErrors "github.com/railwayapp/cli/errors"
 	"github.com/railwayapp/cli/ui"
 )
 
 func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
-	var src string
-
-	if len(req.Args) == 0 {
-		src = "."
-	} else {
-		src = "./" + req.Args[0]
-	}
-
 	isVerbose, err := req.Cmd.Flags().GetBool("verbose")
-
 	if err != nil {
 		// Verbose mode isn't a necessary flag; just default to false.
 		isVerbose = false
 	}
 
+	serviceName, err := req.Cmd.Flags().GetString("service")
+	if err != nil {
+		return err
+	}
+
 	fmt.Print(ui.VerboseInfo(isVerbose, "Using verbose mode"))
 
-	fmt.Print(ui.VerboseInfo(isVerbose, "Loading project configuration"))
 	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
 	}
+
+	src := projectConfig.ProjectPath
+	if src == "" {
+		// When deploying with a project token, the project path is empty
+		src = "."
+	}
+
+	fmt.Print(ui.VerboseInfo(isVerbose, fmt.Sprintf("Uploading directory %s", src)))
 
 	fmt.Print(ui.VerboseInfo(isVerbose, "Loading environment"))
 	environmentName, err := req.Cmd.Flags().GetString("environment")
@@ -52,10 +56,30 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	fmt.Print(ui.VerboseInfo(isVerbose, "Loading services"))
-	service, err := ui.PromptServices(project.Services)
-	if err != nil {
-		return err
+	serviceId := ""
+	if serviceName != "" {
+		for _, service := range project.Services {
+			if service.Name == serviceName {
+				serviceId = service.ID
+			}
+		}
+
+		if serviceId == "" {
+			return CLIErrors.ServiceNotFound
+		}
+	}
+
+	// If service has not been provided via flag, prompt for it
+	if serviceId == "" {
+		fmt.Print(ui.VerboseInfo(isVerbose, "Loading services"))
+		service, err := ui.PromptServices(project.Services)
+		if err != nil {
+			return err
+		}
+
+		if service != nil {
+			serviceId = service.ID
+		}
 	}
 
 	_, err = ioutil.ReadFile(".railwayignore")
@@ -69,10 +93,11 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
-		ServiceID:     service.ID,
+		ServiceID:     serviceId,
 		RootDir:       src,
 	})
 	if err != nil {
+		ui.StopSpinner("")
 		return err
 	} else {
 		ui.StopSpinner(fmt.Sprintf("☁️ Build logs available at %s\n", ui.GrayText(res.URL)))
@@ -103,7 +128,11 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	fmt.Printf("☁️ Deployment logs available at %s\n", ui.GrayText(res.URL))
 	fmt.Printf("OR run `railway logs` to tail them here\n\n")
 
-	fmt.Printf("☁️ Deployment live at %s\n", ui.GrayText(h.ctrl.GetFullUrlFromStaticUrl(res.DeploymentDomain)))
+	if res.DeploymentDomain != "" {
+		fmt.Printf("☁️ Deployment live at %s\n", ui.GrayText(h.ctrl.GetFullUrlFromStaticUrl(res.DeploymentDomain)))
+	} else {
+		fmt.Printf("☁️ Deployment is live\n")
+	}
 
 	return nil
 }

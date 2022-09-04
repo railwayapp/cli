@@ -199,7 +199,6 @@ var prefixTest = []struct {
 }
 
 func TestKeyValues(t *testing.T) {
-	ui.DisableTextStyles()
 	for _, tt := range keyValuesTest {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.out, ui.KeyValues(tt.in))
@@ -208,7 +207,6 @@ func TestKeyValues(t *testing.T) {
 }
 
 func TestUnorderedList(t *testing.T) {
-	ui.DisableTextStyles()
 	for _, tt := range unorderedListTest {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.out, ui.UnorderedList(tt.in))
@@ -217,7 +215,6 @@ func TestUnorderedList(t *testing.T) {
 }
 
 func TestOrderedList(t *testing.T) {
-	ui.DisableTextStyles()
 	for _, tt := range orderedListTest {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.out, ui.OrderedList(tt.in))
@@ -226,7 +223,6 @@ func TestOrderedList(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
-	ui.DisableTextStyles()
 	for _, tt := range truncateTest {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.out, ui.Truncate(tt.inStr, tt.inLen))
@@ -235,7 +231,6 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestParagraph(t *testing.T) {
-	ui.DisableTextStyles()
 	for _, tt := range paragraphTest {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.out, ui.Paragraph(tt.in))
@@ -244,7 +239,6 @@ func TestParagraph(t *testing.T) {
 }
 
 func TestPrefixLines(t *testing.T) {
-	ui.DisableTextStyles()
 	for _, tt := range prefixTest {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.out, ui.PrefixLines(tt.inStr, tt.inPrefix))
