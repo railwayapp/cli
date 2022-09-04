@@ -11,7 +11,7 @@ type UploadRequest struct {
 	EnvironmentID string
 	ServiceID     string
 	RootDir       string
-	GitInfo       git.GitMetadata
+	GitInfo       *git.GitMetadata
 }
 
 type UpRequest struct {
@@ -19,7 +19,7 @@ type UpRequest struct {
 	ProjectID     string
 	EnvironmentID string
 	ServiceID     string
-	GitInfo       git.GitMetadata
+	GitInfo       *git.GitMetadata
 }
 
 type UpResponse struct {

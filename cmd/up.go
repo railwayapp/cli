@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/railwayapp/cli/entity"
-	"github.com/railwayapp/cli/lib/git"
 	CLIErrors "github.com/railwayapp/cli/errors"
+	"github.com/railwayapp/cli/lib/git"
 	"github.com/railwayapp/cli/ui"
 )
 
@@ -106,12 +106,18 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	ui.StartSpinner(&ui.SpinnerCfg{
 		Message: "Laying tracks in the clouds...",
 	})
+
+	gitInfoRef := &gitInfo
+	if gitInfo.HasLocalChanges {
+		gitInfoRef = nil
+	}
+
 	res, err := h.ctrl.Upload(ctx, &entity.UploadRequest{
 		ProjectID:     projectConfig.Project,
 		EnvironmentID: environment.Id,
 		ServiceID:     serviceId,
 		RootDir:       src,
-		GitInfo:       gitInfo,
+		GitInfo:       gitInfoRef,
 	})
 	if err != nil {
 		ui.StopSpinner("")

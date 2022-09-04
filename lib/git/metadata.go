@@ -6,8 +6,9 @@ type CommitInfo struct {
 	Author  string
 }
 type GitMetadata struct {
-	IsRepo   bool
-	RepoName string
-	Branch   string
-	Commit   CommitInfo
+	IsRepo          bool
+	RepoName        string
+	Branch          string
+	Commit          CommitInfo
+	HasLocalChanges bool
 }

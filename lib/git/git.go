@@ -98,6 +98,15 @@ func GetCommit(path string) (CommitInfo, error) {
 	}, nil
 }
 
+func HasLocalChanges(path string) (bool, error) {
+	output, err := execGit(path, "status")
+	if err != nil {
+		return false, err
+	}
+
+	return !strings.Contains(string(output), "working tree clean"), nil
+}
+
 func GetAllMetadata(path string) (GitMetadata, error) {
 	name, err := RepoName(path)
 	if err != nil {
@@ -114,10 +123,16 @@ func GetAllMetadata(path string) (GitMetadata, error) {
 		return GitMetadata{IsRepo: false}, err
 	}
 
+	localChanges, err := HasLocalChanges(path)
+	if err != nil {
+		return GitMetadata{IsRepo: false}, err
+	}
+
 	return GitMetadata{
-		IsRepo:   IsRepo(path),
-		RepoName: name,
-		Branch:   branch,
-		Commit:   commit,
+		IsRepo:          IsRepo(path),
+		RepoName:        name,
+		Branch:          branch,
+		Commit:          commit,
+		HasLocalChanges: localChanges,
 	}, nil
 }
