@@ -303,6 +303,10 @@ func (g *Gateway) GetProjectDeploymentsURL(projectID string) string {
 	return fmt.Sprintf("%s/project/%s/deployments?open=true", configs.GetRailwayURL(), projectID)
 }
 
+func (g *Gateway) GetServiceDeploymentsURL(projectID string, serviceID string, deploymentID string) string {
+	return fmt.Sprintf("%s/project/%s/service/%s?id=%s", configs.GetRailwayURL(), projectID, serviceID, deploymentID)
+}
+
 func (g *Gateway) OpenStaticUrlInBrowser(staticUrl string) error {
 	return browser.OpenURL(fmt.Sprintf("https://%s", staticUrl))
 }

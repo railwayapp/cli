@@ -9,10 +9,12 @@ import (
 	_aurora "github.com/logrusorgru/aurora"
 )
 
-var aurora = _aurora.NewAurora(true)
+var aurora _aurora.Aurora
 
-func DisableTextStyles() {
-	aurora = _aurora.NewAurora(false)
+func init() {
+	// Disable colors automatically if no TTY detected
+	enableColors := SupportsANSICodes()
+	aurora = _aurora.NewAurora(enableColors)
 }
 
 func Bold(payload string) _aurora.Value {

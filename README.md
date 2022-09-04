@@ -4,16 +4,15 @@
 
 This is the command line interface for [Railway](https://railway.app). Use it to connect your code to Railways infrastructure without needing to worry about environment variables or configuration.
 
-[View the docs](https://docs.railway.app/cli)
+[View the docs](https://docs.railway.app/develop/cli)
 
 ## Installation
 
-The Railway CLI is available through [Homebrew](https://brew.sh/), [NPM](https://www.npmjs.com/package/@railway/cli), or as a curl.
+The Railway CLI is available through [Homebrew](https://brew.sh/), [NPM](https://www.npmjs.com/package/@railway/cli), curl, or as a [Nixpkg](https://nixos.org).
 
 ### Brew
 
 ```shell
-brew tap railwayapp/railway
 brew install railway
 ```
 
@@ -32,7 +31,16 @@ yarn global add @railway/cli
 ### curl
 
 ```shell
-curl -fsSL https://railway-develop.app/install.sh | sh
+curl -fsSL https://railway.app/install.sh | sh
+```
+
+### Nixpkg
+Note: This installation method is not supported by Railway and is maintained by the community.
+```shell
+# On NixOS
+nix-env -iA nixos.railway
+# On non-NixOS
+nix-env -iA nixpkgs.railway
 ```
 
 ### From source

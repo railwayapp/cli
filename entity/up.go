@@ -26,3 +26,8 @@ type UpResponse struct {
 	URL              string
 	DeploymentDomain string
 }
+
+type UpErrorResponse struct {
+	Message   string `json:"message"`
+	RequestID string `json:"reqId"`
+}

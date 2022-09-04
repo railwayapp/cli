@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -10,8 +11,6 @@ import (
 type TrainSpinner []string
 
 var (
-	TrainRight  TrainSpinner = []string{"🚅", "🚅🚋", "🚅🚋🚋", "🚅🚋🚋🚋", "🚅🚋🚋🚋🚋", "🚅🚋🚋🚋🚋🚋", "🚅🚋🚋🚋🚋🚋🚋", "🚅🚋🚋🚋🚋🚋🚋🚋", "🚅🚋🚋🚋🚋🚋🚋🚋🚋"}
-	TrainLeft   TrainSpinner = []string{"       🚅", "      🚅🚋", "     🚅🚋🚋", "    🚅🚋🚋🚋", "   🚅🚋🚋🚋🚋", "  🚅🚋🚋🚋🚋🚋", " 🚅🚋🚋🚋🚋🚋🚋", " 🚅🚋🚋🚋🚋🚋🚋🚋", "🚅🚋🚋🚋🚋🚋🚋🚋🚋"}
 	TrainEmojis TrainSpinner = []string{"🚝", "🚅", "🚄", "🚇", "🚞", "🚈", "🚉", "🚂", "🚃", "🚊", "🚋"}
 )
 
@@ -27,6 +26,11 @@ type SpinnerCfg struct {
 var s = &spinner.Spinner{}
 
 func StartSpinner(cfg *SpinnerCfg) {
+	if !SupportsANSICodes() {
+		fmt.Println(cfg.Message)
+		return
+	}
+
 	if cfg.Tokens == nil {
 		cfg.Tokens = TrainEmojis
 	}
@@ -48,5 +52,8 @@ func StopSpinner(msg string) {
 		s.FinalMSG = msg + "\n"
 	}
 
-	s.Stop()
+	// NOTE: Running Stop() when not active triggers a nil pointer
+	if s.Active() {
+		s.Stop()
+	}
 }

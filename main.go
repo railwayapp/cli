@@ -55,8 +55,7 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 		}
 		err := fn(ctx, req)
 		if err != nil {
-			// TODO: Make it *pretty*
-			fmt.Println(err.Error())
+			fmt.Println(ui.AlertDanger(err.Error()))
 			os.Exit(1) // Set non-success exit code on error
 		}
 		return nil
@@ -133,26 +132,40 @@ func init() {
 		Short:   "Show variables for active environment",
 		RunE:    contextualize(handler.Variables, handler.Panic),
 	})
-	variablesCmd.AddCommand(&cobra.Command{
+	variablesCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+
+	variablesGetCmd := &cobra.Command{
 		Use:     "get key",
 		Short:   "Get the value of a variable",
 		RunE:    contextualize(handler.VariablesGet, handler.Panic),
 		Args:    cobra.MinimumNArgs(1),
 		Example: "  railway variables get MY_KEY",
-	})
-	variablesCmd.AddCommand(&cobra.Command{
+	}
+	variablesCmd.AddCommand(variablesGetCmd)
+	variablesGetCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+
+	variablesSetCmd := &cobra.Command{
 		Use:     "set key=value",
 		Short:   "Create or update the value of a variable",
 		RunE:    contextualize(handler.VariablesSet, handler.Panic),
 		Args:    cobra.MinimumNArgs(1),
 		Example: "  railway variables set NODE_ENV=prod NODE_VERSION=12",
-	})
-	variablesCmd.AddCommand(&cobra.Command{
+	}
+	variablesCmd.AddCommand(variablesSetCmd)
+	variablesSetCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+	variablesSetCmd.Flags().Bool("skip-redeploy", false, "Skip redeploying the specified service after changing the variables")
+	variablesSetCmd.Flags().Bool("replace", false, "Fully replace all previous variables instead of updating them")
+	variablesSetCmd.Flags().Bool("yes", false, "Skip all confirmation dialogs")
+
+	variablesDeleteCmd := &cobra.Command{
 		Use:     "delete key",
 		Short:   "Delete a variable",
 		RunE:    contextualize(handler.VariablesDelete, handler.Panic),
 		Example: "  railway variables delete MY_KEY",
-	})
+	}
+	variablesCmd.AddCommand(variablesDeleteCmd)
+	variablesDeleteCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+	variablesDeleteCmd.Flags().Bool("skip-redeploy", false, "Skip redeploying the specified service after changing the variables")
 
 	addRootCmd(&cobra.Command{
 		Use:   "status",
@@ -196,13 +209,15 @@ func init() {
 		RunE:  contextualize(handler.List, handler.Panic),
 	})
 
-	addRootCmd(&cobra.Command{
+	runCmd := addRootCmd(&cobra.Command{
 		Use:                "run",
 		Short:              "Run a local command using variables from the active environment",
 		PersistentPreRunE:  contextualize(handler.CheckVersion, handler.Panic),
 		RunE:               contextualize(handler.Run, handler.Panic),
 		DisableFlagParsing: true,
 	})
+	runCmd.Flags().Bool("ephemeral", false, "Run the local command in an ephemeral environment")
+	runCmd.Flags().String("service", "", "Run the command using variables from the specified service")
 
 	addRootCmd(&cobra.Command{
 		Use:   "protect",
@@ -218,12 +233,21 @@ func init() {
 	})
 
 	upCmd := addRootCmd(&cobra.Command{
-		Use:   "up [path]",
+		Use:   "up",
 		Short: "Upload and deploy project from the current directory",
 		RunE:  contextualize(handler.Up, handler.Panic),
 	})
 	upCmd.Flags().BoolP("detach", "d", false, "Detach from cloud build/deploy logs")
 	upCmd.Flags().StringP("environment", "e", "", "Specify an environment to up onto")
+	upCmd.Flags().StringP("service", "s", "", "Fetch variables accessible to a specific service")
+
+	downCmd := addRootCmd(&cobra.Command{
+		Use:   "down",
+		Short: "Remove the most recent deployment",
+		RunE:  contextualize(handler.Down, handler.Panic),
+	})
+
+	downCmd.Flags().StringP("environment", "e", "", "Specify an environment to delete from")
 
 	addRootCmd(&cobra.Command{
 		Use:   "logs",
@@ -248,6 +272,13 @@ func init() {
 		Short: "Open an interactive shell to a database",
 		RunE:  contextualize(handler.Connect, handler.Panic),
 	})
+
+	shellCmd := addRootCmd(&cobra.Command{
+		Use:   "shell",
+		Short: "Open a subshell with Railway variables available",
+		RunE:  contextualize(handler.Shell, handler.Panic),
+	})
+	shellCmd.Flags().StringP("service", "s", "", "Use variables accessible to a specific service")
 
 	addRootCmd(&cobra.Command{
 		Hidden: true,

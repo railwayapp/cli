@@ -6,7 +6,7 @@ import (
 	"github.com/railwayapp/cli/entity"
 )
 
-func (c *Controller) DeployEnvironmentTriggers(ctx context.Context) error {
+func (c *Controller) DeployEnvironmentTriggers(ctx context.Context, serviceID *string) error {
 	projectCfg, err := c.GetProjectConfigs(ctx)
 	if err != nil {
 		return err
@@ -15,5 +15,6 @@ func (c *Controller) DeployEnvironmentTriggers(ctx context.Context) error {
 	return c.gtwy.DeployEnvironmentTriggers(ctx, &entity.DeployEnvironmentTriggersRequest{
 		ProjectID:     projectCfg.Project,
 		EnvironmentID: projectCfg.Environment,
+		ServiceID:     *serviceID,
 	})
 }
