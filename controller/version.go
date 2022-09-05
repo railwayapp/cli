@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 )
 
@@ -14,5 +15,6 @@ func (c *Controller) GetLatestVersion() (string, error) {
 }
 func (c *Controller) RunUpdateCommand(updateCommand *exec.Cmd) error {
 	err := updateCommand.Run()
+	fmt.Println(err)
 	return err
 }

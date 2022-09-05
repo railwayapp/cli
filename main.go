@@ -29,8 +29,6 @@ func addRootCmd(cmd *cobra.Command) *cobra.Command {
 	return cmd
 }
 
-var OriginalInstallationMethod string
-
 // contextualize converts a HandlerFunction to a cobra function
 func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) entity.CobraFunction {
 	return func(cmd *cobra.Command, args []string) error {
@@ -65,7 +63,6 @@ func contextualize(fn entity.HandlerFunction, panicFn entity.PanicFunction) enti
 }
 
 func init() {
-	cmd.OriginalInstallationMethod = OriginalInstallationMethod
 	// Initializes all commands
 	handler := cmd.New()
 
