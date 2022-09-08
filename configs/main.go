@@ -72,10 +72,17 @@ func (c *Configs) marshalConfig(config *Config, cfg interface{}) error {
 	return config.viper.WriteConfig()
 }
 
-func New() *Configs {
+/*
+`getRootConfigPath` gets the path to where the config should be stored.
+
+Takes into consideration $XDG_CONFIG_HOME and fallsback to the current user
+home directory.
+
+Returns the fullpath.
+*/
+func getRootConfigPath() string {
 	// Configs stored in root (~/.railway)
 	// Includes token, etc
-	rootViper := viper.New()
 	rootConfigPartialPath := ".railway/config.json"
 	if IsDevMode() {
 		rootConfigPartialPath = ".railway/dev-config.json"
@@ -85,15 +92,26 @@ func New() *Configs {
 		rootConfigPartialPath = ".railway/staging-config.json"
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		panic(err)
+	basePath, exists := os.LookupEnv("XDG_CONFIG_HOME")
+
+	if !exists {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			panic(err)
+		}
+		basePath = homeDir
 	}
 
-	rootConfigPath := path.Join(homeDir, rootConfigPartialPath)
+	return path.Join(basePath, rootConfigPartialPath)
+}
+
+func New() *Configs {
+	rootViper := viper.New()
+
+	rootConfigPath := getRootConfigPath()
 
 	rootViper.SetConfigFile(rootConfigPath)
-	err = rootViper.ReadInConfig()
+	err := rootViper.ReadInConfig()
 	if os.IsNotExist(err) {
 		// That's okay, configs are created as needed
 	} else if err != nil {
