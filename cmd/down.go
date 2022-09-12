@@ -42,9 +42,15 @@ func (h *Handler) Down(ctx context.Context, req *entity.CommandRequest) error {
 		return err
 	}
 
-	shouldDelete, err := ui.PromptYesNo(fmt.Sprintf("Delete latest deployment for project %s?", project.Name))
-	if err != nil || !shouldDelete {
-		return err
+	bypass, err := req.Cmd.Flags().GetBool("yes")
+	if err != nil {
+		bypass = false
+	}
+	if !bypass {
+		shouldDelete, err := ui.PromptYesNo(fmt.Sprintf("Delete latest deployment for project %s?", project.Name))
+		if err != nil || !shouldDelete {
+			return err
+		}
 	}
 
 	err = h.ctrl.Down(ctx, &entity.DownRequest{
