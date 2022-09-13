@@ -248,6 +248,7 @@ func init() {
 	})
 
 	downCmd.Flags().StringP("environment", "e", "", "Specify an environment to delete from")
+	downCmd.Flags().Bool("yes", false, "Skip all confirmation dialogs")
 
 	addRootCmd(&cobra.Command{
 		Use:   "logs",
