@@ -24,7 +24,7 @@ func (c *Configs) GetProjectConfigs() (*entity.ProjectConfig, error) {
 
 	userCfg, err := c.GetRootConfigs()
 	if err != nil {
-		return nil, errors.ProjectConfigNotFound
+		return nil, errors.RootConfigNotFound
 	}
 
 	// lookup project in global config based on pwd

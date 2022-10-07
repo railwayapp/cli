@@ -14,9 +14,9 @@ func (h *Handler) Link(ctx context.Context, req *entity.CommandRequest) error {
 		// projectID provided as argument
 		arg := req.Args[0]
 
-		if (uuid.IsValidUUID(arg)) {
+		if uuid.IsValidUUID(arg) {
 			project, err := h.ctrl.GetProject(ctx, arg)
-			if (err != nil) {
+			if err != nil {
 				return err
 			}
 
@@ -24,7 +24,7 @@ func (h *Handler) Link(ctx context.Context, req *entity.CommandRequest) error {
 		}
 
 		project, err := h.ctrl.GetProjectByName(ctx, arg)
-		if (err != nil) {
+		if err != nil {
 			return err
 		}
 
@@ -69,7 +69,7 @@ func (h *Handler) linkFromID(ctx context.Context, req *entity.CommandRequest) er
 	}
 
 	project, err := h.ctrl.GetProject(ctx, projectID)
-	if (err != nil) {
+	if err != nil {
 		return err
 	}
 
