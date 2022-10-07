@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	errors2 "github.com/railwayapp/cli/errors"
+	"github.com/railwayapp/cli/ui"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -166,10 +169,20 @@ func (r *GQLRequest) Run(ctx context.Context, resp interface{}) error {
 		for i, err := range gr.Errors {
 			messages[i] = err.Error()
 		}
+
+		errText := gr.Errors[0].Message
 		if len(gr.Errors) > 1 {
-			return fmt.Errorf("%d Errors: %s", len(gr.Errors), strings.Join(messages, ", "))
+			errText = fmt.Sprintf("%d Errors: %s", len(gr.Errors), strings.Join(messages, ", "))
 		}
-		return errors.New(gr.Errors[0].Message)
+
+		// If any GQL responses return fail because unauthenticated, print an error telling the
+		// user to log in and exit immediately
+		if strings.Contains(errText, "Not Authorized") {
+			println(ui.AlertDanger(errors2.UserNotAuthorized.Error()))
+			os.Exit(1)
+		}
+
+		return errors.New(errText)
 	}
 
 	return nil

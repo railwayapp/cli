@@ -11,8 +11,10 @@ type RailwayError error
 // TEST
 
 var (
+	RootConfigNotFound                  RailwayError = fmt.Errorf("Run %s to get started", ui.Bold("railway login"))
 	UserConfigNotFound                  RailwayError = fmt.Errorf("%s\nRun %s", ui.RedText("Not logged in."), ui.Bold("railway login"))
-	ProjectConfigNotFound               RailwayError = fmt.Errorf("%s. Tip: If you haven't, do railway login\nOtherwise, run %s to get plugged into a new project, or %s to get plugged into an existing project.", ui.RedText("Project not found."), ui.Bold("railway init"), ui.Bold("railway link"))
+	ProjectConfigNotFound               RailwayError = fmt.Errorf("%s\nRun %s to create a new project, or %s to use an existing project", ui.RedText("Project not found"), ui.Bold("railway init"), ui.Bold("railway link"))
+	UserNotAuthorized                   RailwayError = fmt.Errorf("%s\nTry running %s", ui.RedText("Not authorized!"), ui.Bold("railway login"))
 	ProjectTokenNotFound                RailwayError = fmt.Errorf("%s\n", ui.RedText("Project token not found"))
 	ProblemFetchingProjects             RailwayError = fmt.Errorf("%s\nOne of our trains probably derailed!", ui.RedText("There was a problem fetching your projects."))
 	ProblemFetchingWritableGithubScopes RailwayError = fmt.Errorf("%s\nOne of our trains probably derailed!", ui.RedText("There was a problem fetching GitHub metadata."))

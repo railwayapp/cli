@@ -2,7 +2,9 @@ package configs
 
 import (
 	"encoding/json"
+	"github.com/railwayapp/cli/errors"
 	"io/ioutil"
+	"os"
 
 	"github.com/railwayapp/cli/entity"
 )
@@ -10,7 +12,9 @@ import (
 func (c *Configs) GetRootConfigs() (*entity.RootConfig, error) {
 	var cfg entity.RootConfig
 	b, err := ioutil.ReadFile(c.rootConfigs.configPath)
-	if err != nil {
+	if os.IsNotExist(err) {
+		return nil, errors.RootConfigNotFound
+	} else if err != nil {
 		return nil, err
 	}
 	err = json.Unmarshal(b, &cfg)
