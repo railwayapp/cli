@@ -3,13 +3,21 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"github.com/railwayapp/cli/errors"
+	"os"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
 )
 
-func (h *Handler) Unlink(ctx context.Context, req *entity.CommandRequest) error {
-	projectCfg, _ := h.ctrl.GetProjectConfigs(ctx)
+func (h *Handler) Unlink(ctx context.Context, _ *entity.CommandRequest) error {
+	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
+	if err == errors.ProjectConfigNotFound {
+		fmt.Printf(ui.AlertWarning("No project links found"))
+		os.Exit(1)
+	} else if err != nil {
+		return err
+	}
 
 	project, err := h.ctrl.GetProject(ctx, projectCfg.Project)
 	if err != nil {
