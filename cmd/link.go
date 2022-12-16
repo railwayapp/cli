@@ -51,7 +51,7 @@ func (h *Handler) linkFromAccount(ctx context.Context, _ *entity.CommandRequest)
 	}
 
 	if len(projects) == 0 {
-		fmt.Printf(ui.AlertWarning("No projects found"))
+		fmt.Print(ui.AlertWarning("No projects found"))
 		fmt.Printf("Create one with %s\n", ui.GreenText("railway init"))
 		os.Exit(1)
 	}

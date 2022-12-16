@@ -13,7 +13,7 @@ import (
 func (h *Handler) Unlink(ctx context.Context, _ *entity.CommandRequest) error {
 	projectCfg, err := h.ctrl.GetProjectConfigs(ctx)
 	if err == errors.ProjectConfigNotFound {
-		fmt.Printf(ui.AlertWarning("No project is currently linked"))
+		fmt.Print(ui.AlertWarning("No project is currently linked"))
 		os.Exit(1)
 	} else if err != nil {
 		return err
