@@ -97,7 +97,20 @@ func compress(src string, buf io.Writer) error {
 		if passedErr != nil {
 			return err
 		}
-		if de.IsDir() {
+
+		// follow symlinks by default
+		resolvedFilePath, err := filepath.EvalSymlinks(absoluteFile)
+		if err != nil {
+			return err
+		}
+
+		// get info about the file the link points at
+		fileInfo, err := os.Lstat(resolvedFilePath)
+		if err != nil {
+			return err
+		}
+
+		if fileInfo.IsDir() {
 			// skip directories if we can (for perf)
 			// e.g., want to avoid walking node_modules dir
 			for _, s := range skipDirs {
@@ -109,29 +122,18 @@ func compress(src string, buf io.Writer) error {
 			return nil
 		}
 
-		for _, igf := range ignoreFiles {
-			if strings.HasPrefix(absoluteFile, igf.prefix) { // if ignore file applicable
-				trimmed := strings.TrimPrefix(absoluteFile, igf.prefix)
-				if igf.ignore.MatchesPath(trimmed) {
+		for _, ignoredFile := range ignoreFiles {
+			if strings.HasPrefix(absoluteFile, ignoredFile.prefix) { // if ignore file applicable
+				trimmed := strings.TrimPrefix(absoluteFile, ignoredFile.prefix)
+				if ignoredFile.ignore.MatchesPath(trimmed) {
 					return nil
 				}
 			}
 		}
 
-		// follow symlinks by default
-		ln, err := filepath.EvalSymlinks(absoluteFile)
-		if err != nil {
-			return err
-		}
-		// get info about the file the link points at
-		fi, err := os.Lstat(ln)
-		if err != nil {
-			return err
-		}
-
 		// read file into a buffer to prevent tar overwrites
 		data := bytes.NewBuffer(nil)
-		f, err := os.Open(ln)
+		f, err := os.Open(resolvedFilePath)
 		if err != nil {
 			return err
 		}
@@ -146,7 +148,7 @@ func compress(src string, buf io.Writer) error {
 		}
 
 		// generate tar headers
-		header, err := tar.FileInfoHeader(fi, ln)
+		header, err := tar.FileInfoHeader(fileInfo, resolvedFilePath)
 		if err != nil {
 			return err
 		}
@@ -165,6 +167,7 @@ func compress(src string, buf io.Writer) error {
 		if _, err := io.Copy(tw, data); err != nil {
 			return err
 		}
+
 		return err
 	})
 
