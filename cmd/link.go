@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/railwayapp/cli/entity"
 	"github.com/railwayapp/cli/ui"
@@ -43,15 +44,16 @@ func (h *Handler) Link(ctx context.Context, req *entity.CommandRequest) error {
 	}
 }
 
-func (h *Handler) linkFromAccount(ctx context.Context, req *entity.CommandRequest) error {
+func (h *Handler) linkFromAccount(ctx context.Context, _ *entity.CommandRequest) error {
 	projects, err := h.ctrl.GetProjects(ctx)
 	if err != nil {
 		return err
 	}
 
 	if len(projects) == 0 {
-		fmt.Printf("No Projects. Create one with %s\n", ui.GreenText("railway init"))
-		return nil
+		fmt.Print(ui.AlertWarning("No projects found"))
+		fmt.Printf("Create one with %s\n", ui.GreenText("railway init"))
+		os.Exit(1)
 	}
 
 	project, err := ui.PromptProjects(projects)
@@ -62,7 +64,7 @@ func (h *Handler) linkFromAccount(ctx context.Context, req *entity.CommandReques
 	return h.setProject(ctx, project)
 }
 
-func (h *Handler) linkFromID(ctx context.Context, req *entity.CommandRequest) error {
+func (h *Handler) linkFromID(ctx context.Context, _ *entity.CommandRequest) error {
 	projectID, err := ui.PromptText("Enter your project id")
 	if err != nil {
 		return err

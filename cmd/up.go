@@ -25,7 +25,7 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 
 	fmt.Print(ui.VerboseInfo(isVerbose, "Using verbose mode"))
 
-	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
+	projectConfig, err := h.linkAndGetProjectConfigs(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -135,4 +135,24 @@ func (h *Handler) Up(ctx context.Context, req *entity.CommandRequest) error {
 	}
 
 	return nil
+}
+
+func (h *Handler) linkAndGetProjectConfigs(ctx context.Context, req *entity.CommandRequest) (*entity.ProjectConfig, error) {
+	projectConfig, err := h.ctrl.GetProjectConfigs(ctx)
+	if err == CLIErrors.ProjectConfigNotFound {
+		// If project isn't configured, prompt to link and do it again
+		err := h.linkFromAccount(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+
+		projectConfig, err = h.ctrl.GetProjectConfigs(ctx)
+		if err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+
+	return projectConfig, nil
 }
