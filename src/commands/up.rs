@@ -9,10 +9,11 @@ use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
 use is_terminal::IsTerminal;
+use serde::{Deserialize, Serialize};
 use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
 
-use crate::{consts::TICK_STRING, entities::UpResponse, subscription::subscribe_graphql};
+use crate::{consts::TICK_STRING, subscription::subscribe_graphql};
 
 use super::*;
 
@@ -152,4 +153,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpResponse {
+    pub url: String,
+    pub logs_url: String,
+    pub deployment_domain: String,
 }
