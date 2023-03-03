@@ -72,3 +72,4 @@ async-tungstenite = { version = "0.18.0", features = [
   "tokio-rustls-native-certs",
 ] }
 is-terminal = "0.4.4"
+serde_with = "2.2.0"

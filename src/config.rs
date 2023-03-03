@@ -16,6 +16,7 @@ use crate::{
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayProject {
     pub project_path: String,
@@ -27,12 +28,14 @@ pub struct RailwayProject {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayUser {
     pub token: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayConfig {
     pub projects: BTreeMap<String, RailwayProject>,
@@ -40,6 +43,7 @@ pub struct RailwayConfig {
 }
 
 #[derive(Debug)]
+#[serde_with::skip_serializing_none]
 pub struct Configs {
     pub root_config: RailwayConfig,
     root_config_path: PathBuf,
