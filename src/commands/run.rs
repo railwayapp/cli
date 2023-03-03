@@ -11,6 +11,10 @@ pub struct Args {
     #[clap(short, long)]
     service: Option<String>,
 
+    /// Environment to pull variables from (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
     /// Args to pass to the command
     #[clap(trailing_var_arg = true)]
     args: Vec<String>,
@@ -37,10 +41,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .iter()
         .map(|plugin| &plugin.node)
         .collect();
-
+    let environment_id = args
+        .environment
+        .clone()
+        .unwrap_or(linked_project.environment.clone());
     for plugin in plugins {
         let vars = queries::variables::Variables {
-            environment_id: linked_project.environment.clone(),
+            environment_id: environment_id.clone(),
             project_id: linked_project.project.clone(),
             service_id: None,
             plugin_id: Some(plugin.id.clone()),
@@ -67,7 +74,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .context("Service not found")?;
 
         let vars = queries::variables::Variables {
-            environment_id: linked_project.environment.clone(),
+            environment_id: environment_id.clone(),
             project_id: linked_project.project.clone(),
             service_id: Some(service_id.node.id.clone()),
             plugin_id: None,
@@ -81,7 +88,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         all_variables.append(&mut body.variables);
     } else if linked_project.service.is_some() {
         let vars = queries::variables::Variables {
-            environment_id: linked_project.environment.clone(),
+            environment_id: environment_id.clone(),
             project_id: linked_project.project.clone(),
             service_id: linked_project.service.clone(),
             plugin_id: None,
@@ -104,7 +111,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let service_id = services.first().context("No services found")?;
 
         let vars = queries::variables::Variables {
-            environment_id: linked_project.environment.clone(),
+            environment_id: environment_id.clone(),
             project_id: linked_project.project.clone(),
             service_id: Some(service_id.node.id.clone()),
             plugin_id: None,
