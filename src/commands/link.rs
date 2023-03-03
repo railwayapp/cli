@@ -53,6 +53,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             ProjectEnvironment(&environment.node)
         } else if !std::io::stdout().is_terminal() {
             bail!("Environment must be provided when not running in a terminal");
+        } else if body.project.environments.edges.len() == 1 {
+            ProjectEnvironment(&body.project.environments.edges[0].node)
         } else {
             inquire::Select::new(
                 "Select an environment",
