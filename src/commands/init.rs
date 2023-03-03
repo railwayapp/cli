@@ -47,19 +47,6 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         name
     };
 
-    let description = inquire::Text::new("Project Description")
-        .with_formatter(&|s| {
-            if s.is_empty() {
-                "No description provided".to_string()
-            } else {
-                s.to_string()
-            }
-        })
-        .with_placeholder("My first Railway project")
-        .with_help_message("Optional")
-        .with_render_config(render_config)
-        .prompt()?;
-
     let vars = queries::user_projects::Variables {};
 
     let res =
@@ -71,7 +58,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     if teams.is_empty() {
         let vars = mutations::project_create::Variables {
             name: Some(name),
-            description: Some(description),
+            description: None,
             team_id: None,
         };
 
