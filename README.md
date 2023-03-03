@@ -14,8 +14,6 @@ The Railway CLI allows you to
 - Link to an existing Railway project
 - Pull down environment variables for your project locally to run
 - Create services and databases right from the comfort of your fingertips
-## Status
-Currently pre-release. We are looking for feedback and suggestions. Please join our [Discord](https://discord.gg/railway) to provide feedback.
 
 ## Installation
 ### Cargo
