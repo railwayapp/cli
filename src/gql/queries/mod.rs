@@ -78,10 +78,10 @@ pub struct BuildLogs;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.graphql",
-    query_path = "src/gql/queries/strings/ServiceDomains.graphql",
+    query_path = "src/gql/queries/strings/Domains.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-pub struct ServiceDomains;
+pub struct Domains;
 
 #[derive(GraphQLQuery)]
 #[graphql(

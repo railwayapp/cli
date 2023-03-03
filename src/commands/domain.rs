@@ -50,14 +50,13 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         }
     };
 
-    let vars = queries::service_domains::Variables {
+    let vars = queries::domains::Variables {
         project_id: linked_project.project.clone(),
         environment_id: linked_project.environment.clone(),
         service_id: service.clone(),
     };
 
-    let res =
-        post_graphql::<queries::ServiceDomains, _>(&client, configs.get_backboard(), vars).await?;
+    let res = post_graphql::<queries::Domains, _>(&client, configs.get_backboard(), vars).await?;
 
     let body = res
         .data
