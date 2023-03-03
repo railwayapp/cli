@@ -35,9 +35,19 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         body.project.services.edges[0].node.clone().id
     } else {
         let Some(service) = linked_project.service.clone() else {
-        bail!("No service linked");
-      };
-        service.clone()
+            bail!("No service linked. Run `railway service` to link to a service");
+        };
+        if body
+            .project
+            .services
+            .edges
+            .iter()
+            .any(|s| s.node.id == service)
+        {
+            service
+        } else {
+            bail!("Service not found! Run `railway service` to link to a service");
+        }
     };
 
     let vars = queries::service_domains::Variables {
