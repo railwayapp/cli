@@ -64,7 +64,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         .context("Failed to retrieve to get domains for service.")?;
 
     let domain = body.domains;
-    if domain.service_domains.is_empty() || domain.custom_domains.is_empty() {
+    if !(domain.service_domains.is_empty() || domain.custom_domains.is_empty()) {
         bail!("Domain already exists on service");
     }
 
