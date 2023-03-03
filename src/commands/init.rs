@@ -1,7 +1,5 @@
 use std::fmt::Display;
 
-use chrono::format;
-
 use super::{queries::user_projects::UserProjectsMeTeamsEdgesNode, *};
 
 /// Create a new project

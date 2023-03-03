@@ -42,7 +42,6 @@ impl GQLClient {
         Ok(client)
     }
 
-    #[allow(dead_code)]
     pub fn new_unauthorized() -> Result<Client> {
         let mut headers = HeaderMap::new();
         headers.insert(
