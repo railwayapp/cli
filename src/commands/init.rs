@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use chrono::format;
+
 use super::{queries::user_projects::UserProjectsMeTeamsEdgesNode, *};
 
 /// Create a new project
@@ -144,6 +146,16 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         "Created project".green().bold(),
         body.project_create.name.bold(),
         team
+    );
+    println!(
+        "{}",
+        format!(
+            "https://{}/project/{}",
+            configs.get_host(),
+            body.project_create.id
+        )
+        .bold()
+        .underline()
     );
     Ok(())
 }
