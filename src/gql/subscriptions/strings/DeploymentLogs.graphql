@@ -1,0 +1,14 @@
+subscription DeploymentLogs(
+	$deploymentId: String!
+	$filter: String
+	$limit: Int
+) {
+	deploymentLogs(deploymentId: $deploymentId, filter: $filter, limit: $limit) {
+		...LogFields
+	}
+}
+
+fragment LogFields on Log {
+	timestamp
+	message
+}

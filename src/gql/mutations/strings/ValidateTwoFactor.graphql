@@ -1,0 +1,3 @@
+mutation ValidateTwoFactor($token: String!) {
+	twoFactorInfoValidate(input: { token: $token })
+}

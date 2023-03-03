@@ -1,0 +1,6 @@
+query BuildLogs($deploymentId: String!, $startDate: DateTime) {
+	buildLogs(deploymentId: $deploymentId, startDate: $startDate) {
+		message
+		timestamp
+	}
+}

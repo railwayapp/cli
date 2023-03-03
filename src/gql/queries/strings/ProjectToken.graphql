@@ -1,0 +1,13 @@
+query ProjectToken {
+	projectToken {
+		id
+		project {
+			id
+			name
+		}
+		environment {
+			id
+			name
+		}
+	}
+}

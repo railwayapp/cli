@@ -1,0 +1,30 @@
+query Project($id: String!) {
+	project(id: $id) {
+		id
+		name
+		plugins {
+			edges {
+				node {
+					id
+					name
+				}
+			}
+		}
+		environments {
+			edges {
+				node {
+					id
+					name
+				}
+			}
+		}
+		services {
+			edges {
+				node {
+					id
+					name
+				}
+			}
+		}
+	}
+}
