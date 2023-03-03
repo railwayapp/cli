@@ -31,20 +31,23 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
                 .blue()
                 .bold()
         );
-        println!("Plugins:");
-        for plugin in body.project.plugins.edges.iter().map(|plugin| &plugin.node) {
-            println!("{}", format!("{:?}", plugin.name).dimmed().bold());
+        if !body.project.plugins.edges.is_empty() {
+            println!("Plugins:");
+            for plugin in body.project.plugins.edges.iter().map(|plugin| &plugin.node) {
+                println!("{}", format!("{:?}", plugin.name).dimmed().bold());
+            }
         }
-
-        println!("Services:");
-        for service in body
-            .project
-            .services
-            .edges
-            .iter()
-            .map(|service| &service.node)
-        {
-            println!("{}", service.name.dimmed().bold());
+        if !body.project.services.edges.is_empty() {
+            println!("Services:");
+            for service in body
+                .project
+                .services
+                .edges
+                .iter()
+                .map(|service| &service.node)
+            {
+                println!("{}", service.name.dimmed().bold());
+            }
         }
     } else {
         println!("{}", serde_json::to_string_pretty(&body.project)?);
