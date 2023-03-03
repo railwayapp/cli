@@ -5,5 +5,9 @@ use super::*;
 pub struct Args {}
 
 pub async fn command(_args: Args, _json: bool) -> Result<()> {
-    unimplemented!("logout command is not implemented yet");
+    let mut configs = Configs::new()?;
+    configs.reset()?;
+    configs.write()?;
+    println!("Logged out successfully");
+    Ok(())
 }

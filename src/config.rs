@@ -95,6 +95,14 @@ impl Configs {
         })
     }
 
+    pub fn reset(&mut self) -> Result<()> {
+        self.root_config = RailwayConfig {
+            projects: BTreeMap::new(),
+            user: RailwayUser { token: None },
+        };
+        Ok(())
+    }
+
     pub fn get_railway_token() -> Option<String> {
         std::env::var("RAILWAY_TOKEN").ok()
     }
