@@ -105,7 +105,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     };
     let vars = mutations::project_create::Variables {
         name: Some(name),
-        description: Some(description),
+        description: None,
         team_id,
     };
 
