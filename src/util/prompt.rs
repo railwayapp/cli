@@ -4,7 +4,7 @@ use crate::commands::Configs;
 use anyhow::{Context, Result};
 
 pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
-    let mut select = inquire::Select::new(message, options);
+    let select = inquire::Select::new(message, options);
     select
         .with_render_config(Configs::get_render_config())
         .prompt()
@@ -12,7 +12,7 @@ pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
 }
 
 pub fn prompt_confirm(message: &str) -> Result<bool> {
-    let mut confirm = inquire::Confirm::new(message);
+    let confirm = inquire::Confirm::new(message);
     confirm
         .with_render_config(Configs::get_render_config())
         .prompt()
@@ -20,7 +20,7 @@ pub fn prompt_confirm(message: &str) -> Result<bool> {
 }
 
 pub fn prompt_multi_options<T: Display>(message: &str, options: Vec<T>) -> Result<Vec<T>> {
-    let mut multi_select = inquire::MultiSelect::new(message, options);
+    let multi_select = inquire::MultiSelect::new(message, options);
     multi_select
         .with_render_config(Configs::get_render_config())
         .prompt()
