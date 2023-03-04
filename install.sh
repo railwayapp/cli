@@ -338,23 +338,23 @@ IFS=$'\n' read -r -a VERSION <<< "$ALL_VERSIONS"
 DEFAULT_VERSION="$VERSION"
 
 # defaults
-if [ -z "${NIXPACKS_VERSION-}" ]; then
-  NIXPACKS_VERSION="$DEFAULT_VERSION"
+if [ -z "${RAILWAY_VERSION-}" ]; then
+  RAILWAY_VERSION="$DEFAULT_VERSION"
 fi
 
-if [ -z "${NIXPACKS_PLATFORM-}" ]; then
+if [ -z "${RAILWAY_PLATFORM-}" ]; then
   PLATFORM="$(detect_platform)"
 fi
 
-if [ -z "${NIXPACKS_BIN_DIR-}" ]; then
+if [ -z "${RAILWAY_BIN_DIR-}" ]; then
   BIN_DIR=/usr/local/bin
 fi
 
-if [ -z "${NIXPACKS_ARCH-}" ]; then
+if [ -z "${RAILWAY_ARCH-}" ]; then
   ARCH="$(detect_arch)"
 fi
 
-if [ -z "${NIXPACKS_BASE_URL-}" ]; then
+if [ -z "${RAILWAY_BASE_URL-}" ]; then
   BASE_URL="https://github.com/railwayapp/cli/releases"
 fi
 
@@ -474,7 +474,7 @@ print_configuration () {
     debug "${BOLD}Bin directory${NO_COLOR}: ${GREEN}${BIN_DIR}${NO_COLOR}"
     debug "${BOLD}Platform${NO_COLOR}:      ${GREEN}${PLATFORM}${NO_COLOR}"
     debug "${BOLD}Arch${NO_COLOR}:          ${GREEN}${ARCH}${NO_COLOR}"
-    debug "${BOLD}Version${NO_COLOR}:       ${GREEN}${NIXPACKS_VERSION}${NO_COLOR}"
+    debug "${BOLD}Version${NO_COLOR}:       ${GREEN}${RAILWAY_VERSION}${NO_COLOR}"
     printf '\n'
   fi
 }
@@ -487,9 +487,9 @@ if [ "${PLATFORM}" = "pc-windows-msvc" ]; then
   EXT=zip
 fi
 
-URL="${BASE_URL}/download/v${NIXPACKS_VERSION}/railway-v${NIXPACKS_VERSION}-${TARGET}.${EXT}"
+URL="${BASE_URL}/download/v${RAILWAY_VERSION}/railway-v${RAILWAY_VERSION}-${TARGET}.${EXT}"
 debug "Tarball URL: ${UNDERLINE}${BLUE}${URL}${NO_COLOR}"
-confirm "Install railway ${GREEN}${NIXPACKS_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
+confirm "Install railway ${GREEN}${RAILWAY_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
 check_bin_dir "${BIN_DIR}"
 
 install "${EXT}"
