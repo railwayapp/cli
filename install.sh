@@ -504,7 +504,7 @@ printf "$MAGENTA"
   \].`[/  I
   /l\/j\  (]    .  O
  /. ~~ ,\/I          .               Railway is now installed
- \\L__j^\/I       o                Run `railway help` for commands
+ \\L__j^\/I       o               Run `railway help` for commands
   \/--v}  I     o   .
   |    |  I   _________                    
   |    |  I c(`       ')o            
