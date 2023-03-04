@@ -1,0 +1,6 @@
+query TwoFactorInfo {
+	twoFactorInfo {
+		isVerified
+		hasRecoveryCodes
+	}
+}

@@ -1,0 +1,16 @@
+mutation ProjectCreate($name: String, $description: String, $teamId: String) {
+	projectCreate(
+		input: { name: $name, description: $description, teamId: $teamId }
+	) {
+		name
+		id
+		environments {
+			edges {
+				node {
+					id
+					name
+				}
+			}
+		}
+	}
+}

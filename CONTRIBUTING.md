@@ -1,15 +1,17 @@
 # Contribute to the Railway CLI
 
-## Setup
+## Prerequisites
+- [Rust](https://www.rust-lang.org/tools/install)
+- [CMake](https://cmake.org/install/)
 
-Run
+OR
 
-```shell
-make run
-```
+- [Nix](https://nixos.org/download.html)
 
-Build
 
-```shell
-make build
-```
+### Nix Setup
+`nix-shell` to enter the shell with all the dependencies
+
+### Running and Building
+`cargo run -- <args>` to run the binary\
+`cargo build --release` to build the binary

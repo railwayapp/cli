@@ -1,0 +1,154 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*.*.*"
+env:
+  MACOSX_DEPLOYMENT_TARGET: 10.7
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      rlwy_version: ${{ env.CLI_VERSION }}
+
+    steps:
+      - name: Get the release version from the tag
+        shell: bash
+        if: env.CLI_VERSION == ''
+        run: |
+          # Apparently, this is the right way to get a tag name. Really?
+          #
+          # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
+          echo "CLI_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          echo "version is: ${{ env.CLI_VERSION }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Build Changelog
+        id: build_changelog
+        uses: mikepenz/release-changelog-builder-action@v3.7.0
+        with:
+          configuration: ".github/changelog-configuration.json"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub release
+        id: release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.CLI_VERSION }}
+          release_name: ${{ env.CLI_VERSION }}
+
+  build-release:
+    name: Build Release Assets
+    needs: ["create-release"]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+
+          - target: i686-unknown-linux-musl
+            os: ubuntu-latest
+
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+
+          - target: arm-unknown-linux-musleabihf
+            os: ubuntu-latest
+
+          - target: x86_64-apple-darwin
+            os: macOS-latest
+
+          - target: aarch64-apple-darwin
+            os: macOS-latest
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          profile: minimal
+          override: true
+
+      - name: Build release binary
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --locked --target ${{ matrix.target }}
+          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+
+      - name: Prepare binaries [Windows]
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          strip rlwy.exe
+          7z a ../../../rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.zip rlwy.exe
+          cd -
+
+      - name: Prepare binaries [-linux]
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          strip rlwy || true
+          tar czvf ../../../rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.tar.gz rlwy
+          cd -
+
+      - name: Upload release archive
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.create-release.outputs.rlwy_version }}
+          files: rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}*
+
+      - name: Install cargo-deb
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: cargo install cargo-deb
+
+      - name: Generate .deb package file
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: cargo deb --target x86_64-unknown-linux-musl --output rlwy-${{ needs.create-release.outputs.rlwy_version }}-amd64.deb
+
+      - name: Upload .deb package file
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          tag: ${{ needs.create-release.outputs.rlwy_version }}
+          file: rlwy-${{ needs.create-release.outputs.rlwy_version }}-amd64.deb
+
+      - name: Update homebrew tap
+        uses: mislav/bump-homebrew-formula-action@v2
+        if: "matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin' && !contains(github.ref, '-')"
+        with:
+          formula-name: rlwy
+          formula-path: rlwy.rb
+          homebrew-tap: railwayapp/homebrew-tap
+          download-url: https://github.com/railwayapp/cli/releases/latest/download/rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}

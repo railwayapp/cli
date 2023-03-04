@@ -1,0 +1,75 @@
+[package]
+name = "railwayapp"
+version = "3.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["Railway <contact@railway.app>"]
+description = "Interact with Railway via CLI"
+readme = "README.md"
+homepage = "https://github.com/railwayapp/cli"
+repository = "https://github.com/railwayapp/cli"
+rust-version = "1.67.1"
+default-run = "railway"
+
+[[bin]]
+name = "railway"
+path = "src/main.rs"
+
+[[bin]]
+name = "rlwy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.69"
+clap = { version = "4.1.6", features = ["derive", "suggestions"] }
+colored = "2.0.0"
+dirs = "4.0.0"
+serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.93"
+reqwest = { version = "0.11.14", default-features = false, features = [
+  "rustls-tls",
+] }
+chrono = { version = "0.4.23", features = ["serde"], default-features = false }
+graphql_client = { version = "0.11.0", features = ["reqwest-rustls"] }
+paste = "1.0.11"
+tokio = { version = "1.25.0", features = ["full"] }
+clap_complete = "4.1.3"
+open = "3.2.0"
+inquire = "0.5.3"
+tui = "0.19.0"
+crossterm = "0.26.0"
+hyper = { version = "1.0.0-rc.3", features = ["server", "http1"] }
+base64 = "0.21.0"
+http-body-util = "0.1.0-rc.2"
+rand = "0.8.5"
+hostname = "0.3.1"
+indicatif = "0.17.3"
+indoc = "2.0.0"
+console = "0.15.5"
+box_drawing = "0.1.2"
+textwrap = "0.16.0"
+gzp = { version = "0.11.3", default-features = false, features = [
+  "deflate_rust",
+] }
+tar = "0.4.38"
+synchronized-writer = "1.1.11"
+ignore = "0.4.20"
+num_cpus = "1.15.0"
+url = "2.3.1"
+futures = { version = "0.3.26", default-features = false, features = [
+  "compat",
+  "io-compat",
+] }
+tokio-stream = { version = "0.1.12", default-features = false, features = [
+  "sync",
+] }
+uuid = { version = "1.3.0", features = ["serde", "v4"] }
+httparse = "1.8.0"
+names = { version = "0.14.0", default-features = false }
+graphql-ws-client = { version = "0.3.0", features = ["client-graphql-client"] }
+async-tungstenite = { version = "0.18.0", features = [
+  "tokio-runtime",
+  "tokio-rustls-native-certs",
+] }
+is-terminal = "0.4.4"
+serde_with = "2.2.0"
