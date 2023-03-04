@@ -149,6 +149,6 @@ jobs:
           formula-name: rlwy
           formula-path: rlwy.rb
           homebrew-tap: railwayapp/homebrew-tap
-          download-url: https://github.com/railwayapp/cliv3/releases/latest/download/rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.tar.gz
+          download-url: https://github.com/railwayapp/cli/releases/latest/download/rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
