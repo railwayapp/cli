@@ -31,28 +31,16 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .services
         .edges
         .iter()
-        .map(|env| Service(&env.node))
+        .map(|s| Service(&s.node))
         .collect();
 
     if let Some(service) = args.service {
         let service = services
             .iter()
-            .find(|env| env.0.id == service || env.0.name == service)
+            .find(|s| s.0.id == service || s.0.name == service)
             .context("Service not found")?;
-        let vars = queries::project::Variables {
-            id: service.0.id.clone(),
-        };
 
-        let res =
-            post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-        let body = res.data.context(SERVICE_NOT_FOUND)?;
-
-        configs.link_project(
-            body.project.id.clone(),
-            Some(body.project.name),
-            linked_project.environment.clone(),
-            linked_project.environment_name.clone(),
-        )?;
+        configs.link_service(service.0.id.clone())?;
         configs.write()?;
         return Ok(());
     }

@@ -27,7 +27,7 @@ pub struct Args {
     detach: bool,
 }
 
-pub async fn command(args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args, json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
@@ -148,7 +148,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         while let Some(Ok(log)) = log_stream.next().await {
             let log = log.data.context("Failed to retrieve log")?;
             for line in log.build_logs {
-                println!("{}", line.message);
+                if json {
+                    println!("{}", serde_json::to_string(&line)?);
+                } else {
+                    println!("{}", line.message);
+                }
             }
         }
     }
