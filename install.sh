@@ -124,7 +124,7 @@ download() {
   info "This is likely due to rlwy not yet supporting your configuration."
   info "If you would like to see a build for your configuration,"
   info "please create an issue requesting a build for ${MAGENTA}${TARGET}${NO_COLOR}:"
-  info "${BOLD}${UNDERLINE}https://github.com/railwayapp/cliv3/issues/new/${NO_COLOR}"
+  info "${BOLD}${UNDERLINE}https://github.com/railwayapp/cli/issues/new/${NO_COLOR}"
   return $rc
 }
 
@@ -149,7 +149,7 @@ unpack() {
   error "Unknown package extension."
   printf "\n"
   info "This almost certainly results from a bug in this script--please file a"
-  info "bug report at https://github.com/railwayapp/cliv3/issues"
+  info "bug report at https://github.com/railwayapp/cli/issues"
   return 1
 }
 
@@ -325,14 +325,14 @@ is_build_available() {
     printf "\n" >&2
     info "If you would like to see a build for your configuration,"
     info "please create an issue requesting a build for ${MAGENTA}${target}${NO_COLOR}:"
-    info "${BOLD}${UNDERLINE}https://github.com/railwayapp/cliv3/issues/new/${NO_COLOR}"
+    info "${BOLD}${UNDERLINE}https://github.com/railwayapp/cli/issues/new/${NO_COLOR}"
     printf "\n"
     exit 1
   fi
 }
 UNINSTALL=0
 HELP=0
-CARGOTOML="$(curl -fsSL https://raw.githubusercontent.com/railwayapp/cliv3/master/Cargo.toml)"
+CARGOTOML="$(curl -fsSL https://raw.githubusercontent.com/railwayapp/cli/master/Cargo.toml)"
 ALL_VERSIONS="$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' <<< "$CARGOTOML")"
 IFS=$'\n' read -r -a VERSION <<< "$ALL_VERSIONS"
 DEFAULT_VERSION="$VERSION"
@@ -355,7 +355,7 @@ if [ -z "${NIXPACKS_ARCH-}" ]; then
 fi
 
 if [ -z "${NIXPACKS_BASE_URL-}" ]; then
-  BASE_URL="https://github.com/railwayapp/cliv3/releases"
+  BASE_URL="https://github.com/railwayapp/cli/releases"
 fi
 
 # parse argv variables
