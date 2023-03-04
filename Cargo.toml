@@ -6,8 +6,8 @@ license = "MIT"
 authors = ["Railway <contact@railway.app>"]
 description = "Interact with Railway via CLI"
 readme = "README.md"
-homepage = "https://github.com/railwayapp/cliv3"
-repository = "https://github.com/railwayapp/cliv3"
+homepage = "https://github.com/railwayapp/cli"
+repository = "https://github.com/railwayapp/cli"
 rust-version = "1.67.1"
 default-run = "railway"
 
