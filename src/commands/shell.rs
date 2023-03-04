@@ -98,6 +98,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         _ => "sh".to_string(),
     });
 
+    println!("Entering subshell with Railway variables available. Type 'exit' to exit.");
+
     tokio::process::Command::new(shell)
         .envs(all_variables)
         .spawn()
@@ -105,5 +107,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .wait()
         .await
         .context("Failed to wait for command")?;
+    println!("Exited subshell, Railway variables no longer available.");
     Ok(())
 }
