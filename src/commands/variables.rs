@@ -138,7 +138,6 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
 }
 
 fn prompt_plugin(plugins: Vec<Plugin>) -> Result<Plugin> {
-    let configs = Configs::new()?;
     if !std::io::stdout().is_terminal() {
         bail!("Plugin must be provided when not running in a terminal")
     }

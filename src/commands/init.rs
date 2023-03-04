@@ -88,7 +88,7 @@ fn prompt_team(teams: Vec<Team>) -> Result<Team> {
     if teams.len() == 1 {
         return Ok(Team::Personal);
     }
-    let mut select = inquire::Select::new("Team", teams);
+    let select = inquire::Select::new("Team", teams);
     let team = select
         .with_render_config(Configs::get_render_config())
         .prompt()?;

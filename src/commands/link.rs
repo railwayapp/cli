@@ -167,8 +167,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environment)> {
-    let configs = Configs::new()?;
-
     let project = prompt_options("Select a project", project_names)?;
     let environments = project
         .0
@@ -184,8 +182,6 @@ fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environ
 fn prompt_personal_projects(
     personal_project_names: Vec<PersonalProject>,
 ) -> Result<(PersonalProject, PersonalEnvironment)> {
-    let configs = Configs::new()?;
-
     let project = prompt_options("Select a project", personal_project_names)?;
     let environments = project
         .0

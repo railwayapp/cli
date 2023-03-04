@@ -13,7 +13,6 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     if !std::io::stdout().is_terminal() {
         bail!(NON_INTERACTIVE_FAILURE);
     }
-    let configs = Configs::new()?;
     let confirm = inquire::Confirm::new("Open the browser")
         .with_default(true)
         .with_render_config(Configs::get_render_config())
