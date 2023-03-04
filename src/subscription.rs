@@ -1,4 +1,4 @@
-use crate::{commands::Configs, tokio_spawner::TokioSpawner};
+use crate::{commands::Configs, util::tokio_spawner::TokioSpawner};
 use anyhow::{bail, Result};
 use async_tungstenite::tungstenite::Message;
 use graphql_client::GraphQLQuery;

@@ -17,22 +17,21 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await.ok();
 
     let vars = queries::user_projects::Variables {};
-
     let res =
         post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
+    let body = res.data.context("Failed to get user (query me)")?;
 
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    let mut my_projects: Vec<_> = body
+    let mut personal_projects: Vec<_> = body
         .me
         .projects
         .edges
         .iter()
         .map(|project| &project.node)
         .collect();
-    my_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    // Sort by most recently updated (matches dashboard behavior)
+    personal_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
-    let mut all_projects: Vec<_> = my_projects
+    let mut all_projects: Vec<_> = personal_projects
         .iter()
         .map(|project| Project::Me((*project).clone()))
         .collect();
@@ -40,7 +39,7 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
     let teams: Vec<_> = body.me.teams.edges.iter().map(|team| &team.node).collect();
     if !json {
         println!("{}", "Personal".bold());
-        for project in &my_projects {
+        for project in &personal_projects {
             let project_name = if linked_project.is_some()
                 && project.id == linked_project.as_ref().unwrap().project
             {

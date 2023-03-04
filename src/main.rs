@@ -10,7 +10,7 @@ mod consts;
 mod gql;
 mod subscription;
 mod table;
-mod tokio_spawner;
+mod util;
 
 #[macro_use]
 mod macros;

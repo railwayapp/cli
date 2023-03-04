@@ -5,6 +5,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     commands::queries::user_projects::UserProjectsMeTeamsEdgesNode, consts::PROJECT_NOT_FOUND,
+    util::prompt::prompt_options,
 };
 
 use super::{
@@ -33,6 +34,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
+    match args.project_id {
+        Some(project_id) => project_id,
+    }
+
     if let Some(project_id) = args.project_id {
         let vars = queries::project::Variables { id: project_id };
 
@@ -56,7 +61,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         } else if body.project.environments.edges.len() == 1 {
             ProjectEnvironment(&body.project.environments.edges[0].node)
         } else {
-            inquire::Select::new(
+            prompt_options(
                 "Select an environment",
                 body.project
                     .environments
@@ -64,9 +69,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                     .iter()
                     .map(|env| ProjectEnvironment(&env.node))
                     .collect(),
-            )
-            .with_render_config(configs.get_render_config())
-            .prompt()?
+            )?
         };
 
         configs.link_project(
@@ -82,10 +85,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     let vars = queries::user_projects::Variables {};
-
     let res =
         post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
-
     let body = res.data.context("Failed to retrieve response body")?;
 
     let mut personal_projects: Vec<_> = body
@@ -122,9 +123,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .collect::<Vec<_>>();
     team_names.insert(0, Team::Personal);
 
-    let team = inquire::Select::new("Select a team", team_names)
-        .with_render_config(configs.get_render_config())
-        .prompt()?;
+    let team = prompt_options("Select a team", team_names)?;
     match team {
         Team::Personal => {
             let (project, environment) = prompt_personal_projects(personal_project_names)?;
@@ -174,9 +173,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environment)> {
     let configs = Configs::new()?;
 
-    let project = inquire::Select::new("Select a project", project_names)
-        .with_render_config(configs.get_render_config())
-        .prompt()?;
+    let project = prompt_options("Select a project", project_names)?;
     let environments = project
         .0
         .environments
@@ -184,9 +181,7 @@ fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environ
         .iter()
         .map(|env| Environment(&env.node))
         .collect();
-    let environment = inquire::Select::new("Select an environment", environments)
-        .with_render_config(configs.get_render_config())
-        .prompt()?;
+    let environment = prompt_options("Select an environment", environments)?;
     Ok((project, environment))
 }
 
@@ -195,9 +190,7 @@ fn prompt_personal_projects(
 ) -> Result<(PersonalProject, PersonalEnvironment)> {
     let configs = Configs::new()?;
 
-    let project = inquire::Select::new("Select a project", personal_project_names)
-        .with_render_config(configs.get_render_config())
-        .prompt()?;
+    let project = prompt_options("Select a project", personal_project_names)?;
     let environments = project
         .0
         .environments
@@ -205,9 +198,7 @@ fn prompt_personal_projects(
         .iter()
         .map(|env| PersonalEnvironment(&env.node))
         .collect();
-    let environment = inquire::Select::new("Select an environment", environments)
-        .with_render_config(configs.get_render_config())
-        .prompt()?;
+    let environment = prompt_options("Select an environment", environments)?;
     Ok((project, environment))
 }
 

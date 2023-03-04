@@ -251,7 +251,7 @@ impl Configs {
         Ok(())
     }
 
-    pub fn get_render_config(&self) -> RenderConfig {
+    pub fn get_render_config() -> RenderConfig {
         RenderConfig::default_colored()
             .with_help_message(
                 StyleSheet::new()

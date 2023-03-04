@@ -9,108 +9,34 @@ pub struct Args {}
 
 pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
-    let render_config = configs.get_render_config();
     let client = GQLClient::new_authorized(&configs)?;
-    let _linked_project = configs.get_linked_project().await.ok();
-
-    inquire::Select::new(
-        "Starting Point",
-        vec![
-            "Empty Project",
-            // Coming Soon!!
-            //  "Start from Template"
-        ],
-    )
-    .with_render_config(render_config)
-    .prompt()?;
-
-    let name = inquire::Text::new("Project Name")
-        .with_formatter(&|s| {
-            if s.is_empty() {
-                "Will be randomly generated".to_string()
-            } else {
-                s.to_string()
-            }
-        })
-        .with_placeholder("my-first-project")
-        .with_help_message("Leave blank to generate a random name")
-        .with_render_config(render_config)
-        .prompt()?;
-
-    let name = if name.is_empty() {
-        use names::Generator;
-        let mut generator = Generator::default();
-        generator.next().context("Failed to generate name")?
-    } else {
-        name
-    };
 
     let vars = queries::user_projects::Variables {};
-
     let res =
         post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
+    let body = res.data.context("Failed to get user (query me)")?;
 
-    let body = res.data.context("Failed to retrieve response body")?;
     let teams: Vec<_> = body.me.teams.edges.iter().map(|team| &team.node).collect();
+    let team_names = get_team_names(teams);
+    let team = prompt_team(team_names)?;
+    let project_name = prompt_project_name()?;
 
-    if teams.is_empty() {
-        let vars = mutations::project_create::Variables {
-            name: Some(name),
-            description: None,
-            team_id: None,
-        };
-
-        let res =
-            post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
-                .await?;
-
-        let body = res.data.context("Failed to retrieve response body")?;
-        let environment = body
-            .project_create
-            .environments
-            .edges
-            .first()
-            .context("No environments")?
-            .node
-            .clone();
-        configs.link_project(
-            body.project_create.id.clone(),
-            Some(body.project_create.name.clone()),
-            environment.id,
-            Some(environment.name),
-        )?;
-        configs.write()?;
-        println!(
-            "{} {}",
-            "Created project".green().bold(),
-            body.project_create.name.bold(),
-        );
-        return Ok(());
-    }
-
-    let mut team_names = teams
-        .iter()
-        .map(|team| Team::Team(team))
-        .collect::<Vec<_>>();
-    team_names.insert(0, Team::Personal);
-
-    let team = inquire::Select::new("Project Team", team_names)
-        .with_render_config(configs.get_render_config())
-        .prompt()?;
     let team_id = match team {
         Team::Team(team) => Some(team.id.clone()),
-        Team::Personal => None,
+        _ => None,
     };
+
     let vars = mutations::project_create::Variables {
-        name: Some(name),
+        name: Some(project_name),
         description: None,
         team_id,
     };
-
     let res =
         post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars).await?;
+    let body = res
+        .data
+        .context("Failed to create project (mutation projectCreate)")?;
 
-    let body = res.data.context("Failed to retrieve response body")?;
     let environment = body
         .project_create
         .environments
@@ -119,6 +45,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         .context("No environments")?
         .node
         .clone();
+
     configs.link_project(
         body.project_create.id.clone(),
         Some(body.project_create.name.clone()),
@@ -126,12 +53,14 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         Some(environment.name),
     )?;
     configs.write()?;
+
     println!(
         "{} {} on {}",
         "Created project".green().bold(),
         body.project_create.name.bold(),
         team
     );
+
     println!(
         "{}",
         format!(
@@ -143,6 +72,55 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         .underline()
     );
     Ok(())
+}
+
+fn get_team_names(teams: Vec<&UserProjectsMeTeamsEdgesNode>) -> Vec<Team> {
+    let mut team_names = teams
+        .iter()
+        .map(|team| Team::Team(team))
+        .collect::<Vec<_>>();
+    team_names.insert(0, Team::Personal);
+    team_names
+}
+
+fn prompt_team(teams: Vec<Team>) -> Result<Team> {
+    // If there is only the personal team, return None
+    if teams.len() == 1 {
+        return Ok(Team::Personal);
+    }
+    let mut select = inquire::Select::new("Team", teams);
+    let team = select
+        .with_render_config(Configs::get_render_config())
+        .prompt()?;
+    Ok(team)
+}
+
+fn prompt_project_name() -> Result<String> {
+    // Need a custom inquire prompt here, because of the formatter
+    let maybe_name = inquire::Text::new("Project Name")
+        .with_formatter(&|s| {
+            if s.is_empty() {
+                "Will be randomly generated".to_string()
+            } else {
+                s.to_string()
+            }
+        })
+        .with_placeholder("my-first-project")
+        .with_help_message("Leave blank to generate a random name")
+        .with_render_config(Configs::get_render_config())
+        .prompt()?;
+
+    // If name is empty, generate a random name
+    let name = match maybe_name.as_str() {
+        "" => {
+            use names::Generator;
+            let mut generator = Generator::default();
+            generator.next().context("Failed to generate name")?
+        }
+        _ => maybe_name,
+    };
+
+    Ok(name)
 }
 
 #[derive(Debug, Clone)]

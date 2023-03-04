@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! commands_enum {
     ($($module:tt),*) => (
       paste::paste! {
@@ -20,4 +21,15 @@ macro_rules! commands_enum {
         }
       }
     );
+}
+
+// Macro that bails if not running in a terminal
+#[macro_export]
+macro_rules! interact_or {
+    ($message:expr) => {
+        use anyhow::bail;
+        if !std::io::stdout().is_terminal() {
+            bail!($message);
+        }
+    };
 }
