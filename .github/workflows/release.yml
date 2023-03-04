@@ -11,7 +11,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
-      rlwy_version: ${{ env.CLI_VERSION }}
+      railway_version: ${{ env.CLI_VERSION }}
 
     steps:
       - name: Get the release version from the tag
@@ -107,16 +107,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          strip rlwy.exe
-          7z a ../../../rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.zip rlwy.exe
+          strip railway.exe
+          7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
       - name: Prepare binaries [-linux]
         if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          strip rlwy || true
-          tar czvf ../../../rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.tar.gz rlwy
+          strip railway || true
+          tar czvf ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz railway
           cd -
 
       - name: Upload release archive
@@ -124,8 +124,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ needs.create-release.outputs.rlwy_version }}
-          files: rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}*
+          tag_name: ${{ needs.create-release.outputs.railway_version }}
+          files: railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}*
 
       - name: Install cargo-deb
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -133,14 +133,14 @@ jobs:
 
       - name: Generate .deb package file
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: cargo deb --target x86_64-unknown-linux-musl --output rlwy-${{ needs.create-release.outputs.rlwy_version }}-amd64.deb
+        run: cargo deb --target x86_64-unknown-linux-musl --output railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb
 
       - name: Upload .deb package file
         if: matrix.target == 'x86_64-unknown-linux-musl'
         uses: svenstaro/upload-release-action@v2
         with:
-          tag: ${{ needs.create-release.outputs.rlwy_version }}
-          file: rlwy-${{ needs.create-release.outputs.rlwy_version }}-amd64.deb
+          tag: ${{ needs.create-release.outputs.railway_version }}
+          file: railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb
 
       - name: Update homebrew tap
         uses: mislav/bump-homebrew-formula-action@v2
@@ -149,6 +149,6 @@ jobs:
           formula-name: rlwy
           formula-path: rlwy.rb
           homebrew-tap: railwayapp/homebrew-tap
-          download-url: https://github.com/railwayapp/cli/releases/latest/download/rlwy-${{ needs.create-release.outputs.rlwy_version }}-${{ matrix.target }}.tar.gz
+          download-url: https://github.com/railwayapp/cli/releases/latest/download/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
