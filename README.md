@@ -35,7 +35,11 @@ npm install -g @railway/cli
 ```
 ### Bash
 ```bash
-curl -fsSL https://cli.new | sh
+# Install 
+bash <(curl -fsSL cli.new)
+
+# Uninstall
+bash <(curl -fsSL cli.new) -r
 ```
 
 
