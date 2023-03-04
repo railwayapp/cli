@@ -137,21 +137,20 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .collect();
     deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     let latest_deployment = deployments.first().context("No deployments found")?;
-    if !std::io::stdout().is_terminal() {
-        let vars = subscriptions::build_logs::Variables {
-            deployment_id: latest_deployment.id.clone(),
-            filter: Some(String::new()),
-            limit: Some(500),
-        };
+    let vars = subscriptions::build_logs::Variables {
+        deployment_id: latest_deployment.id.clone(),
+        filter: Some(String::new()),
+        limit: Some(500),
+    };
 
-        let (_client, mut log_stream) = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
-        while let Some(Ok(log)) = log_stream.next().await {
-            let log = log.data.context("Failed to retrieve log")?;
-            for line in log.build_logs {
-                println!("{}", line.message);
-            }
+    let (_client, mut log_stream) = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
+    while let Some(Ok(log)) = log_stream.next().await {
+        let log = log.data.context("Failed to retrieve log")?;
+        for line in log.build_logs {
+            println!("{}", line.message);
         }
     }
+
     Ok(())
 }
 
