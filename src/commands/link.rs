@@ -34,10 +34,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    match args.project_id {
-        Some(project_id) => project_id,
-    }
-
     if let Some(project_id) = args.project_id {
         let vars = queries::project::Variables { id: project_id };
 

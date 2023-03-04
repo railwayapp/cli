@@ -25,7 +25,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     let mut configs = Configs::new()?;
-    let render_config = configs.get_render_config();
+    let render_config = Configs::get_render_config();
 
     if args.browserless {
         return browserless_login().await;

@@ -143,7 +143,7 @@ fn prompt_plugin(plugins: Vec<Plugin>) -> Result<Plugin> {
         bail!("Plugin must be provided when not running in a terminal")
     }
     let plugin = inquire::Select::new("Select a plugin", plugins)
-        .with_render_config(configs.get_render_config())
+        .with_render_config(Configs::get_render_config())
         .prompt()?;
 
     Ok(plugin)

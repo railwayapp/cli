@@ -62,7 +62,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     let service = inquire::Select::new("Select a service", services)
-        .with_render_config(configs.get_render_config())
+        .with_render_config(Configs::get_render_config())
         .prompt()?;
 
     configs.link_service(service.0.id.clone())?;

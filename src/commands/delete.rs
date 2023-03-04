@@ -16,7 +16,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         bail!("Cannot delete plugins in non-interactive mode");
     }
     let configs = Configs::new()?;
-    let render_config = configs.get_render_config();
+    let render_config = Configs::get_render_config();
 
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
