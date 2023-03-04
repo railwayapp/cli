@@ -81,10 +81,10 @@ get_tmpfile() {
   local suffix
   suffix="$1"
   if has mktemp; then
-    printf "%s%s.%s.%s" "$(mktemp)" "-rlwy" "${RANDOM}" "${suffix}"
+    printf "%s%s.%s.%s" "$(mktemp)" "-railway" "${RANDOM}" "${suffix}"
   else
     # No really good options here--let's pick a default + hope
-    printf "/tmp/rlwy.%s" "${suffix}"
+    printf "/tmp/railway.%s" "${suffix}"
   fi
 }
 
@@ -121,7 +121,7 @@ download() {
 
   error "Command failed (exit code $rc): ${BLUE}${cmd}${NO_COLOR}"
   printf "\n" >&2
-  info "This is likely due to rlwy not yet supporting your configuration."
+  info "This is likely due to railway not yet supporting your configuration."
   info "If you would like to see a build for your configuration,"
   info "please create an issue requesting a build for ${MAGENTA}${TARGET}${NO_COLOR}:"
   info "${BOLD}${UNDERLINE}https://github.com/railwayapp/cli/issues/new/${NO_COLOR}"
@@ -175,12 +175,12 @@ install() {
 
   if test_writeable "${BIN_DIR}"; then
     sudo=""
-    msg="Installing rlwy, please wait…"
+    msg="Installing railway, please wait…"
   else
     warn "Escalated permissions are required to install to ${BIN_DIR}"
     elevate_priv
     sudo="sudo"
-    msg="Installing rlwy as root, please wait…"
+    msg="Installing railway as root, please wait…"
   fi
   info "$msg"
 
@@ -321,7 +321,7 @@ is_build_available() {
   )
 
   if [ "${good}" != "1" ]; then
-    error "${arch} builds for ${platform} are not yet available for rlwy"
+    error "${arch} builds for ${platform} are not yet available for railway"
     printf "\n" >&2
     info "If you would like to see a build for your configuration,"
     info "please create an issue requesting a build for ${MAGENTA}${target}${NO_COLOR}:"
@@ -434,28 +434,28 @@ else
 fi
 
 if [ $UNINSTALL == 1 ]; then
-  confirm "Are you sure you want to uninstall rlwy?"
+  confirm "Are you sure you want to uninstall railway?"
 
   msg=""
   sudo=""
 
-  info "REMOVING rlwy"
+  info "REMOVING railway"
 
-  if test_writeable "$(dirname "$(which rlwy)")"; then
+  if test_writeable "$(dirname "$(which railway)")"; then
     sudo=""
-    msg="Removing rlwy, please wait…"
+    msg="Removing railway, please wait…"
   else
     warn "Escalated permissions are required to install to ${BIN_DIR}"
     elevate_priv
     sudo="sudo"
-    msg="Removing rlwy as root, please wait…"
+    msg="Removing railway as root, please wait…"
   fi
 
   info "$msg"
-  ${sudo} rm "$(which rlwy)"
-  ${sudo} rm /tmp/rlwy
+  ${sudo} rm "$(which railway)"
+  ${sudo} rm /tmp/railway
 
-  info "Removed rlwy"
+  info "Removed railway"
   exit 0
   
  fi
@@ -487,9 +487,9 @@ if [ "${PLATFORM}" = "pc-windows-msvc" ]; then
   EXT=zip
 fi
 
-URL="${BASE_URL}/download/v${NIXPACKS_VERSION}/rlwy-v${NIXPACKS_VERSION}-${TARGET}.${EXT}"
+URL="${BASE_URL}/download/v${NIXPACKS_VERSION}/railway-v${NIXPACKS_VERSION}-${TARGET}.${EXT}"
 debug "Tarball URL: ${UNDERLINE}${BLUE}${URL}${NO_COLOR}"
-confirm "Install rlwy ${GREEN}${NIXPACKS_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
+confirm "Install railway ${GREEN}${NIXPACKS_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
 check_bin_dir "${BIN_DIR}"
 
 install "${EXT}"
@@ -504,7 +504,7 @@ printf "$MAGENTA"
   \].`[/  I
   /l\/j\  (]    .  O
  /. ~~ ,\/I          .               Railway is now installed
- \\L__j^\/I       o                Run `rlwy help` for commands
+ \\L__j^\/I       o                Run `railway help` for commands
   \/--v}  I     o   .
   |    |  I   _________                    
   |    |  I c(`       ')o            
