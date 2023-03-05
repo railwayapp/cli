@@ -1,11 +1,12 @@
 use crate::{commands::Configs, util::tokio_spawner::TokioSpawner};
 use anyhow::{bail, Result};
-use async_tungstenite::tungstenite::Message;
+use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use graphql_client::GraphQLQuery;
 use graphql_ws_client::{
     graphql::{GraphQLClient, StreamingOperation},
-    AsyncWebsocketClient, SubscriptionStream,
+    AsyncWebsocketClient, SubscriptionStream,GraphQLClientClientBuilder
 };
+use futures::StreamExt;
 
 pub async fn subscribe_graphql<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
     variables: T::Variables,
@@ -18,10 +19,6 @@ where
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
 {
     let configs = Configs::new()?;
-
-    use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
-    use futures::StreamExt;
-    use graphql_ws_client::GraphQLClientClientBuilder;
     let Some(token) = configs.root_config.user.token.clone() else {
       bail!("Unauthorized. Please login with `railway login`")
     };
