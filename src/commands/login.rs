@@ -1,9 +1,12 @@
 use std::{net::SocketAddr, time::Duration};
 
-use crate::consts::{ABORTED_BY_USER, TICK_STRING};
+use crate::{
+    consts::{ABORTED_BY_USER, TICK_STRING},
+    util::prompt::prompt_confirm_with_default,
+};
 
 use super::*;
-use crate::util::prompt::prompt_confirm;
+
 use anyhow::bail;
 use http_body_util::Full;
 use hyper::{body::Bytes, server::conn::http1, service::service_fn, Request, Response};
@@ -31,7 +34,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return browserless_login().await;
     }
 
-    let confirm = prompt_confirm("Open the browser?")?;
+    let confirm = prompt_confirm_with_default("Open the browser?", true)?;
 
     if !confirm {
         bail!(ABORTED_BY_USER);

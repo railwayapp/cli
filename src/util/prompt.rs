@@ -19,6 +19,15 @@ pub fn prompt_confirm(message: &str) -> Result<bool> {
         .context("Failed to prompt for confirm")
 }
 
+pub fn prompt_confirm_with_default(message: &str, default: bool) -> Result<bool> {
+    let confirm = inquire::Confirm::new(message);
+    confirm
+        .with_default(default)
+        .with_render_config(Configs::get_render_config())
+        .prompt()
+        .context("Failed to prompt for confirm")
+}
+
 pub fn prompt_multi_options<T: Display>(message: &str, options: Vec<T>) -> Result<Vec<T>> {
     let multi_select = inquire::MultiSelect::new(message, options);
     multi_select
