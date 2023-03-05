@@ -103,7 +103,7 @@ jobs:
           args: --release --locked --target ${{ matrix.target }}
           use-cross: ${{ matrix.os == 'ubuntu-latest' }}
 
-      - name: Prepare binaries [Windows]
+      - name: Prepare binaries (zip) [Windows]
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
@@ -111,7 +111,16 @@ jobs:
           7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
+      - name: Prepare binares (tar) [Windows]
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          strip railway.exe
+          7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz railway.exe
+          cd -
+
       - name: Prepare binaries [-linux]
+        if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           strip railway || true
