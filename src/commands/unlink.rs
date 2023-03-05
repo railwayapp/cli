@@ -42,7 +42,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             service.node.name.bold(),
             body.project.name.bold()
         );
-        let confirmed = if !std::io::stdout().is_terminal() {
+        let confirmed = if std::io::stdout().is_terminal() {
             prompt_confirm_with_default("Are you sure you want to unlink this service?", true)?
         } else {
             true
@@ -66,7 +66,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         println!("Linked to {}", body.project.name.bold());
     }
 
-    let confirmed = if !std::io::stdout().is_terminal() {
+    let confirmed = if std::io::stdout().is_terminal() {
         prompt_confirm_with_default("Are you sure you want to unlink this project?", true)?
     } else {
         true
