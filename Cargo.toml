@@ -15,10 +15,6 @@ default-run = "railway"
 name = "railway"
 path = "src/main.rs"
 
-[[bin]]
-name = "rlwy"
-path = "src/main.rs"
-
 [dependencies]
 anyhow = "1.0.69"
 clap = { version = "4.1.6", features = ["derive", "suggestions"] }
