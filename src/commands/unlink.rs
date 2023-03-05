@@ -1,3 +1,4 @@
+use crate::util::prompt::prompt_confirm;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
@@ -42,10 +43,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             body.project.name.bold()
         );
         let confirmed = !if std::io::stdout().is_terminal() {
-            inquire::Confirm::new("Are you sure you want to unlink this service?")
-                .with_render_config(Configs::get_render_config())
-                .with_default(true)
-                .prompt()?
+            prompt_confirm("Are you sure you want to unlink this service?")?
         } else {
             true
         };
@@ -69,10 +67,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     let confirmed = !if std::io::stdout().is_terminal() {
-        inquire::Confirm::new("Are you sure you want to unlink this project?")
-            .with_render_config(Configs::get_render_config())
-            .with_default(true)
-            .prompt()?
+        prompt_confirm("Are you sure you want to unlink this project?")?
     } else {
         true
     };

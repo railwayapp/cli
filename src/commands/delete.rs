@@ -3,7 +3,10 @@ use std::time::Duration;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::consts::{ABORTED_BY_USER, TICK_STRING};
+use crate::{
+    consts::{ABORTED_BY_USER, TICK_STRING},
+    util::prompt::{prompt_confirm, prompt_multi_options},
+};
 
 use super::{queries::project_plugins::PluginType, *};
 
@@ -60,10 +63,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         .iter()
         .map(|p| plugin_enum_to_string(&p.node.name))
         .collect();
-
-    let selected = inquire::MultiSelect::new("Select plugins to delete", project_plugins)
-        .with_render_config(render_config)
-        .prompt()?;
+    let selected = prompt_multi_options("Select plugins to delete", project_plugins)?;
 
     for plugin in selected {
         let id = nodes
@@ -77,10 +77,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         let vars = mutations::plugin_delete::Variables { id };
 
         let confirmed =
-            inquire::Confirm::new(format!("Are you sure you want to delete {plugin}?").as_str())
-                .with_default(false)
-                .with_render_config(render_config)
-                .prompt()?;
+            prompt_confirm(format!("Are you sure you want to delete {plugin}?").as_str())?;
 
         if !confirmed {
             bail!(ABORTED_BY_USER)
