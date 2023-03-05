@@ -38,7 +38,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let service = services
             .iter()
             .find(|s| s.0.id == service || s.0.name == service)
-            .context("Service not found")?;
+            .context(SERVICE_NOT_FOUND)?;
 
         configs.link_service(service.0.id.clone())?;
         configs.write()?;
