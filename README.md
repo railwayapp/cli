@@ -18,10 +18,12 @@ The Railway CLI allows you to
 Currently pre-release. We are looking for feedback and suggestions. Please join our [Discord](https://discord.gg/railway) to provide feedback.
 
 ## Installation
+
 ### Cargo
 ```bash
 cargo install railwayapp --locked
 ```
+
 ### Homebrew
 
 ```bash 
@@ -33,6 +35,7 @@ brew install rlwy
 ```bash
 npm install -g @railway/cli
 ```
+
 ### Bash
 ```bash
 # Install 
@@ -42,6 +45,10 @@ bash <(curl -fsSL cli.new)
 bash <(curl -fsSL cli.new) -r
 ```
 
+### Scoop
+```ps1
+scoop install railway
+```
 
 ### From source
 See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
