@@ -3,7 +3,11 @@ use std::fmt::Display;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::{consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND}, table::Table, util::prompt::prompt_select};
+use crate::{
+    consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND},
+    table::Table,
+    util::prompt::prompt_select,
+};
 
 use super::{
     queries::project::{PluginType, ProjectProjectPluginsEdgesNode},
