@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::consts::SERVICE_NOT_FOUND;
+
 use super::*;
 
 /// Open a subshell with Railway variables available
@@ -60,7 +62,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .edges
             .iter()
             .find(|s| s.node.name == service || s.node.id == service)
-            .context("Service not found")?;
+            .context(SERVICE_NOT_FOUND)?;
 
         let vars = queries::variables::Variables {
             environment_id: linked_project.environment.clone(),

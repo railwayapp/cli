@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use anyhow::bail;
 
+use crate::consts::SERVICE_NOT_FOUND;
+
 use super::*;
 
 /// Run a local command using variables from the active environment
@@ -71,7 +73,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .edges
             .iter()
             .find(|s| s.node.name == service || s.node.id == service)
-            .context("Service not found")?;
+            .context(SERVICE_NOT_FOUND)?;
 
         let vars = queries::variables::Variables {
             environment_id: environment_id.clone(),

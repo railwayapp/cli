@@ -3,7 +3,7 @@ use std::fmt::Display;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::{consts::NO_SERVICE_LINKED, table::Table, util::prompt::prompt_select};
+use crate::{consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND}, table::Table, util::prompt::prompt_select};
 
 use super::{
     queries::project::{PluginType, ProjectProjectPluginsEdgesNode},
@@ -67,7 +67,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             .edges
             .iter()
             .find(|edge| edge.node.id == *service || edge.node.name == *service)
-            .context("Service not found")?;
+            .context(SERVICE_NOT_FOUND)?;
         (
             queries::variables::Variables {
                 environment_id: linked_project.environment.clone(),
@@ -84,7 +84,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             .edges
             .iter()
             .find(|edge| edge.node.id == *service)
-            .context("Service not found")?;
+            .context(SERVICE_NOT_FOUND)?;
         (
             queries::variables::Variables {
                 environment_id: linked_project.environment.clone(),
