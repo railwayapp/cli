@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use crate::util::prompt::prompt_select;
+
 use super::{queries::user_projects::UserProjectsMeTeamsEdgesNode, *};
 
 /// Create a new project
@@ -88,10 +90,7 @@ fn prompt_team(teams: Vec<Team>) -> Result<Team> {
     if teams.len() == 1 {
         return Ok(Team::Personal);
     }
-    let select = inquire::Select::new("Team", teams);
-    let team = select
-        .with_render_config(Configs::get_render_config())
-        .prompt()?;
+    let team = prompt_select("Team", teams)?;
     Ok(team)
 }
 

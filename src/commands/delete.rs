@@ -5,7 +5,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     consts::{ABORTED_BY_USER, TICK_STRING},
-    util::prompt::{prompt_confirm, prompt_multi_options},
+    util::prompt::{prompt_confirm, prompt_multi_options, prompt_text},
 };
 
 use super::{queries::project_plugins::PluginType, *};
@@ -19,7 +19,6 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         bail!("Cannot delete plugins in non-interactive mode");
     }
     let configs = Configs::new()?;
-    let render_config = Configs::get_render_config();
 
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -35,9 +34,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     };
 
     if is_two_factor_enabled {
-        let token = inquire::Text::new("Enter your 2FA code")
-            .with_render_config(render_config)
-            .prompt()?;
+        let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
 
         let res =
