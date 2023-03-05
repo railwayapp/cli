@@ -112,7 +112,6 @@ jobs:
           cd -
 
       - name: Prepare binaries [-linux]
-        if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           strip railway || true
