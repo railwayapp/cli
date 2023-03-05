@@ -1,12 +1,12 @@
 use crate::{commands::Configs, util::tokio_spawner::TokioSpawner};
 use anyhow::{bail, Result};
 use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
+use futures::StreamExt;
 use graphql_client::GraphQLQuery;
 use graphql_ws_client::{
     graphql::{GraphQLClient, StreamingOperation},
-    AsyncWebsocketClient, SubscriptionStream,GraphQLClientClientBuilder
+    AsyncWebsocketClient, GraphQLClientClientBuilder, SubscriptionStream,
 };
-use futures::StreamExt;
 
 pub async fn subscribe_graphql<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
     variables: T::Variables,
