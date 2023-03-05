@@ -108,12 +108,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 "railway service".bold().dimmed()
             );
         }
-        let service_id = services.first().context("No services found")?;
+        let service_id = services.first().map(|s| s.node.id.clone());
 
         let vars = queries::variables::Variables {
             environment_id: environment_id.clone(),
             project_id: linked_project.project.clone(),
-            service_id: Some(service_id.node.id.clone()),
+            service_id,
             plugin_id: None,
         };
 
