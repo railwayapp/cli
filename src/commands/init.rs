@@ -7,9 +7,13 @@ use super::{queries::user_projects::UserProjectsMeTeamsEdgesNode, *};
 /// Create a new project
 #[derive(Parser)]
 #[clap(alias = "new")]
-pub struct Args {}
+pub struct Args {
+    #[clap(short, long)]
+    /// Project name
+    name: Option<String>,
+}
 
-pub async fn command(_args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
@@ -21,7 +25,11 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let teams: Vec<_> = body.me.teams.edges.iter().map(|team| &team.node).collect();
     let team_names = get_team_names(teams);
     let team = prompt_team(team_names)?;
-    let project_name = prompt_project_name()?;
+
+    let project_name = match args.name {
+        Some(name) => name,
+        None => prompt_project_name()?,
+    };
 
     let team_id = match team {
         Team::Team(team) => Some(team.id.clone()),
