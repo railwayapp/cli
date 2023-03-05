@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
-use crate::consts::SERVICE_NOT_FOUND;
+use crate::{consts::SERVICE_NOT_FOUND, util::prompt::prompt_select};
 
 use super::{queries::project::ProjectProjectServicesEdgesNode, *};
 
@@ -38,7 +38,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let service = services
             .iter()
             .find(|s| s.0.id == service || s.0.name == service)
-            .context("Service not found")?;
+            .context(SERVICE_NOT_FOUND)?;
 
         configs.link_service(service.0.id.clone())?;
         configs.write()?;
@@ -49,9 +49,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         bail!("No services found");
     }
 
-    let service = inquire::Select::new("Select a service", services)
-        .with_render_config(Configs::get_render_config())
-        .prompt()?;
+    let service = prompt_select("Select a service", services)?;
 
     configs.link_service(service.0.id.clone())?;
     configs.write()?;

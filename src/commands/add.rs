@@ -4,7 +4,10 @@ use anyhow::bail;
 use clap::ValueEnum;
 use is_terminal::IsTerminal;
 
-use crate::consts::{PLUGINS, TICK_STRING};
+use crate::{
+    consts::{PLUGINS, TICK_STRING},
+    util::prompt::prompt_multi_options,
+};
 
 use super::{queries::project_plugins::PluginType, *};
 
@@ -18,7 +21,6 @@ pub struct Args {
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
-    let render_config = Configs::get_render_config();
 
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -64,9 +66,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
         filtered
     } else {
-        inquire::MultiSelect::new("Select plugins to add", filtered_plugins)
-            .with_render_config(render_config)
-            .prompt()?
+        prompt_multi_options("Select plugins to add", filtered_plugins)?
     };
 
     if selected.is_empty() {

@@ -3,7 +3,7 @@ use std::fmt::Display;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::{consts::NO_SERVICE_LINKED, table::Table};
+use crate::{consts::NO_SERVICE_LINKED, table::Table, util::prompt::prompt_select};
 
 use super::{
     queries::project::{PluginType, ProjectProjectPluginsEdgesNode},
@@ -141,9 +141,7 @@ fn prompt_plugin(plugins: Vec<Plugin>) -> Result<Plugin> {
     if !std::io::stdout().is_terminal() {
         bail!("Plugin must be provided when not running in a terminal")
     }
-    let plugin = inquire::Select::new("Select a plugin", plugins)
-        .with_render_config(Configs::get_render_config())
-        .prompt()?;
+    let plugin = prompt_select("Select a plugin", plugins)?;
 
     Ok(plugin)
 }
