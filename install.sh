@@ -55,7 +55,7 @@ info() {
 }
 
 debug() {
-  if [[ -n "${VERBOSE}" ]]; then
+  if [ -n "${VERBOSE}" ]; then
     printf '%s\n' "${BOLD}${GREY}>${NO_COLOR} $*"
   fi
 }
@@ -76,12 +76,17 @@ has() {
   command -v "$1" 1>/dev/null 2>&1
 }
 
+RANDOM_FOR_SH=$(od -vAn -N4 -tu4 < /dev/urandom | sed 's/\t*$//g')
+
+# Removes leading whitespace
+RANDOM_FOR_SH=$(echo ${RANDOM_FOR_SH:-$RANDOM})
+
 # Gets path to a temporary file, even if
 get_tmpfile() {
   local suffix
   suffix="$1"
   if has mktemp; then
-    printf "%s%s.%s.%s" "$(mktemp)" "-railway" "${RANDOM}" "${suffix}"
+    printf "%s%s.%s.%s" "$(mktemp)" "-railway" "${RANDOM_FOR_SH}" "${suffix}"
   else
     # No really good options here--let's pick a default + hope
     printf "/tmp/railway.%s" "${suffix}"
@@ -332,10 +337,18 @@ is_build_available() {
 }
 UNINSTALL=0
 HELP=0
+
 CARGOTOML="$(curl -fsSL https://raw.githubusercontent.com/railwayapp/cli/master/Cargo.toml)"
-ALL_VERSIONS="$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' <<< "$CARGOTOML")"
-IFS=$'\n' read -r -a VERSION <<< "$ALL_VERSIONS"
+ALL_VERSIONS="$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' <<EOH
+"$CARGOTOML"
+EOH
+)"
+IFS=$'\n' read -r VERSION <<EOH
+$ALL_VERSIONS
+EOH
+
 DEFAULT_VERSION="$VERSION"
+
 
 # defaults
 if [ -z "${RAILWAY_VERSION-}" ]; then
@@ -433,7 +446,7 @@ else
   VERBOSE=
 fi
 
-if [ $UNINSTALL == 1 ]; then
+if [ "$UNINSTALL" = 1 ]; then
   confirm "Are you sure you want to uninstall railway?"
 
   msg=""
@@ -459,7 +472,7 @@ if [ $UNINSTALL == 1 ]; then
   exit 0
   
  fi
-if [ $HELP == 1 ]; then
+if [ "$HELP" = 1 ]; then
     echo "${help_text}"
     exit 0
 fi
@@ -469,7 +482,7 @@ is_build_available "${ARCH}" "${PLATFORM}" "${TARGET}"
 
 
 print_configuration () {
-  if [[ -n "${VERBOSE}" ]]; then
+  if [ -n "${VERBOSE}" ]; then
     printf "  %s\n" "${UNDERLINE}Configuration${NO_COLOR}"
     debug "${BOLD}Bin directory${NO_COLOR}: ${GREEN}${BIN_DIR}${NO_COLOR}"
     debug "${BOLD}Platform${NO_COLOR}:      ${GREEN}${PLATFORM}${NO_COLOR}"
