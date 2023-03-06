@@ -1,6 +1,6 @@
 #[macro_export]
 macro_rules! commands_enum {
-    ($($module:tt),*) => (
+    ($($module:ident),*) => (
       paste::paste! {
         #[derive(Subcommand)]
         enum Commands {
