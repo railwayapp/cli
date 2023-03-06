@@ -1,4 +1,4 @@
-name: security audit - cargo
+name: cargo audit
 
 on:
   push:

@@ -1,6 +1,6 @@
 # Railway CLI
 
-[![CI](https://github.com/railwayapp/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/railwayapp/cliv3/actions/workflows/ci.yml)
+[![CI](https://github.com/railwayapp/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/railwayapp/cliv3/actions/workflows/ci.yml) [![cargo audit](https://github.com/GrantBirki/cli/actions/workflows/cargo-audit.yml/badge.svg)](https://github.com/GrantBirki/cli/actions/workflows/cargo-audit.yml)
 
 This is the command line interface for [Railway](https://railway.app). Use it to connect your code to Railway's infrastructure without needing to worry about environment variables or configuration.
 
