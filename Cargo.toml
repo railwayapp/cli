@@ -1,5 +1,5 @@
 [package]
-name = "railwayapp - test"
+name = "railwayapp"
 version = "3.0.6"
 edition = "2021"
 license = "MIT"
