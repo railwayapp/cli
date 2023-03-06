@@ -15,7 +15,11 @@ use serde::{Deserialize, Serialize};
 use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
 
-use crate::{consts::TICK_STRING, subscription::subscribe_graphql};
+use crate::{
+    consts::TICK_STRING,
+    subscription::subscribe_graphql,
+    util::prompt::{prompt_select, PromptService},
+};
 
 use super::*;
 
@@ -71,8 +75,15 @@ pub async fn get_service_to_deploy(
             // If there is only one service, use that
             services.first().map(|service| service.node.id.to_owned())
         } else {
-            // If there are multiple services, bail
-            bail!("Multiple services found. Please specify a service to deploy to.")
+            // If there are multiple services, prompt the user to select one
+            if std::io::stdout().is_terminal() {
+                let prompt_services: Vec<_> =
+                    services.iter().map(|s| PromptService(&s.node)).collect();
+                let service = prompt_select("Select a service to deploy to", prompt_services)?;
+                Some(service.0.id.clone())
+            } else {
+                bail!("Multiple services found. Please specify a service to deploy to.")
+            }
         }
     };
     Ok(service)

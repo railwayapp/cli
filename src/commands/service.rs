@@ -2,7 +2,10 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
-use crate::{consts::SERVICE_NOT_FOUND, util::prompt::prompt_select};
+use crate::{
+    consts::SERVICE_NOT_FOUND,
+    util::prompt::{prompt_select, PromptService},
+};
 
 use super::{queries::project::ProjectProjectServicesEdgesNode, *};
 
@@ -31,7 +34,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .services
         .edges
         .iter()
-        .map(|s| Service(&s.node))
+        .map(|s| PromptService(&s.node))
         .collect();
 
     if let Some(service) = args.service {
@@ -54,13 +57,4 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     configs.link_service(service.0.id.clone())?;
     configs.write()?;
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct Service<'a>(&'a ProjectProjectServicesEdgesNode);
-
-impl<'a> Display for Service<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
-    }
 }

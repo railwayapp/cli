@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::commands::Configs;
+use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
 use anyhow::{Context, Result};
 
 pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
@@ -48,4 +48,13 @@ pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
         .with_render_config(Configs::get_render_config())
         .prompt()
         .context("Failed to prompt for select")
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptService<'a>(pub &'a ProjectProjectServicesEdgesNode);
+
+impl<'a> Display for PromptService<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.name)
+    }
 }
