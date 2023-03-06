@@ -5,6 +5,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND},
+    interact_or,
     table::Table,
     util::prompt::prompt_select,
 };
@@ -142,9 +143,8 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
 }
 
 fn prompt_plugin(plugins: Vec<Plugin>) -> Result<Plugin> {
-    if !std::io::stdout().is_terminal() {
-        bail!("Plugin must be provided when not running in a terminal")
-    }
+    interact_or!("Plugin must be provided when not running in a terminal");
+
     let plugin = prompt_select("Select a plugin", plugins)?;
 
     Ok(plugin)

@@ -72,21 +72,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         environment_id: linked_project.environment.clone(),
     };
 
-    if !std::io::stdout().is_terminal() {
-        println!("Creating domain...");
-
-        let res = post_graphql::<mutations::ServiceDomainCreate, _>(
-            &client,
-            configs.get_backboard(),
-            vars,
-        )
-        .await?;
-
-        let body = res.data.context("Failed to create service domain.")?;
-        let domain = body.service_domain_create.domain;
-
-        println!("Service Domain created: {}", domain.bold());
-    } else {
+    if std::io::stdout().is_terminal() {
         let spinner = indicatif::ProgressBar::new_spinner()
             .with_style(
                 indicatif::ProgressStyle::default_spinner()
@@ -107,6 +93,20 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         let domain = body.service_domain_create.domain;
 
         spinner.finish_and_clear();
+
+        println!("Service Domain created: {}", domain.bold());
+    } else {
+        println!("Creating domain...");
+
+        let res = post_graphql::<mutations::ServiceDomainCreate, _>(
+            &client,
+            configs.get_backboard(),
+            vars,
+        )
+        .await?;
+
+        let body = res.data.context("Failed to create service domain.")?;
+        let domain = body.service_domain_create.domain;
 
         println!("Service Domain created: {}", domain.bold());
     }

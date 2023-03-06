@@ -27,8 +27,8 @@ macro_rules! commands_enum {
 #[macro_export]
 macro_rules! interact_or {
     ($message:expr) => {
-        use anyhow::bail;
         if !std::io::stdout().is_terminal() {
+            use anyhow::bail;
             bail!($message);
         }
     };
