@@ -5,6 +5,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     consts::{ABORTED_BY_USER, TICK_STRING},
+    interact_or,
     util::prompt::{prompt_confirm, prompt_multi_options, prompt_text},
 };
 
@@ -15,9 +16,8 @@ use super::{queries::project_plugins::PluginType, *};
 pub struct Args {}
 
 pub async fn command(_args: Args, _json: bool) -> Result<()> {
-    if !std::io::stdout().is_terminal() {
-        bail!("Cannot delete plugins in non-interactive mode");
-    }
+    interact_or!("Cannot delete plugins in non-interactive mode");
+
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;

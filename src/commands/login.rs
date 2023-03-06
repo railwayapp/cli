@@ -2,6 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use crate::{
     consts::{ABORTED_BY_USER, TICK_STRING},
+    interact_or,
     util::prompt::prompt_confirm_with_default,
 };
 
@@ -24,9 +25,7 @@ pub struct Args {
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
-    if !std::io::stdout().is_terminal() {
-        bail!("Cannot login in non-interactive mode");
-    }
+    interact_or!("Cannot login in non-interactive mode");
 
     let mut configs = Configs::new()?;
 

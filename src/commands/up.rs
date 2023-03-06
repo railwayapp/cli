@@ -4,16 +4,22 @@ use std::{
     time::Duration,
 };
 
+use anyhow::bail;
 use futures::StreamExt;
 use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
 use is_terminal::IsTerminal;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
 
-use crate::{consts::TICK_STRING, subscription::subscribe_graphql};
+use crate::{
+    consts::TICK_STRING,
+    subscription::subscribe_graphql,
+    util::prompt::{prompt_select, PromptService},
+};
 
 use super::*;
 
@@ -25,6 +31,62 @@ pub struct Args {
     #[clap(short, long)]
     /// Don't attach to the log stream
     detach: bool,
+
+    #[clap(short, long)]
+    /// Service to deploy to (defaults to linked service)
+    service: Option<String>,
+}
+
+pub async fn get_service_to_deploy(
+    configs: &Configs,
+    client: &Client,
+    service_arg: Option<String>,
+) -> Result<Option<String>> {
+    let linked_project = configs.get_linked_project().await?;
+
+    let vars = queries::project::Variables {
+        id: linked_project.project.to_owned(),
+    };
+    let res = post_graphql::<queries::Project, _>(client, configs.get_backboard(), vars).await?;
+    let body = res.data.context("Failed to get project (query project)")?;
+
+    let services = body.project.services.edges.iter().collect::<Vec<_>>();
+
+    let service = if let Some(service_arg) = service_arg {
+        // If the user specified a service, use that
+        let service_id = services
+            .iter()
+            .find(|service| service.node.name == service_arg || service.node.id == service_arg);
+        if let Some(service_id) = service_id {
+            Some(service_id.node.id.to_owned())
+        } else {
+            bail!("Service not found");
+        }
+    } else if let Some(service) = linked_project.service {
+        // If the user didn't specify a service, but we have a linked service, use that
+        Some(service)
+    } else {
+        // If the user didn't specify a service, and we don't have a linked service, get the first service
+
+        if services.is_empty() {
+            // If there are no services, backboard will generate one for us
+            None
+        } else if services.len() == 1 {
+            // If there is only one service, use that
+            services.first().map(|service| service.node.id.to_owned())
+        } else {
+            // If there are multiple services, prompt the user to select one
+            if std::io::stdout().is_terminal() {
+                let prompt_services: Vec<_> =
+                    services.iter().map(|s| PromptService(&s.node)).collect();
+                let service = prompt_select("Select a service to deploy to", prompt_services)?;
+                Some(service.0.id.clone())
+            } else {
+                bail!("Multiple services found. Please specify a service to deploy to.")
+            }
+        }
+    };
+    Ok(service)
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -32,7 +94,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
-    let spinner = if !std::io::stdout().is_terminal() {
+
+    let service = get_service_to_deploy(&configs, &client, args.service).await?;
+
+    let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()
             .with_style(
                 ProgressStyle::default_spinner()
@@ -61,7 +126,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         if let Some(spinner) = spinner {
             spinner.finish_with_message("Indexed");
         }
-        if !std::io::stdout().is_terminal() {
+        if std::io::stdout().is_terminal() {
             let pg = ProgressBar::new(walked.len() as u64)
                 .with_style(
                     ProgressStyle::default_bar()
@@ -85,10 +150,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     parz.finish()?;
 
     let builder = client.post(format!(
-        "https://backboard.{hostname}/project/{}/environment/{}/up",
-        linked_project.project, linked_project.environment
+        "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
+        linked_project.project,
+        linked_project.environment,
+        service.unwrap_or_default(),
     ));
-    let spinner = if !std::io::stdout().is_terminal() {
+    let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()
             .with_style(
                 ProgressStyle::default_spinner()
@@ -117,6 +184,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
     println!("  {}: {}", "Build Logs".green().bold(), body.logs_url);
     if args.detach {
+        return Ok(());
+    }
+
+    // If the user is not in a terminal, don't stream logs
+    if !std::io::stdout().is_terminal() {
         return Ok(());
     }
 

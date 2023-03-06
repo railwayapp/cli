@@ -78,11 +78,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             project_id: linked_project.project.clone(),
             name: plugin.to_lowercase(),
         };
-        if !std::io::stdout().is_terminal() {
-            println!("Creating {}...", plugin);
-            post_graphql::<mutations::PluginCreate, _>(&client, configs.get_backboard(), vars)
-                .await?;
-        } else {
+        if std::io::stdout().is_terminal() {
             let spinner = indicatif::ProgressBar::new_spinner()
                 .with_style(
                     indicatif::ProgressStyle::default_spinner()
@@ -94,6 +90,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             post_graphql::<mutations::PluginCreate, _>(&client, configs.get_backboard(), vars)
                 .await?;
             spinner.finish_with_message(format!("Created {plugin}"));
+        } else {
+            println!("Creating {}...", plugin);
+            post_graphql::<mutations::PluginCreate, _>(&client, configs.get_backboard(), vars)
+                .await?;
         }
     }
 
