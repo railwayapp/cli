@@ -3,6 +3,14 @@ use graphql_client::GraphQLQuery;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/DeploymentRemove.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DeploymentRemove;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
     query_path = "src/gql/mutations/strings/LoginSessionConsume.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
