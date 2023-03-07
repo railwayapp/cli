@@ -6,7 +6,7 @@ export const CONFIG = {
 	 * The name of the binary
 	 * @type {string}
 	 */
-	name: "railway{{ext}}",
+	name: "railway",
 
 	/**
 	 * Where to save the unzipped files
