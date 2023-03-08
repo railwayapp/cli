@@ -20,12 +20,7 @@ async function install() {
 	// Fetch Static Config
 	let { name: binName, path: binPath, url } = CONFIG;
 	let triple = triples.platformArchTriples[process.platform][process.arch][0];
-	if (process.platform === "win32") {
-		triple.ext = ".exe";
-	} else {
-		triple.ext = "";
-	}
-	binName = binName.replace(/{{ext}}/g, triple.ext);
+
 	url = url.replace(/{{triple}}/g, triple.raw);
 	url = url.replace(/{{version}}/g, version);
 	url = url.replace(/{{bin_name}}/g, binName);
