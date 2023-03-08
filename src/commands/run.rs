@@ -6,10 +6,8 @@ use reqwest::Client;
 
 use crate::{
     consts::SERVICE_NOT_FOUND,
-    util::{
-        prompt::{prompt_select, PromptService},
-        variables::{get_all_plugin_variables, get_service_variables},
-    },
+    controllers::variables::{get_all_plugin_variables, get_service_variables},
+    util::prompt::{prompt_select, PromptService},
 };
 
 use super::*;

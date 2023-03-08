@@ -47,7 +47,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let vars = queries::variables_for_service_deployment::Variables {
             environment_id: linked_project.environment.clone(),
             project_id: linked_project.project.clone(),
-            service_id: Some(service_id.node.id.clone()),
+            service_id: service_id.node.id.clone(),
         };
 
         let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
@@ -60,11 +60,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let mut body = res.data.context("Failed to retrieve response body")?;
 
         all_variables.append(&mut body.variables_for_service_deployment);
-    } else if linked_project.service.is_some() {
+    } else if let Some(service) = linked_project.service {
         let vars = queries::variables_for_service_deployment::Variables {
             environment_id: linked_project.environment.clone(),
             project_id: linked_project.project.clone(),
-            service_id: linked_project.service.clone(),
+            service_id: service.clone(),
         };
 
         let res = post_graphql::<queries::VariablesForServiceDeployment, _>(

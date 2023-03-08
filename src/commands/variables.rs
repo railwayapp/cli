@@ -52,7 +52,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),
                 project_id: linked_project.project.clone(),
-                service_id: Some(service_name.node.id.clone()),
+                service_id: service_name.node.id.clone(),
             },
             service_name.node.name.clone(),
         )
@@ -68,7 +68,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),
                 project_id: linked_project.project.clone(),
-                service_id: Some(service.clone()),
+                service_id: service.clone(),
             },
             service_name.node.name.clone(),
         )
