@@ -111,14 +111,6 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn prompt_plugin(plugins: Vec<Plugin>) -> Result<Plugin> {
-    interact_or!("Plugin must be provided when not running in a terminal");
-
-    let plugin = prompt_select("Select a plugin", plugins)?;
-
-    Ok(plugin)
-}
-
 struct Plugin<'a>(&'a ProjectProjectPluginsEdgesNode);
 
 impl<'a> Display for Plugin<'a> {
