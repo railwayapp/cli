@@ -35,26 +35,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .map(|plugin| &plugin.node)
         .collect();
 
-    for plugin in plugins {
-        let vars = queries::variables::Variables {
-            environment_id: linked_project.environment.clone(),
-            project_id: linked_project.project.clone(),
-            service_id: None,
-            plugin_id: Some(plugin.id.clone()),
-        };
-
-        let res =
-            post_graphql::<queries::Variables, _>(&client, configs.get_backboard(), vars).await?;
-
-        let mut body = res.data.context("Failed to retrieve response body")?;
-
-        if body.variables.is_empty() {
-            continue;
-        }
-
-        all_variables.append(&mut body.variables);
-    }
-
     if let Some(service) = args.service {
         let service_id = body
             .project
@@ -64,33 +44,39 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .find(|s| s.node.name == service || s.node.id == service)
             .context(SERVICE_NOT_FOUND)?;
 
-        let vars = queries::variables::Variables {
+        let vars = queries::variables_for_service_deployment::Variables {
             environment_id: linked_project.environment.clone(),
             project_id: linked_project.project.clone(),
             service_id: Some(service_id.node.id.clone()),
-            plugin_id: None,
         };
 
-        let res =
-            post_graphql::<queries::Variables, _>(&client, configs.get_backboard(), vars).await?;
+        let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+            &client,
+            configs.get_backboard(),
+            vars,
+        )
+        .await?;
 
         let mut body = res.data.context("Failed to retrieve response body")?;
 
-        all_variables.append(&mut body.variables);
+        all_variables.append(&mut body.variables_for_service_deployment);
     } else if linked_project.service.is_some() {
-        let vars = queries::variables::Variables {
+        let vars = queries::variables_for_service_deployment::Variables {
             environment_id: linked_project.environment.clone(),
             project_id: linked_project.project.clone(),
             service_id: linked_project.service.clone(),
-            plugin_id: None,
         };
 
-        let res =
-            post_graphql::<queries::Variables, _>(&client, configs.get_backboard(), vars).await?;
+        let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+            &client,
+            configs.get_backboard(),
+            vars,
+        )
+        .await?;
 
         let mut body = res.data.context("Failed to retrieve response body")?;
 
-        all_variables.append(&mut body.variables);
+        all_variables.append(&mut body.variables_for_service_deployment);
     } else {
         eprintln!("No service linked, skipping service variables");
     }

@@ -18,11 +18,7 @@ use super::{
 /// Show variables for active environment
 #[derive(Parser)]
 pub struct Args {
-    /// Show variables for a plugin
-    #[clap(short, long)]
-    plugin: bool,
-
-    /// Show variables for a specific service
+    /// Service to show variables for
     #[clap(short, long)]
     service: Option<String>,
 
@@ -43,29 +39,8 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
 
     let body = res.data.context("Failed to retrieve response body")?;
-    let plugins: Vec<_> = body
-        .project
-        .plugins
-        .edges
-        .iter()
-        .map(|plugin| Plugin(&plugin.node))
-        .collect();
 
-    let (vars, name) = if args.plugin {
-        if plugins.is_empty() {
-            bail!("No plugins found");
-        }
-        let plugin = prompt_plugin(plugins)?;
-        (
-            queries::variables::Variables {
-                environment_id: linked_project.environment.clone(),
-                project_id: linked_project.project.clone(),
-                service_id: None,
-                plugin_id: Some(plugin.0.id.clone()),
-            },
-            format!("{plugin}"),
-        )
-    } else if let Some(ref service) = args.service {
+    let (vars, name) = if let Some(ref service) = args.service {
         let service_name = body
             .project
             .services
@@ -74,11 +49,10 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             .find(|edge| edge.node.id == *service || edge.node.name == *service)
             .context(SERVICE_NOT_FOUND)?;
         (
-            queries::variables::Variables {
+            queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),
                 project_id: linked_project.project.clone(),
                 service_id: Some(service_name.node.id.clone()),
-                plugin_id: None,
             },
             service_name.node.name.clone(),
         )
@@ -91,52 +65,47 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             .find(|edge| edge.node.id == *service)
             .context(SERVICE_NOT_FOUND)?;
         (
-            queries::variables::Variables {
+            queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),
                 project_id: linked_project.project.clone(),
                 service_id: Some(service.clone()),
-                plugin_id: None,
             },
             service_name.node.name.clone(),
         )
     } else {
-        if plugins.is_empty() {
-            bail!(NO_SERVICE_LINKED);
-        }
-        let plugin = prompt_plugin(plugins)?;
-        (
-            queries::variables::Variables {
-                environment_id: linked_project.environment.clone(),
-                project_id: linked_project.project.clone(),
-                service_id: None,
-                plugin_id: Some(plugin.0.id.clone()),
-            },
-            format!("{plugin}"),
-        )
+        bail!(NO_SERVICE_LINKED);
     };
 
-    let res = post_graphql::<queries::Variables, _>(&client, configs.get_backboard(), vars).await?;
+    let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+        &client,
+        configs.get_backboard(),
+        vars,
+    )
+    .await?;
 
     let body = res.data.context("Failed to retrieve response body")?;
 
-    if body.variables.is_empty() {
+    if body.variables_for_service_deployment.is_empty() {
         eprintln!("No variables found");
         return Ok(());
     }
 
     if args.kv {
-        for (key, value) in body.variables {
+        for (key, value) in body.variables_for_service_deployment {
             println!("{}={}", key, value);
         }
         return Ok(());
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&body.variables)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body.variables_for_service_deployment)?
+        );
         return Ok(());
     }
 
-    let table = Table::new(name, body.variables);
+    let table = Table::new(name, body.variables_for_service_deployment);
     table.print()?;
 
     Ok(())

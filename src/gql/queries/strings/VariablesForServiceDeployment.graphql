@@ -1,13 +1,11 @@
-query Variables(
+query VariablesForServiceDeployment(
 	$projectId: String!
 	$environmentId: String!
 	$serviceId: String
-	$pluginId: String
 ) {
-	variables(
+	variablesForServiceDeployment(
 		projectId: $projectId
 		environmentId: $environmentId
 		serviceId: $serviceId
-		pluginId: $pluginId
 	)
 }

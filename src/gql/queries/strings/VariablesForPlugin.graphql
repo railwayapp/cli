@@ -1,0 +1,11 @@
+query VariablesForPlugin(
+	$projectId: String!
+	$environmentId: String!
+	$pluginId: String!
+) {
+	variables(
+		projectId: $projectId
+		environmentId: $environmentId
+		pluginId: $pluginId
+	)
+}
