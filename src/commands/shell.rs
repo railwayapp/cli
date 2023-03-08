@@ -27,14 +27,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut all_variables = BTreeMap::<String, String>::new();
     all_variables.insert("IN_RAILWAY_SHELL".to_owned(), "true".to_owned());
 
-    let _plugins: Vec<_> = body
-        .project
-        .plugins
-        .edges
-        .iter()
-        .map(|plugin| &plugin.node)
-        .collect();
-
     if let Some(service) = args.service {
         let service_id = body
             .project
