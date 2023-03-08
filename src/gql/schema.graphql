@@ -70,6 +70,23 @@ enum CnameCheckStatus {
 	WAITING
 }
 
+type Credit implements Node {
+	amount: Float!
+	createdAt: DateTime!
+	customerId: String!
+	id: ID!
+	memo: String
+	type: CreditType!
+	updatedAt: DateTime!
+}
+
+enum CreditType {
+	APPLIED
+	CREDIT
+	DEBIT
+	STRIPE
+}
+
 type CustomDomain implements Domain {
 	cnameCheck: CnameCheck!
 	createdAt: DateTime
@@ -90,6 +107,65 @@ input CustomDomainCreateInput {
 	domain: String!
 	environmentId: String!
 	serviceId: String!
+}
+
+type Customer implements Node {
+	appliedCredits: Float!
+	billingEmail: String
+	creditBalance: Float!
+	credits(
+		after: String
+		before: String
+		first: Int
+		last: Int
+	): CustomerCreditsConnection!
+	defaultPaymentMethod: PaymentMethod
+	defaultPaymentMethodId: String
+	id: ID!
+	invoices: [CustomerInvoice!]!
+	isUsageSubscriber: Boolean!
+	remainingUsageCreditBalance: Float!
+	state: SubscriptionState!
+	stripeCustomerId: String!
+	subscriptions: [CustomerSubscription!]!
+	teamId: String
+	usageLimit: Float
+	userId: String
+}
+
+type CustomerCreditsConnection {
+	edges: [CustomerCreditsConnectionEdge!]!
+	pageInfo: PageInfo!
+}
+
+type CustomerCreditsConnectionEdge {
+	cursor: String!
+	node: Credit!
+}
+
+type CustomerInvoice {
+	amountPaid: Float!
+	hostedURL: String
+	invoiceId: String!
+	items: [SubscriptionItem!]!
+	paymentIntentStatus: String
+	pdfURL: String
+	periodEnd: String!
+	periodStart: String!
+	status: String
+	subscriptionId: String
+	total: Int!
+}
+
+type CustomerSubscription {
+	cancelAt: String
+	couponId: String
+	id: String!
+	items: [SubscriptionItem!]!
+	latestInvoiceId: String!
+	nextInvoiceCurrentTotal: Int!
+	nextInvoiceDate: String!
+	status: String!
 }
 
 """
@@ -728,9 +804,34 @@ type Mutation {
 	supportRequest(input: SupportRequestInput!): Boolean!
 
 	"""
-	Bans a team.
+	Ban a team.
 	"""
 	teamBan(id: String!, input: TeamBanInput!): Boolean!
+
+	"""
+	Create a team
+	"""
+	teamCreate(input: TeamCreateInput!): Team!
+
+	"""
+	Delete a team and all data associated with it
+	"""
+	teamDelete(teamId: String!): Boolean!
+
+	"""
+	Get an invite code for a team and role
+	"""
+	teamInviteCodeCreate(input: TeamInviteCodeCreateInput!): String!
+
+	"""
+	Use an invite code to join a team
+	"""
+	teamInviteCodeUse(code: String!): Team!
+
+	"""
+	Leave a team
+	"""
+	teamLeave(teamId: String!): Boolean!
 
 	"""
 	Changes a user team permissions.
@@ -738,14 +839,29 @@ type Mutation {
 	teamPermissionChange(input: TeamPermissionChangeInput!): Boolean!
 
 	"""
-	Stops all deployments and plugins for a team.
+	Stop all deployments and plugins for a team.
 	"""
 	teamResourcesStop(id: String!, input: TeamResourcesStopInput): Boolean!
 
 	"""
-	Unbans a team.
+	Unban a team.
 	"""
 	teamUnban(id: String!): Boolean!
+
+	"""
+	Update a team by id
+	"""
+	teamUpdate(input: TeamUpdateInput!): Team!
+
+	"""
+	Invite a user by email to a team
+	"""
+	teamUserInvite(input: TeamUserInviteInput!): Boolean!
+
+	"""
+	Remove a user from a team
+	"""
+	teamUserRemove(input: TeamUserRemoveInput!): Boolean!
 
 	"""
 	Logs panics from CLI to Datadog
@@ -832,6 +948,17 @@ type PageInfo {
 	hasNextPage: Boolean!
 	hasPreviousPage: Boolean!
 	startCursor: String
+}
+
+type PaymentMethod {
+	card: PaymentMethodCard
+	id: String!
+}
+
+type PaymentMethodCard {
+	brand: String!
+	country: String
+	last4: String!
 }
 
 enum PlatformServiceStatus {
@@ -1425,6 +1552,28 @@ type Query {
 		projectId: String!
 		serviceId: String!
 	): String!
+
+	"""
+	Find a team by ID
+	"""
+	team(teamId: String!): Team!
+
+	"""
+	Find a team by invite code
+	"""
+	teamByCode(code: String!): Team!
+
+	"""
+	Get all teams
+	"""
+	teams(
+		after: String
+		before: String
+		filter: String
+		first: Int
+		last: Int
+		state: String
+	): QueryTeamsConnection!
 	template(code: String, owner: String, repo: String): Template!
 
 	"""
@@ -1489,6 +1638,15 @@ type Query {
 		serviceId: String
 		unrendered: Boolean
 	): ServiceVariables!
+
+	"""
+	All rendered variables that are required for a service deployment.
+	"""
+	variablesForServiceDeployment(
+		environmentId: String!
+		projectId: String!
+		serviceId: String!
+	): ServiceVariables!
 }
 
 type QueryApiTokensConnection {
@@ -1549,6 +1707,17 @@ type QueryProjectsConnection {
 type QueryProjectsConnectionEdge {
 	cursor: String!
 	node: Project!
+}
+
+type QueryTeamsConnection {
+	edges: [QueryTeamsConnectionEdge!]!
+	pageInfo: PageInfo!
+	totalCount: Int!
+}
+
+type QueryTeamsConnectionEdge {
+	cursor: String!
+	node: Team!
 }
 
 type QueryTemplatesConnection {
@@ -1768,8 +1937,11 @@ input SharedVariableConfigureInput {
 
 type SimilarTemplate {
 	code: String!
+	createdAt: DateTime!
+	creator: TemplateCreator
 	deploys: Int!
 	description: String
+	image: String
 	name: String!
 }
 
@@ -1827,6 +1999,21 @@ type Subscription {
 	): [Log!]!
 }
 
+type SubscriptionItem {
+	itemId: String!
+	priceId: String!
+	productId: String!
+	quantity: Int
+}
+
+enum SubscriptionState {
+	ACTIVE
+	CANCELLED
+	INACTIVE
+	PAST_DUE
+	UNPAID
+}
+
 input SupportRequestInput {
 	isPurchasing: Boolean
 	isTechnical: Boolean
@@ -1835,12 +2022,43 @@ input SupportRequestInput {
 
 type Team implements Node {
 	avatar: String
+	banReason: String
+	createdAt: DateTime!
+	customer: Customer!
+	discordRole: String
 	id: ID!
+	members: [TeamMember!]!
 	name: String!
+	projects(
+		after: String
+		before: String
+		first: Int
+		last: Int
+	): TeamProjectsConnection!
+	teamPermissions: [TeamPermission!]!
+	updatedAt: DateTime!
 }
 
 input TeamBanInput {
 	banReason: String!
+}
+
+input TeamCreateInput {
+	avatar: String
+	name: String!
+}
+
+input TeamInviteCodeCreateInput {
+	role: String!
+	teamId: String!
+}
+
+type TeamMember {
+	avatar: String
+	email: String!
+	id: String!
+	name: String
+	role: TeamRole!
 }
 
 type TeamPermission implements Node {
@@ -1858,6 +2076,16 @@ input TeamPermissionChangeInput {
 	userId: String!
 }
 
+type TeamProjectsConnection {
+	edges: [TeamProjectsConnectionEdge!]!
+	pageInfo: PageInfo!
+}
+
+type TeamProjectsConnectionEdge {
+	cursor: String!
+	node: Project!
+}
+
 input TeamResourcesStopInput {
 	reason: String!
 }
@@ -1865,6 +2093,23 @@ input TeamResourcesStopInput {
 enum TeamRole {
 	ADMIN
 	MEMBER
+}
+
+input TeamUpdateInput {
+	avatar: String
+	name: String!
+	teamId: String!
+}
+
+input TeamUserInviteInput {
+	email: String!
+	link: String!
+	teamId: String!
+}
+
+input TeamUserRemoveInput {
+	teamId: String!
+	userId: String!
 }
 
 input TelemetrySendInput {
@@ -1883,6 +2128,7 @@ type Template implements Node {
 	creator: TemplateCreator
 	demoProjectId: String
 	id: ID!
+	isApproved: Boolean!
 	metadata: TemplateMetadata!
 	projects: Int!
 	services(
@@ -1996,6 +2242,11 @@ enum TemplateStatus {
 input TemplateUpdateInput {
 	config: TemplateConfig!
 	demoProjectId: String
+
+	"""
+	An admin-only flag to force-update a template.
+	"""
+	forceUpdate: Boolean = false
 	metadata: TemplateMetadata!
 	services: [TemplateServiceUpdateInput!]!
 }
