@@ -115,8 +115,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 &client,
                 &configs,
                 linked_project.project.clone(),
-                service_id,
                 environment_id,
+                service_id,
             )
             .await?
         }

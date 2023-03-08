@@ -85,8 +85,6 @@ impl Configs {
                 root_config_path,
             };
 
-            config.write()?;
-
             return Ok(config);
         }
 
@@ -274,7 +272,11 @@ impl Configs {
 
     pub fn write(&self) -> Result<()> {
         create_dir_all(self.root_config_path.parent().unwrap())?;
-        let mut file = File::create(&self.root_config_path)?;
+        let mut file = if let Ok(file) = File::options().write(true).open(&self.root_config_path) {
+            file
+        } else {
+            File::create(&self.root_config_path)?
+        };
         let serialized_config = serde_json::to_vec_pretty(&self.root_config)?;
         file.write_all(serialized_config.as_slice())?;
         file.sync_all()?;
