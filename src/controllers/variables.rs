@@ -13,7 +13,6 @@ pub async fn get_service_variables(
     environment_id: String,
     service_id: String,
 ) -> Result<BTreeMap<String, String>> {
-    dbg!(&project_id, &environment_id, &service_id);
     let vars = queries::variables_for_service_deployment::Variables {
         project_id,
         environment_id,
@@ -26,7 +25,6 @@ pub async fn get_service_variables(
     )
     .await?;
 
-    dbg!(&res);
     let body = res
         .data
         .context("Failed to get service variables (query VariablesForServiceDeployment)")?;
