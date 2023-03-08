@@ -1,5 +1,3 @@
-
-
 use anyhow::bail;
 
 use crate::{
@@ -7,7 +5,7 @@ use crate::{
     util::prompt::{prompt_select, PromptService},
 };
 
-use super::{*};
+use super::*;
 
 /// Link a service to the current project
 #[derive(Parser)]

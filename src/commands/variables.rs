@@ -2,7 +2,6 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
-
 use crate::{
     consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND},
     table::Table,
