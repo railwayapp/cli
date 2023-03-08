@@ -79,7 +79,7 @@ async fn get_service_or_plugins(
             services
                 .first()
                 .map(|service| service.node.id.to_owned())
-                .map(|id| ServiceOrPlugins::Service(id))
+                .map(ServiceOrPlugins::Service)
                 .unwrap()
         } else {
             // If there are multiple services, prompt the user to select one
