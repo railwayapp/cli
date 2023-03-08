@@ -1,4 +1,4 @@
-use std::fmt::Display;
+
 
 use anyhow::bail;
 
@@ -7,7 +7,7 @@ use crate::{
     util::prompt::{prompt_select, PromptService},
 };
 
-use super::{queries::project::ProjectProjectServicesEdgesNode, *};
+use super::{*};
 
 /// Link a service to the current project
 #[derive(Parser)]

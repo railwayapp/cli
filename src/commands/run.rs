@@ -5,7 +5,6 @@ use is_terminal::IsTerminal;
 use reqwest::Client;
 
 use crate::{
-    consts::SERVICE_NOT_FOUND,
     controllers::variables::{get_all_plugin_variables, get_service_variables},
     util::prompt::{prompt_select, PromptService},
 };
@@ -108,7 +107,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .unwrap_or(linked_project.environment.clone());
 
     let service = get_service_or_plugins(&configs, &client, args.service).await?;
-    let mut variables = BTreeMap::<String, String>::new();
+    let _variables = BTreeMap::<String, String>::new();
 
     let variables = match service {
         ServiceOrPlugins::Service(service_id) => {
