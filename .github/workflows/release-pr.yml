@@ -1,4 +1,4 @@
-name: Tag
+name: Create Release PR
 
 on:
   push:
@@ -36,6 +36,14 @@ jobs:
           current_version: ${{ steps.get-latest-tag.outputs.tag }}
           level: ${{ steps.release-label.outputs.level }}
 
+      - name: Strip v-prefix from version
+        id: sanitize-version
+        env:
+          RAW_VERSION: ${{ steps.bump-semver.outputs.new_version }}
+        run: |
+          VERSION=${RAW_VERSION#v}
+          echo "version=$VERSION" >> $GITHUB_ENV
+
       - name: Install cargo-release
         uses: taiki-e/install-action@v1
         with:
@@ -45,4 +53,4 @@ jobs:
         if: ${{ steps.release-label.outputs.level != null }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          version: ${{ steps.bump-semver.outputs.new_version }}
+          version: ${{ steps.sanitize-semver.outputs.new_version }}
