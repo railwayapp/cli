@@ -9,7 +9,8 @@ env:
 
 jobs:
   create-release:
-    if: github.event.pull_request.merged == 'true' && github.event.label.name == 'release/pending'
+    # Publish a release only if a PR was merged with the release/pending label
+    if: github.event.pull_request.merged == true && github.event.label.name == 'release/pending'
 
     name: Create Release
     runs-on: ubuntu-latest

@@ -5,8 +5,9 @@ on:
     types: [ closed ]
 
 jobs:
-  create-pr-release:
-    if: github.event.pull_request.merged == 'true'
+  create-release-pr:
+    # Create a release PR only if a PR was merged with a semver label
+    if: github.event.pull_request.merged == true && (github.event.label.name == 'release/major' || github.event.label.name == 'release/minor' || github.event.label.name == 'release/patch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
