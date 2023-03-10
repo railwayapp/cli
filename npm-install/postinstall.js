@@ -1,9 +1,11 @@
 import triples from "@napi-rs/triples";
-import { createWriteStream } from "fs";
+import { createReadStream, createWriteStream } from "fs";
 import * as fs from "fs/promises";
 import fetch from "node-fetch";
-import { pipeline } from "stream/promises";
+import { pipeline, pipeline } from "stream/promises";
 import tar from "tar";
+import { createGunzip } from "zlib";
+import { pipeline } from "stream/promises";
 
 import { CONFIG } from "./config.js";
 
@@ -30,10 +32,12 @@ async function install() {
 		throw new Error("Failed fetching the binary: " + response.statusText);
 	}
 
-	const tarFile = "downloaded.tar.gz";
+	const tarGzFile = "downloaded.tar.gz";
+	const tarFile = "downloaded.tar";
 
 	await fs.mkdir(binPath, { recursive: true });
-	await pipeline(response.body, createWriteStream(tarFile));
+	await pipeline(response.body, createWriteStream(tarGzFile));
+	await pipeline(createReadStream(tarGzFile), createGunzip(), createWriteStream("tarFile"));
 	await tar.x({ file: tarFile, cwd: binPath });
 	await fs.rm(tarFile);
 }
