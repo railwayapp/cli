@@ -42,7 +42,7 @@ jobs:
           RAW_VERSION: ${{ steps.bump-semver.outputs.new_version }}
         run: |
           VERSION=${RAW_VERSION#v}
-          echo "version=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Install cargo-release
         uses: taiki-e/install-action@v1
