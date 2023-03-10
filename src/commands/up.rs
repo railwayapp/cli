@@ -95,6 +95,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
+    let path = match args.path {
+        Some(path) => path,
+        None => configs.get_closest_linked_project_directory()?.into(),
+    };
+
     let service = get_service_to_deploy(&configs, &client, args.service).await?;
 
     let spinner = if std::io::stdout().is_terminal() {
@@ -118,7 +123,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .from_writer(SynchronizedWriter::new(arc.clone()));
     {
         let mut archive = Builder::new(&mut parz);
-        let mut builder = WalkBuilder::new(args.path.unwrap_or_else(|| ".".into()));
+        let mut builder = WalkBuilder::new(path);
         builder.add_custom_ignore_filename(".railwayignore");
         builder.add_custom_ignore_filename(".gitignore");
         let walker = builder.follow_links(true).hidden(false);
