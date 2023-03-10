@@ -7,7 +7,26 @@ env:
   MACOSX_DEPLOYMENT_TARGET: 10.7
 
 jobs:
+  info:
+    if: github.event.pull_request.merged
+    outputs:
+      is-release: ${{ steps.meta.outputs.is-release }}
+      crate: ${{ steps.meta.outputs.crate-names }}
+      version: ${{ steps.meta.outputs.version-actual }}
+      notes: ${{ steps.meta.outputs.notes }}
+
+    runs-on: ubuntu-latest
+    steps:
+      - id: meta
+        uses: cargo-bins/release-meta@v1
+        with:
+          event-data: ${{ toJSON(github.event) }}
+          extract-notes-under: '### Release notes'
+
   create-release:
+    needs: info
+    if: needs.info.outputs.is-release == 'true'
+
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
@@ -21,8 +40,9 @@ jobs:
           # Apparently, this is the right way to get a tag name. Really?
           #
           # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
-          echo "CLI_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          echo "version is: ${{ env.CLI_VERSION }}"
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "CLI_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "version is: ${{ VERSION }}"
 
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -48,7 +68,7 @@ jobs:
 
   build-release:
     name: Build Release Assets
-    needs: ["create-release"]
+    needs: create-release
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
@@ -81,7 +101,7 @@ jobs:
 
           - target: i686-pc-windows-msvc
             os: windows-latest
-            
+
           - target: x86_64-pc-windows-gnu
             os: windows-latest
 
@@ -114,7 +134,7 @@ jobs:
           7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
-      - name: Prepare binares (tar) [Windows]
+      - name: Prepare binaries (tar) [Windows]
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
@@ -163,3 +183,7 @@ jobs:
           download-url: https://github.com/railwayapp/cli/releases/latest/download/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+
+      - uses: katyo/publish-crates@v2
+        with:
+          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}

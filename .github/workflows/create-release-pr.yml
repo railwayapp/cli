@@ -6,7 +6,7 @@ on:
       - master
 
 jobs:
-  tag:
+  create-pr-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -33,3 +33,7 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PAT }}
           version: ${{ steps.release-label.outputs.level }}
+          pr-label: release/pending
+          pr-title: "Release v<%= version.actual %>"
+          pr-release-notes: true
+          pr-merge-strategy: squash
