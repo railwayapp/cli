@@ -33,5 +33,5 @@ jobs:
         if: ${{ steps.release-label.outputs.level != null }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          level: ${{ steps.release-label.outputs.level }}
+          version: ${{ steps.release-label.outputs.level }}
           pr-label: release
