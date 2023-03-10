@@ -94,10 +94,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+    let prefix: PathBuf = configs.get_closest_linked_project_directory()?.into();
 
     let path = match args.path {
         Some(path) => path,
-        None => configs.get_closest_linked_project_directory()?.into(),
+        None => prefix.clone(),
     };
 
     let service = get_service_to_deploy(&configs, &client, args.service).await?;
@@ -144,11 +145,17 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             pg.enable_steady_tick(Duration::from_millis(100));
 
             for entry in walked.into_iter().progress_with(pg) {
-                archive.append_path(entry?.path())?;
+                let entry = entry?;
+                let path = entry.path();
+                let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
+                archive.append_path_with_name(path, stripped)?;
             }
         } else {
             for entry in walked.into_iter() {
-                archive.append_path(entry?.path())?;
+                let entry = entry?;
+                let path = entry.path();
+                let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
+                archive.append_path_with_name(path, stripped)?;
             }
         }
     }
