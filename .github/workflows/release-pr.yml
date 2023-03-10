@@ -53,5 +53,5 @@ jobs:
       - uses: cargo-bins/release-pr@v2
         if: ${{ steps.release-label.outputs.level != null }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GH_PAT }}
           version: ${{ steps.sanitize-version.outputs.version }}
