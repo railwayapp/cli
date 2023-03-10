@@ -8,6 +8,8 @@ on:
 
 jobs:
   publish_npm:
+    # Publish to NPM only if the release workflow succeeded
+    if: github.event.workflow_run.conclusion == 'success'
     name: Publish NPM
     runs-on: ubuntu-latest
 
