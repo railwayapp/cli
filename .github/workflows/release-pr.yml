@@ -54,4 +54,4 @@ jobs:
         if: ${{ steps.release-label.outputs.level != null }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          version: ${{ steps.sanitize-semver.outputs.version }}
+          version: ${{ steps.sanitize-version.outputs.version }}
