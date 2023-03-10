@@ -1,12 +1,12 @@
 name: Create Release PR
 
 on:
-  push:
-    branches:
-      - master
+  pull_request:
+    types: [ closed ]
 
 jobs:
   create-pr-release:
+    if: github.event.pull_request.merged == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
