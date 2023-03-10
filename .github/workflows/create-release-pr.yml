@@ -7,7 +7,7 @@ on:
 jobs:
   create-release-pr:
     # Create a release PR only if a PR was merged with a semver label
-    if: github.event.pull_request.merged == true && (github.event.label.name == 'release/major' || github.event.label.name == 'release/minor' || github.event.label.name == 'release/patch')
+    if: github.event.pull_request.merged == true && (contains(github.event.pull_request.labels.*.name, 'release/major') || contains(github.event.pull_request.labels.*.name, 'release/minor') || contains(github.event.pull_request.labels.*.name, 'release/patch'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
