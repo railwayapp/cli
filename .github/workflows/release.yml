@@ -21,8 +21,9 @@ jobs:
           # Apparently, this is the right way to get a tag name. Really?
           #
           # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
-          echo "CLI_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          echo "version is: ${{ env.CLI_VERSION }}"
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "CLI_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "version is: ${{ VERSION }}"
 
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -81,7 +82,7 @@ jobs:
 
           - target: i686-pc-windows-msvc
             os: windows-latest
-            
+
           - target: x86_64-pc-windows-gnu
             os: windows-latest
 
@@ -114,7 +115,7 @@ jobs:
           7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
-      - name: Prepare binares (tar) [Windows]
+      - name: Prepare binaries (tar) [Windows]
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
