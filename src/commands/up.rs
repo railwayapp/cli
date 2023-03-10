@@ -35,6 +35,10 @@ pub struct Args {
     #[clap(short, long)]
     /// Service to deploy to (defaults to linked service)
     service: Option<String>,
+
+    #[clap(short, long)]
+    /// Environment to deploy to (defaults to linked environment)
+    environment: Option<String>,
 }
 
 pub async fn get_service_to_deploy(
@@ -152,7 +156,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let builder = client.post(format!(
         "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
         linked_project.project,
-        linked_project.environment,
+        args.environment.unwrap_or(linked_project.environment),
         service.unwrap_or_default(),
     ));
     let spinner = if std::io::stdout().is_terminal() {
