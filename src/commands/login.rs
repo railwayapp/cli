@@ -133,11 +133,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let me = res.data.context("No data")?.me;
 
     spinner.finish_and_clear();
-    println!(
-        "Logged in as {} ({})",
-        me.name.context("No name")?.bold(),
-        me.email
-    );
+
+    if let Some(name) = me.name {
+        println!("Logged in as {} ({})", name.bold(), me.email);
+    } else {
+        println!("Logged in as {}", me.email);
+    }
 
     Ok(())
 }

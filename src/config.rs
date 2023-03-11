@@ -147,11 +147,7 @@ impl Configs {
     }
 
     pub fn get_closest_linked_project_directory(&self) -> Result<String> {
-        let current_dir = std::env::current_dir()?;
-        let path = current_dir
-            .to_str()
-            .context("Unable to get current working directory")?;
-        let mut current_path = PathBuf::from(path);
+        let mut current_path = std::env::current_dir()?;
         loop {
             let path = current_path
                 .to_str()
