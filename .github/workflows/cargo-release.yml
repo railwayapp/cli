@@ -33,6 +33,11 @@ jobs:
         with:
           tool: cargo-release
 
+      - name: Setup Git user
+        run: |
+          git config --global user.name "Github Bot"
+          git config --global user.email "github-bot@railway.app"
+
       - name: Cargo Release
         if: ${{ steps.release-label.outputs.level != null }}
         run: cargo release -x --no-confirm --sign ${{ steps.release-label.outputs.level }}
