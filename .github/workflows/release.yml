@@ -1,17 +1,13 @@
 name: Release
-
 on:
-  pull_request:
-    types: [ closed ]
-
+  push:
+    tags:
+      - "v*.*.*"
 env:
   MACOSX_DEPLOYMENT_TARGET: 10.7
 
 jobs:
   create-release:
-    # Publish a release only if a PR was merged with the release/pending label
-    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'release/pending')
-
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
@@ -25,9 +21,8 @@ jobs:
           # Apparently, this is the right way to get a tag name. Really?
           #
           # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
-          VERSION=${GITHUB_REF#refs/tags/}
-          echo "CLI_VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "version is: ${VERSION}"
+          echo "CLI_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          echo "version is: ${{ env.CLI_VERSION }}"
 
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -49,11 +44,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.CLI_VERSION }}
-          release_name: ${{ env.CLI_VERSION }}
+          name: ${{ env.CLI_VERSION }}
 
   build-release:
     name: Build Release Assets
-    needs: create-release
+    needs: ["create-release"]
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
@@ -119,7 +114,7 @@ jobs:
           7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
-      - name: Prepare binaries (tar) [Windows]
+      - name: Prepare binares (tar) [Windows]
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
@@ -168,7 +163,3 @@ jobs:
           download-url: https://github.com/railwayapp/cli/releases/latest/download/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
-
-      - uses: katyo/publish-crates@v2
-        with:
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
