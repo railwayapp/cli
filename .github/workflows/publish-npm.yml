@@ -1,12 +1,14 @@
 name: Publish
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_run:
+    workflows: [ "Release" ]
+    types:
+      - completed
 
 jobs:
-  publish_npm:
+  publish-npm:
+    if: github.event.workflow_run.conclusion == 'success'
     name: Publish to NPM
     runs-on: ubuntu-latest
 

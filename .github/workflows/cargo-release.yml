@@ -1,0 +1,36 @@
+name: Publish
+
+on:
+  pull_request:
+    types: [ closed ]
+
+jobs:
+  cargo-release:
+    if: github.event.pull_request.merged == true && (contains(github.event.pull_request.labels.*.name, 'release/major') || contains(github.event.pull_request.labels.*.name, 'release/minor') || contains(github.event.pull_request.labels.*.name, 'release/patch'))
+    name: Publish to NPM
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - uses: actions-ecosystem/action-release-label@v1
+        id: release-label
+        if: ${{ steps.get-merged-pull-request.outputs.title != null }}
+        with:
+          github_token: ${{ secrets.GH_PAT }}
+          labels: ${{ steps.get-merged-pull-request.outputs.labels }}
+
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v1
+        with:
+          tool: cargo-release
+
+      - name: Cargo Release
+        if: ${{ steps.release-label.outputs.level != null }}
+        run: cargo release -x --sign ${{ steps.release-label.outputs.level }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
