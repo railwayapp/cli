@@ -26,7 +26,6 @@ jobs:
         id: release-label
         if: ${{ steps.get-merged-pull-request.outputs.title != null }}
         with:
-          github_token: ${{ secrets.GH_PAT }}
           labels: ${{ steps.get-merged-pull-request.outputs.labels }}
 
       - name: Install cargo-release
@@ -36,6 +35,6 @@ jobs:
 
       - name: Cargo Release
         if: ${{ steps.release-label.outputs.level != null }}
-        run: cargo release -x --sign ${{ steps.release-label.outputs.level }}
+        run: cargo release -x --no-confirm --sign ${{ steps.release-label.outputs.level }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
