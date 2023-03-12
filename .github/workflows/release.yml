@@ -114,12 +114,13 @@ jobs:
           7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
-      - name: Prepare binares (tar) [Windows]
+      - name: Prepare binaries (tar) [Windows]
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           strip railway.exe
-          7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz railway.exe
+          7z a -ttar ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar railway.exe
+          7z a -tgzip ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar
           cd -
 
       - name: Prepare binaries [-linux]
