@@ -119,8 +119,8 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           strip railway.exe
-          7z a -ttar ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar railway.exe
-          7z a -tgzip ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar
+          7z a -ttar archive.tar railway.exe
+          7z a -tgzip ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz archive.tar
           cd -
 
       - name: Prepare binaries [-linux]
