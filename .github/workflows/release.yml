@@ -84,6 +84,9 @@ jobs:
 
           - target: x86_64-pc-windows-gnu
             os: windows-latest
+            
+          - target: i686-pc-windows-gnu
+            os: windows-latest
 
     steps:
       - name: Checkout repository
