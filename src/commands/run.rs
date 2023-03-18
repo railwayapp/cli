@@ -138,13 +138,19 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
     };
 
+    // a bit janky :/
+    ctrlc::set_handler(move || {
+        // do nothing, we just want to ignore CTRL+C
+        // this is for `rails c` and similar REPLs
+    })?;
+
     tokio::process::Command::new(args.args.first().context("No command provided")?)
         .args(args.args[1..].iter())
         .envs(variables)
-        .spawn()
-        .context("Failed to spawn command")?
-        .wait()
+        .status()
         .await
-        .context("Failed to wait for command")?;
+        .context("Failed to spawn command")?;
+
+    println!("Looking good? Run `railway up` to deploy your changes!");
     Ok(())
 }
