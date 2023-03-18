@@ -81,12 +81,13 @@ jobs:
 
           - target: i686-pc-windows-msvc
             os: windows-latest
-
+            
           - target: x86_64-pc-windows-gnu
             os: windows-latest
             
           - target: i686-pc-windows-gnu
             os: windows-latest
+            use-cross: true
 
     steps:
       - name: Checkout repository
@@ -107,7 +108,7 @@ jobs:
         with:
           command: build
           args: --release --locked --target ${{ matrix.target }}
-          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+          use-cross: ${{ matrix.use_cross || matrix.os == 'ubuntu-latest' }}
 
       - name: Prepare binaries (zip) [Windows]
         if: matrix.os == 'windows-latest'
