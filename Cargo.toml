@@ -31,7 +31,7 @@ graphql_client = { version = "0.11.0", features = ["reqwest-rustls"] }
 paste = "1.0.12"
 tokio = { version = "1.26.0", features = ["full"] }
 clap_complete = "4.1.5"
-open = "3.4.0"
+open = "4.0.1"
 inquire = "0.5.3"
 hyper = { version = "1.0.0-rc.3", features = ["server", "http1"] }
 base64 = "0.21.0"
