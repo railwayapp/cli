@@ -293,7 +293,7 @@ impl Configs {
         tmp_file.sync_all()?;
 
         // Rename file to final destination to achieve atomic write
-        fs::rename(&tmp_file_path.as_path(), &self.root_config_path)?;
+        fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
 
         Ok(())
     }
