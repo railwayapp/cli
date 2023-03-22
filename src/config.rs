@@ -270,7 +270,7 @@ impl Configs {
         create_dir_all(self.root_config_path.parent().unwrap())?;
 
         // Create temporary file to write initial data to. This is to ensure updates
-        // are atomic. After writingn the tmp file, we will rename it to the final destination,
+        // are atomic. After writing the tmp file, we will rename it to the final destination,
         // which is an atomic operation.
         let mut tmp_file_path = temp_dir();
         tmp_file_path.push(self.root_config_path.file_name().unwrap());
