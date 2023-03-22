@@ -273,7 +273,7 @@ impl Configs {
         // are atomic. After writing the tmp file, we will rename it to the final destination,
         // which is an atomic operation.
         let mut tmp_file_path = temp_dir();
-        tmp_file_path.push(self.root_config_path.file_name().unwrap());
+        tmp_file_path.push(self.root_config_path.file_name().context("Failed to get file name")?);
 
         let tmp_file = File::options().create(true).write(true).open(&tmp_file_path)?;
         serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
