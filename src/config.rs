@@ -1,17 +1,13 @@
-use std::{
-    collections::BTreeMap,
-    fs::{create_dir_all, File},
-    io::{Read, Write},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, fs::{create_dir_all, File}, fs, io::Read, path::PathBuf};
+use std::env::temp_dir;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
+use inquire::ui::{Attributes, RenderConfig, Styled, StyleSheet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{post_graphql, GQLClient},
+    client::{GQLClient, post_graphql},
     commands::queries,
 };
 
@@ -270,15 +266,22 @@ impl Configs {
     }
 
     pub fn write(&self) -> Result<()> {
+        // Ensure directory exists
         create_dir_all(self.root_config_path.parent().unwrap())?;
-        let mut file = if let Ok(file) = File::options().write(true).open(&self.root_config_path) {
-            file
-        } else {
-            File::create(&self.root_config_path)?
-        };
-        let serialized_config = serde_json::to_vec_pretty(&self.root_config)?;
-        file.write_all(serialized_config.as_slice())?;
-        file.sync_all()?;
+
+        // Create temporary file to write initial data to. This is to ensure updates
+        // are atomic. After writingn the tmp file, we will rename it to the final destination,
+        // which is an atomic operation.
+        let mut tmp_file_path = temp_dir();
+        tmp_file_path.push(self.root_config_path.file_name().unwrap());
+
+        let tmp_file = File::options().create(true).write(true).open(&tmp_file_path)?;
+        serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
+        tmp_file.sync_all()?;
+
+        // Rename file to final destination to achieve atomic write
+        fs::rename(&tmp_file_path.as_path(), &self.root_config_path)?;
+
         Ok(())
     }
 }
