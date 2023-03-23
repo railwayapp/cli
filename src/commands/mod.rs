@@ -5,6 +5,7 @@ pub(super) use colored::Colorize;
 
 pub mod add;
 pub mod completion;
+pub mod connect;
 pub mod delete;
 pub mod docs;
 pub mod domain;

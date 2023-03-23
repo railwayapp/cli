@@ -34,6 +34,7 @@ pub struct Args {
 commands_enum!(
     add,
     completion,
+    connect,
     delete,
     domain,
     docs,
