@@ -1,8 +1,8 @@
 use std::fmt::Display;
 
+use crate::commands::queries::project_plugins::ProjectPluginsProjectPluginsEdgesNode;
 use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
 use anyhow::{Context, Result};
-use crate::commands::queries::project_plugins::ProjectPluginsProjectPluginsEdgesNode;
 
 pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
     let select = inquire::Select::new(message, options);

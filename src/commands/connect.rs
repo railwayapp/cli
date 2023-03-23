@@ -4,10 +4,10 @@ use which::which;
 
 use crate::commands::queries::project_plugins::PluginType;
 use crate::consts::PLUGIN_NOT_FOUND;
-use crate::controllers::variables::{get_plugin_variables};
+use crate::controllers::variables::get_plugin_variables;
 use crate::util::prompt::{prompt_select, PromptPlugin};
 
-use super::{*};
+use super::*;
 
 /// Change the active environment
 #[derive(Parser)]
@@ -32,19 +32,29 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let vars = queries::project_plugins::Variables {
         id: linked_project.project.to_owned(),
     };
-    let res = post_graphql::<queries::ProjectPlugins, _>(&client, configs.get_backboard(), vars).await?;
+    let res =
+        post_graphql::<queries::ProjectPlugins, _>(&client, configs.get_backboard(), vars).await?;
     let body = res.data.context("Failed to retrieve response body")?;
 
     let plugin = match args.plugin_name {
-        Some(name) => &body
-            .project
-            .plugins
-            .edges
-            .iter()
-            .find(|edge| edge.node.friendly_name == name)
-            .context(PLUGIN_NOT_FOUND)?.node,
+        Some(name) => {
+            &body
+                .project
+                .plugins
+                .edges
+                .iter()
+                .find(|edge| edge.node.friendly_name == name)
+                .context(PLUGIN_NOT_FOUND)?
+                .node
+        }
         None => {
-            let plugins: Vec<_> = body.project.plugins.edges.iter().map(|p| PromptPlugin(&p.node)).collect();
+            let plugins: Vec<_> = body
+                .project
+                .plugins
+                .edges
+                .iter()
+                .map(|p| PromptPlugin(&p.node))
+                .collect();
             if plugins.is_empty() {
                 bail!("No plugins found");
             }
@@ -66,7 +76,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .map(|env| env.node.id.to_owned())
         .context("Environment not found")?;
 
-    let variables = get_plugin_variables(&client, &configs, linked_project.project, environment_id, plugin.id.clone()).await?;
+    let variables = get_plugin_variables(
+        &client,
+        &configs,
+        linked_project.project,
+        environment_id,
+        plugin.id.clone(),
+    )
+    .await?;
 
     let pass_arg; // Hack to get ownership of formatted string outside match
     let default = &"".to_string();
@@ -74,23 +91,23 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         PluginType::postgresql => (
             "psql",
             vec![
-                "-U", variables.get("PGUSER").unwrap_or(default),
-                "-h", variables.get("PGHOST").unwrap_or(default),
-                "-p", variables.get("PGPORT").unwrap_or(default),
-                "-d", variables.get("PGDATABASE").unwrap_or(default),
-            ]
+                "-U",
+                variables.get("PGUSER").unwrap_or(default),
+                "-h",
+                variables.get("PGHOST").unwrap_or(default),
+                "-p",
+                variables.get("PGPORT").unwrap_or(default),
+                "-d",
+                variables.get("PGDATABASE").unwrap_or(default),
+            ],
         ),
         PluginType::redis => (
             "redis-cli",
-            vec![
-                "-u", variables.get("REDIS_URL").unwrap_or(default),
-            ],
+            vec!["-u", variables.get("REDIS_URL").unwrap_or(default)],
         ),
         PluginType::mongodb => (
             "mongosh",
-            vec![
-                variables.get("MONGO_URL").unwrap_or(default).as_str(),
-            ],
+            vec![variables.get("MONGO_URL").unwrap_or(default).as_str()],
         ),
         PluginType::mysql => {
             // -p is a special case as it requires no whitespace between arg and value
@@ -98,10 +115,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             (
                 "mysql",
                 vec![
-                    "-h", variables.get("MYSQLHOST").unwrap_or(default),
-                    "-u", variables.get("MYSQLUSER").unwrap_or(default),
-                    "-P", variables.get("MYSQLPORT").unwrap_or(default),
-                    "-D", variables.get("MYSQLDATABASE").unwrap_or(default),
+                    "-h",
+                    variables.get("MYSQLHOST").unwrap_or(default),
+                    "-u",
+                    variables.get("MYSQLUSER").unwrap_or(default),
+                    "-P",
+                    variables.get("MYSQLPORT").unwrap_or(default),
+                    "-D",
+                    variables.get("MYSQLDATABASE").unwrap_or(default),
                     pass_arg.as_str(),
                 ],
             )
@@ -113,11 +134,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         bail!("{} must be installed to continue", cmd_name);
     }
 
-    Command::new(cmd_name)
-        .args(args)
-        .spawn()?
-        .wait()
-        .await?;
+    Command::new(cmd_name).args(args).spawn()?.wait().await?;
 
     Ok(())
 }

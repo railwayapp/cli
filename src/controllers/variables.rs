@@ -23,7 +23,7 @@ pub async fn get_service_variables(
         configs.get_backboard(),
         vars,
     )
-        .await?;
+    .await?;
 
     let body = res
         .data
@@ -42,7 +42,14 @@ pub async fn get_all_plugin_variables(
 ) -> Result<BTreeMap<String, String>> {
     let mut plugin_variables = BTreeMap::new();
     for plugin in plugins {
-        let mut vars = get_plugin_variables(client, configs, project_id.clone(), environment_id.clone(), plugin.clone()).await?;
+        let mut vars = get_plugin_variables(
+            client,
+            configs,
+            project_id.clone(),
+            environment_id.clone(),
+            plugin.clone(),
+        )
+        .await?;
         plugin_variables.append(&mut vars);
     }
     Ok(plugin_variables)
@@ -60,9 +67,8 @@ pub async fn get_plugin_variables(
         environment_id: environment_id.clone(),
         plugin_id: plugin_id.clone(),
     };
-    let res =
-        post_graphql::<queries::VariablesForPlugin, _>(client, configs.get_backboard(), vars)
-            .await?;
+    let res = post_graphql::<queries::VariablesForPlugin, _>(client, configs.get_backboard(), vars)
+        .await?;
     let body = res
         .data
         .context("Failed to get plugin variables (query VariablesForPlugin)")?;
