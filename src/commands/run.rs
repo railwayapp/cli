@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
@@ -88,15 +87,21 @@ async fn get_service_or_plugins(
     Ok(service)
 }
 
-pub async fn get_variables_for_run_command(environment: String, service: Option<String>) -> Result<BTreeMap<String, String>> {
+pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
     let vars = queries::project::Variables {
         id: linked_project.project.to_owned(),
     };
     let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
     let body = res.data.context("Failed to get project (query project)")?;
+
+    let environment = args
+        .environment
+        .clone()
+        .unwrap_or(linked_project.environment.clone());
 
     let environment_id = body
         .project
@@ -107,7 +112,7 @@ pub async fn get_variables_for_run_command(environment: String, service: Option<
         .map(|env| env.node.id.to_owned())
         .context("Environment not found")?;
 
-    let service = get_service_or_plugins(&configs, &body.project, service).await?;
+    let service = get_service_or_plugins(&configs, &body.project, args.service).await?;
 
     let variables = match service {
         ServiceOrPlugins::Service(service_id) => {
@@ -118,7 +123,7 @@ pub async fn get_variables_for_run_command(environment: String, service: Option<
                 environment_id,
                 service_id,
             )
-                .await?
+            .await?
         }
         ServiceOrPlugins::Plugins(plugin_ids) => {
             // we fetch all the plugin variables
@@ -129,22 +134,9 @@ pub async fn get_variables_for_run_command(environment: String, service: Option<
                 environment_id,
                 &plugin_ids,
             )
-                .await?
+            .await?
         }
     };
-
-    Ok(variables)
-}
-
-pub async fn command(args: Args, _json: bool) -> Result<()> {
-    let configs = Configs::new()?;
-    let linked_project = configs.get_linked_project().await?;
-    let environment = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
-
-    let variables = get_variables_for_run_command(environment, args.service).await?;
 
     // a bit janky :/
     ctrlc::set_handler(move || {
