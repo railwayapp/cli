@@ -1,5 +1,6 @@
 use anyhow::bail;
 use tokio::process::Command;
+use which::which;
 
 use crate::commands::queries::project_plugins::PluginType;
 use crate::consts::PLUGIN_NOT_FOUND;
@@ -67,42 +68,56 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let variables = get_plugin_variables(&client, &configs, linked_project.project, environment_id, plugin.id.clone()).await?;
 
-    match plugin.name {
-        PluginType::postgresql => {
-            let _ = Command::new("psql")
-                .arg("-U")
-                .arg(variables.get("PGUSER").unwrap_or(&"".to_string()))
-                .arg("-h")
-                .arg(variables.get("PGHOST").unwrap_or(&"".to_string()))
-                .arg("-p")
-                .arg(variables.get("PGPORT").unwrap_or(&"".to_string()))
-                .arg("-d")
-                .arg(variables.get("PGDATABASE").unwrap_or(&"".to_string()))
-                .env("PGPASSWORD", variables.get("PGPASSWORD").unwrap_or(&"".to_string()))
-                .spawn()
-                .expect("ls command failed to start")
-                .wait()
-                .await
-                .expect("ls command failed to run");
+    let pass_arg; // Hack to get ownership of formatted string outside match
+    let default = &"".to_string();
+    let (cmd_name, args): (&str, Vec<&str>) = match &plugin.name {
+        PluginType::postgresql => (
+            "psql",
+            vec![
+                "-U", variables.get("PGUSER").unwrap_or(default),
+                "-h", variables.get("PGHOST").unwrap_or(default),
+                "-p", variables.get("PGPORT").unwrap_or(default),
+                "-d", variables.get("PGDATABASE").unwrap_or(default),
+            ]
+        ),
+        PluginType::redis => (
+            "redis-cli",
+            vec![
+                "-u", variables.get("REDIS_URL").unwrap_or(default),
+            ],
+        ),
+        PluginType::mongodb => (
+            "mongosh",
+            vec![
+                variables.get("MONGO_URL").unwrap_or(default).as_str(),
+            ],
+        ),
+        PluginType::mysql => {
+            // -p is a special case as it requires no whitespace between arg and value
+            pass_arg = format!("-p{}", variables.get("MYSQLPASSWORD").unwrap_or(default));
+            (
+                "mysql",
+                vec![
+                    "-h", variables.get("MYSQLHOST").unwrap_or(default),
+                    "-u", variables.get("MYSQLUSER").unwrap_or(default),
+                    "-P", variables.get("MYSQLPORT").unwrap_or(default),
+                    "-D", variables.get("MYSQLDATABASE").unwrap_or(default),
+                    pass_arg.as_str(),
+                ],
+            )
         }
-        PluginType::redis => {
-            let _ = Command::new("redis-cli")
-                .arg("-U")
-                .arg(variables.get("PGUSER").unwrap_or(&"".to_string()))
-                .arg("-h")
-                .arg(variables.get("PGHOST").unwrap_or(&"".to_string()))
-                .arg("-p")
-                .arg(variables.get("PGPORT").unwrap_or(&"".to_string()))
-                .arg("-d")
-                .arg(variables.get("PGDATABASE").unwrap_or(&"".to_string()))
-                .env("PGPASSWORD", variables.get("PGPASSWORD").unwrap_or(&"".to_string()))
-                .spawn()
-                .expect("ls command failed to start")
-                .wait()
-                .await
-                .expect("ls command failed to run");
-        }
+        PluginType::Other(o) => bail!("Unsupported plugin type {}", o),
     };
+
+    if which(cmd_name).is_err() {
+        bail!("{} must be installed to continue", cmd_name);
+    }
+
+    Command::new(cmd_name)
+        .args(args)
+        .spawn()?
+        .wait()
+        .await?;
 
     Ok(())
 }
