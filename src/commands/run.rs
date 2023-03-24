@@ -144,13 +144,22 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // this is for `rails c` and similar REPLs
     })?;
 
-    tokio::process::Command::new(args.args.first().context("No command provided")?)
-        .args(args.args[1..].iter())
-        .envs(variables)
-        .status()
-        .await
-        .context("Failed to spawn command")?;
+    let exit_status =
+        tokio::process::Command::new(args.args.first().context("No command provided")?)
+            .args(args.args[1..].iter())
+            .envs(variables)
+            .status()
+            .await
+            .context("Failed to spawn command")?;
 
-    println!("Looking good? Run `railway up` to deploy your changes!");
+    if exit_status.success() {
+        println!("Looking good? Run `railway up` to deploy your changes!");
+    }
+
+    if let Some(code) = exit_status.code() {
+        // If there is an exit code (process not terminated by signal), exit with that code
+        std::process::exit(code);
+    }
+
     Ok(())
 }
