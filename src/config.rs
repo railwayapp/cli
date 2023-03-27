@@ -281,7 +281,7 @@ impl Configs {
 
         // Use temporary file to achieve atomic write:
         //  1. Open file ~/railway/config.tmp
-        //  2. Serialize temporary file
+        //  2. Serialize config to temporary file
         //  3. Rename temporary file to ~/railway/config.json (atomic operation)
         let tmp_file_path = self.root_config_path.with_extension("tmp");
         let tmp_file = File::options()
