@@ -275,16 +275,6 @@ impl Configs {
             .root_config_path
             .parent()
             .context("Failed to get parent directory")?;
-        let config_file_name = self
-            .root_config_path
-            .file_name()
-            .context("Failed to get file name")?;
-        let config_tmp_file_name = format!(
-            "{}.tmp",
-            config_file_name
-                .to_str()
-                .context("Failed to convert file name to string")?
-        );
 
         // Ensure directory exists
         create_dir_all(config_dir)?;
@@ -293,7 +283,7 @@ impl Configs {
         //  1. Open file <CONFIG_PATH>.tmp
         //  2. Serialize temporary file
         //  3. Rename temporary file to <CONFIG_PATH> (atomic operation)
-        let tmp_file_path = config_dir.join(config_tmp_file_name);
+        let tmp_file_path = self.root_config_path.with_extension("tmp");
         let tmp_file = File::options()
             .create(true)
             .write(true)
