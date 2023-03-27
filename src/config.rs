@@ -1,4 +1,3 @@
-use std::env::temp_dir;
 use std::{
     collections::BTreeMap,
     fs,
@@ -272,22 +271,23 @@ impl Configs {
     }
 
     pub fn write(&self) -> Result<()> {
+        let config_dir = self
+            .root_config_path
+            .parent()
+            .context("Failed to get parent directory")?;
+
         // Ensure directory exists
-        create_dir_all(self.root_config_path.parent().unwrap())?;
+        create_dir_all(config_dir)?;
 
-        // Create temporary file to write initial data to. This is to ensure updates
-        // are atomic. After writing the tmp file, we will rename it to the final destination,
-        // which is an atomic operation.
-        let mut tmp_file_path = temp_dir();
-        tmp_file_path.push(
-            self.root_config_path
-                .file_name()
-                .context("Failed to get file name")?,
-        );
-
+        // Use temporary file to achieve atomic write:
+        //  1. Open file ~/railway/config.tmp
+        //  2. Serialize config to temporary file
+        //  3. Rename temporary file to ~/railway/config.json (atomic operation)
+        let tmp_file_path = self.root_config_path.with_extension("tmp");
         let tmp_file = File::options()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(&tmp_file_path)?;
         serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
         tmp_file.sync_all()?;
