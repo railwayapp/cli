@@ -272,9 +272,20 @@ impl Configs {
     }
 
     pub fn write(&self) -> Result<()> {
-        let config_dir = self.root_config_path.parent().context("Failed to get parent directory")?;
-        let config_file_name = self.root_config_path.file_name().context("Failed to get file name")?;
-        let config_tmp_file_name = format!("{}.tmp", config_file_name.to_str().context("Failed to convert file name to string")?);
+        let config_dir = self
+            .root_config_path
+            .parent()
+            .context("Failed to get parent directory")?;
+        let config_file_name = self
+            .root_config_path
+            .file_name()
+            .context("Failed to get file name")?;
+        let config_tmp_file_name = format!(
+            "{}.tmp",
+            config_file_name
+                .to_str()
+                .context("Failed to convert file name to string")?
+        );
 
         // Ensure directory exists
         create_dir_all(config_dir)?;
