@@ -272,22 +272,22 @@ impl Configs {
     }
 
     pub fn write(&self) -> Result<()> {
+        let config_dir = self.root_config_path.parent().context("Failed to get parent directory")?;
+        let config_file_name = self.root_config_path.file_name().context("Failed to get file name")?;
+        let config_tmp_file_name = format!("{}.tmp", config_file_name.to_str().context("Failed to convert file name to string")?);
+
         // Ensure directory exists
-        create_dir_all(self.root_config_path.parent().unwrap())?;
+        create_dir_all(config_dir)?;
 
-        // Create temporary file to write initial data to. This is to ensure updates
-        // are atomic. After writing the tmp file, we will rename it to the final destination,
-        // which is an atomic operation.
-        let mut tmp_file_path = temp_dir();
-        tmp_file_path.push(
-            self.root_config_path
-                .file_name()
-                .context("Failed to get file name")?,
-        );
-
+        // Use temporary file to achieve atomic write:
+        //  1. Open file <CONFIG_PATH>.tmp
+        //  2. Serialize temporary file
+        //  3. Rename temporary file to <CONFIG_PATH> (atomic operation)
+        let tmp_file_path = config_dir.join(config_tmp_file_name);
         let tmp_file = File::options()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(&tmp_file_path)?;
         serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
         tmp_file.sync_all()?;
