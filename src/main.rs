@@ -38,6 +38,7 @@ commands_enum!(
     delete,
     domain,
     docs,
+    down,
     environment,
     init,
     link,

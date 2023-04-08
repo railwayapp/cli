@@ -9,6 +9,7 @@ pub mod connect;
 pub mod delete;
 pub mod docs;
 pub mod domain;
+pub mod down;
 pub mod environment;
 pub mod init;
 pub mod link;

@@ -1,0 +1,3 @@
+mutation DeploymentRemove($id: String!) {
+	deploymentRemove(id: $id)
+}
