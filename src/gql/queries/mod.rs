@@ -26,6 +26,7 @@ pub struct Projects;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct UserMeta;
+pub type User = user_meta::UserMetaMe;
 
 #[derive(GraphQLQuery)]
 #[graphql(

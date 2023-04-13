@@ -8,6 +8,7 @@ mod client;
 mod config;
 mod consts;
 mod controllers;
+mod errors;
 mod gql;
 mod subscription;
 mod table;
@@ -62,7 +63,13 @@ commands_enum!(
 async fn main() -> Result<()> {
     let cli = Args::parse();
 
-    Commands::exec(cli).await?;
+    match Commands::exec(cli).await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
 
     Ok(())
 }
