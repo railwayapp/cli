@@ -19,7 +19,7 @@ use crate::{
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
-pub struct RailwayProject {
+pub struct LinkedProject {
     pub project_path: String,
     pub name: Option<String>,
     pub project: String,
@@ -39,7 +39,7 @@ pub struct RailwayUser {
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayConfig {
-    pub projects: BTreeMap<String, RailwayProject>,
+    pub projects: BTreeMap<String, LinkedProject>,
     pub user: RailwayUser,
 }
 
@@ -168,7 +168,7 @@ impl Configs {
         Err(anyhow::anyhow!("No linked project found"))
     }
 
-    pub async fn get_linked_project(&self) -> Result<RailwayProject> {
+    pub async fn get_linked_project(&self) -> Result<LinkedProject> {
         if Self::get_railway_token().is_some() {
             let vars = queries::project_token::Variables {};
             let client = GQLClient::new_authorized(self)?;
@@ -178,7 +178,7 @@ impl Configs {
 
             let data = res.data.context("Invalid project token!")?;
 
-            let project = RailwayProject {
+            let project = LinkedProject {
                 project_path: self.get_current_directory()?,
                 name: Some(data.project_token.project.name),
                 project: data.project_token.project.id,
@@ -197,7 +197,7 @@ impl Configs {
         Ok(project.clone())
     }
 
-    pub fn get_linked_project_mut(&mut self) -> Result<&mut RailwayProject> {
+    pub fn get_linked_project_mut(&mut self) -> Result<&mut LinkedProject> {
         let path = self.get_closest_linked_project_directory()?;
         let project = self
             .root_config
@@ -215,7 +215,7 @@ impl Configs {
         environment_name: Option<String>,
     ) -> Result<()> {
         let path = self.get_current_directory()?;
-        let project = RailwayProject {
+        let project = LinkedProject {
             project_path: path.clone(),
             name,
             project: project_id,
@@ -233,7 +233,7 @@ impl Configs {
         Ok(())
     }
 
-    pub fn unlink_project(&mut self) -> Result<RailwayProject> {
+    pub fn unlink_project(&mut self) -> Result<LinkedProject> {
         let path = self.get_closest_linked_project_directory()?;
         let project = self
             .root_config

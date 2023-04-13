@@ -1,4 +1,4 @@
-use crate::{controllers::project::get_project};
+use crate::controllers::project::get_project;
 
 use super::*;
 
