@@ -1,4 +1,4 @@
-use crate::{commands::queries::User, controllers::user::get_user};
+use crate::{commands::queries::RailwayUser, controllers::user::get_user};
 use colored::*;
 
 use super::*;
@@ -11,7 +11,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let user: User = get_user(&client, &configs).await?;
+    let user: RailwayUser = get_user(&client, &configs).await?;
 
     if let Some(name) = user.name {
         println!(

@@ -4,7 +4,6 @@ use reqwest::{
     Client,
 };
 
-
 use crate::{commands::Environment, config::Configs, consts, errors::RailwayError};
 use anyhow::Result;
 

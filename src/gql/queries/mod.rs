@@ -10,6 +10,7 @@ type ServiceVariables = std::collections::BTreeMap<String, String>;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct Project;
+pub type RailwayProject = project::ProjectProject;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -26,7 +27,7 @@ pub struct Projects;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct UserMeta;
-pub type User = user_meta::UserMetaMe;
+pub type RailwayUser = user_meta::UserMetaMe;
 
 #[derive(GraphQLQuery)]
 #[graphql(
