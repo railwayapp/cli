@@ -1,6 +1,4 @@
 # Automatically update version in package.json on `cargo release`
-[pre-release-replacements]
-file = "package.json"
-search = "\"version\": \"{version}\""
-replace = "\"version\": \"{new_version}\""
-version = "{version}"
+pre-release-replacements = [
+  { file="package.json", search="\"version\": \".*\"", replace="\"version\": \"{new_version}\"" },
+]
