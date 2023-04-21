@@ -144,8 +144,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // this is for `rails c` and similar REPLs
     })?;
 
-    let slash_c = "/C".to_owned();
-    let mut args = args.args.iter().collect::<Vec<_>>();
+    let mut args = args.args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if args.is_empty() {
         bail!("No command provided");
     }
@@ -154,7 +153,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     match std::env::consts::OS {
         "windows" => {
-            args.insert(0, &slash_c);
+            args.insert(0, "/C");
             child_process_name = "cmd"
         }
         _ => {
