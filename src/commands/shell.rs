@@ -108,7 +108,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     async fn windows_shell_detection() -> Option<WindowsShell> {
         let (_, ppname) = get_parent_process_info()
             .context("Failed to get parent process info")
-            .unwrap();
+            .unwrap_or_else(|_| (0, "".to_string()));
 
         if ppname.contains("pwsh") {
             Some(WindowsShell::Powershell7)
