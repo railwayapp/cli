@@ -4,7 +4,6 @@ use crate::consts::SERVICE_NOT_FOUND;
 
 use super::*;
 
-use serde_json::from_str;
 use winapi::shared::minwindef::DWORD;
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 use winapi::um::processthreadsapi::GetCurrentProcessId;
