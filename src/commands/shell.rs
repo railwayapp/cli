@@ -4,16 +4,24 @@ use crate::consts::SERVICE_NOT_FOUND;
 
 use super::*;
 
+/// winapi is only used on windows
+#[cfg(target_os = "windows")]
+extern crate winapi;
+#[cfg(target_os = "windows")]
 use winapi::shared::minwindef::DWORD;
+#[cfg(target_os = "windows")]
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+#[cfg(target_os = "windows")]
 use winapi::um::processthreadsapi::GetCurrentProcessId;
+#[cfg(target_os = "windows")]
 use winapi::um::tlhelp32::{
     CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
 };
 
-extern crate winapi;
-
+/// memory management helpers are also only used on windows
+#[cfg(target_os = "windows")]
 use std::ffi::CStr;
+#[cfg(target_os = "windows")]
 use std::mem::zeroed;
 
 /// Open a subshell with Railway variables available
@@ -85,6 +93,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         eprintln!("No service linked, skipping service variables");
     }
 
+    // disable dead code warning for windows_shell_detection
+    #[allow(dead_code)]
     enum WindowsShell {
         Cmd,
         Powershell,
@@ -94,6 +104,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     /// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
     /// Only matches cmd, powershell or pwsh for safety
     /// defaults to cmd if no parent process is found
+    #[cfg(target_os = "windows")]
     async fn windows_shell_detection() -> Option<WindowsShell> {
         let (_, ppname) = get_parent_process_info()
             .context("Failed to get parent process info")
@@ -106,6 +117,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         } else {
             Some(WindowsShell::Cmd)
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    async fn windows_shell_detection() -> Option<WindowsShell> {
+        None
     }
 
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
@@ -142,6 +158,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
 /// get the parent process info, translated from
 // https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
+#[cfg(target_os = "windows")]
 fn get_parent_process_info() -> Option<(DWORD, String)> {
     let mut pe32: PROCESSENTRY32 = unsafe { zeroed() };
     let pid = unsafe { GetCurrentProcessId() };
@@ -179,6 +196,8 @@ fn get_parent_process_info() -> Option<(DWORD, String)> {
         None
     }
 }
+
+#[cfg(target_os = "windows")]
 fn get_process_name(pid: DWORD) -> Option<String> {
     let mut pe32: PROCESSENTRY32 = unsafe { zeroed() };
     let h_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
