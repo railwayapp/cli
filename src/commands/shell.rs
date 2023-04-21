@@ -103,8 +103,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .unwrap()
             .to_string();
 
-        dbg!(&current_process);
-
         let pids = current_process.split_whitespace().collect::<Vec<&str>>();
         let pids = pids
             .iter()
