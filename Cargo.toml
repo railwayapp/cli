@@ -67,3 +67,5 @@ is-terminal = "0.4.4"
 serde_with = "2.3.1"
 ctrlc = "3.2.5"
 which = "4.4.0"
+winapi = {version="0.3.9", features = ["minwindef", "tlhelp32", "processthreadsapi", "handleapi", "winerror"]}
+
