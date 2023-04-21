@@ -146,29 +146,41 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let exit_status: std::process::ExitStatus;
 
-    match std::env::consts::OS {
-        "windows" => {
-            exit_status = tokio::process::Command::new("cmd")
-                .arg("/C")
-                .args(args.args.iter())
-                .envs(variables)
-                .status()
-                .await
-                .context("Failed to spawn command")?;
-        }
-        _ => {
-            exit_status =
-                tokio::process::Command::new(args.args.first().context("No command provided")?)
-                    .args(args.args[1..].iter())
-                    .envs(variables)
-                    .status()
-                    .await
-                    .context("Failed to spawn command")?;
-        }
+    #[derive(Debug, PartialEq, Eq)]
+    enum OS {
+        Windows,
+        UnixBased,
     }
+
+    let operating_system = match std::env::consts::OS {
+        "windows" => OS::Windows,
+        _ => OS::UnixBased,
+    };
+
+    let mut command = tokio::process::Command::new(match operating_system {
+        OS::Windows => "cmd",
+        OS::UnixBased => args.args.first().context("No command provided")?,
+    });
+
+    let mut args = args.args.iter().collect::<Vec<_>>();
+    if args.is_empty() {
+        bail!("No command provided");
+    }
+
+    let slash_c = "/C".to_owned();
+    if operating_system == OS::Windows {
+        args.insert(0, &slash_c);
+    }
+
+    command.args(args);
+    command.envs(variables);
+
+    exit_status = command.status().await?;
 
     if exit_status.success() {
         println!("Looking good? Run `railway up` to deploy your changes!");
+    } else {
+        bail!("Something went wrong. Check the output above for more information.");
     }
 
     if let Some(code) = exit_status.code() {
