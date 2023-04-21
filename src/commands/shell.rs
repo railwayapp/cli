@@ -70,7 +70,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
         all_variables.append(&mut body.variables_for_service_deployment);
     } else {
-        eprintln!("No service linked, skipping service variables");
+        eprintln!("No service linked, not entering shell.");
+        return Ok(());
     }
 
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
