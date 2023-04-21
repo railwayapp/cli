@@ -144,43 +144,33 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // this is for `rails c` and similar REPLs
     })?;
 
-    let exit_status: std::process::ExitStatus;
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum OS {
-        Windows,
-        UnixBased,
-    }
-
-    let operating_system = match std::env::consts::OS {
-        "windows" => OS::Windows,
-        _ => OS::UnixBased,
-    };
-
-    let mut command = tokio::process::Command::new(match operating_system {
-        OS::Windows => "cmd",
-        OS::UnixBased => args.args.first().context("No command provided")?,
-    });
-
+    let slash_c = "/C".to_owned();
     let mut args = args.args.iter().collect::<Vec<_>>();
     if args.is_empty() {
         bail!("No command provided");
     }
 
-    let slash_c = "/C".to_owned();
-    if operating_system == OS::Windows {
-        args.insert(0, &slash_c);
+    let child_process_name: &str;
+
+    match std::env::consts::OS {
+        "windows" => {
+            args.insert(0, &slash_c);
+            child_process_name = "cmd"
+        }
+        _ => {
+            args.remove(0);
+            child_process_name = args.first().context("No command provided")?
+        }
     }
 
-    command.args(args);
-    command.envs(variables);
-
-    exit_status = command.status().await?;
+    let exit_status = tokio::process::Command::new(child_process_name)
+        .args(args)
+        .envs(variables)
+        .status()
+        .await?;
 
     if exit_status.success() {
         println!("Looking good? Run `railway up` to deploy your changes!");
-    } else {
-        bail!("Something went wrong. Check the output above for more information.");
     }
 
     if let Some(code) = exit_status.code() {
