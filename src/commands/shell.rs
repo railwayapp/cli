@@ -99,6 +99,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         Cmd,
         Powershell,
         Powershell7,
+        NuShell,
+        ElvSh,
     }
 
     /// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
@@ -106,16 +108,21 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     /// defaults to cmd if no parent process is found
     #[cfg(target_os = "windows")]
     async fn windows_shell_detection() -> Option<WindowsShell> {
-        let (_, ppname) = get_parent_process_info()
-            .context("Failed to get parent process info")
-            .unwrap_or_else(|_| (0, "".to_string()));
+        let (_, ppname) = unsafe {
+            get_parent_process_info()
+                .context("Failed to get parent process info")
+                .unwrap_or_else(|_| (0, "".to_string()))
+        };
 
-        if ppname.contains("pwsh") {
-            Some(WindowsShell::Powershell7)
-        } else if ppname.contains("powershell") {
-            Some(WindowsShell::Powershell)
-        } else {
-            Some(WindowsShell::Cmd)
+        let ppname = ppname.split(".").next().unwrap_or("cmd");
+
+        match ppname {
+            "cmd" => Some(WindowsShell::Cmd),
+            "powershell" => Some(WindowsShell::Powershell),
+            "pwsh" => Some(WindowsShell::Powershell7),
+            "nu" => Some(WindowsShell::NuShell),
+            "elvish" => Some(WindowsShell::ElvSh),
+            _ => None,
         }
     }
 
@@ -129,6 +136,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             Some(WindowsShell::Powershell) => "powershell".to_string(),
             Some(WindowsShell::Cmd) => "cmd".to_string(),
             Some(WindowsShell::Powershell7) => "pwsh".to_string(),
+            Some(WindowsShell::NuShell) => "nu".to_string(),
+            Some(WindowsShell::ElvSh) => "elvish".to_string(),
             None => "cmd".to_string(),
         },
         _ => "sh".to_string(),
@@ -159,7 +168,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 /// get the parent process info, translated from
 // https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
 #[cfg(target_os = "windows")]
-fn get_parent_process_info() -> Option<(DWORD, String)> {
+unsafe fn get_parent_process_info() -> Option<(DWORD, String)> {
     let mut pe32: PROCESSENTRY32 = unsafe { zeroed() };
     let pid = unsafe { GetCurrentProcessId() };
     let h_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
@@ -198,7 +207,7 @@ fn get_parent_process_info() -> Option<(DWORD, String)> {
 }
 
 #[cfg(target_os = "windows")]
-fn get_process_name(pid: DWORD) -> Option<String> {
+unsafe fn get_process_name(pid: DWORD) -> Option<String> {
     let mut pe32: PROCESSENTRY32 = unsafe { zeroed() };
     let h_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
 
