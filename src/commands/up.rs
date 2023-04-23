@@ -127,6 +127,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let mut builder = WalkBuilder::new(path);
         builder.add_custom_ignore_filename(".railwayignore");
         builder.add_custom_ignore_filename(".gitignore");
+
+        builder.add_ignore(".git/");
+
         let walker = builder.follow_links(true).hidden(false);
         let walked = walker.build().collect::<Vec<_>>();
         if let Some(spinner) = spinner {
