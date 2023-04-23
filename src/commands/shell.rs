@@ -108,13 +108,23 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     /// defaults to cmd if no parent process is found
     #[cfg(target_os = "windows")]
     async fn windows_shell_detection() -> Option<WindowsShell> {
-        let (_, ppname) = unsafe {
+        let (ppid, mut ppname) = unsafe {
             get_parent_process_info()
                 .context("Failed to get parent process info")
                 .unwrap_or_else(|_| (0, "".to_string()))
         };
 
+        if ppname == "node.exe" {
+            (_, ppname) = unsafe {
+                node_fix(ppid)
+                    .context("Failed to get parent process info")
+                    .unwrap_or_else(|_| (0, "".to_string()))
+            }
+        }
+
         let ppname = ppname.split(".").next().unwrap_or("cmd");
+
+        dbg!(ppname);
 
         match ppname {
             "cmd" => Some(WindowsShell::Cmd),
@@ -165,12 +175,65 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     Ok(())
 }
 
+unsafe fn node_fix(process_id: u32) -> Result<(u32, String)> {
+    dbg!("node_fix");
+    let (ppid, ppname) = unsafe {
+        get_parent_process_info_with_input(process_id)
+            .context("Failed to get parent process info")
+            .unwrap_or_else(|_| (0, "".to_string()))
+    };
+
+    if ppname == "node.exe" {
+        node_fix(ppid)
+    } else {
+        Ok((ppid, ppname))
+    }
+}
+
 /// get the parent process info, translated from
 // https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
 #[cfg(target_os = "windows")]
 unsafe fn get_parent_process_info() -> Option<(DWORD, String)> {
     let mut pe32: PROCESSENTRY32 = unsafe { zeroed() };
     let pid = unsafe { GetCurrentProcessId() };
+    let h_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    let mut ppid = 0;
+
+    if h_snapshot == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    pe32.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+    if unsafe { Process32First(h_snapshot, &mut pe32) } != 0 {
+        loop {
+            if pe32.th32ProcessID == pid {
+                ppid = pe32.th32ParentProcessID;
+                break;
+            }
+            if unsafe { Process32Next(h_snapshot, &mut pe32) } == 0 {
+                break;
+            }
+        }
+    }
+
+    let mut parent_process_name = None;
+    if ppid != 0 {
+        parent_process_name = get_process_name(ppid);
+    }
+
+    unsafe { CloseHandle(h_snapshot) };
+
+    if let Some(ppname) = parent_process_name {
+        Some((ppid, ppname))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn get_parent_process_info_with_input(pid: DWORD) -> Option<(DWORD, String)> {
+    let mut pe32: PROCESSENTRY32 = unsafe { zeroed() };
     let h_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     let mut ppid = 0;
 
