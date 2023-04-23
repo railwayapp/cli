@@ -12,8 +12,6 @@ use winapi::shared::minwindef::DWORD;
 #[cfg(target_os = "windows")]
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 #[cfg(target_os = "windows")]
-use winapi::um::processthreadsapi::GetCurrentProcessId;
-#[cfg(target_os = "windows")]
 use winapi::um::tlhelp32::{
     CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
 };
@@ -202,7 +200,7 @@ unsafe fn node_fix_recursive(process_id: DWORD, recursion: Option<u32>) -> Resul
 // https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
 #[cfg(target_os = "windows")]
 unsafe fn get_parent_process_info(pid: Option<DWORD>) -> Option<(DWORD, String)> {
-    let pid = pid.unwrap_or(unsafe { GetCurrentProcessId() });
+    let pid = pid.unwrap_or(std::process::id());
 
     let mut pe32: PROCESSENTRY32 = unsafe { zeroed() };
     let h_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
