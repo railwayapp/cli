@@ -175,6 +175,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
 unsafe fn node_fix(process_id: u32) -> Result<(u32, String)> {
     dbg!("node_fix");
     let (ppid, ppname) = unsafe {
