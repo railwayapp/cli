@@ -5,7 +5,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     commands::queries::user_projects::UserProjectsMeTeamsEdgesNode, consts::PROJECT_NOT_FOUND,
-    util::prompt::prompt_options,
+    controllers::project::get_project, util::prompt::prompt_options,
 };
 
 use super::{
@@ -35,15 +35,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     if let Some(project_id) = args.project_id {
-        let vars = queries::project::Variables { id: project_id };
-
-        let res =
-            post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-        let body = res.data.context(PROJECT_NOT_FOUND)?;
+        let project = get_project(&client, &configs, project_id.clone()).await?;
 
         let environment = if let Some(environment_name_or_id) = args.environment {
-            let environment = body
-                .project
+            let environment = project
                 .environments
                 .edges
                 .iter()
@@ -54,12 +49,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             ProjectEnvironment(&environment.node)
         } else if !std::io::stdout().is_terminal() {
             bail!("Environment must be provided when not running in a terminal");
-        } else if body.project.environments.edges.len() == 1 {
-            ProjectEnvironment(&body.project.environments.edges[0].node)
+        } else if project.environments.edges.len() == 1 {
+            ProjectEnvironment(&project.environments.edges[0].node)
         } else {
             prompt_options(
                 "Select an environment",
-                body.project
+                project
                     .environments
                     .edges
                     .iter()
@@ -69,8 +64,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         };
 
         configs.link_project(
-            body.project.id.clone(),
-            Some(body.project.name.clone()),
+            project.id.clone(),
+            Some(project.name.clone()),
             environment.0.id.clone(),
             Some(environment.0.name.clone()),
         )?;
