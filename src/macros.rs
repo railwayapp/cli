@@ -23,7 +23,7 @@ macro_rules! commands_enum {
     );
 }
 
-// Macro that bails if not running in a terminal
+/// Ensure running in a terminal or bail with the provided message
 #[macro_export]
 macro_rules! interact_or {
     ($message:expr) => {

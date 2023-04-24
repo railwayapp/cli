@@ -1,12 +1,14 @@
-name: Publish
+name: Publish to NPM
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_run:
+    workflows: [ "Release" ]
+    types:
+      - completed
 
 jobs:
-  publish_npm:
+  publish-npm:
+    if: github.event.workflow_run.conclusion == 'success'
     name: Publish to NPM
     runs-on: ubuntu-latest
 
@@ -16,7 +18,7 @@ jobs:
 
       - name: Set version
         id: vars
-        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+        run: echo "tag=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
 
       - name: Use Node.js 16
         uses: actions/setup-node@v1

@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
+    fs,
     fs::{create_dir_all, File},
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
 };
 
@@ -85,8 +86,6 @@ impl Configs {
                 root_config_path,
             };
 
-            config.write()?;
-
             return Ok(config);
         }
 
@@ -149,11 +148,10 @@ impl Configs {
     }
 
     pub fn get_closest_linked_project_directory(&self) -> Result<String> {
-        let current_dir = std::env::current_dir()?;
-        let path = current_dir
-            .to_str()
-            .context("Unable to get current working directory")?;
-        let mut current_path = PathBuf::from(path);
+        if Self::get_railway_token().is_some() {
+            return self.get_current_directory();
+        }
+        let mut current_path = std::env::current_dir()?;
         loop {
             let path = current_path
                 .to_str()
@@ -273,11 +271,30 @@ impl Configs {
     }
 
     pub fn write(&self) -> Result<()> {
-        create_dir_all(self.root_config_path.parent().unwrap())?;
-        let mut file = File::create(&self.root_config_path)?;
-        let serialized_config = serde_json::to_vec_pretty(&self.root_config)?;
-        file.write_all(serialized_config.as_slice())?;
-        file.sync_all()?;
+        let config_dir = self
+            .root_config_path
+            .parent()
+            .context("Failed to get parent directory")?;
+
+        // Ensure directory exists
+        create_dir_all(config_dir)?;
+
+        // Use temporary file to achieve atomic write:
+        //  1. Open file ~/railway/config.tmp
+        //  2. Serialize config to temporary file
+        //  3. Rename temporary file to ~/railway/config.json (atomic operation)
+        let tmp_file_path = self.root_config_path.with_extension("tmp");
+        let tmp_file = File::options()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_file_path)?;
+        serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
+        tmp_file.sync_all()?;
+
+        // Rename file to final destination to achieve atomic write
+        fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
+
         Ok(())
     }
 }

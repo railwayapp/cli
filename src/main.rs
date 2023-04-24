@@ -7,6 +7,7 @@ use commands::*;
 mod client;
 mod config;
 mod consts;
+mod controllers;
 mod gql;
 mod subscription;
 mod table;
@@ -33,9 +34,11 @@ pub struct Args {
 commands_enum!(
     add,
     completion,
+    connect,
     delete,
     domain,
     docs,
+    down,
     environment,
     init,
     link,
