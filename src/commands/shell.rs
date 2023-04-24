@@ -81,6 +81,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     println!("Entering subshell with Railway variables available. Type 'exit' to exit.");
 
+    // a bit janky :/
+    ctrlc::set_handler(move || {
+        // do nothing, we just want to ignore CTRL+C
+        // this is for `rails c` and similar REPLs
+    })?;
+
     tokio::process::Command::new(shell)
         .envs(all_variables)
         .spawn()
