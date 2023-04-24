@@ -117,18 +117,41 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         println!("Indexing...");
         None
     };
+
+    // Explanation for the below block
+    // arc is a reference counted pointer to a mutexed vector of bytes, which
+    // stores the actual tarball in memory.
+    //
+    // parz is a parallelized gzip writer, which writes to the arc (still in memory)
+    //
+    // archive is a tar archive builder, which writes to the parz writer `new(&mut parz)
+    //
+    // builder is a directory walker which returns an iterable that we loop over to add
+    // files to the tarball (archive)
+    //
+    // during the iteration of `builder`, we ignore all files that match the patterns found in
+    // .railwayignore
+    // .gitignore
+    // .git/**
+    // node_modules/**
     let bytes = Vec::<u8>::new();
     let arc = Arc::new(Mutex::new(bytes));
     let mut parz = ZBuilder::<Gzip, _>::new()
         .num_threads(num_cpus::get())
         .from_writer(SynchronizedWriter::new(arc.clone()));
+
+    // list of all paths to ignore by default
+    let ignore_paths = vec![".git", "node_modules"];
+    let ignore_paths: Vec<&std::ffi::OsStr> = ignore_paths
+        .iter()
+        .map(|s| std::ffi::OsStr::new(s))
+        .collect();
+
     {
         let mut archive = Builder::new(&mut parz);
         let mut builder = WalkBuilder::new(path);
         builder.add_custom_ignore_filename(".railwayignore");
         builder.add_custom_ignore_filename(".gitignore");
-
-        builder.add_ignore(".git/");
 
         let walker = builder.follow_links(true).hidden(false);
         let walked = walker.build().collect::<Vec<_>>();
@@ -136,6 +159,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             spinner.finish_with_message("Indexed");
         }
         if std::io::stdout().is_terminal() {
+            //#region
             let pg = ProgressBar::new(walked.len() as u64)
                 .with_style(
                     ProgressStyle::default_bar()
@@ -146,10 +170,17 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 .with_message("Compressing")
                 .with_finish(ProgressFinish::WithMessage("Compressed".into()));
             pg.enable_steady_tick(Duration::from_millis(100));
+            //#endregion
 
             for entry in walked.into_iter().progress_with(pg) {
                 let entry = entry?;
                 let path = entry.path();
+                if path
+                    .components()
+                    .any(|c| ignore_paths.contains(&c.as_os_str()))
+                {
+                    continue;
+                }
                 let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
                 archive.append_path_with_name(path, stripped)?;
             }
@@ -157,6 +188,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             for entry in walked.into_iter() {
                 let entry = entry?;
                 let path = entry.path();
+                if path
+                    .components()
+                    .any(|c| ignore_paths.contains(&c.as_os_str()))
+                {
+                    continue;
+                }
                 let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
                 archive.append_path_with_name(path, stripped)?;
             }
@@ -186,6 +223,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     };
 
     let body = arc.lock().unwrap().clone();
+
     let res = builder
         .header("Content-Type", "multipart/form-data")
         .body(body)
