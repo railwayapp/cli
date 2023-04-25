@@ -2,10 +2,10 @@ use anyhow::bail;
 use tokio::process::Command;
 use which::which;
 
-use crate::consts::PLUGIN_NOT_FOUND;
-use crate::controllers::project::get_project;
 use crate::controllers::variables::get_plugin_variables;
+use crate::controllers::{environment::get_matched_environment, project::get_project};
 use crate::util::prompt::{prompt_select, PromptPlugin};
+use crate::{consts::PLUGIN_NOT_FOUND, errors::RailwayError};
 
 use super::{queries::project::PluginType, *};
 
@@ -49,19 +49,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 .map(|p| PromptPlugin(&p.node))
                 .collect();
             if plugins.is_empty() {
-                bail!("No plugins found");
+                return Err(RailwayError::ProjectHasNoPlugins.into());
             }
-            prompt_select("Select a plugin", plugins).context("No")?.0
+            prompt_select("Select a plugin", plugins)
+                .context("No plugin selected")?
+                .0
         }
     };
 
-    let environment_id = project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.name == environment || env.node.id == environment)
-        .map(|env| env.node.id.to_owned())
-        .context("Environment not found")?;
+    let environment_id = get_matched_environment(&project, environment)?.id;
 
     let variables = get_plugin_variables(
         &client,

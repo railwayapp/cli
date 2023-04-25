@@ -12,8 +12,9 @@ use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{post_graphql, GQLClient},
+    client::{post_graphql_handle, GQLClient},
     commands::queries,
+    errors::RailwayError,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -173,10 +174,12 @@ impl Configs {
             let vars = queries::project_token::Variables {};
             let client = GQLClient::new_authorized(self)?;
 
-            let res = post_graphql::<queries::ProjectToken, _>(&client, self.get_backboard(), vars)
-                .await?;
-
-            let data = res.data.context("Invalid project token!")?;
+            let data = post_graphql_handle::<queries::ProjectToken, _>(
+                &client,
+                self.get_backboard(),
+                vars,
+            )
+            .await?;
 
             let project = LinkedProject {
                 project_path: self.get_current_directory()?,
@@ -188,23 +191,19 @@ impl Configs {
             };
             return Ok(project);
         }
+
         let path = self.get_closest_linked_project_directory()?;
-        let project = self
-            .root_config
-            .projects
-            .get(&path)
-            .context("Project not found! Run `railway link` to link to a project")?;
-        Ok(project.clone())
+        let project = self.root_config.projects.get(&path);
+
+        project.cloned()
+            .ok_or_else(|| RailwayError::ProjectNotFound.into())
     }
 
     pub fn get_linked_project_mut(&mut self) -> Result<&mut LinkedProject> {
         let path = self.get_closest_linked_project_directory()?;
-        let project = self
-            .root_config
-            .projects
-            .get_mut(&path)
-            .context("Project not found! Run `railway link` to link to a project")?;
-        Ok(project)
+        let project = self.root_config.projects.get_mut(&path);
+
+        project.ok_or_else(|| RailwayError::ProjectNotFound.into())
     }
 
     pub fn link_project(
@@ -233,14 +232,10 @@ impl Configs {
         Ok(())
     }
 
-    pub fn unlink_project(&mut self) -> Result<LinkedProject> {
-        let path = self.get_closest_linked_project_directory()?;
-        let project = self
-            .root_config
-            .projects
-            .remove(&path)
-            .context("Project not found! Run `railway link` to link to a project")?;
-        Ok(project)
+    pub fn unlink_project(&mut self) {
+        if let Ok(path) = self.get_closest_linked_project_directory() {
+            self.root_config.projects.remove(&path);
+        }
     }
 
     pub fn unlink_service(&mut self) -> Result<()> {

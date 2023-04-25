@@ -69,7 +69,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     if !confirmed {
         bail!(ABORTED_BY_USER);
     }
-    configs.unlink_project()?;
+
+    configs.unlink_project();
     configs.write()?;
     Ok(())
 }

@@ -3,10 +3,10 @@ use is_terminal::IsTerminal;
 
 use crate::{
     controllers::{
+        environment::get_matched_environment,
         project::get_project,
         variables::{get_all_plugin_variables, get_service_variables},
     },
-    errors::RailwayError,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -103,18 +103,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .clone()
         .unwrap_or(linked_project.environment.clone());
 
-    let environment_id = project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.name == environment || env.node.id == environment);
-
-    let environment_id = if let Some(environment_id) = environment_id {
-        environment_id.node.id.to_owned()
-    } else {
-        return Err(RailwayError::EnvironmentNotFound(environment).into());
-    };
-
+    let environment_id = get_matched_environment(&project, environment)?.id;
     let service = get_service_or_plugins(&configs, &project, args.service).await?;
 
     let variables = match service {
