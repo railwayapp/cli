@@ -66,7 +66,14 @@ async fn main() -> Result<()> {
     match Commands::exec(cli).await {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("{}", e);
+            // If the user cancels the operation, we want to exit successfully
+            // This can happen if Ctrl+C is pressed during a prompt
+            if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string()
+            {
+                return Ok(());
+            }
+
+            eprintln!("{:?}", e);
             std::process::exit(1);
         }
     }
