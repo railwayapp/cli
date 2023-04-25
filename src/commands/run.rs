@@ -149,7 +149,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         bail!("No command provided");
     }
 
-    // So the linter doesn't get mad. I think this is pretty ugly.
     let child_process_name = match std::env::consts::OS {
         "windows" => {
             args.insert(0, "/C");
