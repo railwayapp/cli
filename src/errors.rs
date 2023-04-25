@@ -28,18 +28,21 @@ pub enum RailwayError {
     NoServices,
 
     #[error(
-        "Environment \"{0}\" not found. Run `railway environment` to connect to an environment."
+        "Environment \"{0}\" not found.\nRun `railway environment` to connect to an environment."
     )]
     EnvironmentNotFound(String),
 
     #[error("Plugin \"{0}\" not found.")]
     PluginNotFound(String),
 
-    #[error("Service \"{0}\" not found. Run `railway service` to connect to a service.")]
+    #[error("Service \"{0}\" not found.\nRun `railway service` to connect to a service.")]
     ServiceNotFound(String),
 
-    #[error("Project has no plugins. Run `railway add` to add a plugin.")]
+    #[error("Project has no plugins.\nRun `railway add` to add a plugin.")]
     ProjectHasNoPlugins,
+
+    #[error("No service linked and no plugins found\nRun `railway service` to link a service")]
+    NoServiceLinked,
 
     #[error("2FA code is incorrect. Please try again.")]
     InvalidTwoFactorCode,

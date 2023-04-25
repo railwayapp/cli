@@ -2,10 +2,7 @@ use std::fmt::Display;
 
 use anyhow::bail;
 
-use crate::{
-    consts::NO_SERVICE_LINKED, controllers::project::get_project, errors::RailwayError,
-    table::Table,
-};
+use crate::{controllers::project::get_project, errors::RailwayError, table::Table};
 
 use super::{
     queries::project::{PluginType, ProjectProjectPluginsEdgesNode},
@@ -66,7 +63,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             service_name.node.name.clone(),
         )
     } else {
-        bail!(NO_SERVICE_LINKED);
+        return Err(RailwayError::NoServiceLinked.into());
     };
 
     let variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
