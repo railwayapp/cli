@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{consts::SERVICE_NOT_FOUND, controllers::project::get_project};
+use crate::{controllers::project::get_project, errors::RailwayError};
 
 use super::*;
 
@@ -46,7 +46,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .edges
             .iter()
             .find(|s| s.node.name == service || s.node.id == service)
-            .context(SERVICE_NOT_FOUND)?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
 
         let vars = queries::variables_for_service_deployment::Variables {
             environment_id: linked_project.environment.clone(),

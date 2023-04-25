@@ -3,8 +3,7 @@ use std::fmt::Display;
 use anyhow::bail;
 
 use crate::{
-    consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND},
-    controllers::project::get_project,
+    consts::NO_SERVICE_LINKED, controllers::project::get_project, errors::RailwayError,
     table::Table,
 };
 
@@ -42,7 +41,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             .edges
             .iter()
             .find(|edge| edge.node.id == *service || edge.node.name == *service)
-            .context(SERVICE_NOT_FOUND)?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(service.clone()))?;
         (
             queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),
@@ -57,7 +56,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             .edges
             .iter()
             .find(|edge| edge.node.id == *service)
-            .context(SERVICE_NOT_FOUND)?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(service.clone()))?;
         (
             queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),

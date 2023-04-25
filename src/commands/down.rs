@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use anyhow::bail;
-
 use crate::{consts::TICK_STRING, util::prompt::prompt_confirm_with_default};
 
 use super::*;

@@ -4,8 +4,8 @@ use which::which;
 
 use crate::controllers::variables::get_plugin_variables;
 use crate::controllers::{environment::get_matched_environment, project::get_project};
+use crate::errors::RailwayError;
 use crate::util::prompt::{prompt_select, PromptPlugin};
-use crate::{consts::PLUGIN_NOT_FOUND, errors::RailwayError};
 
 use super::{queries::project::PluginType, *};
 
@@ -38,7 +38,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 .edges
                 .iter()
                 .find(|edge| edge.node.friendly_name == name)
-                .context(PLUGIN_NOT_FOUND)?
+                .ok_or_else(|| RailwayError::PluginNotFound(name))?
                 .node
         }
         None => {

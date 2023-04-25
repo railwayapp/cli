@@ -27,11 +27,16 @@ pub enum RailwayError {
     #[error("Project does not have any services")]
     NoServices,
 
-    #[error("Environment {0} not found. Run `railway environment` to connect to an environment.")]
+    #[error(
+        "Environment \"{0}\" not found. Run `railway environment` to connect to an environment."
+    )]
     EnvironmentNotFound(String),
 
-    #[error("Plugin {0} not found.")]
+    #[error("Plugin \"{0}\" not found.")]
     PluginNotFound(String),
+
+    #[error("Service \"{0}\" not found. Run `railway service` to connect to a service.")]
+    ServiceNotFound(String),
 
     #[error("Project has no plugins. Run `railway add` to add a plugin.")]
     ProjectHasNoPlugins,

@@ -1,8 +1,8 @@
 use anyhow::bail;
 
 use crate::{
-    consts::SERVICE_NOT_FOUND,
     controllers::project::get_project,
+    errors::RailwayError,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -32,7 +32,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let service = services
             .iter()
             .find(|s| s.0.id == service || s.0.name == service)
-            .context(SERVICE_NOT_FOUND)?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
 
         configs.link_service(service.0.id.clone())?;
         configs.write()?;
