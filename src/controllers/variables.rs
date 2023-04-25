@@ -2,7 +2,7 @@ use crate::{
     client::post_graphql,
     commands::{queries, Configs},
 };
-use anyhow::{Result};
+use anyhow::Result;
 use reqwest::Client;
 use std::collections::BTreeMap;
 
