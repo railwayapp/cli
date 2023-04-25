@@ -18,6 +18,7 @@ use tar::Builder;
 use crate::{
     consts::TICK_STRING,
     controllers::project::get_project,
+    errors::RailwayError,
     subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
 };
@@ -219,8 +220,22 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .header("Content-Type", "multipart/form-data")
         .body(body)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+
+    let status = res.status();
+    if status != 200 {
+        if let Some(spinner) = spinner {
+            spinner.finish_with_message("Failed");
+        }
+
+        // If a user error, parse the response
+        if status == 400 {
+            let body = res.json::<UpErrorResponse>().await?;
+            return Err(RailwayError::FailedToUpload(body.message).into());
+        }
+
+        return Err(RailwayError::FailedToUpload("Failed to upload code".to_string()).into());
+    }
 
     let body = res.json::<UpResponse>().await?;
     if let Some(spinner) = spinner {
@@ -276,4 +291,9 @@ pub struct UpResponse {
     pub url: String,
     pub logs_url: String,
     pub deployment_domain: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpErrorResponse {
+    pub message: String,
 }

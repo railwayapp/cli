@@ -49,4 +49,7 @@ pub enum RailwayError {
 
     #[error("No command provided. Run with `railway run <cmd>`")]
     NoCommandProvided,
+
+    #[error("{0}")]
+    FailedToUpload(String),
 }
