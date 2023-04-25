@@ -20,12 +20,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let environments: Vec<_> = project
+    let environments = project
         .environments
         .edges
         .iter()
         .map(|env| Environment(&env.node))
-        .collect();
+        .collect::<Vec<_>>();
 
     let environment = match args.environment {
         // If the environment is specified, find it in the list of environments
@@ -54,11 +54,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
     };
 
+    let environment_name = environment.0.name.clone();
+    println!("Activated environment {}", environment_name.purple().bold());
+
     configs.link_project(
         linked_project.project.clone(),
         linked_project.name.clone(),
         environment.0.id.clone(),
-        Some(environment.0.name.clone()),
+        Some(environment_name),
     )?;
     configs.write()?;
     Ok(())

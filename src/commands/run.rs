@@ -7,6 +7,7 @@ use crate::{
         project::get_project,
         variables::{get_all_plugin_variables, get_service_variables},
     },
+    errors::RailwayError,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -138,7 +139,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let mut args = args.args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if args.is_empty() {
-        bail!("No command provided");
+        return Err(RailwayError::NoCommandProvided.into());
     }
 
     let child_process_name = match std::env::consts::OS {

@@ -46,4 +46,7 @@ pub enum RailwayError {
 
     #[error("2FA code is incorrect. Please try again.")]
     InvalidTwoFactorCode,
+
+    #[error("No command provided. Run with `railway run <cmd>`")]
+    NoCommandProvided,
 }
