@@ -142,10 +142,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     // list of all paths to ignore by default
     let ignore_paths = vec![".git", "node_modules"];
-    let ignore_paths: Vec<&std::ffi::OsStr> = ignore_paths
-        .iter()
-        .map(|s| std::ffi::OsStr::new(s))
-        .collect();
+    let ignore_paths: Vec<&std::ffi::OsStr> =
+        ignore_paths.iter().map(std::ffi::OsStr::new).collect();
 
     {
         let mut archive = Builder::new(&mut parz);
@@ -159,7 +157,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             spinner.finish_with_message("Indexed");
         }
         if std::io::stdout().is_terminal() {
-            //#region
             let pg = ProgressBar::new(walked.len() as u64)
                 .with_style(
                     ProgressStyle::default_bar()
@@ -170,7 +167,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 .with_message("Compressing")
                 .with_finish(ProgressFinish::WithMessage("Compressed".into()));
             pg.enable_steady_tick(Duration::from_millis(100));
-            //#endregion
 
             for entry in walked.into_iter().progress_with(pg) {
                 let entry = entry?;
