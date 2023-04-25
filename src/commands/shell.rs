@@ -91,54 +91,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         eprintln!("No service linked, skipping service variables");
     }
 
-    // disable dead code warning for windows_shell_detection
-    #[allow(dead_code)]
-    enum WindowsShell {
-        Cmd,
-        Powershell,
-        Powershell7,
-        NuShell,
-        ElvSh,
-    }
-
-    /// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
-    /// defaults to cmd if no parent process is found
-    #[cfg(target_os = "windows")]
-    async fn windows_shell_detection() -> Option<WindowsShell> {
-        let (ppid, mut ppname) = unsafe {
-            get_parent_process_info(None)
-                .context("Failed to get parent process info")
-                .unwrap_or_else(|_| (0, "".to_string()))
-        };
-
-        if ppname == "node.exe" {
-            (_, ppname) = unsafe {
-                node_fix_recursive(ppid, None)
-                    .context("Failed to get parent process info")
-                    // acceptable return because if it fails it will default to cmd
-                    .unwrap_or_else(|_| (0, "".to_string()))
-            }
-        }
-
-        let ppname = ppname.split(".").next().unwrap_or("cmd");
-
-        dbg!(ppname);
-
-        match ppname {
-            "cmd" => Some(WindowsShell::Cmd),
-            "powershell" => Some(WindowsShell::Powershell),
-            "pwsh" => Some(WindowsShell::Powershell7),
-            "nu" => Some(WindowsShell::NuShell),
-            "elvish" => Some(WindowsShell::ElvSh),
-            _ => Some(WindowsShell::Cmd),
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    async fn windows_shell_detection() -> Option<WindowsShell> {
-        None
-    }
-
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
         "windows" => match windows_shell_detection().await {
             Some(WindowsShell::Powershell) => "powershell".to_string(),
@@ -193,6 +145,55 @@ unsafe fn node_fix_recursive(process_id: DWORD, recursion: Option<u32>) -> Resul
     } else {
         Ok((ppid, ppname))
     }
+}
+
+// disable dead code warning for windows_shell_detection
+#[allow(dead_code)]
+enum WindowsShell {
+    Cmd,
+    Powershell,
+    Powershell7,
+    NuShell,
+    ElvSh,
+}
+
+/// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
+///
+/// defaults to cmd if no parent process is found
+#[cfg(target_os = "windows")]
+async fn windows_shell_detection() -> Option<WindowsShell> {
+    let (ppid, mut ppname) = unsafe {
+        get_parent_process_info(None)
+            .context("Failed to get parent process info")
+            .unwrap_or_else(|_| (0, "".to_string()))
+    };
+
+    if ppname == "node.exe" {
+        (_, ppname) = unsafe {
+            node_fix_recursive(ppid, None)
+                .context("Failed to get parent process info")
+                // acceptable return because if it fails it will default to cmd
+                .unwrap_or_else(|_| (0, "".to_string()))
+        }
+    }
+
+    let ppname = ppname.split(".").next().unwrap_or("cmd");
+
+    dbg!(ppname);
+
+    match ppname {
+        "cmd" => Some(WindowsShell::Cmd),
+        "powershell" => Some(WindowsShell::Powershell),
+        "pwsh" => Some(WindowsShell::Powershell7),
+        "nu" => Some(WindowsShell::NuShell),
+        "elvish" => Some(WindowsShell::ElvSh),
+        _ => Some(WindowsShell::Cmd),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn windows_shell_detection() -> Option<WindowsShell> {
+    None
 }
 
 /// get the parent process info, translated from
