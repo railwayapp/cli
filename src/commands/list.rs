@@ -17,12 +17,11 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await.ok();
 
     let vars = queries::user_projects::Variables {};
-    let res =
-        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get user (query me)")?;
+    let me = post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars)
+        .await?
+        .me;
 
-    let mut personal_projects: Vec<_> = body
-        .me
+    let mut personal_projects: Vec<_> = me
         .projects
         .edges
         .iter()
@@ -36,7 +35,7 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
         .map(|project| Project::Me((*project).clone()))
         .collect();
 
-    let teams: Vec<_> = body.me.teams.edges.iter().map(|team| &team.node).collect();
+    let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
     if !json {
         println!("{}", "Personal".bold());
         for project in &personal_projects {
@@ -61,16 +60,12 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
                 team_id: Some(team.id.clone()),
             };
 
-            let res = post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
-                .await?;
+            let projects =
+                post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
+                    .await?
+                    .projects;
 
-            let body = res.data.context("Failed to retrieve response body")?;
-            let mut projects: Vec<_> = body
-                .projects
-                .edges
-                .iter()
-                .map(|project| &project.node)
-                .collect();
+            let mut projects: Vec<_> = projects.edges.iter().map(|project| &project.node).collect();
             projects.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
             let mut team_projects: Vec<_> = projects
                 .iter()

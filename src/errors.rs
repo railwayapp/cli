@@ -27,6 +27,9 @@ pub enum RailwayError {
     #[error("Environment {0} not found. Run `railway environment` to connect to an environment.")]
     EnvironmentNotFound(String),
 
+    #[error("Plugin {0} not found.")]
+    PluginNotFound(String),
+
     #[error("Project has no plugins. Run `railway add` to add a plugin.")]
     ProjectHasNoPlugins,
 }

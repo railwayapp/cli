@@ -44,14 +44,11 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         service_id: service.clone(),
     };
 
-    let res = post_graphql::<queries::Domains, _>(&client, configs.get_backboard(), vars).await?;
+    let domains = post_graphql::<queries::Domains, _>(&client, configs.get_backboard(), vars)
+        .await?
+        .domains;
 
-    let body = res
-        .data
-        .context("Failed to retrieve to get domains for service.")?;
-
-    let domain = body.domains;
-    if !(domain.service_domains.is_empty() || domain.custom_domains.is_empty()) {
+    if !(domains.service_domains.is_empty() || domains.custom_domains.is_empty()) {
         bail!("Domain already exists on service");
     }
 
@@ -70,15 +67,14 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
             .with_message("Creating domain...");
         spinner.enable_steady_tick(Duration::from_millis(100));
 
-        let res = post_graphql::<mutations::ServiceDomainCreate, _>(
+        let domain = post_graphql::<mutations::ServiceDomainCreate, _>(
             &client,
             configs.get_backboard(),
             vars,
         )
-        .await?;
-
-        let body = res.data.context("Failed to create service domain.")?;
-        let domain = body.service_domain_create.domain;
+        .await?
+        .service_domain_create
+        .domain;
 
         spinner.finish_and_clear();
 
@@ -86,15 +82,14 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     } else {
         println!("Creating domain...");
 
-        let res = post_graphql::<mutations::ServiceDomainCreate, _>(
+        let domain = post_graphql::<mutations::ServiceDomainCreate, _>(
             &client,
             configs.get_backboard(),
             vars,
         )
-        .await?;
-
-        let body = res.data.context("Failed to create service domain.")?;
-        let domain = body.service_domain_create.domain;
+        .await?
+        .service_domain_create
+        .domain;
 
         println!("Service Domain created: {}", domain.bold());
     }

@@ -40,14 +40,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         project_id: linked_project.project.clone(),
     };
 
-    let res =
-        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars).await?;
+    let deployments =
+        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
+            .await?
+            .project
+            .deployments;
 
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    let mut deployments: Vec<_> = body
-        .project
-        .deployments
+    let mut deployments: Vec<_> = deployments
         .edges
         .into_iter()
         .map(|deployment| deployment.node)

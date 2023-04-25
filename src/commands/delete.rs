@@ -6,6 +6,7 @@ use is_terminal::IsTerminal;
 use crate::{
     consts::{ABORTED_BY_USER, TICK_STRING},
     controllers::project::get_project,
+    errors::RailwayError,
     interact_or,
     util::prompt::{prompt_confirm, prompt_multi_options, prompt_text},
 };
@@ -27,9 +28,10 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let is_two_factor_enabled = {
         let vars = queries::two_factor_info::Variables {};
 
-        let res = post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-            .await?;
-        let info = res.data.context("No data")?.two_factor_info;
+        let info =
+            post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
+                .await?
+                .two_factor_info;
 
         info.is_verified
     };
@@ -38,10 +40,10 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
 
-        let res =
+        let valid =
             post_graphql::<mutations::ValidateTwoFactor, _>(&client, configs.get_backboard(), vars)
-                .await?;
-        let valid = res.data.context("No data")?.two_factor_info_validate;
+                .await?
+                .two_factor_info_validate;
 
         if !valid {
             bail!("Invalid 2FA code");
@@ -58,7 +60,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         let id = nodes
             .iter()
             .find(|p| p.node.name.to_string() == plugin)
-            .context("Plugin not found")?
+            .ok_or_else(|| RailwayError::PluginNotFound(plugin.clone()))?
             .node
             .id
             .clone();

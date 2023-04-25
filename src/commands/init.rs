@@ -18,11 +18,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     let vars = queries::user_projects::Variables {};
-    let res =
-        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get user (query me)")?;
+    let me = post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars)
+        .await?
+        .me;
 
-    let teams: Vec<_> = body.me.teams.edges.iter().map(|team| &team.node).collect();
+    let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
     let team_names = get_team_names(teams);
     let team = prompt_team(team_names)?;
 
@@ -41,14 +41,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         description: None,
         team_id,
     };
-    let res =
-        post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res
-        .data
-        .context("Failed to create project (mutation projectCreate)")?;
+    let project_create =
+        post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
+            .await?
+            .project_create;
 
-    let environment = body
-        .project_create
+    let environment = project_create
         .environments
         .edges
         .first()
@@ -57,8 +55,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .clone();
 
     configs.link_project(
-        body.project_create.id.clone(),
-        Some(body.project_create.name.clone()),
+        project_create.id.clone(),
+        Some(project_create.name.clone()),
         environment.id,
         Some(environment.name),
     )?;
@@ -67,7 +65,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     println!(
         "{} {} on {}",
         "Created project".green().bold(),
-        body.project_create.name.bold(),
+        project_create.name.bold(),
         team
     );
 
@@ -76,7 +74,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         format!(
             "https://{}/project/{}",
             configs.get_host(),
-            body.project_create.id
+            project_create.id
         )
         .bold()
         .underline()

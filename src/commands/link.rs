@@ -76,12 +76,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     let vars = queries::user_projects::Variables {};
-    let res =
-        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to retrieve response body")?;
+    let me = post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars)
+        .await?
+        .me;
 
-    let mut personal_projects: Vec<_> = body
-        .me
+    let mut personal_projects: Vec<_> = me
         .projects
         .edges
         .iter()
@@ -94,7 +93,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .map(|project| PersonalProject(project))
         .collect::<Vec<_>>();
 
-    let teams: Vec<_> = body.me.teams.edges.iter().map(|team| &team.node).collect();
+    let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
 
     if teams.is_empty() {
         let (project, environment) = prompt_personal_projects(personal_project_names)?;
@@ -130,16 +129,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 team_id: Some(team.id.clone()),
             };
 
-            let res = post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
-                .await?;
+            let projects =
+                post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
+                    .await?
+                    .projects;
 
-            let body = res.data.context("Failed to retrieve response body")?;
-            let mut projects: Vec<_> = body
-                .projects
-                .edges
-                .iter()
-                .map(|project| &project.node)
-                .collect();
+            let mut projects: Vec<_> = projects.edges.iter().map(|project| &project.node).collect();
             projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
             let project_names = projects

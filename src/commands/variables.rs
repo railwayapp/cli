@@ -70,36 +70,32 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         bail!(NO_SERVICE_LINKED);
     };
 
-    let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+    let variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
         &client,
         configs.get_backboard(),
         vars,
     )
-    .await?;
+    .await?
+    .variables_for_service_deployment;
 
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    if body.variables_for_service_deployment.is_empty() {
+    if variables.is_empty() {
         eprintln!("No variables found");
         return Ok(());
     }
 
     if args.kv {
-        for (key, value) in body.variables_for_service_deployment {
+        for (key, value) in variables {
             println!("{}={}", key, value);
         }
         return Ok(());
     }
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&body.variables_for_service_deployment)?
-        );
+        println!("{}", serde_json::to_string_pretty(&variables)?);
         return Ok(());
     }
 
-    let table = Table::new(name, body.variables_for_service_deployment);
+    let table = Table::new(name, variables);
     table.print()?;
 
     Ok(())

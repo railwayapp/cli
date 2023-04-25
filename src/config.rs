@@ -12,7 +12,7 @@ use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{post_graphql_handle, GQLClient},
+    client::{post_graphql, GQLClient},
     commands::queries,
     errors::RailwayError,
 };
@@ -174,12 +174,9 @@ impl Configs {
             let vars = queries::project_token::Variables {};
             let client = GQLClient::new_authorized(self)?;
 
-            let data = post_graphql_handle::<queries::ProjectToken, _>(
-                &client,
-                self.get_backboard(),
-                vars,
-            )
-            .await?;
+            let data =
+                post_graphql::<queries::ProjectToken, _>(&client, self.get_backboard(), vars)
+                    .await?;
 
             let project = LinkedProject {
                 project_path: self.get_current_directory()?,
@@ -195,7 +192,8 @@ impl Configs {
         let path = self.get_closest_linked_project_directory()?;
         let project = self.root_config.projects.get(&path);
 
-        project.cloned()
+        project
+            .cloned()
             .ok_or_else(|| RailwayError::ProjectNotFound.into())
     }
 

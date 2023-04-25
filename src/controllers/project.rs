@@ -1,7 +1,7 @@
 use reqwest::Client;
 
 use crate::{
-    client::post_graphql_handle,
+    client::post_graphql,
     commands::{
         queries::{self},
         Configs,
@@ -17,19 +17,18 @@ pub async fn get_project(
 ) -> Result<queries::RailwayProject, RailwayError> {
     let vars = queries::project::Variables { id: project_id };
 
-    let project =
-        post_graphql_handle::<queries::Project, _>(client, configs.get_backboard(), vars)
-            .await
-            .map_err(|e| {
-                if let RailwayError::GraphQLError(msg) = &e {
-                    if msg.contains("Project not found") {
-                        return RailwayError::ProjectNotFound;
-                    }
+    let project = post_graphql::<queries::Project, _>(client, configs.get_backboard(), vars)
+        .await
+        .map_err(|e| {
+            if let RailwayError::GraphQLError(msg) = &e {
+                if msg.contains("Project not found") {
+                    return RailwayError::ProjectNotFound;
                 }
+            }
 
-                e
-            })?
-            .project;
+            e
+        })?
+        .project;
 
     Ok(project)
 }

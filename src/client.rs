@@ -60,7 +60,7 @@ impl GQLClient {
     }
 }
 
-pub async fn post_graphql_handle<Q: GraphQLQuery, U: reqwest::IntoUrl>(
+pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     client: &reqwest::Client,
     url: U,
     variables: Q::Variables,
@@ -83,13 +83,13 @@ pub async fn post_graphql_handle<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     }
 }
 
-pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
-    client: &reqwest::Client,
-    url: U,
-    variables: Q::Variables,
-) -> Result<GraphQLResponse<Q::ResponseData>, reqwest::Error> {
-    let body = Q::build_query(variables);
-    let res = client.post(url).json(&body).send().await?;
+// pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
+//     client: &reqwest::Client,
+//     url: U,
+//     variables: Q::Variables,
+// ) -> Result<GraphQLResponse<Q::ResponseData>, reqwest::Error> {
+//     let body = Q::build_query(variables);
+//     let res = client.post(url).json(&body).send().await?;
 
-    res.json().await
-}
+//     res.json().await
+// }
