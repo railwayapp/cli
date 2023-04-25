@@ -32,14 +32,6 @@ pub type RailwayUser = user_meta::UserMetaMe;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.graphql",
-    query_path = "src/gql/queries/strings/ProjectPlugins.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct ProjectPlugins;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.graphql",
     query_path = "src/gql/queries/strings/TwoFactorInfo.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

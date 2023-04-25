@@ -20,4 +20,10 @@ pub enum RailwayError {
 
     #[error("Project not found. Run `railway link` to connect to a project.")]
     ProjectNotFound,
+
+    #[error("Project does not have any services")]
+    NoServices,
+
+    #[error("Environment {0} not found. Run `railway environment` to connect to an environment.")]
+    EnvironmentNotFound(String),
 }

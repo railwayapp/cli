@@ -5,11 +5,12 @@ use is_terminal::IsTerminal;
 
 use crate::{
     consts::{ABORTED_BY_USER, TICK_STRING},
+    controllers::project::get_project,
     interact_or,
     util::prompt::{prompt_confirm, prompt_multi_options, prompt_text},
 };
 
-use super::{queries::project_plugins::PluginType, *};
+use super::*;
 
 /// Delete plugins from a project
 #[derive(Parser)]
@@ -47,25 +48,16 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         }
     }
 
-    let vars = queries::project_plugins::Variables {
-        id: linked_project.project.clone(),
-    };
+    let project = get_project(&client, &configs, linked_project.project).await?;
 
-    let res =
-        post_graphql::<queries::ProjectPlugins, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
-    let nodes = body.project.plugins.edges;
-    let project_plugins: Vec<_> = nodes
-        .iter()
-        .map(|p| plugin_enum_to_string(&p.node.name))
-        .collect();
+    let nodes = project.plugins.edges;
+    let project_plugins: Vec<_> = nodes.iter().map(|p| p.node.name.to_string()).collect();
     let selected = prompt_multi_options("Select plugins to delete", project_plugins)?;
 
     for plugin in selected {
         let id = nodes
             .iter()
-            .find(|p| plugin_enum_to_string(&p.node.name) == plugin)
+            .find(|p| p.node.name.to_string() == plugin)
             .context("Plugin not found")?
             .node
             .id
@@ -94,14 +86,4 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         spinner.finish_with_message(format!("Deleted {plugin}"));
     }
     Ok(())
-}
-
-fn plugin_enum_to_string(plugin: &PluginType) -> String {
-    match plugin {
-        PluginType::postgresql => "PostgreSQL".to_owned(),
-        PluginType::mysql => "MySQL".to_owned(),
-        PluginType::redis => "Redis".to_owned(),
-        PluginType::mongodb => "MongoDB".to_owned(),
-        PluginType::Other(other) => other.to_owned(),
-    }
 }

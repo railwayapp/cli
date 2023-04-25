@@ -2,7 +2,11 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    controllers::variables::{get_all_plugin_variables, get_service_variables},
+    controllers::{
+        project::get_project,
+        variables::{get_all_plugin_variables, get_service_variables},
+    },
+    errors::RailwayError,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -92,27 +96,26 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get project (query project)")?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
     let environment = args
         .environment
         .clone()
         .unwrap_or(linked_project.environment.clone());
 
-    let environment_id = body
-        .project
+    let environment_id = project
         .environments
         .edges
         .iter()
-        .find(|env| env.node.name == environment || env.node.id == environment)
-        .map(|env| env.node.id.to_owned())
-        .context("Environment not found")?;
+        .find(|env| env.node.name == environment || env.node.id == environment);
 
-    let service = get_service_or_plugins(&configs, &body.project, args.service).await?;
+    let environment_id = if let Some(environment_id) = environment_id {
+        environment_id.node.id.to_owned()
+    } else {
+        return Err(RailwayError::EnvironmentNotFound(environment).into());
+    };
+
+    let service = get_service_or_plugins(&configs, &project, args.service).await?;
 
     let variables = match service {
         ServiceOrPlugins::Service(service_id) => {

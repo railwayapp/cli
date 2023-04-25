@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::consts::SERVICE_NOT_FOUND;
+use crate::{consts::SERVICE_NOT_FOUND, controllers::project::get_project};
 
 use super::*;
 
@@ -17,19 +17,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
     let mut all_variables = BTreeMap::<String, String>::new();
     all_variables.insert("IN_RAILWAY_SHELL".to_owned(), "true".to_owned());
 
     if let Some(service) = args.service {
-        let service_id = body
-            .project
+        let service_id = project
             .services
             .edges
             .iter()

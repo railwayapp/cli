@@ -3,7 +3,7 @@ use std::fmt::Display;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::{interact_or, util::prompt::prompt_options};
+use crate::{controllers::project::get_project, interact_or, util::prompt::prompt_options};
 
 use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
 
@@ -19,16 +19,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res
-        .data
-        .context("Failed to get environments (query project)")?;
-
-    let environments: Vec<_> = body
-        .project
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let environments: Vec<_> = project
         .environments
         .edges
         .iter()

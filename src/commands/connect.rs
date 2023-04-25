@@ -2,12 +2,12 @@ use anyhow::bail;
 use tokio::process::Command;
 use which::which;
 
-use crate::commands::queries::project_plugins::PluginType;
 use crate::consts::PLUGIN_NOT_FOUND;
+use crate::controllers::project::get_project;
 use crate::controllers::variables::get_plugin_variables;
 use crate::util::prompt::{prompt_select, PromptPlugin};
 
-use super::*;
+use super::{queries::project::PluginType, *};
 
 /// Change the active environment
 #[derive(Parser)]
@@ -29,17 +29,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .clone()
         .unwrap_or(linked_project.environment.clone());
 
-    let vars = queries::project_plugins::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res =
-        post_graphql::<queries::ProjectPlugins, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to retrieve response body")?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
     let plugin = match args.plugin_name {
         Some(name) => {
-            &body
-                .project
+            &project
                 .plugins
                 .edges
                 .iter()
@@ -48,8 +42,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 .node
         }
         None => {
-            let plugins: Vec<_> = body
-                .project
+            let plugins: Vec<_> = project
                 .plugins
                 .edges
                 .iter()
@@ -62,13 +55,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
     };
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get project (query project)")?;
-    let environment_id = body
-        .project
+    let environment_id = project
         .environments
         .edges
         .iter()

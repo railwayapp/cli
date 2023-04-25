@@ -4,6 +4,7 @@ use anyhow::bail;
 
 use crate::{
     consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND},
+    controllers::project::get_project,
     table::Table,
 };
 
@@ -29,17 +30,14 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
+    let _vars = queries::project::Variables {
         id: linked_project.project.to_owned(),
     };
 
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
     let (vars, name) = if let Some(ref service) = args.service {
-        let service_name = body
-            .project
+        let service_name = project
             .services
             .edges
             .iter()
@@ -54,8 +52,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             service_name.node.name.clone(),
         )
     } else if let Some(ref service) = linked_project.service {
-        let service_name = body
-            .project
+        let service_name = project
             .services
             .edges
             .iter()

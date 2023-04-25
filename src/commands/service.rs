@@ -2,6 +2,7 @@ use anyhow::bail;
 
 use crate::{
     consts::SERVICE_NOT_FOUND,
+    controllers::project::get_project,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -18,17 +19,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    let services: Vec<_> = body
-        .project
+    let services: Vec<_> = project
         .services
         .edges
         .iter()

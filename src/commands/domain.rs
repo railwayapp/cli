@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::consts::TICK_STRING;
+use crate::{consts::TICK_STRING, controllers::project::get_project, errors::RailwayError};
 
 use super::*;
 
@@ -18,32 +18,20 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    if body.project.services.edges.is_empty() {
-        bail!("No services found for project");
+    if project.services.edges.is_empty() {
+        return Err(RailwayError::NoServices.into());
     }
 
     // If there is only one service, it will generate a domain for that service
-    let service = if body.project.services.edges.len() == 1 {
-        body.project.services.edges[0].node.clone().id
+    let service = if project.services.edges.len() == 1 {
+        project.services.edges[0].node.clone().id
     } else {
         let Some(service) = linked_project.service.clone() else {
             bail!("No service linked. Run `railway service` to link to a service");
         };
-        if body
-            .project
-            .services
-            .edges
-            .iter()
-            .any(|s| s.node.id == service)
-        {
+        if project.services.edges.iter().any(|s| s.node.id == service) {
             service
         } else {
             bail!("Service not found! Run `railway service` to link to a service");

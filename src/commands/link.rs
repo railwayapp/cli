@@ -4,7 +4,7 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    commands::queries::user_projects::UserProjectsMeTeamsEdgesNode, consts::PROJECT_NOT_FOUND,
+    commands::queries::user_projects::UserProjectsMeTeamsEdgesNode,
     controllers::project::get_project, util::prompt::prompt_options,
 };
 

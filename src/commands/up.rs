@@ -17,6 +17,7 @@ use tar::Builder;
 
 use crate::{
     consts::TICK_STRING,
+    controllers::project::get_project,
     subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
 };
@@ -43,14 +44,8 @@ pub async fn get_service_to_deploy(
     service_arg: Option<String>,
 ) -> Result<Option<String>> {
     let linked_project = configs.get_linked_project().await?;
-
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get project (query project)")?;
-
-    let services = body.project.services.edges.iter().collect::<Vec<_>>();
+    let project = get_project(client, configs, linked_project.project.clone()).await?;
+    let services = project.services.edges.iter().collect::<Vec<_>>();
 
     let service = if let Some(service_arg) = service_arg {
         // If the user specified a service, use that
