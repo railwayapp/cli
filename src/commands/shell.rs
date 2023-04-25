@@ -102,7 +102,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     /// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
-    /// Only matches cmd, powershell or pwsh for safety
     /// defaults to cmd if no parent process is found
     #[cfg(target_os = "windows")]
     async fn windows_shell_detection() -> Option<WindowsShell> {
