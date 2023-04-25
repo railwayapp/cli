@@ -1,7 +1,5 @@
 use std::fmt::Display;
 
-
-
 use crate::{controllers::project::get_project, errors::RailwayError, table::Table};
 
 use super::{
