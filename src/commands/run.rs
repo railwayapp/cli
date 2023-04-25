@@ -144,13 +144,24 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // this is for `rails c` and similar REPLs
     })?;
 
-    let exit_status =
-        tokio::process::Command::new(args.args.first().context("No command provided")?)
-            .args(args.args[1..].iter())
-            .envs(variables)
-            .status()
-            .await
-            .context("Failed to spawn command")?;
+    let mut args = args.args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    if args.is_empty() {
+        bail!("No command provided");
+    }
+
+    let child_process_name = match std::env::consts::OS {
+        "windows" => {
+            args.insert(0, "/C");
+            "cmd"
+        }
+        _ => args.remove(0),
+    };
+
+    let exit_status = tokio::process::Command::new(child_process_name)
+        .args(args)
+        .envs(variables)
+        .status()
+        .await?;
 
     if exit_status.success() {
         println!("Looking good? Run `railway up` to deploy your changes!");
