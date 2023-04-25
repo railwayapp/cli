@@ -1494,6 +1494,7 @@ dependencies = [
  "url",
  "uuid",
  "which",
+ "winapi",
 ]
 
 [[package]]
