@@ -155,8 +155,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             "cmd"
         }
         _ => {
-            args.remove(0);
-            args.first().context("No command provided")?
+            args.remove(0)
         }
     };
 
