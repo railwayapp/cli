@@ -5,7 +5,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     commands::queries::user_projects::UserProjectsMeTeamsEdgesNode,
-    controllers::project::get_project, util::prompt::prompt_options,
+    controllers::project::get_project, errors::RailwayError, util::prompt::prompt_options,
 };
 
 use super::{
@@ -157,6 +157,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environment)> {
+    if project_names.is_empty() {
+        return Err(RailwayError::NoProjects.into());
+    }
+
     let project = prompt_options("Select a project", project_names)?;
     let environments = project
         .0
@@ -172,6 +176,10 @@ fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environ
 fn prompt_personal_projects(
     personal_project_names: Vec<PersonalProject>,
 ) -> Result<(PersonalProject, PersonalEnvironment)> {
+    if personal_project_names.is_empty() {
+        return Err(RailwayError::NoProjects.into());
+    }
+
     let project = prompt_options("Select a project", personal_project_names)?;
     let environments = project
         .0

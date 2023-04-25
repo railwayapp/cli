@@ -21,6 +21,9 @@ pub enum RailwayError {
     #[error("Project not found. Run `railway link` to connect to a project.")]
     ProjectNotFound,
 
+    #[error("No projects found. Run `railway init` to create a new project")]
+    NoProjects,
+
     #[error("Project does not have any services")]
     NoServices,
 
