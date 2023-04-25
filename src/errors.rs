@@ -35,4 +35,7 @@ pub enum RailwayError {
 
     #[error("Project has no plugins. Run `railway add` to add a plugin.")]
     ProjectHasNoPlugins,
+
+    #[error("2FA code is incorrect. Please try again.")]
+    InvalidTwoFactorCode,
 }

@@ -2,8 +2,6 @@ use crate::{controllers::project::get_project, util::prompt::prompt_confirm_with
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::consts::ABORTED_BY_USER;
-
 use super::*;
 
 /// Disassociate project from current directory
@@ -43,8 +41,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         };
 
         if !confirmed {
-            bail!(ABORTED_BY_USER);
+            return Ok(());
         }
+
         configs.unlink_service()?;
         configs.write()?;
         return Ok(());
@@ -67,7 +66,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     };
 
     if !confirmed {
-        bail!(ABORTED_BY_USER);
+        return Ok(());
     }
 
     configs.unlink_project();

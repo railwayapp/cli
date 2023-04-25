@@ -4,7 +4,7 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    consts::{ABORTED_BY_USER, TICK_STRING},
+    consts::TICK_STRING,
     controllers::project::get_project,
     errors::RailwayError,
     interact_or,
@@ -46,7 +46,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
                 .two_factor_info_validate;
 
         if !valid {
-            bail!("Invalid 2FA code");
+            return Err(RailwayError::InvalidTwoFactorCode.into());
         }
     }
 
@@ -71,7 +71,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
             prompt_confirm(format!("Are you sure you want to delete {plugin}?").as_str())?;
 
         if !confirmed {
-            bail!(ABORTED_BY_USER)
+            return Ok(());
         }
 
         let spinner = indicatif::ProgressBar::new_spinner()

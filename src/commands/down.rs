@@ -2,10 +2,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 
-use crate::{
-    consts::{ABORTED_BY_USER, TICK_STRING},
-    util::prompt::prompt_confirm_with_default,
-};
+use crate::{consts::TICK_STRING, util::prompt::prompt_confirm_with_default};
 
 use super::*;
 
@@ -61,7 +58,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         )?;
 
         if !confirmed {
-            bail!(ABORTED_BY_USER)
+            return Ok(());
         }
     }
 
