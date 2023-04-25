@@ -154,9 +154,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             args.insert(0, "/C");
             "cmd"
         }
-        _ => {
-            args.remove(0)
-        }
+        _ => args.remove(0),
     };
 
     let exit_status = tokio::process::Command::new(child_process_name)
