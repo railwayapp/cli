@@ -103,13 +103,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let service = get_service_to_deploy(&configs, &client, args.service).await?;
-
     let environment = args
         .environment
         .clone()
         .unwrap_or(linked_project.environment.clone());
     let environment_id = get_matched_environment(&project, environment)?.id;
+
+    let service = get_service_to_deploy(&configs, &client, args.service).await?;
 
     let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()
