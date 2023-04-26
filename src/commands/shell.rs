@@ -186,8 +186,6 @@ async fn windows_shell_detection() -> Option<WindowsShell> {
 
     let ppname = ppname.split(".").next().unwrap_or("cmd");
 
-    dbg!(ppname);
-
     match ppname {
         "cmd" => Some(WindowsShell::Cmd),
         "powershell" => Some(WindowsShell::Powershell),
