@@ -152,7 +152,9 @@ impl Configs {
         if Self::get_railway_token().is_some() {
             return self.get_current_directory();
         }
+
         let mut current_path = std::env::current_dir()?;
+
         loop {
             let path = current_path
                 .to_str()
@@ -166,7 +168,8 @@ impl Configs {
                 break;
             }
         }
-        Err(anyhow::anyhow!("No linked project found"))
+
+        Err(RailwayError::NoLinkedProject.into())
     }
 
     pub async fn get_linked_project(&self) -> Result<LinkedProject> {
@@ -194,7 +197,7 @@ impl Configs {
 
         project
             .cloned()
-            .ok_or_else(|| RailwayError::ProjectNotFound.into())
+            .ok_or_else(|| RailwayError::NoLinkedProject.into())
     }
 
     pub fn get_linked_project_mut(&mut self) -> Result<&mut LinkedProject> {
@@ -220,6 +223,7 @@ impl Configs {
             environment_name,
             service: None,
         };
+
         self.root_config.projects.insert(path, project);
         Ok(())
     }

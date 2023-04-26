@@ -18,6 +18,9 @@ pub enum RailwayError {
     #[error("Failed to fetch: {0}")]
     FetchError(#[from] reqwest::Error),
 
+    #[error("No linked project found. Run `railway link` to connect to a project.")]
+    NoLinkedProject,
+
     #[error("Project not found. Run `railway link` to connect to a project.")]
     ProjectNotFound,
 
