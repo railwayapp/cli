@@ -1,3 +1,4 @@
+pub mod deployment;
 pub mod environment;
 pub mod plugin;
 pub mod project;

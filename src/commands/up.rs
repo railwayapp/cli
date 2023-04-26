@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -14,10 +15,14 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
+use tokio::task;
 
 use crate::{
+    commands::queries::deployment::DeploymentStatus,
     consts::TICK_STRING,
-    controllers::{environment::get_matched_environment, project::get_project},
+    controllers::{
+        deployment::get_deployment, environment::get_matched_environment, project::get_project,
+    },
     errors::RailwayError,
     subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
@@ -41,6 +46,20 @@ pub struct Args {
     #[clap(short, long)]
     /// Environment to deploy to (defaults to linked environment)
     environment: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpResponse {
+    pub deployment_id: String,
+    pub url: String,
+    pub logs_url: String,
+    pub deployment_domain: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpErrorResponse {
+    pub message: String,
 }
 
 pub async fn get_service_to_deploy(
@@ -253,7 +272,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     if let Some(spinner) = spinner {
         spinner.finish_with_message("Uploaded");
     }
+
+    let deployment_id = body.deployment_id;
+
     println!("  {}: {}", "Build Logs".green().bold(), body.logs_url);
+
     if args.detach {
         return Ok(());
     }
@@ -280,11 +303,27 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .collect();
     deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     let latest_deployment = deployments.first().context("No deployments found")?;
+
     let vars = subscriptions::build_logs::Variables {
-        deployment_id: latest_deployment.id.clone(),
+        deployment_id: deployment_id.clone(),
         filter: Some(String::new()),
         limit: Some(500),
     };
+
+    let is_deployed = Arc::new(Mutex::new(false));
+    let is_deployed_clone = is_deployed.clone();
+
+    tokio::task::spawn(async move {
+        match wait_for_success(deployment_id.clone()).await {
+            Ok(_) => {
+                let mut is_deployed = is_deployed_clone.lock().unwrap();
+                *is_deployed = true;
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch deployment status: {}", e);
+            }
+        }
+    });
 
     let (_client, mut log_stream) = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
     while let Some(Ok(log)) = log_stream.next().await {
@@ -292,20 +331,35 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         for line in log.build_logs {
             println!("{}", line.message);
         }
+
+        // If the deployment is deployed, stop streaming build logs
+        if *is_deployed.lock().unwrap() {
+            break;
+        }
     }
+
+    println!("DEPLOYED!");
 
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpResponse {
-    pub url: String,
-    pub logs_url: String,
-    pub deployment_domain: String,
-}
+async fn wait_for_success(deployment_id: String) -> Result<(), anyhow::Error> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpErrorResponse {
-    pub message: String,
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let deployment = get_deployment(&client, &configs, deployment_id.clone())
+            .await
+            .unwrap();
+        println!("Status: {:?}", deployment.status);
+
+        if deployment.status == DeploymentStatus::SUCCESS
+            || deployment.status == DeploymentStatus::FAILED
+        {
+            break;
+        }
+    }
+
+    Ok(())
 }
