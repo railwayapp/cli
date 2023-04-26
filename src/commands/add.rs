@@ -6,10 +6,11 @@ use is_terminal::IsTerminal;
 
 use crate::{
     consts::{PLUGINS, TICK_STRING},
+    controllers::project::get_project,
     util::prompt::prompt_multi_options,
 };
 
-use super::{queries::project_plugins::PluginType, *};
+use super::{queries::project::PluginType, *};
 
 /// Add a new plugin to your project
 #[derive(Parser)]
@@ -25,21 +26,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project_plugins::Variables {
-        id: linked_project.project.clone(),
-    };
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let res =
-        post_graphql::<queries::ProjectPlugins, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    let project_plugins: Vec<_> = body
-        .project
+    let project_plugins: Vec<_> = project
         .plugins
         .edges
         .iter()
-        .map(|p| plugin_enum_to_string(&p.node.name))
+        .map(|p| p.node.name.to_string())
         .collect();
 
     let filtered_plugins: Vec<_> = PLUGINS
@@ -56,7 +49,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .plugin
             .iter()
             .map(clap_plugin_enum_to_plugin_enum)
-            .map(|p| plugin_enum_to_string(&p))
+            .map(|p| p.to_string())
             .filter(|plugin| !project_plugins.contains(&plugin.to_string()))
             .collect();
 
@@ -98,16 +91,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn plugin_enum_to_string(plugin: &PluginType) -> String {
-    match plugin {
-        PluginType::postgresql => "PostgreSQL".to_owned(),
-        PluginType::mysql => "MySQL".to_owned(),
-        PluginType::redis => "Redis".to_owned(),
-        PluginType::mongodb => "MongoDB".to_owned(),
-        PluginType::Other(other) => other.to_owned(),
-    }
 }
 
 #[derive(ValueEnum, Clone, Debug)]

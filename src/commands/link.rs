@@ -4,8 +4,8 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    commands::queries::user_projects::UserProjectsMeTeamsEdgesNode, consts::PROJECT_NOT_FOUND,
-    util::prompt::prompt_options,
+    commands::queries::user_projects::UserProjectsMeTeamsEdgesNode,
+    controllers::project::get_project, errors::RailwayError, util::prompt::prompt_options,
 };
 
 use super::{
@@ -35,15 +35,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     if let Some(project_id) = args.project_id {
-        let vars = queries::project::Variables { id: project_id };
-
-        let res =
-            post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-        let body = res.data.context(PROJECT_NOT_FOUND)?;
+        let project = get_project(&client, &configs, project_id.clone()).await?;
 
         let environment = if let Some(environment_name_or_id) = args.environment {
-            let environment = body
-                .project
+            let environment = project
                 .environments
                 .edges
                 .iter()
@@ -54,12 +49,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             ProjectEnvironment(&environment.node)
         } else if !std::io::stdout().is_terminal() {
             bail!("Environment must be provided when not running in a terminal");
-        } else if body.project.environments.edges.len() == 1 {
-            ProjectEnvironment(&body.project.environments.edges[0].node)
+        } else if project.environments.edges.len() == 1 {
+            ProjectEnvironment(&project.environments.edges[0].node)
         } else {
             prompt_options(
                 "Select an environment",
-                body.project
+                project
                     .environments
                     .edges
                     .iter()
@@ -69,8 +64,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         };
 
         configs.link_project(
-            body.project.id.clone(),
-            Some(body.project.name.clone()),
+            project.id.clone(),
+            Some(project.name.clone()),
             environment.0.id.clone(),
             Some(environment.0.name.clone()),
         )?;
@@ -81,12 +76,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     let vars = queries::user_projects::Variables {};
-    let res =
-        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to retrieve response body")?;
+    let me = post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars)
+        .await?
+        .me;
 
-    let mut personal_projects: Vec<_> = body
-        .me
+    let mut personal_projects: Vec<_> = me
         .projects
         .edges
         .iter()
@@ -99,7 +93,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .map(|project| PersonalProject(project))
         .collect::<Vec<_>>();
 
-    let teams: Vec<_> = body.me.teams.edges.iter().map(|team| &team.node).collect();
+    let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
 
     if teams.is_empty() {
         let (project, environment) = prompt_personal_projects(personal_project_names)?;
@@ -135,16 +129,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 team_id: Some(team.id.clone()),
             };
 
-            let res = post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
-                .await?;
+            let projects =
+                post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
+                    .await?
+                    .projects;
 
-            let body = res.data.context("Failed to retrieve response body")?;
-            let mut projects: Vec<_> = body
-                .projects
-                .edges
-                .iter()
-                .map(|project| &project.node)
-                .collect();
+            let mut projects: Vec<_> = projects.edges.iter().map(|project| &project.node).collect();
             projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
             let project_names = projects
@@ -167,6 +157,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environment)> {
+    if project_names.is_empty() {
+        return Err(RailwayError::NoProjects.into());
+    }
+
     let project = prompt_options("Select a project", project_names)?;
     let environments = project
         .0
@@ -182,6 +176,10 @@ fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environ
 fn prompt_personal_projects(
     personal_project_names: Vec<PersonalProject>,
 ) -> Result<(PersonalProject, PersonalEnvironment)> {
+    if personal_project_names.is_empty() {
+        return Err(RailwayError::NoProjects.into());
+    }
+
     let project = prompt_options("Select a project", personal_project_names)?;
     let environments = project
         .0

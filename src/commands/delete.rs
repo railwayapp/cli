@@ -4,12 +4,14 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    consts::{ABORTED_BY_USER, TICK_STRING},
+    consts::TICK_STRING,
+    controllers::project::get_project,
+    errors::RailwayError,
     interact_or,
     util::prompt::{prompt_confirm, prompt_multi_options, prompt_text},
 };
 
-use super::{queries::project_plugins::PluginType, *};
+use super::*;
 
 /// Delete plugins from a project
 #[derive(Parser)]
@@ -26,9 +28,10 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let is_two_factor_enabled = {
         let vars = queries::two_factor_info::Variables {};
 
-        let res = post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-            .await?;
-        let info = res.data.context("No data")?.two_factor_info;
+        let info =
+            post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
+                .await?
+                .two_factor_info;
 
         info.is_verified
     };
@@ -37,36 +40,27 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
 
-        let res =
+        let valid =
             post_graphql::<mutations::ValidateTwoFactor, _>(&client, configs.get_backboard(), vars)
-                .await?;
-        let valid = res.data.context("No data")?.two_factor_info_validate;
+                .await?
+                .two_factor_info_validate;
 
         if !valid {
-            bail!("Invalid 2FA code");
+            return Err(RailwayError::InvalidTwoFactorCode.into());
         }
     }
 
-    let vars = queries::project_plugins::Variables {
-        id: linked_project.project.clone(),
-    };
+    let project = get_project(&client, &configs, linked_project.project).await?;
 
-    let res =
-        post_graphql::<queries::ProjectPlugins, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
-    let nodes = body.project.plugins.edges;
-    let project_plugins: Vec<_> = nodes
-        .iter()
-        .map(|p| plugin_enum_to_string(&p.node.name))
-        .collect();
+    let nodes = project.plugins.edges;
+    let project_plugins: Vec<_> = nodes.iter().map(|p| p.node.name.to_string()).collect();
     let selected = prompt_multi_options("Select plugins to delete", project_plugins)?;
 
     for plugin in selected {
         let id = nodes
             .iter()
-            .find(|p| plugin_enum_to_string(&p.node.name) == plugin)
-            .context("Plugin not found")?
+            .find(|p| p.node.name.to_string() == plugin)
+            .ok_or_else(|| RailwayError::PluginNotFound(plugin.clone()))?
             .node
             .id
             .clone();
@@ -77,7 +71,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
             prompt_confirm(format!("Are you sure you want to delete {plugin}?").as_str())?;
 
         if !confirmed {
-            bail!(ABORTED_BY_USER)
+            return Ok(());
         }
 
         let spinner = indicatif::ProgressBar::new_spinner()
@@ -94,14 +88,4 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         spinner.finish_with_message(format!("Deleted {plugin}"));
     }
     Ok(())
-}
-
-fn plugin_enum_to_string(plugin: &PluginType) -> String {
-    match plugin {
-        PluginType::postgresql => "PostgreSQL".to_owned(),
-        PluginType::mysql => "MySQL".to_owned(),
-        PluginType::redis => "Redis".to_owned(),
-        PluginType::mongodb => "MongoDB".to_owned(),
-        PluginType::Other(other) => other.to_owned(),
-    }
 }

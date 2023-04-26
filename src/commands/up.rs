@@ -17,6 +17,8 @@ use tar::Builder;
 
 use crate::{
     consts::TICK_STRING,
+    controllers::project::get_project,
+    errors::RailwayError,
     subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
 };
@@ -47,14 +49,8 @@ pub async fn get_service_to_deploy(
     service_arg: Option<String>,
 ) -> Result<Option<String>> {
     let linked_project = configs.get_linked_project().await?;
-
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get project (query project)")?;
-
-    let services = body.project.services.edges.iter().collect::<Vec<_>>();
+    let project = get_project(client, configs, linked_project.project.clone()).await?;
+    let services = project.services.edges.iter().collect::<Vec<_>>();
 
     let service = if let Some(service_arg) = service_arg {
         // If the user specified a service, use that
@@ -98,6 +94,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+    let prefix: PathBuf = configs.get_closest_linked_project_directory()?.into();
+
+    let path = match args.path {
+        Some(path) => path,
+        None => prefix.clone(),
+    };
 
     let service = get_service_to_deploy(&configs, &client, args.service).await?;
 
@@ -115,16 +117,40 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         println!("Indexing...");
         None
     };
+
+    // Explanation for the below block
+    // arc is a reference counted pointer to a mutexed vector of bytes, which
+    // stores the actual tarball in memory.
+    //
+    // parz is a parallelized gzip writer, which writes to the arc (still in memory)
+    //
+    // archive is a tar archive builder, which writes to the parz writer `new(&mut parz)
+    //
+    // builder is a directory walker which returns an iterable that we loop over to add
+    // files to the tarball (archive)
+    //
+    // during the iteration of `builder`, we ignore all files that match the patterns found in
+    // .railwayignore
+    // .gitignore
+    // .git/**
+    // node_modules/**
     let bytes = Vec::<u8>::new();
     let arc = Arc::new(Mutex::new(bytes));
     let mut parz = ZBuilder::<Gzip, _>::new()
         .num_threads(num_cpus::get())
         .from_writer(SynchronizedWriter::new(arc.clone()));
+
+    // list of all paths to ignore by default
+    let ignore_paths = vec![".git", "node_modules"];
+    let ignore_paths: Vec<&std::ffi::OsStr> =
+        ignore_paths.iter().map(std::ffi::OsStr::new).collect();
+
     {
         let mut archive = Builder::new(&mut parz);
-        let mut builder = WalkBuilder::new(args.path.unwrap_or_else(|| ".".into()));
+        let mut builder = WalkBuilder::new(path);
         builder.add_custom_ignore_filename(".railwayignore");
         builder.add_custom_ignore_filename(".gitignore");
+
         let walker = builder.follow_links(true).hidden(false);
         let walked = walker.build().collect::<Vec<_>>();
         if let Some(spinner) = spinner {
@@ -143,11 +169,29 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             pg.enable_steady_tick(Duration::from_millis(100));
 
             for entry in walked.into_iter().progress_with(pg) {
-                archive.append_path(entry?.path())?;
+                let entry = entry?;
+                let path = entry.path();
+                if path
+                    .components()
+                    .any(|c| ignore_paths.contains(&c.as_os_str()))
+                {
+                    continue;
+                }
+                let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
+                archive.append_path_with_name(path, stripped)?;
             }
         } else {
             for entry in walked.into_iter() {
-                archive.append_path(entry?.path())?;
+                let entry = entry?;
+                let path = entry.path();
+                if path
+                    .components()
+                    .any(|c| ignore_paths.contains(&c.as_os_str()))
+                {
+                    continue;
+                }
+                let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
+                archive.append_path_with_name(path, stripped)?;
             }
         }
     }
@@ -175,12 +219,27 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     };
 
     let body = arc.lock().unwrap().clone();
+
     let res = builder
         .header("Content-Type", "multipart/form-data")
         .body(body)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+
+    let status = res.status();
+    if status != 200 {
+        if let Some(spinner) = spinner {
+            spinner.finish_with_message("Failed");
+        }
+
+        // If a user error, parse the response
+        if status == 400 {
+            let body = res.json::<UpErrorResponse>().await?;
+            return Err(RailwayError::FailedToUpload(body.message).into());
+        }
+
+        return Err(RailwayError::FailedToUpload("Failed to upload code".to_string()).into());
+    }
 
     let body = res.json::<UpResponse>().await?;
     if let Some(spinner) = spinner {
@@ -200,14 +259,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         project_id: linked_project.project.clone(),
     };
 
-    let res =
-        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars).await?;
+    let deployments =
+        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
+            .await?
+            .project
+            .deployments;
 
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    let mut deployments: Vec<_> = body
-        .project
-        .deployments
+    let mut deployments: Vec<_> = deployments
         .edges
         .into_iter()
         .map(|deployment| deployment.node)
@@ -237,4 +295,9 @@ pub struct UpResponse {
     pub url: String,
     pub logs_url: String,
     pub deployment_domain: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpErrorResponse {
+    pub message: String,
 }

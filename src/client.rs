@@ -1,16 +1,18 @@
-use graphql_client::{GraphQLQuery, Response};
+use graphql_client::GraphQLQuery;
 use reqwest::{
     header::{HeaderMap, HeaderValue},
     Client,
 };
 
-use crate::{commands::Environment, config::Configs, consts};
-use anyhow::{bail, Result};
+use crate::{commands::Environment, config::Configs, consts, errors::RailwayError};
+use anyhow::Result;
+
+use graphql_client::Response as GraphQLResponse;
 
 pub struct GQLClient;
 
 impl GQLClient {
-    pub fn new_authorized(configs: &Configs) -> Result<Client> {
+    pub fn new_authorized(configs: &Configs) -> Result<Client, RailwayError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &Configs::get_railway_token() {
             headers.insert("project-access-token", HeaderValue::from_str(token)?);
@@ -21,14 +23,14 @@ impl GQLClient {
             );
         } else if let Some(token) = &configs.root_config.user.token {
             if token.is_empty() {
-                bail!("Unauthorized. Please login with `railway login`")
+                return Err(RailwayError::Unauthorized);
             }
             headers.insert(
                 "authorization",
                 HeaderValue::from_str(&format!("Bearer {token}"))?,
             );
         } else {
-            bail!("Unauthorized. Please login with `railway login`")
+            return Err(RailwayError::Unauthorized);
         }
         headers.insert(
             "x-source",
@@ -38,7 +40,8 @@ impl GQLClient {
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
-            .build()?;
+            .build()
+            .unwrap();
         Ok(client)
     }
 
@@ -61,9 +64,21 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     client: &reqwest::Client,
     url: U,
     variables: Q::Variables,
-) -> Result<Response<Q::ResponseData>, reqwest::Error> {
+) -> Result<Q::ResponseData, RailwayError> {
     let body = Q::build_query(variables);
-    let reqwest_response = client.post(url).json(&body).send().await?;
+    let res: GraphQLResponse<Q::ResponseData> =
+        client.post(url).json(&body).send().await?.json().await?;
 
-    reqwest_response.json().await
+    if let Some(errors) = res.errors {
+        if errors[0].message.to_lowercase().contains("not authorized") {
+            // Handle unauthorized errors in a custom way
+            Err(RailwayError::Unauthorized)
+        } else {
+            Err(RailwayError::GraphQLError(errors[0].message.clone()))
+        }
+    } else if let Some(data) = res.data {
+        Ok(data)
+    } else {
+        Err(RailwayError::MissingResponseData)
+    }
 }

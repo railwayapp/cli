@@ -44,7 +44,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.CLI_VERSION }}
-          release_name: ${{ env.CLI_VERSION }}
+          name: ${{ env.CLI_VERSION }}
 
   build-release:
     name: Build Release Assets
@@ -81,9 +81,13 @@ jobs:
 
           - target: i686-pc-windows-msvc
             os: windows-latest
-            
+
           - target: x86_64-pc-windows-gnu
             os: windows-latest
+
+          - target: i686-pc-windows-gnu
+            os: windows-latest
+            use-cross: true
 
     steps:
       - name: Checkout repository
@@ -104,7 +108,7 @@ jobs:
         with:
           command: build
           args: --release --locked --target ${{ matrix.target }}
-          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+          use-cross: ${{ matrix.use-cross || matrix.os == 'ubuntu-latest' }}
 
       - name: Prepare binaries (zip) [Windows]
         if: matrix.os == 'windows-latest'
@@ -114,12 +118,13 @@ jobs:
           7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
-      - name: Prepare binares (tar) [Windows]
+      - name: Prepare binaries (tar) [Windows]
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           strip railway.exe
-          7z a ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz railway.exe
+          7z a -ttar archive.tar railway.exe
+          7z a -tgzip ../../../railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz archive.tar
           cd -
 
       - name: Prepare binaries [-linux]

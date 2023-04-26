@@ -1,10 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use crate::{
-    consts::{ABORTED_BY_USER, TICK_STRING},
-    interact_or,
-    util::prompt::prompt_confirm_with_default,
-};
+use crate::{consts::TICK_STRING, interact_or, util::prompt::prompt_confirm_with_default};
 
 use super::*;
 
@@ -36,7 +32,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let confirm = prompt_confirm_with_default("Open the browser?", true)?;
 
     if !confirm {
-        bail!(ABORTED_BY_USER);
+        return Ok(());
     }
 
     let port = rand::thread_rng().gen_range(50000..60000);
@@ -128,16 +124,17 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let client = GQLClient::new_authorized(&configs)?;
     let vars = queries::user_meta::Variables {};
-
-    let res = post_graphql::<queries::UserMeta, _>(&client, configs.get_backboard(), vars).await?;
-    let me = res.data.context("No data")?.me;
+    let me = post_graphql::<queries::UserMeta, _>(&client, configs.get_backboard(), vars)
+        .await?
+        .me;
 
     spinner.finish_and_clear();
-    println!(
-        "Logged in as {} ({})",
-        me.name.context("No name")?.bold(),
-        me.email
-    );
+
+    if let Some(name) = me.name {
+        println!("Logged in as {} ({})", name.bold(), me.email);
+    } else {
+        println!("Logged in as {}", me.email);
+    }
 
     Ok(())
 }
@@ -189,10 +186,10 @@ async fn browserless_login() -> Result<()> {
     println!("{}", "Browserless Login".bold());
     let client = GQLClient::new_unauthorized()?;
     let vars = mutations::login_session_create::Variables {};
-    let res =
+    let word_code =
         post_graphql::<mutations::LoginSessionCreate, _>(&client, configs.get_backboard(), vars)
-            .await?;
-    let word_code = res.data.context("No data")?.login_session_create;
+            .await?
+            .login_session_create;
 
     use base64::{
         alphabet::URL_SAFE,
@@ -219,18 +216,21 @@ async fn browserless_login() -> Result<()> {
         )
         .with_message("Waiting for login...");
     spinner.enable_steady_tick(Duration::from_millis(100));
+
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let vars = mutations::login_session_consume::Variables {
             code: word_code.clone(),
         };
-        let res = post_graphql::<mutations::LoginSessionConsume, _>(
+        let token = post_graphql::<mutations::LoginSessionConsume, _>(
             &client,
             configs.get_backboard(),
             vars,
         )
-        .await?;
-        if let Some(token) = res.data.context("No data")?.login_session_consume {
+        .await?
+        .login_session_consume;
+
+        if let Some(token) = token {
             spinner.finish_and_clear();
             configs.root_config.user.token = Some(token);
             configs.write()?;
@@ -238,16 +238,12 @@ async fn browserless_login() -> Result<()> {
             let client = GQLClient::new_authorized(&configs)?;
             let vars = queries::user_meta::Variables {};
 
-            let res = post_graphql::<queries::UserMeta, _>(&client, configs.get_backboard(), vars)
-                .await?;
-            let me = res.data.context("No data")?.me;
+            let me = post_graphql::<queries::UserMeta, _>(&client, configs.get_backboard(), vars)
+                .await?
+                .me;
 
             spinner.finish_and_clear();
-            println!(
-                "Logged in as {} ({})",
-                me.name.context("No name")?.bold(),
-                me.email
-            );
+            println!("Logged in as {}", me.email);
             break;
         }
     }

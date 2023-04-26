@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
+    fs,
     fs::{create_dir_all, File},
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
 };
 
@@ -13,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     client::{post_graphql, GQLClient},
     commands::queries,
+    errors::RailwayError,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
-pub struct RailwayProject {
+pub struct LinkedProject {
     pub project_path: String,
     pub name: Option<String>,
     pub project: String,
@@ -38,7 +40,7 @@ pub struct RailwayUser {
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayConfig {
-    pub projects: BTreeMap<String, RailwayProject>,
+    pub projects: BTreeMap<String, LinkedProject>,
     pub user: RailwayUser,
 }
 
@@ -147,11 +149,12 @@ impl Configs {
     }
 
     pub fn get_closest_linked_project_directory(&self) -> Result<String> {
-        let current_dir = std::env::current_dir()?;
-        let path = current_dir
-            .to_str()
-            .context("Unable to get current working directory")?;
-        let mut current_path = PathBuf::from(path);
+        if Self::get_railway_token().is_some() {
+            return self.get_current_directory();
+        }
+
+        let mut current_path = std::env::current_dir()?;
+
         loop {
             let path = current_path
                 .to_str()
@@ -165,20 +168,20 @@ impl Configs {
                 break;
             }
         }
-        Err(anyhow::anyhow!("No linked project found"))
+
+        Err(RailwayError::NoLinkedProject.into())
     }
 
-    pub async fn get_linked_project(&self) -> Result<RailwayProject> {
+    pub async fn get_linked_project(&self) -> Result<LinkedProject> {
         if Self::get_railway_token().is_some() {
             let vars = queries::project_token::Variables {};
             let client = GQLClient::new_authorized(self)?;
 
-            let res = post_graphql::<queries::ProjectToken, _>(&client, self.get_backboard(), vars)
-                .await?;
+            let data =
+                post_graphql::<queries::ProjectToken, _>(&client, self.get_backboard(), vars)
+                    .await?;
 
-            let data = res.data.context("Invalid project token!")?;
-
-            let project = RailwayProject {
+            let project = LinkedProject {
                 project_path: self.get_current_directory()?,
                 name: Some(data.project_token.project.name),
                 project: data.project_token.project.id,
@@ -188,23 +191,20 @@ impl Configs {
             };
             return Ok(project);
         }
+
         let path = self.get_closest_linked_project_directory()?;
-        let project = self
-            .root_config
-            .projects
-            .get(&path)
-            .context("Project not found! Run `railway link` to link to a project")?;
-        Ok(project.clone())
+        let project = self.root_config.projects.get(&path);
+
+        project
+            .cloned()
+            .ok_or_else(|| RailwayError::NoLinkedProject.into())
     }
 
-    pub fn get_linked_project_mut(&mut self) -> Result<&mut RailwayProject> {
+    pub fn get_linked_project_mut(&mut self) -> Result<&mut LinkedProject> {
         let path = self.get_closest_linked_project_directory()?;
-        let project = self
-            .root_config
-            .projects
-            .get_mut(&path)
-            .context("Project not found! Run `railway link` to link to a project")?;
-        Ok(project)
+        let project = self.root_config.projects.get_mut(&path);
+
+        project.ok_or_else(|| RailwayError::ProjectNotFound.into())
     }
 
     pub fn link_project(
@@ -215,7 +215,7 @@ impl Configs {
         environment_name: Option<String>,
     ) -> Result<()> {
         let path = self.get_current_directory()?;
-        let project = RailwayProject {
+        let project = LinkedProject {
             project_path: path.clone(),
             name,
             project: project_id,
@@ -223,6 +223,7 @@ impl Configs {
             environment_name,
             service: None,
         };
+
         self.root_config.projects.insert(path, project);
         Ok(())
     }
@@ -233,14 +234,10 @@ impl Configs {
         Ok(())
     }
 
-    pub fn unlink_project(&mut self) -> Result<RailwayProject> {
-        let path = self.get_closest_linked_project_directory()?;
-        let project = self
-            .root_config
-            .projects
-            .remove(&path)
-            .context("Project not found! Run `railway link` to link to a project")?;
-        Ok(project)
+    pub fn unlink_project(&mut self) {
+        if let Ok(path) = self.get_closest_linked_project_directory() {
+            self.root_config.projects.remove(&path);
+        }
     }
 
     pub fn unlink_service(&mut self) -> Result<()> {
@@ -271,15 +268,30 @@ impl Configs {
     }
 
     pub fn write(&self) -> Result<()> {
-        create_dir_all(self.root_config_path.parent().unwrap())?;
-        let mut file = if let Ok(file) = File::options().write(true).open(&self.root_config_path) {
-            file
-        } else {
-            File::create(&self.root_config_path)?
-        };
-        let serialized_config = serde_json::to_vec_pretty(&self.root_config)?;
-        file.write_all(serialized_config.as_slice())?;
-        file.sync_all()?;
+        let config_dir = self
+            .root_config_path
+            .parent()
+            .context("Failed to get parent directory")?;
+
+        // Ensure directory exists
+        create_dir_all(config_dir)?;
+
+        // Use temporary file to achieve atomic write:
+        //  1. Open file ~/railway/config.tmp
+        //  2. Serialize config to temporary file
+        //  3. Rename temporary file to ~/railway/config.json (atomic operation)
+        let tmp_file_path = self.root_config_path.with_extension("tmp");
+        let tmp_file = File::options()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_file_path)?;
+        serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
+        tmp_file.sync_all()?;
+
+        // Rename file to final destination to achieve atomic write
+        fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
+
         Ok(())
     }
 }

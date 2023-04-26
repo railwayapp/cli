@@ -1,6 +1,9 @@
 use std::fmt::Display;
 
-use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
+use crate::commands::{
+    queries::project::{ProjectProjectPluginsEdgesNode, ProjectProjectServicesEdgesNode},
+    Configs,
+};
 use anyhow::{Context, Result};
 
 pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
@@ -56,5 +59,14 @@ pub struct PromptService<'a>(pub &'a ProjectProjectServicesEdgesNode);
 impl<'a> Display for PromptService<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.name)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptPlugin<'a>(pub &'a ProjectProjectPluginsEdgesNode);
+
+impl<'a> Display for PromptPlugin<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.friendly_name)
     }
 }

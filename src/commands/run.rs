@@ -2,7 +2,12 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    controllers::variables::{get_all_plugin_variables, get_service_variables},
+    controllers::{
+        environment::get_matched_environment,
+        project::get_project,
+        variables::{get_all_plugin_variables, get_service_variables},
+    },
+    errors::RailwayError,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -92,27 +97,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get project (query project)")?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
     let environment = args
         .environment
         .clone()
         .unwrap_or(linked_project.environment.clone());
 
-    let environment_id = body
-        .project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.name == environment || env.node.id == environment)
-        .map(|env| env.node.id.to_owned())
-        .context("Environment not found")?;
-
-    let service = get_service_or_plugins(&configs, &body.project, args.service).await?;
+    let environment_id = get_matched_environment(&project, environment)?.id;
+    let service = get_service_or_plugins(&configs, &project, args.service).await?;
 
     let variables = match service {
         ServiceOrPlugins::Service(service_id) => {
@@ -138,13 +131,39 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
     };
 
-    tokio::process::Command::new(args.args.first().context("No command provided")?)
-        .args(args.args[1..].iter())
+    // a bit janky :/
+    ctrlc::set_handler(move || {
+        // do nothing, we just want to ignore CTRL+C
+        // this is for `rails c` and similar REPLs
+    })?;
+
+    let mut args = args.args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    if args.is_empty() {
+        return Err(RailwayError::NoCommandProvided.into());
+    }
+
+    let child_process_name = match std::env::consts::OS {
+        "windows" => {
+            args.insert(0, "/C");
+            "cmd"
+        }
+        _ => args.remove(0),
+    };
+
+    let exit_status = tokio::process::Command::new(child_process_name)
+        .args(args)
         .envs(variables)
-        .spawn()
-        .context("Failed to spawn command")?
-        .wait()
-        .await
-        .context("Failed to wait for command")?;
+        .status()
+        .await?;
+
+    if exit_status.success() {
+        println!("Looking good? Run `railway up` to deploy your changes!");
+    }
+
+    if let Some(code) = exit_status.code() {
+        // If there is an exit code (process not terminated by signal), exit with that code
+        std::process::exit(code);
+    }
+
     Ok(())
 }
