@@ -17,7 +17,7 @@ use tar::Builder;
 
 use crate::{
     consts::TICK_STRING,
-    controllers::project::get_project,
+    controllers::{environment::get_matched_environment, project::get_project},
     errors::RailwayError,
     subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
@@ -101,7 +101,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         None => prefix.clone(),
     };
 
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
     let service = get_service_to_deploy(&configs, &client, args.service).await?;
+
+    let environment = args
+        .environment
+        .clone()
+        .unwrap_or(linked_project.environment.clone());
+    let environment_id = get_matched_environment(&project, environment)?.id;
 
     let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()
@@ -200,7 +208,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let builder = client.post(format!(
         "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
         linked_project.project,
-        args.environment.unwrap_or(linked_project.environment),
+        environment_id,
         service.unwrap_or_default(),
     ));
     let spinner = if std::io::stdout().is_terminal() {
