@@ -17,7 +17,7 @@ use tar::Builder;
 
 use crate::{
     consts::TICK_STRING,
-    controllers::project::get_project,
+    controllers::{environment::get_matched_environment, project::get_project},
     errors::RailwayError,
     subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
@@ -37,6 +37,10 @@ pub struct Args {
     #[clap(short, long)]
     /// Service to deploy to (defaults to linked service)
     service: Option<String>,
+
+    #[clap(short, long)]
+    /// Environment to deploy to (defaults to linked environment)
+    environment: Option<String>,
 }
 
 pub async fn get_service_to_deploy(
@@ -96,6 +100,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         Some(path) => path,
         None => prefix.clone(),
     };
+
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    let environment = args
+        .environment
+        .clone()
+        .unwrap_or(linked_project.environment.clone());
+    let environment_id = get_matched_environment(&project, environment)?.id;
 
     let service = get_service_to_deploy(&configs, &client, args.service).await?;
 
@@ -196,7 +208,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let builder = client.post(format!(
         "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
         linked_project.project,
-        linked_project.environment,
+        environment_id,
         service.unwrap_or_default(),
     ));
     let spinner = if std::io::stdout().is_terminal() {
