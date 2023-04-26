@@ -2,7 +2,7 @@ use crate::{
     client::post_graphql,
     commands::{queries, Configs},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reqwest::Client;
 use std::collections::BTreeMap;
 
@@ -18,18 +18,15 @@ pub async fn get_service_variables(
         environment_id,
         service_id,
     };
-    let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+    let variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
         client,
         configs.get_backboard(),
         vars,
     )
-    .await?;
+    .await?
+    .variables_for_service_deployment;
 
-    let body = res
-        .data
-        .context("Failed to get service variables (query VariablesForServiceDeployment)")?;
-
-    Ok(body.variables_for_service_deployment)
+    Ok(variables)
 }
 
 // note - this is only for projects with no services
@@ -67,11 +64,10 @@ pub async fn get_plugin_variables(
         environment_id: environment_id.clone(),
         plugin_id: plugin_id.clone(),
     };
-    let res = post_graphql::<queries::VariablesForPlugin, _>(client, configs.get_backboard(), vars)
-        .await?;
-    let body = res
-        .data
-        .context("Failed to get plugin variables (query VariablesForPlugin)")?;
+    let variables =
+        post_graphql::<queries::VariablesForPlugin, _>(client, configs.get_backboard(), vars)
+            .await?
+            .variables;
 
-    Ok(body.variables)
+    Ok(variables)
 }

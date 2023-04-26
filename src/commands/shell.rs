@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::consts::SERVICE_NOT_FOUND;
+use crate::{controllers::project::get_project, errors::RailwayError};
 
 use super::*;
 
@@ -35,24 +35,18 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
     let mut all_variables = BTreeMap::<String, String>::new();
     all_variables.insert("IN_RAILWAY_SHELL".to_owned(), "true".to_owned());
 
     if let Some(service) = args.service {
-        let service_id = body
-            .project
+        let service_id = project
             .services
             .edges
             .iter()
             .find(|s| s.node.name == service || s.node.id == service)
-            .context(SERVICE_NOT_FOUND)?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
 
         let vars = queries::variables_for_service_deployment::Variables {
             environment_id: linked_project.environment.clone(),
@@ -60,16 +54,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             service_id: service_id.node.id.clone(),
         };
 
-        let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+        let mut variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
             &client,
             configs.get_backboard(),
             vars,
         )
-        .await?;
+        .await?
+        .variables_for_service_deployment;
 
-        let mut body = res.data.context("Failed to retrieve response body")?;
-
-        all_variables.append(&mut body.variables_for_service_deployment);
+        all_variables.append(&mut variables);
     } else if let Some(service) = linked_project.service {
         let vars = queries::variables_for_service_deployment::Variables {
             environment_id: linked_project.environment.clone(),
@@ -77,16 +70,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             service_id: service.clone(),
         };
 
-        let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+        let mut variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
             &client,
             configs.get_backboard(),
             vars,
         )
-        .await?;
+        .await?
+        .variables_for_service_deployment;
 
-        let mut body = res.data.context("Failed to retrieve response body")?;
-
-        all_variables.append(&mut body.variables_for_service_deployment);
+        all_variables.append(&mut variables);
     } else {
         eprintln!("No service linked, not entering shell.");
         return Ok(());

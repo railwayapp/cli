@@ -1,3 +1,6 @@
+use crate::{commands::queries::RailwayUser, controllers::user::get_user};
+use colored::*;
+
 use super::*;
 
 /// Get the current logged in user
@@ -7,16 +10,18 @@ pub struct Args {}
 pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let vars = queries::user_meta::Variables {};
 
-    let res = post_graphql::<queries::UserMeta, _>(&client, configs.get_backboard(), vars).await?;
-    let me = res.data.context("No data")?.me;
+    let user: RailwayUser = get_user(&client, &configs).await?;
 
-    println!(
-        "Logged in as {} ({})",
-        me.name.context("No name")?.bold(),
-        me.email
-    );
+    if let Some(name) = user.name {
+        println!(
+            "Logged in as {} ({}) 👋",
+            name,
+            user.email.bright_magenta().bold()
+        )
+    } else {
+        println!("Logged in as {} 👋", user.email.bright_magenta().bold())
+    }
 
     Ok(())
 }

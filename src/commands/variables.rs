@@ -1,11 +1,6 @@
 use std::fmt::Display;
 
-use anyhow::bail;
-
-use crate::{
-    consts::{NO_SERVICE_LINKED, SERVICE_NOT_FOUND},
-    table::Table,
-};
+use crate::{controllers::project::get_project, errors::RailwayError, table::Table};
 
 use super::{
     queries::project::{PluginType, ProjectProjectPluginsEdgesNode},
@@ -29,22 +24,19 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
+    let _vars = queries::project::Variables {
         id: linked_project.project.to_owned(),
     };
 
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
     let (vars, name) = if let Some(ref service) = args.service {
-        let service_name = body
-            .project
+        let service_name = project
             .services
             .edges
             .iter()
             .find(|edge| edge.node.id == *service || edge.node.name == *service)
-            .context(SERVICE_NOT_FOUND)?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(service.clone()))?;
         (
             queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),
@@ -54,13 +46,12 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             service_name.node.name.clone(),
         )
     } else if let Some(ref service) = linked_project.service {
-        let service_name = body
-            .project
+        let service_name = project
             .services
             .edges
             .iter()
             .find(|edge| edge.node.id == *service)
-            .context(SERVICE_NOT_FOUND)?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(service.clone()))?;
         (
             queries::variables_for_service_deployment::Variables {
                 environment_id: linked_project.environment.clone(),
@@ -70,39 +61,35 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             service_name.node.name.clone(),
         )
     } else {
-        bail!(NO_SERVICE_LINKED);
+        return Err(RailwayError::NoServiceLinked.into());
     };
 
-    let res = post_graphql::<queries::VariablesForServiceDeployment, _>(
+    let variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
         &client,
         configs.get_backboard(),
         vars,
     )
-    .await?;
+    .await?
+    .variables_for_service_deployment;
 
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    if body.variables_for_service_deployment.is_empty() {
+    if variables.is_empty() {
         eprintln!("No variables found");
         return Ok(());
     }
 
     if args.kv {
-        for (key, value) in body.variables_for_service_deployment {
+        for (key, value) in variables {
             println!("{}={}", key, value);
         }
         return Ok(());
     }
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&body.variables_for_service_deployment)?
-        );
+        println!("{}", serde_json::to_string_pretty(&variables)?);
         return Ok(());
     }
 
-    let table = Table::new(name, body.variables_for_service_deployment);
+    let table = Table::new(name, variables);
     table.print()?;
 
     Ok(())

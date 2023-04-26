@@ -17,6 +17,8 @@ use tar::Builder;
 
 use crate::{
     consts::TICK_STRING,
+    controllers::project::get_project,
+    errors::RailwayError,
     subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
 };
@@ -43,14 +45,8 @@ pub async fn get_service_to_deploy(
     service_arg: Option<String>,
 ) -> Result<Option<String>> {
     let linked_project = configs.get_linked_project().await?;
-
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get project (query project)")?;
-
-    let services = body.project.services.edges.iter().collect::<Vec<_>>();
+    let project = get_project(client, configs, linked_project.project.clone()).await?;
+    let services = project.services.edges.iter().collect::<Vec<_>>();
 
     let service = if let Some(service_arg) = service_arg {
         // If the user specified a service, use that
@@ -224,8 +220,22 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .header("Content-Type", "multipart/form-data")
         .body(body)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+
+    let status = res.status();
+    if status != 200 {
+        if let Some(spinner) = spinner {
+            spinner.finish_with_message("Failed");
+        }
+
+        // If a user error, parse the response
+        if status == 400 {
+            let body = res.json::<UpErrorResponse>().await?;
+            return Err(RailwayError::FailedToUpload(body.message).into());
+        }
+
+        return Err(RailwayError::FailedToUpload("Failed to upload code".to_string()).into());
+    }
 
     let body = res.json::<UpResponse>().await?;
     if let Some(spinner) = spinner {
@@ -245,14 +255,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         project_id: linked_project.project.clone(),
     };
 
-    let res =
-        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars).await?;
+    let deployments =
+        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
+            .await?
+            .project
+            .deployments;
 
-    let body = res.data.context("Failed to retrieve response body")?;
-
-    let mut deployments: Vec<_> = body
-        .project
-        .deployments
+    let mut deployments: Vec<_> = deployments
         .edges
         .into_iter()
         .map(|deployment| deployment.node)
@@ -282,4 +291,9 @@ pub struct UpResponse {
     pub url: String,
     pub logs_url: String,
     pub deployment_domain: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpErrorResponse {
+    pub message: String,
 }

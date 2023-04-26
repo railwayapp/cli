@@ -1,8 +1,6 @@
-use crate::util::prompt::prompt_confirm_with_default;
+use crate::{controllers::project::get_project, util::prompt::prompt_confirm_with_default};
 use anyhow::bail;
 use is_terminal::IsTerminal;
-
-use crate::consts::ABORTED_BY_USER;
 
 use super::*;
 
@@ -19,15 +17,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-
-    let body = res.data.context("Failed to retrieve response body")?;
-    let linked_service = body
-        .project
+    let linked_service = project
         .services
         .edges
         .iter()
@@ -40,7 +32,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         println!(
             "Linked to {} on {}",
             service.node.name.bold(),
-            body.project.name.bold()
+            project.name.bold()
         );
         let confirmed = if std::io::stdout().is_terminal() {
             prompt_confirm_with_default("Are you sure you want to unlink this service?", true)?
@@ -49,8 +41,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         };
 
         if !confirmed {
-            bail!(ABORTED_BY_USER);
+            return Ok(());
         }
+
         configs.unlink_service()?;
         configs.write()?;
         return Ok(());
@@ -60,10 +53,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         println!(
             "Linked to {} on {}",
             service.node.name.bold(),
-            body.project.name.bold()
+            project.name.bold()
         );
     } else {
-        println!("Linked to {}", body.project.name.bold());
+        println!("Linked to {}", project.name.bold());
     }
 
     let confirmed = if std::io::stdout().is_terminal() {
@@ -73,9 +66,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     };
 
     if !confirmed {
-        bail!(ABORTED_BY_USER);
+        return Ok(());
     }
-    configs.unlink_project()?;
+
+    configs.unlink_project();
     configs.write()?;
     Ok(())
 }

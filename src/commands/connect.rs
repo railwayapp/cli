@@ -2,12 +2,12 @@ use anyhow::bail;
 use tokio::process::Command;
 use which::which;
 
-use crate::commands::queries::project_plugins::PluginType;
-use crate::consts::PLUGIN_NOT_FOUND;
 use crate::controllers::variables::get_plugin_variables;
+use crate::controllers::{environment::get_matched_environment, project::get_project};
+use crate::errors::RailwayError;
 use crate::util::prompt::{prompt_select, PromptPlugin};
 
-use super::*;
+use super::{queries::project::PluginType, *};
 
 /// Change the active environment
 #[derive(Parser)]
@@ -29,52 +29,35 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .clone()
         .unwrap_or(linked_project.environment.clone());
 
-    let vars = queries::project_plugins::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res =
-        post_graphql::<queries::ProjectPlugins, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to retrieve response body")?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
     let plugin = match args.plugin_name {
         Some(name) => {
-            &body
-                .project
+            &project
                 .plugins
                 .edges
                 .iter()
                 .find(|edge| edge.node.friendly_name == name)
-                .context(PLUGIN_NOT_FOUND)?
+                .ok_or_else(|| RailwayError::PluginNotFound(name))?
                 .node
         }
         None => {
-            let plugins: Vec<_> = body
-                .project
+            let plugins: Vec<_> = project
                 .plugins
                 .edges
                 .iter()
                 .map(|p| PromptPlugin(&p.node))
                 .collect();
             if plugins.is_empty() {
-                bail!("No plugins found");
+                return Err(RailwayError::ProjectHasNoPlugins.into());
             }
-            prompt_select("Select a plugin", plugins).context("No")?.0
+            prompt_select("Select a plugin", plugins)
+                .context("No plugin selected")?
+                .0
         }
     };
 
-    let vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-    let res = post_graphql::<queries::Project, _>(&client, configs.get_backboard(), vars).await?;
-    let body = res.data.context("Failed to get project (query project)")?;
-    let environment_id = body
-        .project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.name == environment || env.node.id == environment)
-        .map(|env| env.node.id.to_owned())
-        .context("Environment not found")?;
+    let environment_id = get_matched_environment(&project, environment)?.id;
 
     let variables = get_plugin_variables(
         &client,
