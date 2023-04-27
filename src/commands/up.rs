@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::bail;
+use colored;
 use futures::StreamExt;
 use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
@@ -21,7 +22,9 @@ use crate::{
     commands::queries::deployment::DeploymentStatus,
     consts::TICK_STRING,
     controllers::{
-        deployment::get_deployment, environment::get_matched_environment, project::get_project,
+        deployment::{get_deployment, stream_build_logs, stream_deploy_logs},
+        environment::get_matched_environment,
+        project::get_project,
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
@@ -286,38 +289,36 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let vars = queries::deployments::Variables {
-        project_id: linked_project.project.clone(),
-    };
+    // Stream both build and deploy logs
+    let build_deployment_id = deployment_id.clone();
+    let deploy_deployment_id = deployment_id.clone();
 
-    let deployments =
-        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
-            .await?
-            .project
-            .deployments;
+    let tasks = vec![
+        tokio::task::spawn(async move {
+            match stream_build_logs(build_deployment_id, |log| println!("{}", log.message)).await {
+                Err(e) => {
+                    eprintln!("Failed to stream build logs: {}", e);
+                }
+                Ok(_) => {}
+            }
+        }),
+        tokio::task::spawn(async move {
+            match stream_deploy_logs(deploy_deployment_id, |log| println!("{}", log.message)).await
+            {
+                Err(e) => {
+                    eprintln!("Failed to stream deploy logs: {}", e);
+                }
+                Ok(_) => {}
+            }
+        }),
+    ];
 
-    let mut deployments: Vec<_> = deployments
-        .edges
-        .into_iter()
-        .map(|deployment| deployment.node)
-        .collect();
-    deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let latest_deployment = deployments.first().context("No deployments found")?;
-
-    let vars = subscriptions::build_logs::Variables {
-        deployment_id: deployment_id.clone(),
-        filter: Some(String::new()),
-        limit: Some(500),
-    };
-
-    let is_deployed = Arc::new(Mutex::new(false));
-    let is_deployed_clone = is_deployed.clone();
-
+    // If the build fails, we want to terminate the process
     tokio::task::spawn(async move {
-        match wait_for_success(deployment_id.clone()).await {
+        match wait_for_failure(deployment_id.clone()).await {
             Ok(_) => {
-                let mut is_deployed = is_deployed_clone.lock().unwrap();
-                *is_deployed = true;
+                println!("{}", "Build failed".red().bold());
+                std::process::exit(1);
             }
             Err(e) => {
                 eprintln!("Failed to fetch deployment status: {}", e);
@@ -325,25 +326,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
     });
 
-    let (_client, mut log_stream) = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
-    while let Some(Ok(log)) = log_stream.next().await {
-        let log = log.data.context("Failed to retrieve log")?;
-        for line in log.build_logs {
-            println!("{}", line.message);
-        }
-
-        // If the deployment is deployed, stop streaming build logs
-        if *is_deployed.lock().unwrap() {
-            break;
-        }
-    }
-
-    println!("DEPLOYED!");
+    futures::future::join_all(tasks).await;
 
     Ok(())
 }
 
-async fn wait_for_success(deployment_id: String) -> Result<(), anyhow::Error> {
+async fn wait_for_failure(deployment_id: String) -> Result<(), anyhow::Error> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
@@ -352,11 +340,8 @@ async fn wait_for_success(deployment_id: String) -> Result<(), anyhow::Error> {
         let deployment = get_deployment(&client, &configs, deployment_id.clone())
             .await
             .unwrap();
-        println!("Status: {:?}", deployment.status);
 
-        if deployment.status == DeploymentStatus::SUCCESS
-            || deployment.status == DeploymentStatus::FAILED
-        {
+        if deployment.status == DeploymentStatus::FAILED {
             break;
         }
     }
