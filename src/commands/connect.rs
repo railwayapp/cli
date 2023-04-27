@@ -9,7 +9,7 @@ use crate::util::prompt::{prompt_select, PromptPlugin};
 
 use super::{queries::project::PluginType, *};
 
-/// Change the active environment
+/// Connect to a plugin's shell (psql for Postgres, mongosh for MongoDB, etc.)
 #[derive(Parser)]
 pub struct Args {
     /// The name of the plugin to connect to
