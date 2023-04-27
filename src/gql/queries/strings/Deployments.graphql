@@ -1,12 +1,13 @@
 query Deployments($projectId: String!) {
-	project(id: $projectId) {
-		deployments {
-			edges {
-				node {
-					id
-					createdAt
-				}
-			}
-		}
-	}
+  project(id: $projectId) {
+    deployments {
+      edges {
+        node {
+          id
+          createdAt
+          status
+        }
+      }
+    }
+  }
 }

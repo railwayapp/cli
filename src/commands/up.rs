@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::bail;
-use futures::StreamExt;
+
 use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
@@ -16,10 +16,14 @@ use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
 
 use crate::{
+    commands::queries::deployment::DeploymentStatus,
     consts::TICK_STRING,
-    controllers::{environment::get_matched_environment, project::get_project},
+    controllers::{
+        deployment::{get_deployment, stream_build_logs, stream_deploy_logs},
+        environment::get_matched_environment,
+        project::get_project,
+    },
     errors::RailwayError,
-    subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -41,6 +45,20 @@ pub struct Args {
     #[clap(short, long)]
     /// Environment to deploy to (defaults to linked environment)
     environment: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpResponse {
+    pub deployment_id: String,
+    pub url: String,
+    pub logs_url: String,
+    pub deployment_domain: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpErrorResponse {
+    pub message: String,
 }
 
 pub async fn get_service_to_deploy(
@@ -253,7 +271,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     if let Some(spinner) = spinner {
         spinner.finish_with_message("Uploaded");
     }
+
+    let deployment_id = body.deployment_id;
+
     println!("  {}: {}", "Build Logs".green().bold(), body.logs_url);
+
     if args.detach {
         return Ok(());
     }
@@ -263,49 +285,59 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let vars = queries::deployments::Variables {
-        project_id: linked_project.project.clone(),
-    };
+    // Stream both build and deploy logs
+    let build_deployment_id = deployment_id.clone();
+    let deploy_deployment_id = deployment_id.clone();
 
-    let deployments =
-        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
-            .await?
-            .project
-            .deployments;
+    let tasks = vec![
+        tokio::task::spawn(async move {
+            if let Err(e) =
+                stream_build_logs(build_deployment_id, |log| println!("{}", log.message)).await
+            {
+                eprintln!("Failed to stream build logs: {}", e);
+            }
+        }),
+        tokio::task::spawn(async move {
+            if let Err(e) =
+                stream_deploy_logs(deploy_deployment_id, |log| println!("{}", log.message)).await
+            {
+                eprintln!("Failed to stream deploy logs: {}", e);
+            }
+        }),
+    ];
 
-    let mut deployments: Vec<_> = deployments
-        .edges
-        .into_iter()
-        .map(|deployment| deployment.node)
-        .collect();
-    deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let latest_deployment = deployments.first().context("No deployments found")?;
-    let vars = subscriptions::build_logs::Variables {
-        deployment_id: latest_deployment.id.clone(),
-        filter: Some(String::new()),
-        limit: Some(500),
-    };
-
-    let (_client, mut log_stream) = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
-    while let Some(Ok(log)) = log_stream.next().await {
-        let log = log.data.context("Failed to retrieve log")?;
-        for line in log.build_logs {
-            println!("{}", line.message);
+    // If the build fails, we want to terminate the process
+    tokio::task::spawn(async move {
+        match wait_for_failure(deployment_id.clone()).await {
+            Ok(_) => {
+                println!("{}", "Build failed".red().bold());
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch deployment status: {}", e);
+            }
         }
-    }
+    });
+
+    futures::future::join_all(tasks).await;
 
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpResponse {
-    pub url: String,
-    pub logs_url: String,
-    pub deployment_domain: String,
-}
+async fn wait_for_failure(deployment_id: String) -> Result<(), anyhow::Error> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpErrorResponse {
-    pub message: String,
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let deployment = get_deployment(&client, &configs, deployment_id.clone())
+            .await
+            .unwrap();
+
+        if deployment.status == DeploymentStatus::FAILED {
+            break;
+        }
+    }
+
+    Ok(())
 }
