@@ -330,12 +330,11 @@ async fn wait_for_failure(deployment_id: String) -> Result<(), anyhow::Error> {
 
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let deployment = get_deployment(&client, &configs, deployment_id.clone())
-            .await
-            .unwrap();
 
-        if deployment.status == DeploymentStatus::FAILED {
-            break;
+        if let Ok(deployment) = get_deployment(&client, &configs, deployment_id.clone()).await {
+            if deployment.status == DeploymentStatus::FAILED {
+                break;
+            }
         }
     }
 
