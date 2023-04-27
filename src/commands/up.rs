@@ -1,13 +1,11 @@
 use std::{
-    error::Error,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::bail;
-use colored;
-use futures::StreamExt;
+
 use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
@@ -16,7 +14,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
-use tokio::task;
 
 use crate::{
     commands::queries::deployment::DeploymentStatus,
@@ -27,7 +24,6 @@ use crate::{
         project::get_project,
     },
     errors::RailwayError,
-    subscription::subscribe_graphql,
     util::prompt::{prompt_select, PromptService},
 };
 
@@ -295,20 +291,17 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let tasks = vec![
         tokio::task::spawn(async move {
-            match stream_build_logs(build_deployment_id, |log| println!("{}", log.message)).await {
-                Err(e) => {
-                    eprintln!("Failed to stream build logs: {}", e);
-                }
-                Ok(_) => {}
+            if let Err(e) =
+                stream_build_logs(build_deployment_id, |log| println!("{}", log.message)).await
+            {
+                eprintln!("Failed to stream build logs: {}", e);
             }
         }),
         tokio::task::spawn(async move {
-            match stream_deploy_logs(deploy_deployment_id, |log| println!("{}", log.message)).await
+            if let Err(e) =
+                stream_deploy_logs(deploy_deployment_id, |log| println!("{}", log.message)).await
             {
-                Err(e) => {
-                    eprintln!("Failed to stream deploy logs: {}", e);
-                }
-                Ok(_) => {}
+                eprintln!("Failed to stream deploy logs: {}", e);
             }
         }),
     ];

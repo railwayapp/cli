@@ -1,8 +1,6 @@
-use futures::StreamExt;
+use crate::controllers::deployment::{stream_build_logs, stream_deploy_logs};
 
-use crate::subscription::subscribe_graphql;
-
-use super::*;
+use super::{queries::deployments::DeploymentStatus, *};
 
 /// View the most-recent deploy's logs
 #[derive(Parser)]
@@ -39,43 +37,24 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     let latest_deployment = deployments.first().context("No deployments found")?;
 
-    if args.build && !args.deployment {
-        let vars = subscriptions::build_logs::Variables {
-            deployment_id: latest_deployment.id.clone(),
-            filter: Some(String::new()),
-            limit: Some(500),
-        };
-
-        let (_client, mut log_stream) = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
-        while let Some(Ok(log)) = log_stream.next().await {
-            let log = log.data.context("Failed to retrieve log")?;
-            for line in log.build_logs {
-                if json {
-                    println!("{}", serde_json::to_string(&line)?);
-                } else {
-                    println!("{}", line.message);
-                }
+    if (args.build || latest_deployment.status == DeploymentStatus::FAILED) && !args.deployment {
+        stream_build_logs(latest_deployment.id.clone(), |log| {
+            if json {
+                println!("{}", serde_json::to_string(&log).unwrap());
+            } else {
+                println!("{}", log.message);
             }
-        }
+        })
+        .await?;
     } else {
-        let vars = subscriptions::deployment_logs::Variables {
-            deployment_id: latest_deployment.id.clone(),
-            filter: Some(String::new()),
-            limit: Some(500),
-        };
-
-        let (_client, mut log_stream) =
-            subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await?;
-        while let Some(Ok(log)) = log_stream.next().await {
-            let log = log.data.context("Failed to retrieve log")?;
-            for line in log.deployment_logs {
-                if json {
-                    println!("{}", serde_json::to_string(&line)?);
-                } else {
-                    println!("{}", line.message);
-                }
+        stream_deploy_logs(latest_deployment.id.clone(), |log| {
+            if json {
+                println!("{}", serde_json::to_string(&log).unwrap());
+            } else {
+                println!("{}", log.message);
             }
-        }
+        })
+        .await?;
     }
 
     Ok(())

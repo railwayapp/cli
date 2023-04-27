@@ -10,7 +10,7 @@ use crate::{
     errors::RailwayError,
     subscription::subscribe_graphql,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use futures::StreamExt;
 
 pub async fn get_deployment(
@@ -20,7 +20,7 @@ pub async fn get_deployment(
 ) -> Result<queries::RailwayDeployment, RailwayError> {
     let vars = queries::deployment::Variables { id: deployment_id };
 
-    let deployment = post_graphql::<queries::Deployment, _>(&client, configs.get_backboard(), vars)
+    let deployment = post_graphql::<queries::Deployment, _>(client, configs.get_backboard(), vars)
         .await?
         .deployment;
 
@@ -29,7 +29,7 @@ pub async fn get_deployment(
 
 pub async fn stream_build_logs(
     deployment_id: String,
-    on_log: fn(log: build_logs::LogFields),
+    on_log: impl Fn(build_logs::LogFields),
 ) -> Result<()> {
     let vars = subscriptions::build_logs::Variables {
         deployment_id: deployment_id.clone(),
@@ -50,7 +50,7 @@ pub async fn stream_build_logs(
 
 pub async fn stream_deploy_logs(
     deployment_id: String,
-    on_log: fn(log: deployment_logs::LogFields),
+    on_log: impl Fn(deployment_logs::LogFields),
 ) -> Result<()> {
     let vars = subscriptions::deployment_logs::Variables {
         deployment_id: deployment_id.clone(),

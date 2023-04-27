@@ -65,7 +65,7 @@ pub struct VariablesForPlugin;
 #[graphql(
     schema_path = "src/gql/schema.graphql",
     query_path = "src/gql/queries/strings/Deployments.graphql",
-    response_derives = "Debug, Serialize, Clone"
+    response_derives = "Debug, Serialize, Clone, PartialEq"
 )]
 pub struct Deployments;
 
