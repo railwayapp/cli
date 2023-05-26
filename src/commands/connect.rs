@@ -73,16 +73,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let (cmd_name, args): (&str, Vec<&str>) = match &plugin.name {
         PluginType::postgresql => (
             "psql",
-            vec![
-                "-U",
-                variables.get("PGUSER").unwrap_or(default),
-                "-h",
-                variables.get("PGHOST").unwrap_or(default),
-                "-p",
-                variables.get("PGPORT").unwrap_or(default),
-                "-d",
-                variables.get("PGDATABASE").unwrap_or(default),
-            ],
+            vec![variables.get("DATABASE_URL").unwrap_or(default)],
         ),
         PluginType::redis => (
             "redis-cli",
