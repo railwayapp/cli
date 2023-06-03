@@ -2,7 +2,7 @@ use crate::controllers::deployment::{stream_build_logs, stream_deploy_logs};
 
 use super::{queries::deployments::DeploymentStatus, *};
 
-/// View the most-recent deploy's logs
+/// View a deploy's logs
 #[derive(Parser)]
 pub struct Args {
     /// Show deployment logs
@@ -12,6 +12,9 @@ pub struct Args {
     /// Show build logs
     #[clap(short, long, group = "log_type")]
     build: bool,
+
+    /// Deployment ID to pull logs from. Omit to pull from latest deloy
+    deployment_id: Option<String>,
 }
 
 pub async fn command(args: Args, json: bool) -> Result<()> {
@@ -34,11 +37,23 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         .into_iter()
         .map(|deployment| deployment.node)
         .collect();
-    deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let latest_deployment = deployments.first().context("No deployments found")?;
 
-    if (args.build || latest_deployment.status == DeploymentStatus::FAILED) && !args.deployment {
-        stream_build_logs(latest_deployment.id.clone(), |log| {
+    let deployment;
+    if let Some(deployment_id) = args.deployment_id {
+        deployment = deployments
+            .iter()
+            .find(|deployment| {
+                deployment.id == deployment_id
+            })
+            .context("Deployment id does not exist")?;
+    } else {
+        // get the latest deloyment
+        deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        deployment = deployments.first().context("No deployments found")?;
+    };
+
+    if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
+        stream_build_logs(deployment.id.clone(), |log| {
             if json {
                 println!("{}", serde_json::to_string(&log).unwrap());
             } else {
@@ -47,7 +62,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         })
         .await?;
     } else {
-        stream_deploy_logs(latest_deployment.id.clone(), |log| {
+        stream_deploy_logs(deployment.id.clone(), |log| {
             if json {
                 println!("{}", serde_json::to_string(&log).unwrap());
             } else {
