@@ -28,6 +28,10 @@ pub struct Args {
     /// Service to pull variables from (defaults to linked service)
     #[clap(short, long)]
     service: Option<String>,
+
+    /// Shell to execute (defaults to $SHELL or parent process of railway)
+    #[clap(long)]
+    shell: Option<String>,
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -84,17 +88,17 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
-        "windows" => match windows_shell_detection().await {
-            Some(WindowsShell::Powershell) => "powershell".to_string(),
-            Some(WindowsShell::Cmd) => "cmd".to_string(),
-            Some(WindowsShell::Powershell7) => "pwsh".to_string(),
-            Some(WindowsShell::NuShell) => "nu".to_string(),
-            Some(WindowsShell::ElvSh) => "elvish".to_string(),
-            None => "cmd".to_string(),
-        },
-        _ => "sh".to_string(),
-    });
+    let shell = if args.shell.is_some() {
+        args.shell.unwrap()
+    } else {
+        match std::env::consts::OS {
+            "windows" => match windows_shell_detection().await {
+                Some(shell) => shell.to_string(),
+                None => "cmd".to_string(),
+            },
+            _ => "sh".to_string(),
+        }
+    };
 
     let shell_options = match shell.as_str() {
         "powershell" => vec!["/nologo"],
@@ -154,6 +158,19 @@ enum WindowsShell {
     Powershell7,
     NuShell,
     ElvSh,
+}
+
+#[allow(dead_code)]
+impl core::fmt::Display for WindowsShell {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match *self {
+            WindowsShell::Powershell => write!(f, "powershell"),
+            WindowsShell::Cmd => write!(f, "cmd"),
+            WindowsShell::Powershell7 => write!(f, "pwsh"),
+            WindowsShell::NuShell => write!(f, "nu"),
+            WindowsShell::ElvSh => write!(f, "elvish"),
+        }
+    }
 }
 
 /// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
