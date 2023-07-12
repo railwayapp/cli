@@ -28,6 +28,10 @@ pub struct Args {
     /// Service to pull variables from (defaults to linked service)
     #[clap(short, long)]
     service: Option<String>,
+
+    /// Open shell without banner
+    #[clap(long)]
+    silent: bool,
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -103,7 +107,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         _ => vec![],
     };
 
-    println!("Entering subshell with Railway variables available. Type 'exit' to exit.\n");
+    if !args.silent {
+        println!("Entering subshell with Railway variables available. Type 'exit' to exit.\n");
+    }
 
     // a bit janky :/
     ctrlc::set_handler(move || {
