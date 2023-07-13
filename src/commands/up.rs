@@ -264,7 +264,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             return Err(RailwayError::FailedToUpload(body.message).into());
         }
 
-        return Err(RailwayError::FailedToUpload(format!("Failed to upload code with status code {status}")).into());
+        return Err(RailwayError::FailedToUpload(format!(
+            "Failed to upload code with status code {status}"
+        ))
+        .into());
     }
 
     let body = res.json::<UpResponse>().await?;
