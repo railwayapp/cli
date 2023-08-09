@@ -187,7 +187,7 @@ impl std::str::FromStr for WindowsShell {
 //
 // 1. edit the WindowsShell enum and add the new shell
 // 2. edit the impl Display for WindowsShell and add the new shell's stringified name (Powershell7 => "pwsh")
-// 3. add a new match arm in the below function implementation
+// 3. edit the impl FromStr for WindowsShell and add the new shell's stringified name (pwsh => Powershell7)
 #[cfg(target_os = "windows")]
 async fn windows_shell_detection() -> Option<WindowsShell> {
     let (ppid, mut ppname) = unsafe {
@@ -208,15 +208,6 @@ async fn windows_shell_detection() -> Option<WindowsShell> {
     let ppname = ppname.split(".").next().unwrap_or("cmd");
 
     ppname.parse::<WindowsShell>().ok()
-
-    // match ppname {
-    //     "cmd" => Some(WindowsShell::Cmd),
-    //     "powershell" => Some(WindowsShell::Powershell),
-    //     "pwsh" => Some(WindowsShell::Powershell7),
-    //     "nu" => Some(WindowsShell::NuShell),
-    //     "elvish" => Some(WindowsShell::ElvSh),
-    //     _ => Some(WindowsShell::Cmd),
-    // }
 }
 
 #[cfg(not(target_os = "windows"))]
