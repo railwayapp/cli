@@ -86,11 +86,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
         "windows" => match windows_shell_detection().await {
-            Some(WindowsShell::Powershell) => "powershell".to_string(),
-            Some(WindowsShell::Cmd) => "cmd".to_string(),
-            Some(WindowsShell::Powershell7) => "pwsh".to_string(),
-            Some(WindowsShell::NuShell) => "nu".to_string(),
-            Some(WindowsShell::ElvSh) => "elvish".to_string(),
+            Some(shell) => shell.to_string(),
             None => "cmd".to_string(),
         },
         _ => "sh".to_string(),
@@ -168,9 +164,30 @@ impl core::fmt::Display for WindowsShell {
     }
 }
 
+impl std::str::FromStr for WindowsShell {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "cmd" => Ok(WindowsShell::Cmd),
+            "powershell" => Ok(WindowsShell::Powershell),
+            "pwsh" => Ok(WindowsShell::Powershell7),
+            "nu" => Ok(WindowsShell::NuShell),
+            "elvish" => Ok(WindowsShell::ElvSh),
+            _ => Ok(WindowsShell::Cmd),
+        }
+    }
+}
+
 /// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
 ///
 /// defaults to cmd if no parent process is found
+///
+// How to add new shells:
+//
+// 1. edit the WindowsShell enum and add the new shell
+// 2. edit the impl Display for WindowsShell and add the new shell's stringified name (Powershell7 => "pwsh")
+// 3. add a new match arm in the below function implementation
 #[cfg(target_os = "windows")]
 async fn windows_shell_detection() -> Option<WindowsShell> {
     let (ppid, mut ppname) = unsafe {
@@ -190,14 +207,16 @@ async fn windows_shell_detection() -> Option<WindowsShell> {
 
     let ppname = ppname.split(".").next().unwrap_or("cmd");
 
-    match ppname {
-        "cmd" => Some(WindowsShell::Cmd),
-        "powershell" => Some(WindowsShell::Powershell),
-        "pwsh" => Some(WindowsShell::Powershell7),
-        "nu" => Some(WindowsShell::NuShell),
-        "elvish" => Some(WindowsShell::ElvSh),
-        _ => Some(WindowsShell::Cmd),
-    }
+    ppname.parse::<WindowsShell>().ok()
+
+    // match ppname {
+    //     "cmd" => Some(WindowsShell::Cmd),
+    //     "powershell" => Some(WindowsShell::Powershell),
+    //     "pwsh" => Some(WindowsShell::Powershell7),
+    //     "nu" => Some(WindowsShell::NuShell),
+    //     "elvish" => Some(WindowsShell::ElvSh),
+    //     _ => Some(WindowsShell::Cmd),
+    // }
 }
 
 #[cfg(not(target_os = "windows"))]
