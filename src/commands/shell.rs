@@ -156,6 +156,18 @@ enum WindowsShell {
     ElvSh,
 }
 
+impl core::fmt::Display for WindowsShell {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match *self {
+            WindowsShell::Powershell => write!(f, "powershell"),
+            WindowsShell::Cmd => write!(f, "cmd"),
+            WindowsShell::Powershell7 => write!(f, "pwsh"),
+            WindowsShell::NuShell => write!(f, "nu"),
+            WindowsShell::ElvSh => write!(f, "elvish"),
+        }
+    }
+}
+
 /// https://gist.github.com/mattn/253013/d47b90159cf8ffa4d92448614b748aa1d235ebe4
 ///
 /// defaults to cmd if no parent process is found
