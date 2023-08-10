@@ -125,8 +125,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .wait()
         .await
         .context("Failed to wait for command")?;
-
-    println!("Exited subshell, Railway variables no longer available.");
+    
+    if !args.silent {
+        println!("Exited subshell, Railway variables no longer available.");
+    }
     Ok(())
 }
 
