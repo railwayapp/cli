@@ -190,7 +190,7 @@ impl Configs {
                 project: data.project_token.project.id,
                 environment: data.project_token.environment.id,
                 environment_name: Some(data.project_token.environment.name),
-                service: project.cloned().and_then(|p| p.service)
+                service: project.cloned().and_then(|p| p.service),
             };
             return Ok(project);
         }

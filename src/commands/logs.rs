@@ -5,7 +5,10 @@ use crate::controllers::{
 };
 use anyhow::bail;
 
-use super::{queries::deployments::DeploymentStatus, *};
+use super::{
+    queries::deployments::{DeploymentListInput, DeploymentStatus},
+    *,
+};
 
 /// View the most-recent deploy's logs
 #[derive(Parser)]
@@ -60,13 +63,18 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     }.unwrap();
 
     let vars = queries::deployments::Variables {
-        project_id: linked_project.project.clone(),
+        input: DeploymentListInput {
+            project_id: Some(linked_project.project.clone()),
+            environment_id: Some(environment_id),
+            service_id: Some(service),
+            include_deleted: None,
+            status: None,
+        },
     };
 
     let deployments =
         post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
             .await?
-            .project
             .deployments;
 
     let mut deployments: Vec<_> = deployments

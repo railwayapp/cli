@@ -1,6 +1,5 @@
-query Deployments($projectId: String!) {
-  project(id: $projectId) {
-    deployments {
+query Deployments($input: DeploymentListInput!) {
+    deployments(input: $input) {
       edges {
         node {
           id
@@ -9,5 +8,4 @@ query Deployments($projectId: String!) {
         }
       }
     }
-  }
 }
