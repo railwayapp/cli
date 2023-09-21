@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use anyhow::bail;
 
-use super::{queries::deployments::DeploymentListInput, *};
+use super::{
+    queries::{deployments::DeploymentListInput, deployments::DeploymentStatus},
+    *,
+};
 use crate::{
     consts::TICK_STRING,
     controllers::{environment::get_matched_environment, project::get_project},
@@ -89,7 +92,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut deployments: Vec<_> = deployments
         .edges
         .into_iter()
-        .map(|deployment| deployment.node)
+        .filter_map(|deployment| {
+            if deployment.node.status == DeploymentStatus::SUCCESS {
+                Some(deployment.node)
+            } else {
+                None
+            }
+        })
         .collect();
     deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     let latest_deployment = deployments.first().context("No deployments found")?;
