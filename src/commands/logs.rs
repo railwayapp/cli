@@ -80,7 +80,13 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let mut deployments: Vec<_> = deployments
         .edges
         .into_iter()
-        .map(|deployment| deployment.node)
+        .filter_map(|deployment| {
+            if deployment.node.status == DeploymentStatus::SUCCESS {
+                Some(deployment.node)
+            } else {
+                None
+            }
+        })
         .collect();
     deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     let latest_deployment = deployments.first().context("No deployments found")?;
