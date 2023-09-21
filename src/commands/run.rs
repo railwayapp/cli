@@ -156,10 +156,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .status()
         .await?;
 
-    if exit_status.success() {
-        println!("Looking good? Run `railway up` to deploy your changes!");
-    }
-
     if let Some(code) = exit_status.code() {
         // If there is an exit code (process not terminated by signal), exit with that code
         std::process::exit(code);
