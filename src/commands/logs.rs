@@ -45,22 +45,20 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let services = project.services.edges.iter().collect::<Vec<_>>();
 
     let environment_id = get_matched_environment(&project, environment)?.id;
-    let service = if let Some(service_arg) = args.service {
+    let service = match (args.service, linked_project.service) {
         // If the user specified a service, use that
-        let service_id = services
+        (Some(service_arg), _) => services
             .iter()
-            .find(|service| service.node.name == service_arg || service.node.id == service_arg);
-        if let Some(service_id) = service_id {
-            Some(service_id.node.id.to_owned())
-        } else {
-            bail!("Service not found");
-        }
-    } else if let Some(service) = linked_project.service {
-        // If the user didn't specify a service, but we have a linked service, use that
-        Some(service)
-    } else {
-        bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag.");
-    }.unwrap();
+            .find(|service| service.node.name == service_arg || service.node.id == service_arg)
+            .with_context(|| format!("Service '{service_arg}' not found"))?
+            .node
+            .id
+            .to_owned(),
+        // Otherwise if we have a linked service, use that
+        (_, Some(linked_service)) => linked_service,
+        // Otherwise it's a user error
+        _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
+    };
 
     let vars = queries::deployments::Variables {
         input: DeploymentListInput {
