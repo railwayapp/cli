@@ -81,11 +81,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         .edges
         .into_iter()
         .filter_map(|deployment| {
-            if deployment.node.status == DeploymentStatus::SUCCESS {
-                Some(deployment.node)
-            } else {
-                None
-            }
+            (deployment.node.status == DeploymentStatus::SUCCESS).then_some(deployment.node)
         })
         .collect();
     deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
