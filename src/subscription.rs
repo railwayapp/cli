@@ -20,7 +20,7 @@ where
 {
     let configs = Configs::new()?;
     let Some(token) = configs.root_config.user.token.clone() else {
-      bail!("Unauthorized. Please login with `railway login`")
+        bail!("Unauthorized. Please login with `railway login`")
     };
     let bearer = format!("Bearer {token}");
     let hostname = configs.get_host();
