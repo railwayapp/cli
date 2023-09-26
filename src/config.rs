@@ -173,6 +173,9 @@ impl Configs {
     }
 
     pub async fn get_linked_project(&self) -> Result<LinkedProject> {
+        let path = self.get_closest_linked_project_directory()?;
+        let project = self.root_config.projects.get(&path);
+
         if Self::get_railway_token().is_some() {
             let vars = queries::project_token::Variables {};
             let client = GQLClient::new_authorized(self)?;
@@ -187,13 +190,10 @@ impl Configs {
                 project: data.project_token.project.id,
                 environment: data.project_token.environment.id,
                 environment_name: Some(data.project_token.environment.name),
-                service: None,
+                service: project.cloned().and_then(|p| p.service),
             };
             return Ok(project);
         }
-
-        let path = self.get_closest_linked_project_directory()?;
-        let project = self.root_config.projects.get(&path);
 
         project
             .cloned()
