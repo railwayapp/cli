@@ -29,8 +29,8 @@ cargo install railwayapp --locked
 ### Homebrew
 
 ```bash 
-brew tap railwayapp/tap
-brew install rlwy
+brew tap railwayapp/railway
+brew install railway
 ```
 
 ### NPM
