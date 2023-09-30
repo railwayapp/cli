@@ -19,6 +19,14 @@ query UserProjects {
 							}
 						}
 					}
+                    services {
+                        edges {
+                            node {
+                                id
+                                name
+                            }
+                        }
+                    }
 				}
 			}
 		}
