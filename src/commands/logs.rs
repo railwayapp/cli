@@ -90,9 +90,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     if let Some(deployment_id) = args.deployment_id {
         deployment = deployments
             .iter()
-            .find(|deployment| {
-                deployment.id == deployment_id
-            })
+            .find(|deployment| deployment.id == deployment_id)
             .context("Deployment id does not exist")?;
     } else {
         // get the latest deloyment
@@ -111,8 +109,55 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         .await?;
     } else {
         stream_deploy_logs(deployment.id.clone(), |log| {
-            if json {
-                println!("{}", serde_json::to_string(&log).unwrap());
+            if !log.attributes.is_empty() {
+                let timestamp = log
+                    .attributes
+                    .iter()
+                    .find(|attr| {
+                        attr.key.to_lowercase() == "timestamp" || attr.key.to_lowercase() == "ts"
+                    })
+                    .map(|attr| attr.value.clone())
+                    .unwrap_or(String::default());
+                let level = log
+                    .attributes
+                    .iter()
+                    .find(|attr| {
+                        attr.key.to_lowercase() == "level" || attr.key.to_lowercase() == "lvl"
+                    })
+                    .map(|attr| attr.value.clone())
+                    .unwrap_or(String::default());
+                let message = log
+                    .attributes
+                    .iter()
+                    .find(|attr| {
+                        attr.key.to_lowercase() == "message" || attr.key.to_lowercase() == "msg"
+                    })
+                    .map(|attr| attr.value.clone())
+                    .unwrap_or(String::default());
+                println!(
+                    "{} {} {} {}",
+                    timestamp,
+                    level,
+                    message,
+                    log.attributes
+                        .iter()
+                        .filter_map(|attr| {
+                            let key = attr.key.to_lowercase();
+                            if key != "timestamp"
+                                && key != "ts"
+                                && key != "level"
+                                && key != "lvl"
+                                && key != "message"
+                                && key != "msg"
+                            {
+                                Some(format!("{}={}", attr.key.clone(), attr.value.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<String>>()
+                        .join(" ")
+                )
             } else {
                 println!("{}", log.message);
             }
