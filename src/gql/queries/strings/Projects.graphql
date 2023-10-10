@@ -17,6 +17,14 @@ query Projects($teamId: String) {
 						}
 					}
 				}
+            	services {
+      				edges {
+        				node {
+          					id
+							name
+        				}
+      				}
+    			}
 			}
 		}
 	}
