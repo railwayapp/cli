@@ -89,9 +89,6 @@ pub async fn get_service_to_deploy(
         if services.is_empty() {
             // If there are no services, backboard will generate one for us
             None
-        } else if services.len() == 1 {
-            // If there is only one service, use that
-            services.first().map(|service| service.node.id.to_owned())
         } else {
             // If there are multiple services, prompt the user to select one
             if std::io::stdout().is_terminal() {
