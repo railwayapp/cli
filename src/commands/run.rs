@@ -8,7 +8,7 @@ use crate::{
         variables::{get_all_plugin_variables, get_service_variables},
     },
     errors::RailwayError,
-    util::prompt::{prompt_select, PromptService},
+    util::{prompt::{prompt_select, PromptService}, shell::get_shell},
 };
 
 use super::{queries::project::ProjectProject, *};
@@ -137,20 +137,22 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // this is for `rails c` and similar REPLs
     })?;
 
-    let mut args = args.args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    let args = args.args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if args.is_empty() {
         return Err(RailwayError::NoCommandProvided.into());
     }
 
-    let child_process_name = match std::env::consts::OS {
-        "windows" => {
-            args.insert(0, "/C");
-            "cmd"
-        }
-        _ => args.remove(0),
+    let shell = get_shell().await;
+    let shell_options = match shell.as_str() {
+        "powershell" => vec!["/nologo", "-Command", "\""],
+        "pwsh" => vec!["/nologo", "-Command", "\""],
+        "cmd" => vec!["/C"],
+        "sh" => vec!["-c"],
+        _ => vec![],
     };
 
-    let exit_status = tokio::process::Command::new(child_process_name)
+    let exit_status = tokio::process::Command::new(shell)
+        .args(shell_options)
         .args(args)
         .envs(variables)
         .status()
