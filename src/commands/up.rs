@@ -24,7 +24,10 @@ use crate::{
         project::get_project,
     },
     errors::RailwayError,
-    util::prompt::{prompt_select, PromptService},
+    util::{
+        logs::format_attr_log,
+        prompt::{prompt_select, PromptService},
+    },
 };
 
 use super::*;
@@ -309,9 +312,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             }
         }),
         tokio::task::spawn(async move {
-            if let Err(e) =
-                stream_deploy_logs(deploy_deployment_id, |log| println!("{}", log.message)).await
-            {
+            if let Err(e) = stream_deploy_logs(deploy_deployment_id, format_attr_log).await {
                 eprintln!("Failed to stream deploy logs: {}", e);
             }
         }),
