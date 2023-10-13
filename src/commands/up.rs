@@ -167,7 +167,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .from_writer(SynchronizedWriter::new(arc.clone()));
 
     // list of all paths to ignore by default
-    let ignore_paths = vec![".git", "node_modules"];
+    let ignore_paths = [".git", "node_modules"];
     let ignore_paths: Vec<&std::ffi::OsStr> =
         ignore_paths.iter().map(std::ffi::OsStr::new).collect();
 
