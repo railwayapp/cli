@@ -4,16 +4,21 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    commands::queries::user_projects::UserProjectsMeTeamsEdgesNode,
-    controllers::project::get_project, errors::RailwayError, util::prompt::prompt_options,
+    controllers::project::get_project,
+    errors::RailwayError,
+    util::prompt::{prompt_options, prompt_select, PromptService},
 };
 
 use super::{
     queries::{
         project::ProjectProjectEnvironmentsEdgesNode,
-        projects::{ProjectsProjectsEdgesNode, ProjectsProjectsEdgesNodeEnvironmentsEdgesNode},
+        projects::{
+            ProjectsProjectsEdgesNode, ProjectsProjectsEdgesNodeEnvironmentsEdgesNode,
+            ProjectsProjectsEdgesNodeServicesEdgesNode,
+        },
         user_projects::{
             UserProjectsMeProjectsEdgesNode, UserProjectsMeProjectsEdgesNodeEnvironmentsEdgesNode,
+            UserProjectsMeProjectsEdgesNodeServicesEdgesNode, UserProjectsMeTeamsEdgesNode,
         },
     },
     *,
@@ -28,6 +33,9 @@ pub struct Args {
 
     /// Project ID to link to
     project_id: Option<String>,
+
+    /// The service to link
+    service: Option<String>,
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -63,12 +71,38 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             )?
         };
 
+        let services: Vec<_> = project
+            .services
+            .edges
+            .iter()
+            .map(|s| PromptService(&s.node))
+            .collect();
+
+        if let Some(service) = args.service {
+            let service = services
+                .iter()
+                .find(|s| s.0.id == service || s.0.name == service)
+                .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
+
+            configs.link_service(service.0.id.clone())?;
+            configs.write()?;
+            return Ok(());
+        }
+
+        if services.is_empty() {
+            bail!("No services found");
+        }
+
+        let service = prompt_select("Select a service", services)?;
+
         configs.link_project(
             project.id.clone(),
             Some(project.name.clone()),
             environment.0.id.clone(),
             Some(environment.0.name.clone()),
         )?;
+
+        configs.link_service(service.0.id.clone())?;
         configs.write()?;
         return Ok(());
     } else if !std::io::stdout().is_terminal() {
@@ -96,13 +130,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
 
     if teams.is_empty() {
-        let (project, environment) = prompt_personal_projects(personal_project_names)?;
+        let (project, environment, service) = prompt_personal_projects(personal_project_names)?;
         configs.link_project(
             project.0.id.clone(),
             Some(project.0.name.clone()),
             environment.0.id.clone(),
             Some(environment.0.name.clone()),
         )?;
+        configs.link_service(service.0.id.clone())?;
         configs.write()?;
         return Ok(());
     }
@@ -116,13 +151,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let team = prompt_options("Select a team", team_names)?;
     match team {
         Team::Personal => {
-            let (project, environment) = prompt_personal_projects(personal_project_names)?;
+            let (project, environment, service) = prompt_personal_projects(personal_project_names)?;
             configs.link_project(
                 project.0.id.clone(),
                 Some(project.0.name.clone()),
                 environment.0.id.clone(),
                 Some(environment.0.name.clone()),
             )?;
+            configs.link_service(service.0.id.clone())?;
         }
         Team::Team(team) => {
             let vars = queries::projects::Variables {
@@ -141,13 +177,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 .iter()
                 .map(|project| Project(project))
                 .collect::<Vec<_>>();
-            let (project, environment) = prompt_team_projects(project_names)?;
+            let (project, environment, service) = prompt_team_projects(project_names)?;
             configs.link_project(
                 project.0.id.clone(),
                 Some(project.0.name.clone()),
                 environment.0.id.clone(),
                 Some(environment.0.name.clone()),
             )?;
+            configs.link_service(service.0.id.clone())?;
         }
     }
 
@@ -156,7 +193,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     Ok(())
 }
 
-fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environment)> {
+fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environment, Service)> {
     if project_names.is_empty() {
         return Err(RailwayError::NoProjects.into());
     }
@@ -169,13 +206,23 @@ fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environ
         .iter()
         .map(|env| Environment(&env.node))
         .collect();
+
     let environment = prompt_options("Select an environment", environments)?;
-    Ok((project, environment))
+    let services: Vec<_> = project
+        .0
+        .services
+        .edges
+        .iter()
+        .map(|s| Service(&s.node))
+        .collect();
+    let service = prompt_select("Select a service", services)?;
+
+    Ok((project, environment, service))
 }
 
 fn prompt_personal_projects(
     personal_project_names: Vec<PersonalProject>,
-) -> Result<(PersonalProject, PersonalEnvironment)> {
+) -> Result<(PersonalProject, PersonalEnvironment, PersonalService)> {
     if personal_project_names.is_empty() {
         return Err(RailwayError::NoProjects.into());
     }
@@ -189,7 +236,24 @@ fn prompt_personal_projects(
         .map(|env| PersonalEnvironment(&env.node))
         .collect();
     let environment = prompt_options("Select an environment", environments)?;
-    Ok((project, environment))
+    let services: Vec<_> = project
+        .0
+        .services
+        .edges
+        .iter()
+        .map(|s| PersonalService(&s.node))
+        .collect();
+    let service = prompt_select("Select a service", services)?;
+    Ok((project, environment, service))
+}
+
+#[derive(Debug, Clone)]
+struct PersonalService<'a>(&'a UserProjectsMeProjectsEdgesNodeServicesEdgesNode);
+
+impl<'a> Display for PersonalService<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +278,15 @@ impl<'a> Display for PersonalEnvironment<'a> {
 struct Project<'a>(&'a ProjectsProjectsEdgesNode);
 
 impl<'a> Display for Project<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.name)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Service<'a>(&'a ProjectsProjectsEdgesNodeServicesEdgesNode);
+
+impl<'a> Display for Service<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.name)
     }
