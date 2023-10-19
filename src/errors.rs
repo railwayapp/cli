@@ -44,9 +44,6 @@ pub enum RailwayError {
     #[error("Service or plugin \"{0}\" not found.")]
     ServiceOrPluginNotFound(String),
 
-    #[error("Project has no plugins.\nRun `railway add` to add a plugin.")]
-    ProjectHasNoPlugins,
-
     #[error("Project has no services or plugins.")]
     ProjectHasNoServicesOrPlugins,
 

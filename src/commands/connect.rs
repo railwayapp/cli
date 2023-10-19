@@ -49,7 +49,7 @@ impl From<PromptPluginOrService> for PluginOrService {
     }
 }
 
-impl<'a> Display for PluginOrService {
+impl Display for PluginOrService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PluginOrService::Plugin(plugin) => write!(f, "{}", plugin.friendly_name),
@@ -58,7 +58,7 @@ impl<'a> Display for PluginOrService {
     }
 }
 
-impl<'a> Display for PromptPluginOrService {
+impl Display for PromptPluginOrService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(service) = &self.service {
             return write!(f, "{}", service.name);
