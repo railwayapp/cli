@@ -69,13 +69,6 @@ async fn get_service_or_plugins(
                     .map(|plugin| plugin.node.id.to_owned())
                     .collect(),
             )
-        } else if services.len() == 1 {
-            // If there is only one service, use that
-            services
-                .first()
-                .map(|service| service.node.id.to_owned())
-                .map(ServiceOrPlugins::Service)
-                .unwrap()
         } else {
             // If there are multiple services, prompt the user to select one
             if std::io::stdout().is_terminal() {
