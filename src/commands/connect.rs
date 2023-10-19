@@ -28,7 +28,7 @@ pub struct Args {
 impl Display for PluginOrService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PluginOrService::Plugin(plugin) => write!(f, "{}", plugin.friendly_name),
+            PluginOrService::Plugin(plugin) => write!(f, "{} (legacy)", plugin.friendly_name),
             PluginOrService::Service(service) => write!(f, "{}", service.name),
         }
     }

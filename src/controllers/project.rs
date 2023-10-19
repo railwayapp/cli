@@ -47,22 +47,22 @@ pub fn get_plugin_or_service(
     project: &ProjectProject,
     service_or_plugin_name: String,
 ) -> Result<PluginOrService> {
-    let plugin = project
-        .plugins
-        .edges
-        .iter()
-        .find(|edge| edge.node.friendly_name.to_lowercase() == service_or_plugin_name);
-
     let service = project
         .services
         .edges
         .iter()
         .find(|edge| edge.node.name.to_lowercase() == service_or_plugin_name);
 
-    if let Some(plugin) = plugin {
-        return Ok(PluginOrService::Plugin(plugin.node.clone()));
-    } else if let Some(service) = service {
+    let plugin = project
+        .plugins
+        .edges
+        .iter()
+        .find(|edge| edge.node.friendly_name.to_lowercase() == service_or_plugin_name);
+
+    if let Some(service) = service {
         return Ok(PluginOrService::Service(service.node.clone()));
+    } else if let Some(plugin) = plugin {
+        return Ok(PluginOrService::Plugin(plugin.node.clone()));
     }
 
     bail!(RailwayError::ServiceOrPluginNotFound(
