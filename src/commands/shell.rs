@@ -1,3 +1,4 @@
+use anyhow::bail;
 use std::collections::BTreeMap;
 
 use crate::{controllers::project::get_project, errors::RailwayError};
@@ -84,8 +85,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
         all_variables.append(&mut variables);
     } else {
-        eprintln!("No service linked, not entering shell.");
-        return Ok(());
+        bail!("No service linked. Please link one with `railway service`");
     }
 
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
