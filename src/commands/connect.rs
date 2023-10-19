@@ -12,12 +12,7 @@ use crate::controllers::{
 use crate::errors::RailwayError;
 use crate::util::prompt::prompt_select;
 
-use super::{
-    queries::project::{
-        PluginType, ProjectProjectPluginsEdgesNode, ProjectProjectServicesEdgesNode,
-    },
-    *,
-};
+use super::{queries::project::PluginType, *};
 
 /// Connect to a plugin's shell (psql for Postgres, mongosh for MongoDB, etc.)
 #[derive(Parser)]
@@ -30,43 +25,12 @@ pub struct Args {
     environment: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-
-pub struct PromptPluginOrService {
-    pub plugin: Option<ProjectProjectPluginsEdgesNode>,
-    pub service: Option<ProjectProjectServicesEdgesNode>,
-}
-
-impl From<PromptPluginOrService> for PluginOrService {
-    fn from(val: PromptPluginOrService) -> Self {
-        if let Some(service) = val.service {
-            return PluginOrService::Service(service);
-        } else if let Some(plugin) = val.plugin {
-            return PluginOrService::Plugin(plugin);
-        }
-
-        panic!("No plugin or service found")
-    }
-}
-
 impl Display for PluginOrService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PluginOrService::Plugin(plugin) => write!(f, "{}", plugin.friendly_name),
             PluginOrService::Service(service) => write!(f, "{}", service.name),
         }
-    }
-}
-
-impl Display for PromptPluginOrService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(service) = &self.service {
-            return write!(f, "{}", service.name);
-        } else if let Some(plugin) = &self.plugin {
-            return write!(f, "{}", plugin.friendly_name);
-        }
-
-        panic!("No plugin or service found")
     }
 }
 
