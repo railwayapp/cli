@@ -6,6 +6,8 @@ use anyhow::Result;
 use reqwest::Client;
 use std::collections::BTreeMap;
 
+use super::project::PluginOrService;
+
 pub async fn get_service_variables(
     client: &Client,
     configs: &Configs,
@@ -68,6 +70,45 @@ pub async fn get_plugin_variables(
         post_graphql::<queries::VariablesForPlugin, _>(client, configs.get_backboard(), vars)
             .await?
             .variables;
+
+    Ok(variables)
+}
+
+pub async fn get_plugin_or_service_variables(
+    client: &Client,
+    configs: &Configs,
+    project_id: String,
+    environment_id: String,
+    plugin_or_service: &PluginOrService,
+) -> Result<BTreeMap<String, String>> {
+    let variables = match plugin_or_service {
+        PluginOrService::Plugin(plugin) => {
+            let query = queries::variables_for_plugin::Variables {
+                project_id: project_id.clone(),
+                environment_id: environment_id.clone(),
+                plugin_id: plugin.id.clone(),
+            };
+
+            post_graphql::<queries::VariablesForPlugin, _>(client, configs.get_backboard(), query)
+                .await?
+                .variables
+        }
+        PluginOrService::Service(service) => {
+            let query = queries::variables_for_service_deployment::Variables {
+                project_id: project_id.clone(),
+                environment_id: environment_id.clone(),
+                service_id: service.id.clone(),
+            };
+
+            post_graphql::<queries::VariablesForServiceDeployment, _>(
+                client,
+                configs.get_backboard(),
+                query,
+            )
+            .await?
+            .variables_for_service_deployment
+        }
+    };
 
     Ok(variables)
 }

@@ -3,12 +3,22 @@ use reqwest::Client;
 use crate::{
     client::post_graphql,
     commands::{
-        queries::{self},
+        queries::{
+            self,
+            project::{
+                ProjectProject, ProjectProjectPluginsEdgesNode, ProjectProjectServicesEdgesNode,
+            },
+        },
         Configs,
     },
     errors::RailwayError,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
+
+pub enum PluginOrService {
+    Plugin(ProjectProjectPluginsEdgesNode),
+    Service(ProjectProjectServicesEdgesNode),
+}
 
 pub async fn get_project(
     client: &Client,
@@ -31,4 +41,31 @@ pub async fn get_project(
         .project;
 
     Ok(project)
+}
+
+pub fn get_plugin_or_service(
+    project: &ProjectProject,
+    service_or_plugin_name: String,
+) -> Result<PluginOrService> {
+    let service = project
+        .services
+        .edges
+        .iter()
+        .find(|edge| edge.node.name.to_lowercase() == service_or_plugin_name);
+
+    let plugin = project
+        .plugins
+        .edges
+        .iter()
+        .find(|edge| edge.node.friendly_name.to_lowercase() == service_or_plugin_name);
+
+    if let Some(service) = service {
+        return Ok(PluginOrService::Service(service.node.clone()));
+    } else if let Some(plugin) = plugin {
+        return Ok(PluginOrService::Plugin(plugin.node.clone()));
+    }
+
+    bail!(RailwayError::ServiceOrPluginNotFound(
+        service_or_plugin_name
+    ))
 }
