@@ -90,9 +90,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     if let Some(deployment_id) = args.deployment_id {
         deployment = deployments
             .iter()
-            .find(|deployment| {
-                deployment.id == deployment_id
-            })
+            .find(|deployment| deployment.id == deployment_id)
             .context("Deployment id does not exist")?;
     } else {
         // get the latest deloyment
