@@ -71,6 +71,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             )?
         };
 
+        configs.link_project(
+            project.id.clone(),
+            Some(project.name.clone()),
+            environment.0.id.clone(),
+            Some(environment.0.name.clone()),
+        )?;
+
         let services: Vec<_> = project
             .services
             .edges
@@ -87,22 +94,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             configs.link_service(service.0.id.clone())?;
             configs.write()?;
             return Ok(());
+        } else if !services.is_empty() {
+            let service = prompt_select("Select a service", services)?;
+            configs.link_service(service.0.id.clone())?;
         }
 
-        if services.is_empty() {
-            bail!("No services found");
-        }
-
-        let service = prompt_select("Select a service", services)?;
-
-        configs.link_project(
-            project.id.clone(),
-            Some(project.name.clone()),
-            environment.0.id.clone(),
-            Some(environment.0.name.clone()),
-        )?;
-
-        configs.link_service(service.0.id.clone())?;
         configs.write()?;
         return Ok(());
     } else if !std::io::stdout().is_terminal() {
@@ -137,7 +133,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             environment.0.id.clone(),
             Some(environment.0.name.clone()),
         )?;
-        configs.link_service(service.0.id.clone())?;
+
+        if let Some(service) = service {
+            configs.link_service(service.0.id.clone())?;
+        }
+
         configs.write()?;
         return Ok(());
     }
@@ -158,7 +158,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 environment.0.id.clone(),
                 Some(environment.0.name.clone()),
             )?;
-            configs.link_service(service.0.id.clone())?;
+
+            if let Some(service) = service {
+                configs.link_service(service.0.id.clone())?;
+            }
         }
         Team::Team(team) => {
             let vars = queries::projects::Variables {
@@ -184,7 +187,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 environment.0.id.clone(),
                 Some(environment.0.name.clone()),
             )?;
-            configs.link_service(service.0.id.clone())?;
+
+            if let Some(service) = service {
+                configs.link_service(service.0.id.clone())?;
+            }
         }
     }
 
@@ -193,7 +199,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     Ok(())
 }
 
-fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environment, Service)> {
+fn prompt_team_projects(
+    project_names: Vec<Project>,
+) -> Result<(Project, Environment, Option<Service>)> {
     if project_names.is_empty() {
         return Err(RailwayError::NoProjects.into());
     }
@@ -215,14 +223,22 @@ fn prompt_team_projects(project_names: Vec<Project>) -> Result<(Project, Environ
         .iter()
         .map(|s| Service(&s.node))
         .collect();
-    let service = prompt_select("Select a service", services)?;
+    let service = if services.is_empty() {
+        None
+    } else {
+        Some(prompt_select("Select a service", services)?)
+    };
 
     Ok((project, environment, service))
 }
 
 fn prompt_personal_projects(
     personal_project_names: Vec<PersonalProject>,
-) -> Result<(PersonalProject, PersonalEnvironment, PersonalService)> {
+) -> Result<(
+    PersonalProject,
+    PersonalEnvironment,
+    Option<PersonalService>,
+)> {
     if personal_project_names.is_empty() {
         return Err(RailwayError::NoProjects.into());
     }
@@ -243,7 +259,13 @@ fn prompt_personal_projects(
         .iter()
         .map(|s| PersonalService(&s.node))
         .collect();
-    let service = prompt_select("Select a service", services)?;
+
+    let service = if services.is_empty() {
+        None
+    } else {
+        Some(prompt_select("Select a service", services)?)
+    };
+
     Ok((project, environment, service))
 }
 
