@@ -94,10 +94,11 @@ pub async fn get_service_to_deploy(
             if std::io::stdout().is_terminal() {
                 let prompt_services: Vec<_> =
                     services.iter().map(|s| PromptService(&s.node)).collect();
-                let service = prompt_select("Select a service to deploy to", prompt_services)?;
+                let service = prompt_select("Select a service to deploy to", prompt_services)
+                    .context("Please specify a service to deploy to via the `--service` flag.")?;
                 Some(service.0.id.clone())
             } else {
-                bail!("Multiple services found. Please specify a service to deploy to.")
+                bail!("Multiple services found. Please specify a service to deploy to via the `--service` flag.")
             }
         }
     };
