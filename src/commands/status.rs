@@ -33,11 +33,16 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
                 println!("{}", format!("{:?}", plugin.name).dimmed().bold());
             }
         }
-        if !project.services.edges.is_empty() {
-            println!("Services:");
-            for service in project.services.edges.iter().map(|service| &service.node) {
-                println!("{}", service.name.dimmed().bold());
-            }
+        if let Some(linked_service) = linked_project.service {
+            let service = project
+                .services
+                .edges
+                .iter()
+                .find(|service| service.node.id == linked_service)
+                .expect("service linked doesn't exist");
+            println!("Service: {}", service.node.name.green().bold());
+        } else {
+            println!("Service: {}", "None".red().bold())
         }
     } else {
         println!("{}", serde_json::to_string_pretty(&project)?);
