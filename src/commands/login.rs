@@ -32,7 +32,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let confirm = prompt_confirm_with_default("Open the browser?", true)?;
 
     if !confirm {
-        return Ok(());
+        return browserless_login().await;
     }
 
     let port = rand::thread_rng().gen_range(50000..60000);
