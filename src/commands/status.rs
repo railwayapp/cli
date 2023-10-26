@@ -39,7 +39,7 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
                 .edges
                 .iter()
                 .find(|service| service.node.id == linked_service)
-                .expect("service linked doesn't exist");
+                .expect("the linked service doesn't exist");
             println!("Service: {}", service.node.name.green().bold());
         } else {
             println!("Service: {}", "None".red().bold())
