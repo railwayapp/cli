@@ -18,7 +18,7 @@ pub enum RailwayError {
     #[error("Failed to fetch: {0}")]
     FetchError(#[from] reqwest::Error),
 
-    #[error("No linked project found. Run `railway link` to connect to a project.")]
+    #[error("No linked project found. Run railway link to connect to a project, and a service.")]
     NoLinkedProject,
 
     #[error("Project not found. Run `railway link` to connect to a project.")]
@@ -41,8 +41,11 @@ pub enum RailwayError {
     #[error("Service \"{0}\" not found.\nRun `railway service` to connect to a service.")]
     ServiceNotFound(String),
 
-    #[error("Project has no plugins.\nRun `railway add` to add a plugin.")]
-    ProjectHasNoPlugins,
+    #[error("Service or plugin \"{0}\" not found.")]
+    ServiceOrPluginNotFound(String),
+
+    #[error("Project has no services or plugins.")]
+    ProjectHasNoServicesOrPlugins,
 
     #[error("No service linked and no plugins found\nRun `railway service` to link a service")]
     NoServiceLinked,
@@ -55,4 +58,7 @@ pub enum RailwayError {
 
     #[error("{0}")]
     FailedToUpload(String),
+
+    #[error("Could not determine database type for service {0}")]
+    UnknownDatabaseType(String),
 }

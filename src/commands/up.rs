@@ -92,18 +92,16 @@ pub async fn get_service_to_deploy(
         if services.is_empty() {
             // If there are no services, backboard will generate one for us
             None
-        } else if services.len() == 1 {
-            // If there is only one service, use that
-            services.first().map(|service| service.node.id.to_owned())
         } else {
             // If there are multiple services, prompt the user to select one
             if std::io::stdout().is_terminal() {
                 let prompt_services: Vec<_> =
                     services.iter().map(|s| PromptService(&s.node)).collect();
-                let service = prompt_select("Select a service to deploy to", prompt_services)?;
+                let service = prompt_select("Select a service to deploy to", prompt_services)
+                    .context("Please specify a service to deploy to via the `--service` flag.")?;
                 Some(service.0.id.clone())
             } else {
-                bail!("Multiple services found. Please specify a service to deploy to.")
+                bail!("Multiple services found. Please specify a service to deploy to via the `--service` flag.")
             }
         }
     };

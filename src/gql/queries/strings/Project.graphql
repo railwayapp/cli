@@ -24,6 +24,20 @@ query Project($id: String!) {
         node {
           id
           name
+
+          serviceInstances {
+            edges {
+              node {
+                id
+                serviceId
+                environmentId
+                source {
+                  repo
+                  image
+                }
+              }
+            }
+          }
         }
       }
     }
