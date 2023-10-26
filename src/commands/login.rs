@@ -1,6 +1,8 @@
 use std::{net::SocketAddr, time::Duration};
 
-use crate::{consts::TICK_STRING, interact_or, util::prompt::prompt_confirm_with_default};
+use crate::{
+    consts::TICK_STRING, interact_or, util::prompt::prompt_confirm_with_default_with_cancel,
+};
 
 use super::*;
 
@@ -29,10 +31,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return browserless_login().await;
     }
 
-    let confirm = prompt_confirm_with_default("Open the browser?", true)?;
+    let confirm = prompt_confirm_with_default_with_cancel("Open the browser?", true)?;
 
-    if !confirm {
-        return browserless_login().await;
+    if let Some(confirm) = confirm {
+        if !confirm {
+            return browserless_login().await;
+        }
+    } else {
+        return Ok(());
     }
 
     let port = rand::thread_rng().gen_range(50000..60000);
