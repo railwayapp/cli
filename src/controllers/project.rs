@@ -51,13 +51,11 @@ pub fn get_plugin_or_service(
         .services
         .edges
         .iter()
-        .find(|edge| edge.node.name.to_lowercase() == service_or_plugin_name);
+        .find(|edge| edge.node.name.to_lowercase() == service_or_plugin_name.to_lowercase());
 
-    let plugin = project
-        .plugins
-        .edges
-        .iter()
-        .find(|edge| edge.node.friendly_name.to_lowercase() == service_or_plugin_name);
+    let plugin = project.plugins.edges.iter().find(|edge| {
+        edge.node.friendly_name.to_lowercase() == service_or_plugin_name.to_lowercase()
+    });
 
     if let Some(service) = service {
         return Ok(PluginOrService::Service(service.node.clone()));
