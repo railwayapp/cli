@@ -118,7 +118,10 @@ impl PluginOrService {
                     .and_then(|source| source.image)
                     .map(|image: String| image.to_lowercase())
                     .and_then(|image: String| {
-                        if image.contains("postgres") {
+                        if image.contains("postgres")
+                            || image.contains("postgis")
+                            || image.contains("timescale")
+                        {
                             Some(PluginType::postgresql)
                         } else if image.contains("redis") {
                             Some(PluginType::redis)
