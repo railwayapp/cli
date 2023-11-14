@@ -23,7 +23,7 @@ use std::ffi::CStr;
 #[cfg(target_os = "windows")]
 use std::mem::zeroed;
 
-/// Open a subshell with Railway variables available
+/// Open a local subshell with Railway variables available
 #[derive(Parser)]
 pub struct Args {
     /// Service to pull variables from (defaults to linked service)
