@@ -265,6 +265,9 @@ impl Configs {
                         .with_attr(Attributes::BOLD),
                 ),
             )
+            .with_canceled_prompt_indicator(
+                Styled::new("<cancelled>").with_fg(inquire::ui::Color::DarkRed),
+            )
     }
 
     pub fn write(&self) -> Result<()> {
