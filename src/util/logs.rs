@@ -35,10 +35,10 @@ pub fn format_attr_log(mut log: subscriptions::deployment_logs::LogFields) {
             // for some reason, .uppercase() removes formatting
             let level = level.replace('"', "").to_uppercase();
             match level.to_lowercase().as_str() {
-                "info" => level.blue(),
-                "error" => level.red(),
-                "warn" => level.yellow(),
-                "debug" => level.magenta(),
+                "info" => "INFO".blue(),
+                "error" | "err" => "ERRO".red(),
+                "warn" => "WARN".yellow(),
+                "debug" => "DBUG".magenta(),
                 _ => level.normal(),
             }
             .bold()
