@@ -22,7 +22,7 @@ pub fn format_attr_log(mut log: subscriptions::deployment_logs::LogFields) {
                 "timestamp" | "ts" | "time" => {
                     timestamp = Some(attr.value.clone().replace('"', ""))
                 }
-                "level" | "lvl" => level = Some(attr.value.clone()),
+                "level" | "lvl" | "severity" => level = Some(attr.value.clone()),
                 _ => others.push(format!(
                     "{}{}{}",
                     attr.key.clone().bright_cyan(),
