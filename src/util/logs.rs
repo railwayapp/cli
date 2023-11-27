@@ -3,7 +3,6 @@ use colored::Colorize;
 
 pub fn format_attr_log(mut log: subscriptions::deployment_logs::LogFields) {
     if !log.attributes.is_empty() {
-        let mut timestamp: Option<String> = None;
         let mut level: Option<String> = None;
         let message = log.message;
         let mut others = Vec::new();
@@ -19,9 +18,6 @@ pub fn format_attr_log(mut log: subscriptions::deployment_logs::LogFields) {
         // get attributes using a match
         for attr in &log.attributes {
             match attr.key.to_lowercase().as_str() {
-                "timestamp" | "ts" | "time" => {
-                    timestamp = Some(attr.value.clone().replace('"', ""))
-                }
                 "level" | "lvl" | "severity" => level = Some(attr.value.clone()),
                 _ => others.push(format!(
                     "{}{}{}",
@@ -50,7 +46,7 @@ pub fn format_attr_log(mut log: subscriptions::deployment_logs::LogFields) {
         println!(
             "{}={} {}={} {}={}{}{5} {}",
             "timestamp".bright_cyan(),
-            timestamp.unwrap_or_default().purple(),
+            log.timestamp.replace('"', "").purple(),
             "level".bright_cyan(),
             level.unwrap_or_default(),
             "msg".bright_cyan(),
