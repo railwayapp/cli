@@ -1,0 +1,17 @@
+Dockerfile
+bin/
+npm-install/
+target/
+.cargo/
+.git/
+.github/
+CONTRIBUTING.md
+LICENSE
+README.md
+flake.*
+package.json
+install.sh
+pnpm-lock.yaml
+release.toml
+shell.nix
+v2.sh
