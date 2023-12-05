@@ -129,7 +129,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn node_fix_recursive(process_id: DWORD, recursion: Option<u32>) -> Result<(u32, String)> {
+unsafe fn wrapper_fix_recursive(
+    process_id: DWORD,
+    recursion: Option<u32>,
+) -> Result<(u32, String)> {
     // recursive because for some reason it occasionally is more than one level deep
     let recursion = recursion.unwrap_or(0);
     if recursion > 10 {
@@ -143,8 +146,10 @@ unsafe fn node_fix_recursive(process_id: DWORD, recursion: Option<u32>) -> Resul
             .unwrap_or_else(|_| (0, "".to_string()))
     };
 
-    if ppname == "node.exe" {
-        node_fix_recursive(ppid, recursion.checked_add(1))
+    let triggers = vec!["node.exe", "railway.exe"];
+
+    if triggers.contains(&ppname.as_str()) {
+        wrapper_fix_recursive(ppid, recursion.checked_add(1))
     } else {
         Ok((ppid, ppname))
     }
@@ -204,16 +209,18 @@ async fn windows_shell_detection() -> Option<WindowsShell> {
             .unwrap_or_else(|_| (0, "".to_string()))
     };
 
-    if ppname == "node.exe" {
+    let triggers = vec!["node.exe", "railway.exe"];
+
+    if triggers.contains(&ppname.as_str()) {
         (_, ppname) = unsafe {
-            node_fix_recursive(ppid, None)
+            wrapper_fix_recursive(ppid, None)
                 .context("Failed to get parent process info")
                 // acceptable return because if it fails it will default to cmd
                 .unwrap_or_else(|_| (0, "".to_string()))
         }
     }
 
-    let ppname = ppname.split(".").next().unwrap_or("cmd");
+    let ppname = ppname.split('.').next().unwrap_or("cmd");
 
     ppname.parse::<WindowsShell>().ok()
 }
@@ -258,11 +265,7 @@ unsafe fn get_parent_process_info(pid: Option<DWORD>) -> Option<(DWORD, String)>
 
     unsafe { CloseHandle(h_snapshot) };
 
-    if let Some(ppname) = parent_process_name {
-        Some((ppid, ppname))
-    } else {
-        None
-    }
+    parent_process_name.map(|ppname| (ppid, ppname))
 }
 
 #[cfg(target_os = "windows")]
