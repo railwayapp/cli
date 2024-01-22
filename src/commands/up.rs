@@ -66,8 +66,8 @@ pub struct UpErrorResponse {
 }
 
 enum UpExitReason {
-    DEPLOYED = 0,
-    FAILED = 1,
+    Deployed,
+    Failed,
 }
 
 pub async fn get_service_to_deploy(
@@ -331,7 +331,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     tokio::task::spawn(async move {
         match wait_for_exit_reason(deployment_id.clone()).await {
             Ok(reason) => match reason {
-                UpExitReason::DEPLOYED => {
+                UpExitReason::Deployed => {
                     if args.cicd {
                         println!("{}", "Deploy complete".green().bold());
                         std::process::exit(0);
@@ -339,7 +339,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 }
                 _ => {
                     println!("{}", "Build failed".red().bold());
-                    std::process::exit(reason as i32);
+                    std::process::exit(1);
                 }
             },
             Err(e) => {
@@ -362,8 +362,8 @@ async fn wait_for_exit_reason(deployment_id: String) -> Result<UpExitReason, any
 
         if let Ok(deployment) = get_deployment(&client, &configs, deployment_id.clone()).await {
             match deployment.status {
-                DeploymentStatus::SUCCESS => return Ok(UpExitReason::DEPLOYED),
-                DeploymentStatus::FAILED => return Ok(UpExitReason::FAILED),
+                DeploymentStatus::SUCCESS => return Ok(UpExitReason::Deployed),
+                DeploymentStatus::FAILED => return Ok(UpExitReason::Failed),
                 _ => {}
             }
         }
