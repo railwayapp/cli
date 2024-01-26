@@ -28,7 +28,7 @@ cargo install railwayapp --locked
 
 ### Homebrew
 
-```bash 
+```bash
 brew tap railwayapp/railway
 brew install railway
 ```
@@ -40,7 +40,7 @@ npm install -g @railway/cli
 
 ### Bash
 ```bash
-# Install 
+# Install
 bash <(curl -fsSL cli.new)
 
 # Uninstall
@@ -50,6 +50,18 @@ bash <(curl -fsSL cli.new) -r
 ### Scoop
 ```ps1
 scoop install railway
+```
+
+### Zsh Shell Completion
+
+Add this to your zinit config (.zshrc):
+
+```shell
+zinit light railway/cli
+
+# it also works with turbo mode:
+zinit ice wait lucid
+zinit load railway/cli
 ```
 
 ### From source
