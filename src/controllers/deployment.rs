@@ -37,7 +37,7 @@ pub async fn stream_build_logs(
         limit: Some(500),
     };
 
-    let (_client, mut stream) = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
+    let mut stream = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
     while let Some(Ok(log)) = stream.next().await {
         let log = log.data.context("Failed to retrieve build log")?;
         for line in log.build_logs {
@@ -58,7 +58,7 @@ pub async fn stream_deploy_logs(
         limit: Some(500),
     };
 
-    let (_client, mut stream) = subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await?;
+    let mut stream = subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await?;
     while let Some(Ok(log)) = stream.next().await {
         let log = log.data.context("Failed to retrieve deploy log")?;
         for line in log.deployment_logs {
