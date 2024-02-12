@@ -1,23 +1,22 @@
-use std::time::Duration;
-
 use anyhow::bail;
-use clap::ValueEnum;
 use is_terminal::IsTerminal;
+use std::time::Duration;
+use strum::IntoEnumIterator;
 
 use crate::{
-    consts::{PLUGINS, TICK_STRING},
-    controllers::project::get_project,
+    consts::TICK_STRING,
+    controllers::{database::DatabaseType, project::get_project},
     util::prompt::prompt_multi_options,
 };
 
-use super::{queries::project::PluginType, *};
+use super::*;
 
 /// Add a new plugin to your project
 #[derive(Parser)]
 pub struct Args {
-    /// The name of the plugin to add
+    /// The name of the database to add
     #[arg(short, long, value_enum)]
-    plugin: Vec<ClapPluginEnum>,
+    database: Vec<DatabaseType>,
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -28,38 +27,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let project_plugins: Vec<_> = project
-        .plugins
-        .edges
-        .iter()
-        .map(|p| p.node.name.to_string())
-        .collect();
-
-    let filtered_plugins: Vec<_> = PLUGINS
-        .iter()
-        .map(|p| p.to_string())
-        .filter(|plugin| !project_plugins.contains(&plugin.to_string()))
-        .collect();
-
-    let selected = if !std::io::stdout().is_terminal() || !args.plugin.is_empty() {
-        if args.plugin.is_empty() {
+    let databases = if args.database.is_empty() {
+        if !std::io::stdout().is_terminal() {
             bail!("No plugins specified");
         }
-        let filtered: Vec<_> = args
-            .plugin
-            .iter()
-            .map(clap_plugin_enum_to_plugin_enum)
-            .map(|p| p.to_string())
-            .filter(|plugin| !project_plugins.contains(&plugin.to_string()))
-            .collect();
-
-        if filtered.is_empty() {
-            bail!("Plugins already exist");
-        }
-
-        filtered
+        prompt_multi_options("Select databases to add", DatabaseType::iter().collect())?
     } else {
-        prompt_multi_options("Select plugins to add", filtered_plugins)?
+        args.database
     };
 
     if selected.is_empty() {
@@ -91,21 +65,4 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-enum ClapPluginEnum {
-    Postgresql,
-    Mysql,
-    Redis,
-    Mongodb,
-}
-
-fn clap_plugin_enum_to_plugin_enum(clap_plugin_enum: &ClapPluginEnum) -> PluginType {
-    match clap_plugin_enum {
-        ClapPluginEnum::Postgresql => PluginType::postgresql,
-        ClapPluginEnum::Mysql => PluginType::mysql,
-        ClapPluginEnum::Redis => PluginType::redis,
-        ClapPluginEnum::Mongodb => PluginType::mongodb,
-    }
 }

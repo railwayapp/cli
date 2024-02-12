@@ -1,0 +1,12 @@
+query TemplateDetail($code: String!) {
+  template(code: $code) {
+    services {
+      edges {
+        node {
+          id
+          config
+        }
+      }
+    }
+  }
+}

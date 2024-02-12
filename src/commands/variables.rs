@@ -1,11 +1,5 @@
-use std::fmt::Display;
-
+use super::*;
 use crate::{controllers::project::get_project, errors::RailwayError, table::Table};
-
-use super::{
-    queries::project::{PluginType, ProjectProjectPluginsEdgesNode},
-    *,
-};
 
 /// Show variables for active environment
 #[derive(Parser)]
@@ -93,22 +87,4 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     table.print()?;
 
     Ok(())
-}
-
-struct Plugin<'a>(&'a ProjectProjectPluginsEdgesNode);
-
-impl<'a> Display for Plugin<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match &self.0.name {
-                PluginType::mongodb => "MongoDB",
-                PluginType::mysql => "MySQL",
-                PluginType::postgresql => "PostgreSQL",
-                PluginType::redis => "Redis",
-                PluginType::Other(plugin) => plugin,
-            }
-        )
-    }
 }

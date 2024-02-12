@@ -1,0 +1,3 @@
+mutation DatabaseDeploy($code: String!, $projectId: String!) {
+    templateDeploy(input)
+}

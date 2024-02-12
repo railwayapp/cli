@@ -101,3 +101,11 @@ pub struct Domains;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct ProjectToken;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/queries/strings/TemplateDetail.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateDetail;
