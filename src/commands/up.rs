@@ -173,7 +173,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let mut archive = Builder::new(&mut parz);
         let mut builder = WalkBuilder::new(path);
         builder.add_custom_ignore_filename(".railwayignore");
-        builder.add_custom_ignore_filename(".gitignore");
 
         let walker = builder.follow_links(true).hidden(false);
         let walked = walker.build().collect::<Vec<_>>();
