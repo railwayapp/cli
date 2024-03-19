@@ -1,7 +1,10 @@
-use crate::controllers::{
-    deployment::{stream_build_logs, stream_deploy_logs},
-    environment::get_matched_environment,
-    project::get_project,
+use crate::{
+    controllers::{
+        deployment::{stream_build_logs, stream_deploy_logs},
+        environment::get_matched_environment,
+        project::get_project,
+    },
+    util::logs::format_attr_log,
 };
 use anyhow::bail;
 
@@ -108,14 +111,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         })
         .await?;
     } else {
-        stream_deploy_logs(deployment.id.clone(), |log| {
-            if json {
-                println!("{}", serde_json::to_string(&log).unwrap());
-            } else {
-                println!("{}", log.message);
-            }
-        })
-        .await?;
+        stream_deploy_logs(deployment.id.clone(), format_attr_log).await?;
     }
 
     Ok(())
