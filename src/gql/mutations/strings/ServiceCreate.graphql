@@ -1,0 +1,6 @@
+mutation ServiceCreate($projectId: String!, $variables: ServiceVariables) {
+  serviceCreate(input: {projectId: $projectId, variables: $variables}) {
+    id
+    name
+  }
+}

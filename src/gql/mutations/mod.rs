@@ -1,5 +1,7 @@
 use graphql_client::GraphQLQuery;
 
+pub type ServiceVariables = serde_json::Value;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.graphql",
@@ -47,6 +49,14 @@ pub struct PluginDelete;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct ProjectCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/ServiceCreate.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceCreate;
 
 #[derive(GraphQLQuery)]
 #[graphql(

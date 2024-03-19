@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use envfile::EnvFile;
 
 use crate::util::prompt::prompt_select;
 
@@ -11,6 +12,10 @@ pub struct Args {
     #[clap(short, long)]
     /// Project name
     name: Option<String>,
+
+    #[clap(short, long)]
+    /// Disable .env file being loaded into project variables
+    env: bool
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -45,6 +50,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
             .await?
             .project_create;
+    let service_create = post_graphql::<mutations::ServiceCreate, _>(&client, configs.get_backboard(), mutations::service_create::Variables {
+        project_id: project_create.id,
+        variables: Some(serde_json::json!())
+    })
 
     let environment = project_create
         .environments
