@@ -1,19 +1,12 @@
-use crate::{commands::Configs, util::tokio_spawner::TokioSpawner};
+use crate::commands::Configs;
 use anyhow::{bail, Result};
-use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
-use futures::StreamExt;
+use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
 use graphql_client::GraphQLQuery;
-use graphql_ws_client::{
-    graphql::{GraphQLClient, StreamingOperation},
-    AsyncWebsocketClient, GraphQLClientClientBuilder, SubscriptionStream,
-};
+use graphql_ws_client::{graphql::StreamingOperation, Client, Subscription};
 
 pub async fn subscribe_graphql<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
     variables: T::Variables,
-) -> Result<(
-    AsyncWebsocketClient<GraphQLClient, Message>,
-    SubscriptionStream<GraphQLClient, StreamingOperation<T>>,
-)>
+) -> Result<Subscription<StreamingOperation<T>>>
 where
     <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
@@ -36,14 +29,7 @@ where
 
     let (connection, _) = async_tungstenite::tokio::connect_async(request).await?;
 
-    let (sink, stream) = connection.split::<Message>();
-
-    let mut client = GraphQLClientClientBuilder::new()
-        .build(stream, sink, TokioSpawner::current())
-        .await?;
-    let stream = client
-        .streaming_operation(StreamingOperation::<T>::new(variables))
-        .await?;
-
-    Ok((client, stream))
+    Ok(Client::build(connection)
+        .subscribe(StreamingOperation::<T>::new(variables))
+        .await?)
 }
