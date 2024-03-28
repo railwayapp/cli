@@ -1,4 +1,14 @@
 use graphql_client::GraphQLQuery;
+use serde::{Deserialize, Serialize};
+type TemplateDeployService = serde_json::Value;
+type ServiceVariables = std::collections::BTreeMap<String, String>;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateVolume {
+    pub mount_path: String,
+    pub name: Option<String>,
+}
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -47,3 +57,11 @@ pub struct ServiceDomainCreate;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct ValidateTwoFactor;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/TemplateDeploy.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateDeploy;

@@ -1,3 +1,8 @@
-mutation DatabaseDeploy($code: String!, $projectId: String!) {
-    templateDeploy(input)
+mutation TemplateDeploy($projectId: String!, $environmentId: String!, $services: [TemplateDeployService!]!, $templateCode: String!) {
+  templateDeploy(
+    input: {projectId: $projectId, environmentId: $environmentId, services: $services, templateCode: $templateCode}
+  ) {
+    projectId
+    workflowId
+  }
 }

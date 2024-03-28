@@ -1,7 +1,61 @@
 use graphql_client::GraphQLQuery;
+use serde::{Deserialize, Serialize};
 
 type DateTime = chrono::DateTime<chrono::Utc>;
 type ServiceVariables = std::collections::BTreeMap<String, String>;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateServiceConfig {
+    pub name: String,
+    pub icon: Option<String>,
+    pub source: TemplateServiceConfigIcon,
+    pub variables: Vec<TemplateServiceVariables>,
+    pub domains: Vec<TemplateServiceDomainConfig>,
+    pub tcp_proxies: Option<Vec<TemplateServiceTcpProxy>>,
+    // buildConfig is irrelevant
+    pub deploy_config: Option<TemplateServiceDeployConfig>,
+    pub volumes: Option<Vec<TemplateServiceVolumeConfig>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateServiceDeployConfig {
+    pub start_command: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateServiceVolumeConfig {
+    pub mount_path: String,
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateServiceTcpProxy {
+    pub application_port: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateServiceDomainConfig {
+    pub has_service_domain: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateServiceVariables {
+    pub name: String,
+    pub description: Option<String>,
+    pub default_value: Option<String>,
+    pub is_optional: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TemplateServiceConfigIcon {
+    pub image: String,
+}
 
 #[derive(GraphQLQuery)]
 #[graphql(
