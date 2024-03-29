@@ -44,15 +44,9 @@ pub enum RailwayError {
     #[error("No service linked\nRun `railway service` to link a service")]
     NoServiceLinked,
 
-    #[error("2FA code is incorrect. Please try again.")]
-    InvalidTwoFactorCode,
-
     #[error("No command provided. Run with `railway run <cmd>`")]
     NoCommandProvided,
 
     #[error("{0}")]
     FailedToUpload(String),
-
-    #[error("Could not determine database type for service {0}")]
-    UnknownDatabaseType(String),
 }
