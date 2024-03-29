@@ -11,7 +11,7 @@ use crate::{
 
 use super::*;
 
-/// Add a new plugin to your project
+/// Provision a database into your project
 #[derive(Parser)]
 pub struct Args {
     /// The name of the database to add
@@ -73,42 +73,45 @@ async fn fetch_and_create(
         queries::template_detail::Variables { code: db.to_slug() },
     )
     .await?;
+
     let services: Vec<mutations::template_deploy::TemplateDeployService> = details
         .template
         .services
         .edges
         .iter()
         .map(|s| {
-            let mut s_var = BTreeMap::<String, String>::new();
-            let mut s_vol = Vec::<TemplateVolume>::new();
-            // all variables in a db template have default values, this is safe
-            for variable in s.node.config.variables.clone() {
-                s_var.insert(
-                    variable.name.clone(),
-                    variable.default_value.clone().unwrap(),
-                );
-            }
-            if let Some(volumes) = s.node.config.volumes.clone() {
-                for volume in volumes {
-                    s_vol.push(TemplateVolume {
-                        mount_path: volume.mount_path.clone(),
-                        name: volume.name.clone(),
-                    });
-                }
-            }
+            let s_var = s
+                .node
+                .config
+                .variables
+                .iter()
+                .map(|variable| {
+                    (
+                        variable.name.clone(),
+                        variable.default_value.clone().unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<String, String>>();
+
+            let s_vol = s
+                .node
+                .config
+                .volumes
+                .clone()
+                .map(|volumes| {
+                    volumes
+                        .into_iter()
+                        .map(|volume| TemplateVolume {
+                            mount_path: volume.mount_path.clone(),
+                            name: volume.name.clone(),
+                        })
+                        .collect::<Vec<TemplateVolume>>()
+                })
+                .unwrap_or_default();
 
             mutations::template_deploy::TemplateDeployService {
                 commit: None,
-                has_domain: Some(
-                    s.node
-                        .config
-                        .domains
-                        .clone()
-                        .iter()
-                        .find(|d| d.has_service_domain)
-                        .map(|s| s.has_service_domain)
-                        .unwrap_or(false),
-                ),
+                has_domain: Some(s.node.config.domains.iter().any(|d| d.has_service_domain)),
                 healthcheck_path: None,
                 id: Some(s.node.id.clone()),
                 is_private: None,
@@ -121,9 +124,9 @@ async fn fetch_and_create(
                     .node
                     .config
                     .deploy_config
-                    .clone()
-                    .and_then(|deploy_config| deploy_config.start_command),
-                tcp_proxy_application_port: s.node.config.tcp_proxies.clone().and_then(
+                    .as_ref()
+                    .and_then(|deploy_config| deploy_config.start_command.clone()),
+                tcp_proxy_application_port: s.node.config.tcp_proxies.as_ref().and_then(
                     |tcp_proxies| tcp_proxies.first().map(|first| first.application_port),
                 ),
                 template: s.node.config.source.image.clone(),
@@ -132,12 +135,14 @@ async fn fetch_and_create(
             }
         })
         .collect();
+
     let vars = mutations::template_deploy::Variables {
         project_id: linked_project.project.clone(),
         environment_id: linked_project.environment.clone(),
         services,
         template_code: db.to_slug(),
     };
+
     post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), vars).await?;
     Ok(())
 }
