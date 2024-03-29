@@ -13,10 +13,10 @@ use crate::{controllers::project::get_service, queries::project::ProjectProjectS
 
 use super::*;
 
-/// Connect to a plugin's shell (psql for Postgres, mongosh for MongoDB, etc.)
+/// Connect to a database's shell (psql for Postgres, mongosh for MongoDB, etc.)
 #[derive(Parser)]
 pub struct Args {
-    /// The name of the plugin to connect to
+    /// The name of the database to connect to
     service_name: Option<String>,
 
     /// Environment to pull variables from (defaults to linked environment)
@@ -113,7 +113,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
         Ok(())
     } else {
-        bail!("No database found for service")
+        bail!("No supported database found in service")
     }
 }
 
