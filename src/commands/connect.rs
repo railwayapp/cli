@@ -61,13 +61,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         })?;
 
     let environment_id = get_matched_environment(&project, environment)?.id;
-
     let variables = get_service_variables(
         &client,
         &configs,
         linked_project.project,
         environment_id.clone(),
-        service.name,
+        service.id,
     )
     .await?;
     let database_type = {
@@ -118,13 +117,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 fn get_connect_command(
-    plugin_type: DatabaseType,
+    database_type: DatabaseType,
     variables: BTreeMap<String, String>,
 ) -> Result<(String, Vec<String>)> {
     let pass_arg; // Hack to get ownership of formatted string outside match
     let default = &"".to_string();
 
-    let (cmd_name, args): (&str, Vec<&str>) = match &plugin_type {
+    let (cmd_name, args): (&str, Vec<&str>) = match &database_type {
         DatabaseType::PostgreSQL => (
             "psql",
             vec![variables.get("DATABASE_URL").unwrap_or(default)],

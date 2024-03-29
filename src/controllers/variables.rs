@@ -25,6 +25,5 @@ pub async fn get_service_variables(
     )
     .await?
     .variables_for_service_deployment;
-
     Ok(variables)
 }
