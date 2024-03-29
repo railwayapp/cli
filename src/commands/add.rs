@@ -27,7 +27,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let databases = if args.database.is_empty() {
         if !std::io::stdout().is_terminal() {
-            bail!("No plugins specified");
+            bail!("No database specified");
         }
         prompt_multi_options("Select databases to add", DatabaseType::iter().collect())?
     } else {
@@ -35,7 +35,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     };
 
     if databases.is_empty() {
-        bail!("No plugins selected");
+        bail!("No database selected");
     }
 
     for db in databases {
