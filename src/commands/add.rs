@@ -39,7 +39,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     for db in databases {
-        // fetch template detail
         if std::io::stdout().is_terminal() {
             let spinner = indicatif::ProgressBar::new_spinner()
                 .with_style(
