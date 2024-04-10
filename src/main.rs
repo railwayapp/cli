@@ -36,7 +36,6 @@ commands_enum!(
     add,
     completion,
     connect,
-    delete,
     domain,
     docs,
     down,

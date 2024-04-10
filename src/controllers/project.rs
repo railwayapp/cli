@@ -5,20 +5,13 @@ use crate::{
     commands::{
         queries::{
             self,
-            project::{
-                ProjectProject, ProjectProjectPluginsEdgesNode, ProjectProjectServicesEdgesNode,
-            },
+            project::{ProjectProject, ProjectProjectServicesEdgesNode},
         },
         Configs,
     },
     errors::RailwayError,
 };
 use anyhow::{bail, Result};
-
-pub enum PluginOrService {
-    Plugin(ProjectProjectPluginsEdgesNode),
-    Service(ProjectProjectServicesEdgesNode),
-}
 
 pub async fn get_project(
     client: &Client,
@@ -43,27 +36,19 @@ pub async fn get_project(
     Ok(project)
 }
 
-pub fn get_plugin_or_service(
+pub fn get_service(
     project: &ProjectProject,
-    service_or_plugin_name: String,
-) -> Result<PluginOrService> {
+    service_name: String,
+) -> Result<ProjectProjectServicesEdgesNode> {
     let service = project
         .services
         .edges
         .iter()
-        .find(|edge| edge.node.name.to_lowercase() == service_or_plugin_name.to_lowercase());
-
-    let plugin = project.plugins.edges.iter().find(|edge| {
-        edge.node.friendly_name.to_lowercase() == service_or_plugin_name.to_lowercase()
-    });
+        .find(|edge| edge.node.name.to_lowercase() == service_name.to_lowercase());
 
     if let Some(service) = service {
-        return Ok(PluginOrService::Service(service.node.clone()));
-    } else if let Some(plugin) = plugin {
-        return Ok(PluginOrService::Plugin(plugin.node.clone()));
+        return Ok(service.node.clone());
     }
 
-    bail!(RailwayError::ServiceOrPluginNotFound(
-        service_or_plugin_name
-    ))
+    bail!(RailwayError::ServiceNotFound(service_name))
 }

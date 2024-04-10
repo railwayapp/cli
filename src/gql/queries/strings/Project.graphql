@@ -2,15 +2,6 @@ query Project($id: String!) {
   project(id: $id) {
     id
     name
-    plugins {
-      edges {
-        node {
-          id
-          name
-          friendlyName
-        }
-      }
-    }
     environments {
       edges {
         node {

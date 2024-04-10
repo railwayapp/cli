@@ -1,5 +1,0 @@
-mutation PluginCreate($name: String!, $projectId: String!) {
-	pluginCreate(input: { name: $name, projectId: $projectId }) {
-		id
-	}
-}
