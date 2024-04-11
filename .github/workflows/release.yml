@@ -90,24 +90,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
+      - name: Setup rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: ${{ matrix.target }}
-          profile: minimal
-          override: true
-
-      - name: Build release binary
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release --locked --target ${{ matrix.target }}
-          use-cross: ${{ matrix.use-cross || matrix.os == 'ubuntu-latest' }}
+            targets: ${{ matrix.os }}
+      
+      - run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Prepare binaries (zip) [Windows]
         if: matrix.os == 'windows-latest'
