@@ -25,7 +25,7 @@ jobs:
           echo "version is: ${{ env.CLI_VERSION }}"
 
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
@@ -158,3 +158,18 @@ jobs:
           download-url: https://github.com/railwayapp/cli/releases/latest/download/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+  publish-crate:
+    name: Publish new version on crates.io
+    needs: ["create-release"]
+    runs-on: ubuntu-latest
+    steps:
+        - name: Checkout repository
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 1
+        - name: Toolchain
+          uses: dtolnay/rust-toolchain@stable
+        - name: Publish
+          uses: katyo/publish-crates@v2
+          with:
+            registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
