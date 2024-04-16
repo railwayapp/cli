@@ -40,7 +40,7 @@ pub struct Args {
 
     #[clap(short, long)]
     /// Only stream build logs and exit after it's done
-    cicd: bool,
+    ci: bool,
 
     #[clap(short, long)]
     /// Service to deploy to (defaults to linked service)
@@ -322,8 +322,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
     })];
 
-    // Stream deploy logs only if cicd flag is not set
-    if !args.cicd {
+    // Stream deploy logs only if ci flag is not set
+    if !args.ci {
         tasks.push(tokio::task::spawn(async move {
             if let Err(e) =
                 stream_deploy_logs(deploy_deployment_id, |log| println!("{}", log.message)).await
@@ -338,7 +338,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         match wait_for_exit_reason(deployment_id.clone()).await {
             Ok(reason) => match reason {
                 UpExitReason::Deployed => {
-                    if args.cicd {
+                    if args.ci {
                         println!("{}", "Deploy complete".green().bold());
                         std::process::exit(0);
                     }
