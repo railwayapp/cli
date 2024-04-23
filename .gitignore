@@ -1,3 +1,4 @@
 /target
 node_modules
 bin/railway
+.DS_Store
