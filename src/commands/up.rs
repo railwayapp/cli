@@ -42,12 +42,20 @@ pub struct Args {
     detach: bool,
 
     #[clap(short, long)]
+    /// Only stream build logs and exit after it's done
+    ci: bool,
+
+    #[clap(short, long)]
     /// Service to deploy to (defaults to linked service)
     service: Option<String>,
 
     #[clap(short, long)]
     /// Environment to deploy to (defaults to linked environment)
     environment: Option<String>,
+
+    #[clap(long)]
+    /// Don't ignore paths from .gitignore
+    no_gitignore: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,6 +70,11 @@ pub struct UpResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpErrorResponse {
     pub message: String,
+}
+
+enum UpExitReason {
+    Deployed,
+    Failed,
 }
 
 pub async fn get_service_to_deploy(
@@ -176,7 +189,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let mut archive = Builder::new(&mut parz);
         let mut builder = WalkBuilder::new(path);
         builder.add_custom_ignore_filename(".railwayignore");
-        builder.add_custom_ignore_filename(".gitignore");
+        if !args.no_gitignore {
+            builder.add_custom_ignore_filename(".gitignore");
+        }
 
         let walker = builder.follow_links(true).hidden(false);
         let walked = walker.build().collect::<Vec<_>>();
@@ -297,32 +312,45 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Stream both build and deploy logs
     let build_deployment_id = deployment_id.clone();
     let deploy_deployment_id = deployment_id.clone();
 
-    let tasks = vec![
-        tokio::task::spawn(async move {
+    //	Create vector of log streaming tasks
+    //	Always stream build logs
+    let mut tasks = vec![tokio::task::spawn(async move {
+        if let Err(e) =
+            stream_build_logs(build_deployment_id, |log| println!("{}", log.message)).await
+        {
+            eprintln!("Failed to stream build logs: {}", e);
+        }
+    })];
+
+    // Stream deploy logs only if ci flag is not set
+    if !args.ci {
+        tasks.push(tokio::task::spawn(async move {
             if let Err(e) =
-                stream_build_logs(build_deployment_id, |log| println!("{}", log.message)).await
+                stream_deploy_logs(deploy_deployment_id, format_attr_log).await
             {
-                eprintln!("Failed to stream build logs: {}", e);
-            }
-        }),
-        tokio::task::spawn(async move {
-            if let Err(e) = stream_deploy_logs(deploy_deployment_id, format_attr_log).await {
                 eprintln!("Failed to stream deploy logs: {}", e);
             }
-        }),
-    ];
+        }));
+    }
 
     // If the build fails, we want to terminate the process
     tokio::task::spawn(async move {
-        match wait_for_failure(deployment_id.clone()).await {
-            Ok(_) => {
-                println!("{}", "Build failed".red().bold());
-                std::process::exit(1);
-            }
+        match wait_for_exit_reason(deployment_id.clone()).await {
+            Ok(reason) => match reason {
+                UpExitReason::Deployed => {
+                    if args.ci {
+                        println!("{}", "Deploy complete".green().bold());
+                        std::process::exit(0);
+                    }
+                }
+                _ => {
+                    println!("{}", "Build failed".red().bold());
+                    std::process::exit(1);
+                }
+            },
             Err(e) => {
                 eprintln!("Failed to fetch deployment status: {}", e);
             }
@@ -334,7 +362,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_failure(deployment_id: String) -> Result<(), anyhow::Error> {
+async fn wait_for_exit_reason(deployment_id: String) -> Result<UpExitReason, anyhow::Error> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
@@ -342,11 +370,11 @@ async fn wait_for_failure(deployment_id: String) -> Result<(), anyhow::Error> {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         if let Ok(deployment) = get_deployment(&client, &configs, deployment_id.clone()).await {
-            if deployment.status == DeploymentStatus::FAILED {
-                break;
+            match deployment.status {
+                DeploymentStatus::SUCCESS => return Ok(UpExitReason::Deployed),
+                DeploymentStatus::FAILED => return Ok(UpExitReason::Failed),
+                _ => {}
             }
         }
     }
-
-    Ok(())
 }

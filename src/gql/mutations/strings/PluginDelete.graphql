@@ -1,3 +1,0 @@
-mutation PluginDelete($id: String!) {
-	pluginDelete(id: $id)
-}

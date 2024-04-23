@@ -1,6 +1,6 @@
 [package]
 name = "railwayapp"
-version = "3.5.1"
+version = "3.7.0"
 edition = "2021"
 license = "MIT"
 authors = ["Railway <contact@railway.app>"]
@@ -27,7 +27,7 @@ reqwest = { version = "0.11.14", default-features = false, features = [
   "rustls-tls",
 ] }
 chrono = { version = "0.4.24", features = ["serde"], default-features = false }
-graphql_client = { version = "0.11.0", features = ["reqwest-rustls"] }
+graphql_client = { version = "0.13.0", features = ["reqwest-rustls"] }
 paste = "1.0.12"
 tokio = { version = "1.26.0", features = ["full"] }
 clap_complete = "4.1.5"
@@ -58,8 +58,8 @@ futures = { version = "0.3.27", default-features = false, features = [
 uuid = { version = "1.3.0", features = ["serde", "v4"] }
 httparse = "1.8.0"
 names = { version = "0.14.0", default-features = false }
-graphql-ws-client = { version = "0.3.0", features = ["client-graphql-client"] }
-async-tungstenite = { version = "0.18.0", features = [
+graphql-ws-client = { version = "0.8.0", features = ["client-graphql-client", "tungstenite"] }
+async-tungstenite = { version = "0.25.0", features = [
   "tokio-runtime",
   "tokio-rustls-native-certs",
 ] }
@@ -69,3 +69,4 @@ ctrlc = "3.2.5"
 which = "4.4.0"
 thiserror = "1.0.40"
 winapi = {version="0.3.9", features = ["minwindef", "tlhelp32", "processthreadsapi", "handleapi", "winerror"]}
+strum = { version = "0.26.1", features = ["derive"] }

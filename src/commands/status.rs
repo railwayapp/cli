@@ -4,7 +4,7 @@ use super::*;
 
 /// Show information about the current project
 #[derive(Parser)]
-pub struct Args {}
+pub struct Args;
 
 pub async fn command(_args: Args, json: bool) -> Result<()> {
     let configs = Configs::new()?;
@@ -27,17 +27,17 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
                 .blue()
                 .bold()
         );
-        if !project.plugins.edges.is_empty() {
-            println!("Plugins:");
-            for plugin in project.plugins.edges.iter().map(|plugin| &plugin.node) {
-                println!("{}", format!("{:?}", plugin.name).dimmed().bold());
-            }
-        }
-        if !project.services.edges.is_empty() {
-            println!("Services:");
-            for service in project.services.edges.iter().map(|service| &service.node) {
-                println!("{}", service.name.dimmed().bold());
-            }
+
+        if let Some(linked_service) = linked_project.service {
+            let service = project
+                .services
+                .edges
+                .iter()
+                .find(|service| service.node.id == linked_service)
+                .expect("the linked service doesn't exist");
+            println!("Service: {}", service.node.name.green().bold());
+        } else {
+            println!("Service: {}", "None".red().bold())
         }
     } else {
         println!("{}", serde_json::to_string_pretty(&project)?);
