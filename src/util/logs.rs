@@ -2,7 +2,8 @@ use crate::subscriptions;
 use colored::Colorize;
 
 pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
-    if log.attributes.is_empty() {
+    // we love inconsistencies!
+    if log.attributes.is_empty() || (log.attributes.len() == 1 && log.attributes.first().is_some_and(|attr| attr.key == "level")) {
         println!("{}", log.message);
         return;
     }
@@ -47,5 +48,5 @@ pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
         level,
         message,
         others.join(" ")
-    );
+     );
 }

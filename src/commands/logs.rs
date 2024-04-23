@@ -111,7 +111,13 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         })
         .await?;
     } else {
-        stream_deploy_logs(deployment.id.clone(), format_attr_log).await?;
+        stream_deploy_logs(deployment.id.clone(), |log| {
+            if json {
+                println!("{}", serde_json::to_string(&log).unwrap());
+            } else {
+                format_attr_log(log);
+            }
+        }).await?;
     }
 
     Ok(())
