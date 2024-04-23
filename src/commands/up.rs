@@ -328,9 +328,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     // Stream deploy logs only if ci flag is not set
     if !args.ci {
         tasks.push(tokio::task::spawn(async move {
-            if let Err(e) =
-                stream_deploy_logs(deploy_deployment_id, format_attr_log).await
-            {
+            if let Err(e) = stream_deploy_logs(deploy_deployment_id, format_attr_log).await {
                 eprintln!("Failed to stream deploy logs: {}", e);
             }
         }));
