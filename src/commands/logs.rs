@@ -117,7 +117,8 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             } else {
                 format_attr_log(log);
             }
-        }).await?;
+        })
+        .await?;
     }
 
     Ok(())
