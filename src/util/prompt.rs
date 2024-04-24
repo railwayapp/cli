@@ -1,3 +1,4 @@
+use colored::*;
 use std::fmt::Display;
 
 use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
@@ -45,6 +46,10 @@ pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
         .with_render_config(Configs::get_render_config())
         .prompt()
         .context("Failed to prompt for select")
+}
+
+pub fn fake_select(message: &str, selected: &str) {
+    println!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
 #[derive(Debug, Clone)]

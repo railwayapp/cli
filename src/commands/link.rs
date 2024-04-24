@@ -1,25 +1,17 @@
+use colored::*;
 use std::fmt::Display;
-
-use anyhow::bail;
-use is_terminal::IsTerminal;
 
 use crate::{
     controllers::project::get_project,
     errors::RailwayError,
-    util::prompt::{prompt_options, prompt_select, PromptService},
+    queries::project::ProjectProject,
+    util::prompt::{fake_select, prompt_options},
 };
 
 use super::{
     queries::{
-        project::ProjectProjectEnvironmentsEdgesNode,
-        projects::{
-            ProjectsProjectsEdgesNode, ProjectsProjectsEdgesNodeEnvironmentsEdgesNode,
-            ProjectsProjectsEdgesNodeServicesEdgesNode,
-        },
-        user_projects::{
-            UserProjectsMeProjectsEdgesNode, UserProjectsMeProjectsEdgesNodeEnvironmentsEdgesNode,
-            UserProjectsMeProjectsEdgesNodeServicesEdgesNode, UserProjectsMeTeamsEdgesNode,
-        },
+        projects::ProjectsProjectsEdgesNode,
+        user_projects::{UserProjectsMeProjectsEdgesNode, UserProjectsMeTeamsEdgesNode},
     },
     *,
 };
@@ -27,14 +19,16 @@ use super::{
 /// Associate existing project with current directory, may specify projectId as an argument
 #[derive(Parser)]
 pub struct Args {
-    #[clap(long)]
+    #[clap(long, short)]
     /// Environment to link to
     environment: Option<String>,
 
     /// Project ID to link to
+    #[clap(long, short)]
     project_id: Option<String>,
 
-    /// The service to link
+    /// The service to link to
+    #[clap(long, short)]
     service: Option<String>,
 }
 
@@ -42,156 +36,101 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    if let Some(project_id) = args.project_id {
-        let project = get_project(&client, &configs, project_id.clone()).await?;
-
-        let environment = if let Some(environment_name_or_id) = args.environment {
-            let environment = project
-                .environments
-                .edges
-                .iter()
-                .find(|env| {
-                    env.node.name == environment_name_or_id || env.node.id == environment_name_or_id
-                })
-                .context("Environment not found")?;
-            ProjectEnvironment(&environment.node)
-        } else if !std::io::stdout().is_terminal() {
-            bail!("Environment must be provided when not running in a terminal");
-        } else if project.environments.edges.len() == 1 {
-            ProjectEnvironment(&project.environments.edges[0].node)
-        } else {
-            prompt_options(
-                "Select an environment",
-                project
-                    .environments
-                    .edges
-                    .iter()
-                    .map(|env| ProjectEnvironment(&env.node))
-                    .collect(),
-            )?
-        };
-
-        configs.link_project(
-            project.id.clone(),
-            Some(project.name.clone()),
-            environment.0.id.clone(),
-            Some(environment.0.name.clone()),
-        )?;
-
-        let services: Vec<_> = project
-            .services
-            .edges
-            .iter()
-            .map(|s| PromptService(&s.node))
-            .collect();
-
-        if let Some(service) = args.service {
-            let service = services
-                .iter()
-                .find(|s| s.0.id == service || s.0.name == service)
-                .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
-
-            configs.link_service(service.0.id.clone())?;
-            configs.write()?;
-            return Ok(());
-        } else if !services.is_empty() {
-            let service = prompt_select("Select a service", services)?;
-            configs.link_service(service.0.id.clone())?;
+    let project = NormalisedProject::from(if let Some(project_id) = args.project_id {
+        let fetched_project = get_project(&client, &configs, project_id).await?;
+        // fake_select is used to mimic the user providing input in the terminal
+        // just for detail
+        if let Some(team) = fetched_project.clone().team {
+            fake_select("Select a team", &team.name);
         }
-
-        configs.write()?;
-        return Ok(());
-    } else if !std::io::stdout().is_terminal() {
-        bail!("Project must be provided when not running in a terminal");
-    }
-
-    let vars = queries::user_projects::Variables {};
-    let me = post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars)
+        fake_select("Select a project", fetched_project.name.as_str());
+        Project(ProjectType::Fetched(fetched_project))
+    } else {
+        let me = post_graphql::<queries::UserProjects, _>(
+            &client,
+            configs.get_backboard(),
+            queries::user_projects::Variables {},
+        )
         .await?
         .me;
-
-    let mut personal_projects: Vec<_> = me
-        .projects
-        .edges
-        .iter()
-        .map(|project| &project.node)
-        .collect();
-    personal_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
-    let personal_project_names = personal_projects
-        .iter()
-        .map(|project| PersonalProject(project))
-        .collect::<Vec<_>>();
-
-    let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
-
-    if teams.is_empty() {
-        let (project, environment, service) = prompt_personal_projects(personal_project_names)?;
-        configs.link_project(
-            project.0.id.clone(),
-            Some(project.0.name.clone()),
-            environment.0.id.clone(),
-            Some(environment.0.name.clone()),
-        )?;
-
-        if let Some(service) = service {
-            configs.link_service(service.0.id.clone())?;
-        }
-
-        configs.write()?;
-        return Ok(());
-    }
-
-    let mut team_names = teams
-        .iter()
-        .map(|team| Team::Team(team))
-        .collect::<Vec<_>>();
-    team_names.insert(0, Team::Personal);
-
-    let team = prompt_options("Select a team", team_names)?;
-    match team {
-        Team::Personal => {
-            let (project, environment, service) = prompt_personal_projects(personal_project_names)?;
-            configs.link_project(
-                project.0.id.clone(),
-                Some(project.0.name.clone()),
-                environment.0.id.clone(),
-                Some(environment.0.name.clone()),
-            )?;
-
-            if let Some(service) = service {
-                configs.link_service(service.0.id.clone())?;
-            }
-        }
-        Team::Team(team) => {
-            let vars = queries::projects::Variables {
-                team_id: Some(team.id.clone()),
-            };
-
-            let projects =
-                post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
+        let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
+        if teams.is_empty() {
+            // prompt projects on personal account
+            prompt_personal_projects(me)?
+        } else {
+            // prompt teams
+            let mut team_names = vec![Team::Personal];
+            team_names.extend(teams.into_iter().map(Team::Team));
+            match prompt_options("Select a team", team_names)? {
+                Team::Personal => prompt_personal_projects(me)?,
+                Team::Team(team) => {
+                    let vars = queries::projects::Variables {
+                        team_id: Some(team.id.clone()),
+                    };
+                    let projects = post_graphql::<queries::Projects, _>(
+                        &client,
+                        configs.get_backboard(),
+                        vars,
+                    )
                     .await?
                     .projects;
-
-            let mut projects: Vec<_> = projects.edges.iter().map(|project| &project.node).collect();
-            projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
-            let project_names = projects
-                .iter()
-                .map(|project| Project(project))
-                .collect::<Vec<_>>();
-            let (project, environment, service) = prompt_team_projects(project_names)?;
-            configs.link_project(
-                project.0.id.clone(),
-                Some(project.0.name.clone()),
-                environment.0.id.clone(),
-                Some(environment.0.name.clone()),
-            )?;
-
-            if let Some(service) = service {
-                configs.link_service(service.0.id.clone())?;
+                    prompt_team_projects(projects)?
+                }
             }
         }
+    });
+
+    let environment = if let Some(environment) = args.environment {
+        let env = project.environments.iter().find(|e| {
+            (e.name.to_lowercase() == environment.to_lowercase())
+                || (e.id.to_lowercase() == environment.to_lowercase())
+        });
+        if let Some(env) = env {
+            fake_select("Select an environment", env.name.as_str());
+            env.clone()
+        } else {
+            return Err(RailwayError::EnvironmentNotFound(environment).into());
+        }
+    } else {
+        prompt_options("Select an environment", project.environments)?
+    };
+    let useful_services = project
+        .services
+        .iter()
+        .filter(|&a| {
+            a.service_instances
+                .iter()
+                .any(|instance| instance == &environment.id)
+        })
+        .cloned()
+        .collect::<Vec<NormalisedService>>();
+    let service = if !useful_services.is_empty() {
+        Some(if let Some(service) = args.service {
+            let service_norm = useful_services.iter().find(|s| {
+                (s.name.to_lowercase() == service.to_lowercase())
+                    || (s.id.to_lowercase() == service.to_lowercase())
+            });
+            if let Some(service) = service_norm {
+                fake_select("Select a service", &service.name);
+                service.clone()
+            } else {
+                return Err(RailwayError::ServiceNotFound(service).into());
+            }
+        } else {
+            prompt_options("Select a service", useful_services)?
+        })
+    } else {
+        None
+    };
+
+    configs.link_project(
+        project.id,
+        Some(project.name),
+        environment.id,
+        Some(environment.name),
+    )?;
+    if let Some(service) = service {
+        configs.link_service(service.id)?;
     }
 
     configs.write()?;
@@ -200,126 +139,160 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 fn prompt_team_projects(
-    project_names: Vec<Project>,
-) -> Result<(Project, Environment, Option<Service>)> {
-    if project_names.is_empty() {
-        return Err(RailwayError::NoProjects.into());
-    }
-
-    let project = prompt_options("Select a project", project_names)?;
-    let environments = project
-        .0
-        .environments
+    projects: queries::projects::ProjectsProjects,
+) -> Result<Project, anyhow::Error> {
+    let mut team_projects: Vec<ProjectsProjectsEdgesNode> = projects
         .edges
         .iter()
-        .map(|env| Environment(&env.node))
+        .cloned()
+        .map(|edge| edge.node)
         .collect();
-
-    let environment = prompt_options("Select an environment", environments)?;
-    let services: Vec<_> = project
-        .0
-        .services
-        .edges
+    team_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let prompt_projects = team_projects
         .iter()
-        .map(|s| Service(&s.node))
-        .collect();
-    let service = if services.is_empty() {
-        None
-    } else {
-        Some(prompt_select("Select a service", services)?)
-    };
-
-    Ok((project, environment, service))
+        .cloned()
+        .map(|project| Project(ProjectType::Team(project)))
+        .collect::<Vec<Project>>();
+    prompt_options("Select a project", prompt_projects)
 }
 
 fn prompt_personal_projects(
-    personal_project_names: Vec<PersonalProject>,
-) -> Result<(
-    PersonalProject,
-    PersonalEnvironment,
-    Option<PersonalService>,
-)> {
-    if personal_project_names.is_empty() {
+    me: queries::user_projects::UserProjectsMe,
+) -> Result<Project, anyhow::Error> {
+    let mut personal_projects = me
+        .projects
+        .edges
+        .iter()
+        .map(|project| &project.node)
+        .collect::<Vec<&UserProjectsMeProjectsEdgesNode>>();
+    if personal_projects.is_empty() {
         return Err(RailwayError::NoProjects.into());
     }
-
-    let project = prompt_options("Select a project", personal_project_names)?;
-    let environments = project
-        .0
-        .environments
-        .edges
+    personal_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let prompt_projects = personal_projects
         .iter()
-        .map(|env| PersonalEnvironment(&env.node))
-        .collect();
-    let environment = prompt_options("Select an environment", environments)?;
-    let services: Vec<_> = project
-        .0
-        .services
-        .edges
-        .iter()
-        .map(|s| PersonalService(&s.node))
-        .collect();
-
-    let service = if services.is_empty() {
-        None
-    } else {
-        Some(prompt_select("Select a service", services)?)
-    };
-
-    Ok((project, environment, service))
+        .cloned()
+        .map(|project| Project(ProjectType::Personal(project.clone())))
+        .collect::<Vec<Project>>();
+    prompt_options("Select a project", prompt_projects)
 }
 
-#[derive(Debug, Clone)]
-struct PersonalService<'a>(&'a UserProjectsMeProjectsEdgesNodeServicesEdgesNode);
-
-impl<'a> Display for PersonalService<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
+structstruck::strike! {
+    #[strikethrough[derive(Debug, Clone, derive_new::new)]]
+    struct NormalisedProject {
+        /// Project ID
+        id: String,
+        /// Project name
+        name: String,
+        /// Project environments
+        environments: Vec<struct NormalisedEnvironment {
+            /// Environment ID
+            id: String,
+            /// Environment Name
+            name: String
+        }>,
+        /// Project services
+        services: Vec<struct NormalisedService {
+            /// Service ID
+            id: String,
+            /// Service name
+            name: String,
+            /// A `Vec` of environment IDs where the service is present
+            ///
+            /// _**note**_: this isn't what the API returns, we are just extracting what we need
+            service_instances: Vec<String>,
+        }>
     }
 }
 
-#[derive(Debug, Clone)]
-struct PersonalProject<'a>(&'a UserProjectsMeProjectsEdgesNode);
-
-impl<'a> Display for PersonalProject<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PersonalEnvironment<'a>(&'a UserProjectsMeProjectsEdgesNodeEnvironmentsEdgesNode);
-
-impl<'a> Display for PersonalEnvironment<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Project<'a>(&'a ProjectsProjectsEdgesNode);
-
-impl<'a> Display for Project<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Service<'a>(&'a ProjectsProjectsEdgesNodeServicesEdgesNode);
-
-impl<'a> Display for Service<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Environment<'a>(&'a ProjectsProjectsEdgesNodeEnvironmentsEdgesNode);
-
-impl<'a> Display for Environment<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
+// unfortunately, due to the graphql client returning 3 different types for some reason (despite them all being identical)
+// we need to write 3 match arms to convert it to our normaliesd project type
+impl From<Project> for NormalisedProject {
+    fn from(value: Project) -> Self {
+        match value.0 {
+            ProjectType::Fetched(fetched) => NormalisedProject::new(
+                fetched.id,
+                fetched.name,
+                fetched
+                    .environments
+                    .edges
+                    .into_iter()
+                    .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
+                    .collect(),
+                fetched
+                    .services
+                    .edges
+                    .into_iter()
+                    .map(|service| {
+                        NormalisedService::new(
+                            service.node.id,
+                            service.node.name,
+                            service
+                                .node
+                                .service_instances
+                                .edges
+                                .into_iter()
+                                .map(|instance| instance.node.environment_id)
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            ProjectType::Personal(personal) => NormalisedProject::new(
+                personal.id,
+                personal.name,
+                personal
+                    .environments
+                    .edges
+                    .into_iter()
+                    .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
+                    .collect(),
+                personal
+                    .services
+                    .edges
+                    .into_iter()
+                    .map(|service| {
+                        NormalisedService::new(
+                            service.node.id,
+                            service.node.name,
+                            service
+                                .node
+                                .service_instances
+                                .edges
+                                .into_iter()
+                                .map(|instance| instance.node.environment_id)
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            ProjectType::Team(team) => NormalisedProject::new(
+                team.id,
+                team.name,
+                team.environments
+                    .edges
+                    .into_iter()
+                    .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
+                    .collect(),
+                team.services
+                    .edges
+                    .into_iter()
+                    .map(|service| {
+                        NormalisedService::new(
+                            service.node.id,
+                            service.node.name,
+                            service
+                                .node
+                                .service_instances
+                                .edges
+                                .into_iter()
+                                .map(|instance| instance.node.environment_id)
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+        }
     }
 }
 
@@ -339,10 +312,33 @@ impl<'a> Display for Team<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct ProjectEnvironment<'a>(&'a ProjectProjectEnvironmentsEdgesNode);
+enum ProjectType {
+    Personal(UserProjectsMeProjectsEdgesNode),
+    Team(ProjectsProjectsEdgesNode),
+    Fetched(ProjectProject),
+}
 
-impl<'a> Display for ProjectEnvironment<'a> {
+#[derive(Debug, Clone)]
+struct Project(ProjectType);
+
+impl Display for Project {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
+        match &self.0 {
+            ProjectType::Personal(personal) => write!(f, "{}", personal.name),
+            ProjectType::Team(team_project) => write!(f, "{}", team_project.name),
+            ProjectType::Fetched(fetched) => write!(f, "{}", fetched.name),
+        }
+    }
+}
+
+impl Display for NormalisedEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl Display for NormalisedService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
     }
 }

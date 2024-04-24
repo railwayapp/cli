@@ -2,6 +2,9 @@ query Project($id: String!) {
   project(id: $id) {
     id
     name
+    team {
+        name
+    }
     environments {
       edges {
         node {
