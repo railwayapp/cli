@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     controllers::{
         deployment::{stream_build_logs, stream_deploy_logs},
@@ -111,13 +113,22 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         })
         .await?;
     } else {
-        stream_deploy_logs(deployment.id.clone(), |log| {
-            if json {
-                println!("{}", serde_json::to_string(&log).unwrap());
-            } else {
-                format_attr_log(log);
-            }
-        })
+        stream_deploy_logs(
+            deployment.id.clone(),
+            |log: subscriptions::deployment_logs::LogFields| {
+                if json {
+                    let mut map: HashMap<String, String> = HashMap::new();
+                    map.insert("message".to_string(), log.message.clone());
+                    map.insert("timestamp".to_string(), log.timestamp.clone());
+                    for attribute in log.attributes {
+                        map.insert(attribute.key.clone(), attribute.value.clone());
+                    }
+                    println!("{}", serde_json::to_string(&map).unwrap());
+                } else {
+                    format_attr_log(log);
+                }
+            },
+        )
         .await?;
     }
 
