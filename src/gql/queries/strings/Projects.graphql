@@ -1,31 +1,38 @@
 query Projects($teamId: String) {
-	projects(teamId: $teamId) {
-		edges {
-			node {
-				id
-				name
-				updatedAt
-				team {
-					id
-					name
-				}
-				environments {
-					edges {
-						node {
-							id
-							name
-						}
-					}
-				}
-            	services {
-      				edges {
-        				node {
-          					id
-							name
-        				}
-      				}
-    			}
-			}
-		}
-	}
+  projects(teamId: $teamId) {
+    edges {
+      node {
+        id
+        name
+        updatedAt
+        team {
+          id
+          name
+        }
+        environments {
+          edges {
+            node {
+              id
+              name
+            }
+          }
+        }
+        services {
+          edges {
+            node {
+              id
+              name
+              serviceInstances {
+                edges {
+                  node {
+                    environmentId
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
