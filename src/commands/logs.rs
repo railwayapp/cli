@@ -121,9 +121,12 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
                     map.insert("message".to_string(), log.message.clone());
                     map.insert("timestamp".to_string(), log.timestamp.clone());
                     for attribute in log.attributes {
-                        map.insert(attribute.key.clone(), attribute.value.clone());
+                        map.insert(
+                            attribute.key.clone(),
+                            attribute.value.clone().trim_matches('"').to_string(),
+                        );
                     }
-                    println!("{}", serde_json::to_string(&map).unwrap());
+                    println!("{}", serde_json::to_string_pretty(&map).unwrap());
                 } else {
                     format_attr_log(log);
                 }
