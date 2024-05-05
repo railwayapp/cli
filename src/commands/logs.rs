@@ -1,9 +1,15 @@
-use crate::controllers::{
-    deployment::{stream_build_logs, stream_deploy_logs},
-    environment::get_matched_environment,
-    project::get_project,
+use std::collections::HashMap;
+
+use crate::{
+    controllers::{
+        deployment::{stream_build_logs, stream_deploy_logs},
+        environment::get_matched_environment,
+        project::get_project,
+    },
+    util::logs::format_attr_log,
 };
 use anyhow::bail;
+use serde_json::Value;
 
 use super::{
     queries::deployments::{DeploymentListInput, DeploymentStatus},
@@ -108,13 +114,42 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         })
         .await?;
     } else {
-        stream_deploy_logs(deployment.id.clone(), |log| {
-            if json {
-                println!("{}", serde_json::to_string(&log).unwrap());
-            } else {
-                println!("{}", log.message);
-            }
-        })
+        stream_deploy_logs(
+            deployment.id.clone(),
+            |log: subscriptions::deployment_logs::LogFields| {
+                if json {
+                    let mut map: HashMap<String, Value> = HashMap::new();
+
+                    // Insert fixed attributes
+                    map.insert(
+                        "message".to_string(),
+                        serde_json::to_value(log.message.clone()).unwrap(),
+                    );
+                    map.insert(
+                        "timestamp".to_string(),
+                        serde_json::to_value(log.timestamp.clone()).unwrap(),
+                    );
+
+                    // Insert dynamic attributes
+                    for attribute in log.attributes {
+                        // Trim surrounding quotes if present
+                        let value = match attribute.value.trim_matches('"').parse::<Value>() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                serde_json::to_value(attribute.value.trim_matches('"')).unwrap()
+                            }
+                        };
+                        map.insert(attribute.key, value);
+                    }
+
+                    // Convert HashMap to JSON string
+                    let json_string = serde_json::to_string(&map).unwrap();
+                    println!("{}", json_string);
+                } else {
+                    format_attr_log(log);
+                }
+            },
+        )
         .await?;
     }
 
