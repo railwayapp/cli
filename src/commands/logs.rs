@@ -9,6 +9,7 @@ use crate::{
     util::logs::format_attr_log,
 };
 use anyhow::bail;
+use serde_json::Value;
 
 use super::{
     queries::deployments::{DeploymentListInput, DeploymentStatus},
@@ -117,16 +118,33 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
             deployment.id.clone(),
             |log: subscriptions::deployment_logs::LogFields| {
                 if json {
-                    let mut map: HashMap<String, String> = HashMap::new();
-                    map.insert("message".to_string(), log.message.clone());
-                    map.insert("timestamp".to_string(), log.timestamp.clone());
+                    let mut map: HashMap<String, Value> = HashMap::new();
+
+                    // Insert fixed attributes
+                    map.insert(
+                        "message".to_string(),
+                        serde_json::to_value(log.message.clone()).unwrap(),
+                    );
+                    map.insert(
+                        "timestamp".to_string(),
+                        serde_json::to_value(log.timestamp.clone()).unwrap(),
+                    );
+
+                    // Insert dynamic attributes
                     for attribute in log.attributes {
-                        map.insert(
-                            attribute.key.clone(),
-                            attribute.value.clone().trim_matches('"').to_string(),
-                        );
+                        // Trim surrounding quotes if present
+                        let value = match attribute.value.trim_matches('"').parse::<Value>() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                serde_json::to_value(attribute.value.trim_matches('"')).unwrap()
+                            }
+                        };
+                        map.insert(attribute.key, value);
                     }
-                    println!("{}", serde_json::to_string(&map).unwrap());
+
+                    // Convert HashMap to JSON string
+                    let json_string = serde_json::to_string(&map).unwrap();
+                    println!("{}", json_string);
                 } else {
                     format_attr_log(log);
                 }
