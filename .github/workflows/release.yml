@@ -2,7 +2,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
 env:
   MACOSX_DEPLOYMENT_TARGET: 10.7
 
@@ -28,14 +28,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Build Changelog
-        id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v3.7.0
-        with:
-          configuration: ".github/changelog-configuration.json"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub release
         id: release
