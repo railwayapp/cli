@@ -16,8 +16,7 @@ where
     let mut request = format!("wss://backboard.{hostname}/graphql/v2").into_client_request()?;
     let headers = request.headers_mut();
     if let Some(token) = &Configs::get_railway_token() {
-        headers
-            .insert("project-access-token", HeaderValue::from_str(token)?);
+        headers.insert("project-access-token", HeaderValue::from_str(token)?);
     } else if let Some(token) = configs.get_railway_auth_token() {
         headers.insert(
             "authorization",
