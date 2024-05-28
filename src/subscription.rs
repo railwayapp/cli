@@ -11,27 +11,25 @@ where
     <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
 {
-    dbg!(std::any::type_name::<T>());
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let mut request = format!("wss://backboard.{hostname}/graphql/v2").into_client_request()?;
+    let headers = request.headers_mut();
     if let Some(token) = &Configs::get_railway_token() {
-        request
-            .headers_mut()
+        headers
             .insert("project-access-token", HeaderValue::from_str(token)?);
     } else if let Some(token) = configs.get_railway_auth_token() {
-        request.headers_mut().insert(
+        headers.insert(
             "authorization",
             HeaderValue::from_str(&format!("Bearer {token}"))?,
         );
     } else {
         bail!("Not authorized");
     }
-    request.headers_mut().insert(
+    headers.insert(
         "Sec-WebSocket-Protocol",
         HeaderValue::from_str("graphql-transport-ws").unwrap(),
     );
-    dbg!(request.headers());
 
     let (connection, _) = async_tungstenite::tokio::connect_async(request).await?;
 
