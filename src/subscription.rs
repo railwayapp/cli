@@ -12,20 +12,23 @@ where
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
 {
     let configs = Configs::new()?;
-    let Some(token) = configs.root_config.user.token.clone() else {
-        bail!("Unauthorized. Please login with `railway login`")
-    };
-    let bearer = format!("Bearer {token}");
     let hostname = configs.get_host();
     let mut request = format!("wss://backboard.{hostname}/graphql/v2").into_client_request()?;
-
-    request.headers_mut().insert(
+    let headers = request.headers_mut();
+    if let Some(token) = &Configs::get_railway_token() {
+        headers.insert("project-access-token", HeaderValue::from_str(token)?);
+    } else if let Some(token) = configs.get_railway_auth_token() {
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}"))?,
+        );
+    } else {
+        bail!("Not authorized");
+    }
+    headers.insert(
         "Sec-WebSocket-Protocol",
         HeaderValue::from_str("graphql-transport-ws").unwrap(),
     );
-    request
-        .headers_mut()
-        .insert("Authorization", HeaderValue::from_str(&bearer)?);
 
     let (connection, _) = async_tungstenite::tokio::connect_async(request).await?;
 

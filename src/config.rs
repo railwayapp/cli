@@ -115,6 +115,15 @@ impl Configs {
         std::env::var("RAILWAY_API_TOKEN").ok()
     }
 
+    /// tries the environment variable and the config file
+    pub fn get_railway_auth_token(&self) -> Option<String> {
+        Self::get_railway_api_token().or(self
+            .root_config
+            .user
+            .token
+            .clone()
+            .filter(|t| !t.is_empty()))
+    }
     pub fn get_environment_id() -> Environment {
         match std::env::var("RAILWAY_ENV")
             .map(|env| env.to_lowercase())
