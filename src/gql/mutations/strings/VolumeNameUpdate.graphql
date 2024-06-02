@@ -1,0 +1,5 @@
+mutation VolumeNameUpdate($volumeId: String!, $name: String!) {
+  volumeUpdate(volumeId: $volumeId, input: {name: $name}) {
+    name
+  }
+}

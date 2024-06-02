@@ -83,3 +83,21 @@ pub struct VolumeCreate;
     skip_serializing_none
 )]
 pub struct VolumeDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/VolumeMountPathUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeMountPathUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/VolumeNameUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeNameUpdate;

@@ -1,0 +1,7 @@
+mutation VolumeMountPathUpdate($serviceId: String, $environmentId: String!, $volumeId: String!, $mountPath: String!) {
+  volumeInstanceUpdate(
+    input: {serviceId: $serviceId, mountPath: $mountPath}
+    environmentId: $environmentId
+    volumeId: $volumeId
+  )
+}

@@ -50,7 +50,21 @@ structstruck::strike! {
         }),
 
         /// Update a volume
-        Update,
+        #[clap(alias = "edit")]
+        Update(struct {
+            /// The ID/name of the volume you wish to update
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The new mount path of the volume (optional)
+            #[clap(long, short)]
+            mount_path: Option<String>,
+
+            /// The new name of the volume (optional)
+            #[clap(long, short)]
+            name: Option<String>,
+
+        }),
     }
 }
 
@@ -69,7 +83,94 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         Commands::Add(a) => add(service, environment, a.mount_path, project).await?,
         Commands::List => list(environment, project).await?,
         Commands::Delete(d) => delete(environment, d.volume, project).await?,
-        _ => unimplemented!(),
+        Commands::Update(u) => update(environment, u.volume, u.mount_path, u.name, project).await?,
+    }
+
+    Ok(())
+}
+
+async fn update(
+    environment: String,
+    volume: Option<String>,
+    mount_path: Option<String>,
+    name: Option<String>,
+    project: ProjectProject,
+) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let volumes: Vec<Volume> = project
+        .volumes
+        .edges
+        .iter()
+        .filter_map(|v| {
+            v.node
+                .volume_instances
+                .edges
+                .iter()
+                .find(|a| a.node.environment_id == environment.clone())
+                .map(|a| Volume(&a.node))
+        })
+        .collect();
+    let volume = if let Some(vol) = volume {
+        let norm_vol = volumes.iter().find(|v| {
+            (v.0.volume.name.to_lowercase() == vol.to_lowercase())
+                || (v.0.volume.id.to_lowercase() == vol.to_lowercase())
+        });
+        if let Some(volume) = norm_vol {
+            fake_select("Select a volume to delete", &volume.0.volume.name);
+            volume.clone()
+        } else {
+            return Err(RailwayError::VolumeNotFound(vol).into());
+        }
+    } else {
+        // prompt
+        let volume = prompt_options("Select a volume to delete", volumes)?;
+        volume.clone()
+    };
+
+    if mount_path.is_none() && name.is_none() {
+        bail!("In order to use the update command, please provide a new mount path or a new name via the flags");
+    }
+
+    if let Some(mount_path) = mount_path {
+        if !mount_path.starts_with('/') {
+            bail!("All mount paths must start with /")
+        }
+        post_graphql::<mutations::VolumeMountPathUpdate, _>(
+            &client,
+            configs.get_backboard(),
+            mutations::volume_mount_path_update::Variables {
+                volume_id: volume.0.volume.id.clone(),
+                service_id: volume.0.service_id.clone(),
+                environment_id: environment.clone(),
+                mount_path: mount_path.clone(),
+            },
+        )
+        .await?;
+
+        println!(
+            "Succesfully updated the mount path of volume \"{}\" to \"{}\"",
+            volume.0.volume.name.blue(),
+            mount_path.purple()
+        );
+    }
+
+    if let Some(name) = name {
+        post_graphql::<mutations::VolumeNameUpdate, _>(
+            &client,
+            configs.get_backboard(),
+            mutations::volume_name_update::Variables {
+                volume_id: volume.0.volume.id.clone(),
+                name: name.clone(),
+            },
+        )
+        .await?;
+
+        println!(
+            "Succesfully updated the name of volume \"{}\" to \"{}\"",
+            volume.0.volume.name.blue(),
+            name.purple()
+        );
     }
 
     Ok(())
