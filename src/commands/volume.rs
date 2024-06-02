@@ -1,11 +1,16 @@
 use super::*;
 use crate::{
     controllers::project::get_project,
-    queries::project::{ProjectProject, ProjectProjectVolumesEdges},
-    util::prompt::{fake_select, prompt_text},
+    errors::RailwayError,
+    queries::project::{
+        ProjectProject, ProjectProjectVolumesEdges,
+        ProjectProjectVolumesEdgesNodeVolumeInstancesEdgesNode,
+    },
+    util::prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
 };
 use anyhow::{anyhow, bail};
 use clap::Parser;
+use std::fmt::Display;
 
 /// Manage project volumes
 #[derive(Parser)]
@@ -38,7 +43,11 @@ structstruck::strike! {
 
         /// Delete a volume
         #[clap(alias = "remove", alias = "rm")]
-        Delete,
+        Delete(struct {
+            /// The ID/name of the volume you wish to delete
+            #[clap(long, short)]
+            volume: Option<String>
+        }),
 
         /// Update a volume
         Update,
@@ -59,9 +68,99 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     match args.command {
         Commands::Add(a) => add(service, environment, a.mount_path, project).await?,
         Commands::List => list(environment, project).await?,
+        Commands::Delete(d) => delete(environment, d.volume, project).await?,
         _ => unimplemented!(),
     }
 
+    Ok(())
+}
+
+async fn delete(
+    environment: String,
+    volume: Option<String>,
+    project: ProjectProject,
+) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let volumes: Vec<Volume> = project
+        .volumes
+        .edges
+        .iter()
+        .filter_map(|v| {
+            v.node
+                .volume_instances
+                .edges
+                .iter()
+                .find(|a| a.node.environment_id == environment.clone())
+                .map(|a| Volume(&a.node))
+        })
+        .collect();
+    let volume = if let Some(vol) = volume {
+        let norm_vol = volumes.iter().find(|v| {
+            (v.0.volume.name.to_lowercase() == vol.to_lowercase())
+                || (v.0.volume.id.to_lowercase() == vol.to_lowercase())
+        });
+        if let Some(volume) = norm_vol {
+            fake_select("Select a volume to delete", &volume.0.volume.name);
+            volume.clone()
+        } else {
+            return Err(RailwayError::VolumeNotFound(vol).into());
+        }
+    } else {
+        // prompt
+        let volume = prompt_options("Select a volume to delete", volumes)?;
+        volume.clone()
+    };
+
+    let confirm = prompt_confirm_with_default(
+        format!(
+            r#"Are you sure you want to delete the volume "{}"?"#,
+            volume.0.volume.name
+        )
+        .as_str(),
+        false,
+    )?;
+    if confirm {
+        let is_two_factor_enabled = {
+            let vars = queries::two_factor_info::Variables {};
+
+            let info =
+                post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
+                    .await?
+                    .two_factor_info;
+
+            info.is_verified
+        };
+
+        if is_two_factor_enabled {
+            let token = prompt_text("Enter your 2FA code")?;
+            let vars = mutations::validate_two_factor::Variables { token };
+
+            let valid = post_graphql::<mutations::ValidateTwoFactor, _>(
+                &client,
+                configs.get_backboard(),
+                vars,
+            )
+            .await?
+            .two_factor_info_validate;
+
+            if !valid {
+                return Err(RailwayError::InvalidTwoFactorCode.into());
+            }
+        }
+        let volume_id = volume.0.volume.id.clone();
+        let p = post_graphql::<mutations::VolumeDelete, _>(
+            &client,
+            configs.get_backboard(),
+            mutations::volume_delete::Variables { id: volume_id },
+        )
+        .await?;
+        if p.volume_delete {
+            println!("Volume \"{}\" deleted", volume.0.volume.name.blue());
+        } else {
+            bail!("Failed to delete volume");
+        }
+    }
     Ok(())
 }
 
@@ -198,4 +297,13 @@ async fn add(
     );
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct Volume<'a>(&'a ProjectProjectVolumesEdgesNodeVolumeInstancesEdgesNode);
+
+impl<'a> Display for Volume<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.volume.name)
+    }
 }

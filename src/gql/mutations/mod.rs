@@ -74,3 +74,12 @@ pub struct TemplateDeploy;
     skip_serializing_none
 )]
 pub struct VolumeCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/VolumeDelete.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeDelete;
