@@ -43,6 +43,8 @@ query Project($id: String!) {
                 serviceId
                 mountPath
                 environmentId
+                currentSizeMB
+                sizeMB
                 volume {
                   name
                   id
