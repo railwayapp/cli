@@ -65,3 +65,12 @@ pub struct ValidateTwoFactor;
     skip_serializing_none
 )]
 pub struct TemplateDeploy;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/VolumeCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeCreate;

@@ -55,7 +55,8 @@ commands_enum!(
     unlink,
     up,
     variables,
-    whoami
+    whoami,
+    volume
 );
 
 #[tokio::main]
