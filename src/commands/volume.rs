@@ -98,35 +98,7 @@ async fn update(
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let volumes: Vec<Volume> = project
-        .volumes
-        .edges
-        .iter()
-        .filter_map(|v| {
-            v.node
-                .volume_instances
-                .edges
-                .iter()
-                .find(|a| a.node.environment_id == environment.clone())
-                .map(|a| Volume(&a.node))
-        })
-        .collect();
-    let volume = if let Some(vol) = volume {
-        let norm_vol = volumes.iter().find(|v| {
-            (v.0.volume.name.to_lowercase() == vol.to_lowercase())
-                || (v.0.volume.id.to_lowercase() == vol.to_lowercase())
-        });
-        if let Some(volume) = norm_vol {
-            fake_select("Select a volume to delete", &volume.0.volume.name);
-            volume.clone()
-        } else {
-            return Err(RailwayError::VolumeNotFound(vol).into());
-        }
-    } else {
-        // prompt
-        let volume = prompt_options("Select a volume to delete", volumes)?;
-        volume.clone()
-    };
+    let volume = select_volume(project, environment.as_str(), volume)?;
 
     if mount_path.is_none() && name.is_none() {
         bail!("In order to use the update command, please provide a new mount path or a new name via the flags");
@@ -183,35 +155,7 @@ async fn delete(
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let volumes: Vec<Volume> = project
-        .volumes
-        .edges
-        .iter()
-        .filter_map(|v| {
-            v.node
-                .volume_instances
-                .edges
-                .iter()
-                .find(|a| a.node.environment_id == environment.clone())
-                .map(|a| Volume(&a.node))
-        })
-        .collect();
-    let volume = if let Some(vol) = volume {
-        let norm_vol = volumes.iter().find(|v| {
-            (v.0.volume.name.to_lowercase() == vol.to_lowercase())
-                || (v.0.volume.id.to_lowercase() == vol.to_lowercase())
-        });
-        if let Some(volume) = norm_vol {
-            fake_select("Select a volume to delete", &volume.0.volume.name);
-            volume.clone()
-        } else {
-            return Err(RailwayError::VolumeNotFound(vol).into());
-        }
-    } else {
-        // prompt
-        let volume = prompt_options("Select a volume to delete", volumes)?;
-        volume.clone()
-    };
+    let volume = select_volume(project, environment.as_str(), volume)?;
 
     let confirm = prompt_confirm_with_default(
         format!(
@@ -401,10 +345,47 @@ async fn add(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct Volume<'a>(&'a ProjectProjectVolumesEdgesNodeVolumeInstancesEdgesNode);
+fn select_volume(
+    project: ProjectProject,
+    environment: &str,
+    volume: Option<String>,
+) -> Result<Volume, anyhow::Error> {
+    let volumes: Vec<Volume> = project
+        .volumes
+        .edges
+        .iter()
+        .filter_map(|v| {
+            v.node
+                .volume_instances
+                .edges
+                .iter()
+                .find(|a| a.node.environment_id == environment)
+                .map(|a| Volume(a.node.clone()))
+        })
+        .collect();
+    let volume = if let Some(vol) = volume {
+        let norm_vol = volumes.iter().find(|v| {
+            (v.0.volume.name.to_lowercase() == vol.to_lowercase())
+                || (v.0.volume.id.to_lowercase() == vol.to_lowercase())
+        });
+        if let Some(volume) = norm_vol {
+            fake_select("Select a volume to delete", &volume.0.volume.name);
+            volume.clone()
+        } else {
+            return Err(RailwayError::VolumeNotFound(vol).into());
+        }
+    } else {
+        // prompt
+        let volume = prompt_options("Select a volume to delete", volumes)?;
+        volume.clone()
+    };
+    Ok(volume)
+}
 
-impl<'a> Display for Volume<'a> {
+#[derive(Debug, Clone)]
+struct Volume(ProjectProjectVolumesEdgesNodeVolumeInstancesEdgesNode);
+
+impl Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.volume.name)
     }
