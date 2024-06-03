@@ -1,0 +1,7 @@
+mutation VolumeAttach($environmentId: String!, $volumeId: String!, $serviceId: String!) {
+  volumeInstanceUpdate(
+    input: { serviceId: $serviceId }
+    environmentId: $environmentId
+    volumeId: $volumeId
+  )
+}

@@ -72,6 +72,13 @@ structstruck::strike! {
             #[clap(long, short)]
             volume: Option<String>
         })
+
+        /// Attach a volume to a service
+        Attach(struct {
+            /// The ID/name of the volume you wish to attach
+            #[clap(long, short)]
+            volume: Option<String>
+        })
     }
 }
 
@@ -92,6 +99,69 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         Commands::Delete(d) => delete(environment, d.volume, project).await?,
         Commands::Update(u) => update(environment, u.volume, u.mount_path, u.name, project).await?,
         Commands::Detach(d) => detach(environment, d.volume, project).await?,
+        Commands::Attach(a) => attach(environment, a.volume, service, project).await?,
+    }
+
+    Ok(())
+}
+
+async fn attach(
+    environment: String,
+    volume: Option<String>,
+    service: Option<String>,
+    project: ProjectProject,
+) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let volume = select_volume(project.clone(), environment.as_str(), volume)?.0;
+    let service = service.ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
+    let service_name = &project
+        .services
+        .edges
+        .iter()
+        .find(|s| s.node.id == service)
+        .ok_or_else(|| anyhow!("The service linked/provided doesn't exist"))?
+        .node
+        .name;
+    if volume.service_id.is_some() {
+        bail!("Volume {} is already mounted to service {}. Please detach it via `railway volume detach` first.", volume.volume.name, project
+        .services
+        .edges
+        .iter()
+        .find(|a| a.node.id == volume.service_id.clone().unwrap_or_default())
+        .ok_or(anyhow!(
+            "The service the volume is attcahed to doesn't exist"
+        ))?.node.name)
+    }
+    let confirm = prompt_confirm_with_default(
+        format!(
+            "Are you sure you want to attach the volume {} to service {}?",
+            volume.volume.name, service_name
+        )
+        .as_str(),
+        false,
+    )?;
+    if confirm {
+        let p = post_graphql::<mutations::VolumeAttach, _>(
+            &client,
+            configs.get_backboard(),
+            mutations::volume_attach::Variables {
+                volume_id: volume.volume.id.clone(),
+                service_id: service.clone(),
+                environment_id: environment.clone(),
+            },
+        )
+        .await?;
+
+        if p.volume_instance_update {
+            println!(
+                "Volume \"{}\" attached to service \"{}\"",
+                volume.volume.name.blue(),
+                service_name.blue()
+            );
+        } else {
+            bail!("Failed to attach volume");
+        }
     }
 
     Ok(())
@@ -433,14 +503,14 @@ fn select_volume(
                 || (v.0.volume.id.to_lowercase() == vol.to_lowercase())
         });
         if let Some(volume) = norm_vol {
-            fake_select("Select a volume to delete", &volume.0.volume.name);
+            fake_select("Select a volume", &volume.0.volume.name);
             volume.clone()
         } else {
             return Err(RailwayError::VolumeNotFound(vol).into());
         }
     } else {
         // prompt
-        let volume = prompt_options("Select a volume to delete", volumes)?;
+        let volume = prompt_options("Select a volume", volumes)?;
         volume.clone()
     };
     Ok(volume)
