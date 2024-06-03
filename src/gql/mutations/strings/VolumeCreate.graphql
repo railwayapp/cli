@@ -1,0 +1,7 @@
+mutation VolumeCreate($projectId: String!, $environmentId: String!, $serviceId: String!, $mountPath: String!) {
+  volumeCreate(
+    input: {projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, mountPath: $mountPath}
+  ) {
+    name
+  }
+}

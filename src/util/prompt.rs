@@ -12,6 +12,14 @@ pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
         .context("Failed to prompt for options")
 }
 
+pub fn prompt_text(message: &str) -> Result<String> {
+    let select = inquire::Text::new(message);
+    select
+        .with_render_config(Configs::get_render_config())
+        .prompt()
+        .context("Failed to prompt for options")
+}
+
 pub fn prompt_confirm_with_default(message: &str, default: bool) -> Result<bool> {
     let confirm = inquire::Confirm::new(message);
     confirm

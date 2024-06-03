@@ -25,4 +25,5 @@ pub mod status;
 pub mod unlink;
 pub mod up;
 pub mod variables;
+pub mod volume;
 pub mod whoami;

@@ -3,7 +3,7 @@ query Project($id: String!) {
     id
     name
     team {
-        name
+      name
     }
     environments {
       edges {
@@ -18,7 +18,6 @@ query Project($id: String!) {
         node {
           id
           name
-
           serviceInstances {
             edges {
               node {
@@ -28,6 +27,27 @@ query Project($id: String!) {
                 source {
                   repo
                   image
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    volumes {
+      edges {
+        node {
+          volumeInstances {
+            edges {
+              node {
+                serviceId
+                mountPath
+                environmentId
+                currentSizeMB
+                sizeMB
+                volume {
+                  name
+                  id
                 }
               }
             }

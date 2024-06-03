@@ -49,4 +49,10 @@ pub enum RailwayError {
 
     #[error("{0}")]
     FailedToUpload(String),
+
+    #[error("Volume {0} not found.")]
+    VolumeNotFound(String),
+
+    #[error("2FA code is incorrect. Please try again.")]
+    InvalidTwoFactorCode,
 }

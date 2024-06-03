@@ -1,0 +1,3 @@
+mutation VolumeDelete($id: String!) {
+  volumeDelete(volumeId: $id)
+}
