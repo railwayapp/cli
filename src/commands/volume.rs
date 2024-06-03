@@ -304,17 +304,18 @@ async fn list(environment: String, project: ProjectProject) -> Result<()> {
                 .find(|a| a.node.environment_id == environment.clone())
                 .unwrap();
             println!("Volume: {}", volume.node.volume.name.green());
+            let service = project
+                .services
+                .edges
+                .iter()
+                .find(|s| s.node.id == volume.node.service_id.clone().unwrap_or_default());
             println!(
                 "Attached to: {}",
-                project
-                    .services
-                    .edges
-                    .iter()
-                    .find(|s| s.node.id == volume.node.service_id.clone().unwrap())
-                    .unwrap()
-                    .node
-                    .name
-                    .purple()
+                if let Some(service) = service {
+                    service.node.name.purple()
+                } else {
+                    "N/A".dimmed()
+                }
             );
             println!("Mount path: {}", volume.node.mount_path.yellow());
             println!(
