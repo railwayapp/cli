@@ -1,0 +1,7 @@
+mutation VolumeDetach($environmentId: String!, $volumeId: String!) {
+  volumeInstanceUpdate(
+    input: { serviceId: null }
+    environmentId: $environmentId
+    volumeId: $volumeId
+  )
+}

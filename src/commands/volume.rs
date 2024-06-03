@@ -65,6 +65,13 @@ structstruck::strike! {
             name: Option<String>,
 
         }),
+
+        /// Detach a volume from a service
+        Detach(struct {
+            /// The ID/name of the volume you wish to detach
+            #[clap(long, short)]
+            volume: Option<String>
+        })
     }
 }
 
@@ -84,6 +91,63 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         Commands::List => list(environment, project).await?,
         Commands::Delete(d) => delete(environment, d.volume, project).await?,
         Commands::Update(u) => update(environment, u.volume, u.mount_path, u.name, project).await?,
+        Commands::Detach(d) => detach(environment, d.volume, project).await?,
+    }
+
+    Ok(())
+}
+
+async fn detach(
+    environment: String,
+    volume: Option<String>,
+    project: ProjectProject,
+) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let volume = select_volume(project.clone(), environment.as_str(), volume)?.0;
+
+    if volume.service_id.is_none() {
+        bail!(
+            "Volume {} is not attached to any service",
+            volume.volume.name
+        );
+    }
+
+    let service = project
+        .services
+        .edges
+        .iter()
+        .find(|a| a.node.id == volume.service_id.clone().unwrap_or_default())
+        .ok_or(anyhow!(
+            "The service the volume is attcahed to doesn't exist"
+        ))?;
+    let confirm = prompt_confirm_with_default(
+        format!(
+            "Are you sure you want to detach the volume {} from service {}?",
+            volume.volume.name, service.node.name
+        )
+        .as_str(),
+        false,
+    )?;
+    if confirm {
+        let p = post_graphql::<mutations::VolumeDetach, _>(
+            &client,
+            configs.get_backboard(),
+            mutations::volume_detach::Variables {
+                volume_id: volume.volume.id.clone(),
+                environment_id: environment,
+            },
+        )
+        .await?;
+        if p.volume_instance_update {
+            println!(
+                "Volume \"{}\" detached from service \"{}\"",
+                volume.volume.name.blue(),
+                service.node.name.blue()
+            );
+        } else {
+            bail!("Failed to detach volume");
+        }
     }
 
     Ok(())
