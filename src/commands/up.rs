@@ -56,6 +56,10 @@ pub struct Args {
     #[clap(long)]
     /// Don't ignore paths from .gitignore
     no_gitignore: bool,
+
+    #[clap(long)]
+    /// Verbose output
+    verbose: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -239,12 +243,23 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
     parz.finish()?;
 
-    let builder = client.post(format!(
+    let url = format!(
         "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
         linked_project.project,
         environment_id,
-        service.unwrap_or_default(),
-    ));
+        service.clone().unwrap_or_default(),
+    );
+
+    if args.verbose {
+        let bytes_len = arc.lock().unwrap().len();
+        println!("railway up");
+        println!("service: {}", service.clone().unwrap_or_default());
+        println!("environment: {}", environment_id);
+        println!("bytes: {}", bytes_len);
+        println!("url: {}", url);
+    }
+
+    let builder = client.post(url);
     let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()
             .with_style(
