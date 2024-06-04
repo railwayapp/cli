@@ -11,18 +11,17 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
-      railway_version: ${{ env.CLI_VERSION }}
+      railway_version: ${{ steps.get_version.outputs.cli_version }}
 
     steps:
       - name: Get the release version from the tag
+        id: get_version
         shell: bash
-        if: env.CLI_VERSION == ''
         run: |
-          # Apparently, this is the right way to get a tag name. Really?
-          #
-          # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
-          echo "CLI_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          echo "version is: ${{ env.CLI_VERSION }}"
+          CLI_VERSION="${GITHUB_REF#refs/tags/}"
+          echo "CLI_VERSION=$CLI_VERSION" >> $GITHUB_ENV
+          echo "::set-output name=cli_version::$CLI_VERSION"
+          echo "version is: $CLI_VERSION"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,10 +34,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.CLI_VERSION }}
-          name: ${{ env.CLI_VERSION }}
+          tag_name: ${{ steps.get_version.outputs.cli_version }}
+          name: ${{ steps.get_version.outputs.cli_version }}
 
-  # Build sources for every OS
   github_build:
     name: Build release binaries
     strategy:
@@ -47,50 +45,47 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            name: railway-x86_64-unknown-linux-gnu.tar.gz
+            name: railway-${{ needs.create-release.outputs.railway_version }}-x86_64-unknown-linux-gnu.tar.gz
 
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            name: railway-x86_64-unknown-linux-musl.tar.gz
+            name: railway-${{ needs.create-release.outputs.railway_version }}-x86_64-unknown-linux-musl.tar.gz
 
           - target: i686-unknown-linux-musl
             os: ubuntu-latest
-            name: railway-i686-unknown-linux-musl.tar.gz
+            name: railway-${{ needs.create-release.outputs.railway_version }}-i686-unknown-linux-musl.tar.gz
 
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            name: railway-aarch64-unknown-linux-musl.tar.gz
+            name: railway-${{ needs.create-release.outputs.railway_version }}-aarch64-unknown-linux-musl.tar.gz
 
           - target: arm-unknown-linux-musleabihf
             os: ubuntu-latest
-            name: railway-arm-unknown-linux-musleabihf.tar.gz
+            name: railway-${{ needs.create-release.outputs.railway_version }}-arm-unknown-linux-musleabihf.tar.gz
 
           - target: x86_64-apple-darwin
-            os: macOS-11
-            name: railway-x86_64-apple-darwin.tar.gz
+            os: macos-latest
+            name: railway-${{ needs.create-release.outputs.railway_version }}-x86_64-apple-darwin.tar.gz
 
           - target: aarch64-apple-darwin
-            os: macOS-11
-            name: railway-aarch64-apple-darwin.tar.gz
+            os: macos-latest
+            name: railway-${{ needs.create-release.outputs.railway_version }}-aarch64-apple-darwin.tar.gz
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: railway-x86_64-pc-windows-msvc.zip
-            rustflags: -C target-feature=+crt-static
+            name: railway-${{ needs.create-release.outputs.railway_version }}-x86_64-pc-windows-msvc.zip
 
           - target: i686-pc-windows-msvc
             os: windows-latest
-            name: railway-i686-pc-windows-msvc.zip
-            rustflags: -C target-feature=+crt-static
+            name: railway-${{ needs.create-release.outputs.railway_version }}-i686-pc-windows-msvc.zip
 
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            name: railway-aarch64-pc-windows-msvc.zip
-            rustflags: -C target-feature=+crt-static
+            name: railway-${{ needs.create-release.outputs.railway_version }}-aarch64-pc-windows-msvc.zip
 
           - target: x86_64-unknown-freebsd
             os: ubuntu-latest
-            name: railway-x86_64-unknown-freebsd.tar.gz
+            name: railway-${{ needs.create-release.outputs.railway_version }}-x86_64-unknown-freebsd.tar.gz
 
     runs-on: ${{ matrix.os }}
     continue-on-error: true
@@ -107,17 +102,14 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: Setup | Install cargo-wix [Windows]
-        continue-on-error: true
-        # aarch64 is only supported in wix 4.0 development builds
         if: matrix.os == 'windows-latest' && matrix.target != 'aarch64-pc-windows-msvc'
         run: cargo install --version 0.3.4 cargo-wix
         env:
-          # cargo-wix does not require static crt
           RUSTFLAGS: ""
 
       - name: Setup | Install cross [Linux]
         if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@cross
+        run: cargo install cross
 
       - name: Build | Build [Cargo]
         if: matrix.os != 'ubuntu-latest'
@@ -128,12 +120,11 @@ jobs:
         run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Build | Installer [Windows]
-        continue-on-error: true
         if: matrix.os == 'windows-latest' && matrix.target != 'aarch64-pc-windows-msvc'
         run: >
           cargo wix -v --no-build --nocapture -I install/windows/main.wxs
           --target ${{ matrix.target }}
-          --output target/wix/railway-${{ matrix.target }}.msi
+          --output target/wix/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.msi
 
       - name: Post Build | Prepare artifacts [Windows]
         if: matrix.os == 'windows-latest'
@@ -156,12 +147,11 @@ jobs:
           path: ${{ matrix.name }}
 
       - name: Release | Upload installer artifacts [Windows]
-        continue-on-error: true
         if: matrix.os == 'windows-latest' && matrix.target != 'aarch64-pc-windows-msvc'
         uses: actions/upload-artifact@v4
         with:
-          name: railway-${{ matrix.target }}.msi
-          path: target/wix/railway-${{ matrix.target }}.msi
+          name: railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.msi
+          path: target/wix/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.msi
 
       - name: Upload release archive
         uses: softprops/action-gh-release@v1
@@ -169,7 +159,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.create-release.outputs.railway_version }}
-          files: railway-${{ matrix.target }}*
+          files: railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}*
 
       - name: Install cargo-deb
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -177,37 +167,38 @@ jobs:
 
       - name: Generate .deb package file
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: cargo deb --target x86_64-unknown-linux-musl --output railway-amd64.deb
+        run: cargo deb --target x86_64-unknown-linux-musl --output railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb
 
       - name: Upload .deb package file
         if: matrix.target == 'x86_64-unknown-linux-musl'
         uses: svenstaro/upload-release-action@v2
         with:
           tag: ${{ needs.create-release.outputs.railway_version }}
-          file: railway-amd64.deb
+          file: railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb
 
       - name: Update homebrew tap
+        if: matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin' && !contains(github.ref, '-')
         uses: mislav/bump-homebrew-formula-action@v2
-        if: "matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin' && !contains(github.ref, '-')"
         with:
           formula-name: rlwy
           formula-path: rlwy.rb
           homebrew-tap: railwayapp/homebrew-tap
-          download-url: https://github.com/railwayapp/cli/releases/latest/download/railway-${{ matrix.target }}.tar.gz
+          download-url: https://github.com/railwayapp/cli/releases/latest/download/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+
   publish-crate:
     name: Publish new version on crates.io
-    needs: ["create-release"]
+    needs: create-release
     runs-on: ubuntu-latest
     steps:
-        - name: Checkout repository
-          uses: actions/checkout@v4
-          with:
-            fetch-depth: 1
-        - name: Toolchain
-          uses: dtolnay/rust-toolchain@stable
-        - name: Publish
-          uses: katyo/publish-crates@v2
-          with:
-            registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        uses: katyo/publish-crates@v2
+        with:
+          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
