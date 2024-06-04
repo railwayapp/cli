@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use graphql_client::GraphQLQuery;
 use reqwest::{
     header::{HeaderMap, HeaderValue},
@@ -32,6 +34,7 @@ impl GQLClient {
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
+            .timeout(Duration::from_secs(15))
             .build()
             .unwrap();
         Ok(client)

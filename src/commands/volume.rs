@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    consts::TICK_STRING,
     controllers::project::get_project,
     errors::RailwayError,
     queries::project::{
@@ -10,7 +11,8 @@ use crate::{
 };
 use anyhow::{anyhow, bail};
 use clap::Parser;
-use std::fmt::Display;
+use is_terminal::IsTerminal;
+use std::{fmt::Display, time::Duration};
 
 /// Manage project volumes
 #[derive(Parser)]
@@ -456,25 +458,47 @@ async fn add(
             environment_name.blue()
         );
     }
-
     let volume = mutations::volume_create::Variables {
         service_id: service.clone(),
         environment_id: environment.clone(),
         mount_path: mount.clone(),
         project_id: project.id,
     };
+    if std::io::stdout().is_terminal() {
+        let spinner = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message("Creating volume..");
+        spinner.enable_steady_tick(Duration::from_millis(100));
 
-    let details =
-        post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
-            .await?;
+        let details =
+            post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
+                .await?;
 
-    println!(
-        "Volume \"{}\" created for service {} in environment {} at mount path \"{}\"",
-        details.volume_create.name.blue(),
-        service_name.blue(),
-        environment_name.blue(),
-        mount.cyan().bold()
-    );
+        spinner.finish_with_message(format!(
+            "Volume \"{}\" created for service {} in environment {} at mount path \"{}\"",
+            details.volume_create.name.blue(),
+            service_name.blue(),
+            environment_name.blue(),
+            mount.cyan().bold()
+        ));
+    } else {
+        println!("Creating volume..");
+        let details =
+            post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
+                .await?;
+
+        println!(
+            "Volume \"{}\" created for service {} in environment {} at mount path \"{}\"",
+            details.volume_create.name.blue(),
+            service_name.blue(),
+            environment_name.blue(),
+            mount.cyan().bold()
+        );
+    }
 
     Ok(())
 }
