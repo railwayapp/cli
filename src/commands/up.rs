@@ -356,8 +356,16 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         while let Some(Ok(input)) = stream.next().await {
             if let Some(data) = input.data {
                 if let Some(payload) = data.deployment_events.payload {
-                    if payload.error.is_some() {
-                        println!("{}", "Build failed".red().bold());
+                    if let Some(error) = payload.error {
+                        println!(
+                            "{}{}",
+                            "Build failed: {}".red().bold(),
+                            if !error.is_empty() {
+                                format!(": {}", error.red().bold())
+                            } else {
+                                String::new()
+                            }
+                        );
                         std::process::exit(1);
                     }
                 }
