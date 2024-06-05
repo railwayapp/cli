@@ -1,16 +1,14 @@
-name: Release
+name: Deploy
 on:
   push:
-    branches:
-      - master
+    tags:
+      - "v*"
+
 env:
   CARGO_INCREMENTAL: 0
-  CARGO_NET_RETRY: 10
-  RUST_BACKTRACE: short
-  RUSTUP_MAX_RETRIES: 10
-  MACOSX_DEPLOYMENT_TARGET: 10.7
 
 jobs:
+  # Build sources for every OS
   github_build:
     name: Build release binaries
     strategy:
@@ -19,97 +17,135 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            name: railway-${{ needs.get_version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
 
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            name: railway-${{ needs.get_version.outputs.version }}-x86_64-unknown-linux-musl.tar.gz
+
+          - target: i686-unknown-linux-musl
+            os: ubuntu-latest
+
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+
+          - target: arm-unknown-linux-musleabihf
+            os: ubuntu-latest
 
           - target: x86_64-apple-darwin
-            os: macOS-11
-            name: railway-${{ needs.get_version.outputs.version }}-x86_64-apple-darwin.tar.gz
+            os: macOS-latest
 
           - target: aarch64-apple-darwin
-            os: macOS-11
-            name: railway-${{ needs.get_version.outputs.version }}-aarch64-apple-darwin.tar.gz
+            os: macOS-latest
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+
+          - target: x86_64-unknown-freebsd
+            os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
     continue-on-error: true
-    env:
-      RUSTFLAGS: ${{ matrix.rustflags || '' }}
     steps:
       - name: Setup | Checkout
-        uses: actions/checkout@v4
-
-      - name: Get Version
-        id: get_version
-        run: echo "::set-output name=version::$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+        uses: actions/checkout@v3
 
       - name: Setup | Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: actions-rs/toolchain@v1.0.7
         with:
           toolchain: stable
+          override: true
+          profile: minimal
           target: ${{ matrix.target }}
 
-      - name: Build | Build [Cargo]
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Setup | Cache
+        uses: Swatinem/rust-cache@v1
 
-      - name: Post Build | Prepare artifacts
+      - name: Build | Build
+        uses: actions-rs/cargo@v1.0.3
+        with:
+          command: build
+          args: --release --locked --target ${{ matrix.target }}
+          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
+
+      - name: Get Version
+        id: version
+        run: echo ::set-output name=version::$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].version')
+
+      - name: Post Build | Prepare artifacts [Windows]
+        if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czvf ../../../${{ matrix.name }} railway
+          strip railway.exe
+          version=${{ steps.version.outputs.version }}
+          7z a ../../../railway-${{ version }}-${{ matrix.target }}.zip railway.exe
           cd -
 
-      - name: Release | Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.name }}
+      - name: Post Build | Prepare artifacts [-nix]
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          # TODO: investigate better cross platform stripping
+          strip railway || true
+          version=${{ steps.version.outputs.version }}
+          tar czvf ../../../railway-${{ version }}-${{ matrix.target }}.tar.gz railway
+          cd -
 
-  create_release:
-    name: Create Release
+      - name: Build | Create Debian package
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          version=${{ steps.version.outputs.version }}
+          cargo install cargo-deb
+          cargo deb --no-build --target ${{ matrix.target }}
+          mv target/${{ matrix.target }}/debian/railway_${{ version }}_${{ matrix.target }}.deb railway-${{ version }}-${{ matrix.target }}.deb
+
+      - name: Deploy | Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: railway-${{ steps.version.outputs.version }}-${{ matrix.target }}
+          path: |
+            railway-${{ steps.version.outputs.version }}-${{ matrix.target }}.*
+            target/${{ matrix.target }}/debian/*.deb
+
+  # Create GitHub release with Rust build targets
+  github_release:
+    name: Create GitHub Release
     needs: github_build
     runs-on: ubuntu-latest
     steps:
-      - name: Get Version
-        id: get_version
-        run: echo "::set-output name=version::$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup | Checkout
+        uses: actions/checkout@v3
         with:
-          tag_name: ${{ steps.get_version.outputs.version }}
-          release_name: Release ${{ steps.get_version.outputs.version }}
-          draft: false
-          prerelease: false
+          fetch-depth: 0
+          
+      - name: Setup | Artifacts
+        uses: actions/download-artifact@v3
 
-      - name: Download Artifacts
-        uses: actions/download-artifact@v2
+      - name: Build | Publish
+        uses: softprops/action-gh-release@v1
         with:
-          path: ./artifacts
+          files: |
+            railway-*/railway-*
+            railway-*/railway-*.deb
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./artifacts/${{ matrix.name }}
-          asset_name: ${{ matrix.name }}
-          asset_content_type: application/gzip
-
-  cargo_publish:
-    name: Publish Cargo Package
-    needs: create_release
+  # Publish to crates.io and bump Homebrew formula
+  publish:
+    name: Publish to crates.io and Bump Homebrew Formula
+    needs: github_release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v2
-
-      - name: Publish
-        uses: softprops/cargo-publish@v1
+      - name: Publish to crates.io
+        uses: dtolnay/publish-rust-crate@v1
         with:
           token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Bump Homebrew Formula
+        uses: ryanjbonnell/homebrew-formula-updater@v1.0.0
+        with:
+          formula: rlwy
+          version: ${{ steps.version.outputs.version }}
+          token: ${{ secrets.GITHUB_TOKEN }}
