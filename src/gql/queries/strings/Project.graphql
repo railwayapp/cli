@@ -24,8 +24,6 @@ query Project($id: String!) {
                 id
                 serviceId
                 environmentId
-                healthcheckPath
-                healthcheckTimeout
                 source {
                   repo
                   image
