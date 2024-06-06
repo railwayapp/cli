@@ -1,29 +1,27 @@
 name: Publish to NPM
 
 on:
-  workflow_run:
-    workflows: [ "Release" ]
+  release:
     types:
-      - completed
+    - published
 
 jobs:
   publish-npm:
-    if: github.event.workflow_run.conclusion == 'success'
     name: Publish to NPM
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set version
         id: vars
         run: echo "tag=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
 
-      - name: Use Node.js 16
+      - name: Use Node.js 20
         uses: actions/setup-node@v1
         with:
-          node-version: 16
+          node-version: 20
           registry-url: https://registry.npmjs.org/
 
       - name: Setup Git user
