@@ -1,0 +1,13 @@
+subscription DeploymentEvents($deploymentId: String!) {
+  deploymentEvents(id: $deploymentId) {
+    ...EventsFields
+  }
+}
+
+fragment EventsFields on DeploymentEvent {
+  step
+  completedAt
+  payload {
+    error
+  }
+}

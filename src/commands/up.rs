@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::bail;
 
+use futures::StreamExt;
 use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
@@ -16,14 +17,15 @@ use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
 
 use crate::{
-    commands::queries::deployment::DeploymentStatus,
     consts::TICK_STRING,
     controllers::{
-        deployment::{get_deployment, stream_build_logs, stream_deploy_logs},
+        deployment::{stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
         project::get_project,
     },
     errors::RailwayError,
+    subscription::subscribe_graphql,
+    subscriptions::deployment_events::DeploymentEventStep,
     util::{
         logs::format_attr_log,
         prompt::{prompt_select, PromptService},
@@ -74,11 +76,6 @@ pub struct UpResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpErrorResponse {
     pub message: String,
-}
-
-enum UpExitReason {
-    Deployed,
-    Failed,
 }
 
 pub async fn get_service_to_deploy(
@@ -348,24 +345,37 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             }
         }));
     }
-
+    let mut stream = subscribe_graphql::<subscriptions::DeploymentEvents>(
+        subscriptions::deployment_events::Variables {
+            deployment_id: deployment_id.clone(),
+        },
+    )
+    .await?;
     // If the build fails, we want to terminate the process
     tokio::task::spawn(async move {
-        match wait_for_exit_reason(deployment_id.clone()).await {
-            Ok(reason) => match reason {
-                UpExitReason::Deployed => {
-                    if args.ci {
-                        println!("{}", "Deploy complete".green().bold());
-                        std::process::exit(0);
+        while let Some(Ok(input)) = stream.next().await {
+            if let Some(data) = input.data {
+                if let Some(payload) = data.deployment_events.payload {
+                    if let Some(error) = payload.error {
+                        println!(
+                            "{}{}",
+                            "Build failed: {}".red().bold(),
+                            if !error.is_empty() {
+                                format!(": {}", error.red().bold())
+                            } else {
+                                String::new()
+                            }
+                        );
+                        std::process::exit(1);
                     }
                 }
-                _ => {
-                    println!("{}", "Build failed".red().bold());
-                    std::process::exit(1);
+                if (data.deployment_events.step == DeploymentEventStep::DRAIN_INSTANCES)
+                    && data.deployment_events.completed_at.is_some()
+                    && args.ci
+                {
+                    println!("{}", "Deploy complete".green().bold());
+                    std::process::exit(0);
                 }
-            },
-            Err(e) => {
-                eprintln!("Failed to fetch deployment status: {}", e);
             }
         }
     });
@@ -373,21 +383,4 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     futures::future::join_all(tasks).await;
 
     Ok(())
-}
-
-async fn wait_for_exit_reason(deployment_id: String) -> Result<UpExitReason, anyhow::Error> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-
-    loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        if let Ok(deployment) = get_deployment(&client, &configs, deployment_id.clone()).await {
-            match deployment.status {
-                DeploymentStatus::SUCCESS => return Ok(UpExitReason::Deployed),
-                DeploymentStatus::FAILED => return Ok(UpExitReason::Failed),
-                _ => {}
-            }
-        }
-    }
 }

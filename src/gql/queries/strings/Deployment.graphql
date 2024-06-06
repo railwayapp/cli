@@ -1,6 +1,0 @@
-query Deployment($id: String!) {
-  deployment(id: $id) {
-    id
-    status
-  }
-}
