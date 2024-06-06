@@ -1,0 +1,5 @@
+mutation DeploymentRedeploy($id: String!) {
+  deploymentRedeploy(id:$id) {
+    id
+  }
+}
