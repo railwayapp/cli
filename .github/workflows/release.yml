@@ -118,7 +118,7 @@ jobs:
           cd -
 
       - name: Prepare binaries (tar) [Windows]
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' || matrix.target == 'i686-pc-windows-gnu'
         run: |
           cd target/${{ matrix.target }}/release
           strip railway.exe
@@ -127,7 +127,7 @@ jobs:
           cd -
 
       - name: Prepare binaries [-linux]
-        if: matrix.os != 'windows-latest'
+        if: matrix.os != 'windows-latest' && matrix.target != 'i686-pc-windows-gnu'
         run: |
           cd target/${{ matrix.target }}/release
           strip railway || true
@@ -141,6 +141,10 @@ jobs:
         with:
           tag_name: ${{ needs.create-release.outputs.railway_version }}
           files: railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}*
+
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install cargo-deb
         if: matrix.target == 'x86_64-unknown-linux-musl'
