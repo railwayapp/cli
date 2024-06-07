@@ -56,7 +56,8 @@ commands_enum!(
     up,
     variables,
     whoami,
-    volume
+    volume,
+    redeploy
 );
 
 #[tokio::main]

@@ -24,6 +24,10 @@ query Project($id: String!) {
                 id
                 serviceId
                 environmentId
+                latestDeployment {
+                  canRedeploy
+                  id
+                }
                 source {
                   repo
                   image

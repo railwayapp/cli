@@ -119,3 +119,12 @@ pub struct VolumeDetach;
     skip_serializing_none
 )]
 pub struct VolumeAttach;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.graphql",
+    query_path = "src/gql/mutations/strings/DeploymentRedeploy.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct DeploymentRedeploy;
