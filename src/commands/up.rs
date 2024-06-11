@@ -359,11 +359,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                     if let Some(error) = payload.error {
                         println!(
                             "{}{}",
-                            "Build failed: {}".red().bold(),
+                            "Build failed: ".red().bold(),
                             if !error.is_empty() {
                                 format!(": {}", error.red().bold())
                             } else {
-                                String::new()
+                                "unknown".dimmed().to_string()
                             }
                         );
                         std::process::exit(1);
