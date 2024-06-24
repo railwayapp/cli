@@ -1,3 +1,5 @@
 /target
 node_modules
 bin/railway
+.envrc
+.direnv/*

@@ -1,4 +1,4 @@
-use hyper::header::InvalidHeaderValue;
+use reqwest::header::InvalidHeaderValue;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
