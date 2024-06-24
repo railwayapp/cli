@@ -9,6 +9,7 @@ use super::*;
 use anyhow::bail;
 use http_body_util::Full;
 use hyper::{body::Bytes, server::conn::http1, service::service_fn, Request, Response};
+use hyper_util::rt::tokio::TokioIo;
 use is_terminal::IsTerminal;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -115,11 +116,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     spinner.enable_steady_tick(Duration::from_millis(100));
 
     let (stream, _) = listener.accept().await?;
+    let io = TokioIo::new(stream);
 
     // Intentionally not awaiting this task, so that we exit after a single request
     tokio::task::spawn(async move {
         http1::Builder::new()
-            .serve_connection(stream, service_fn(hello))
+            .serve_connection(io, service_fn(hello))
             .await?;
         Ok::<_, anyhow::Error>(())
     });

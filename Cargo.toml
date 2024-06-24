@@ -29,11 +29,12 @@ reqwest = { version = "0.11.14", default-features = false, features = [
 chrono = { version = "0.4.24", features = ["serde"], default-features = false }
 graphql_client = { version = "0.13.0", features = ["reqwest-rustls"] }
 paste = "1.0.12"
-tokio = { version = "1.26.0", features = ["full"] }
+tokio = { version = "1.38.0", features = ["full"] }
 clap_complete = "4.1.5"
 open = "4.0.1"
 inquire = "0.5.3"
-hyper = { version = "1.0.0-rc.3", features = ["server", "http1"] }
+hyper = { version = "1.3.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 base64 = "0.21.0"
 http-body-util = "0.1.0-rc.2"
 rand = "0.8.5"
