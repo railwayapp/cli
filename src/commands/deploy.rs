@@ -81,7 +81,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 /// fetch database details via `TemplateDetail`
 /// create database via `TemplateDeploy`
-async fn fetch_and_create(
+pub async fn fetch_and_create(
     client: &reqwest::Client,
     configs: &Configs,
     template: String,
