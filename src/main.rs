@@ -36,6 +36,7 @@ commands_enum!(
     add,
     completion,
     connect,
+    deploy,
     domain,
     docs,
     down,

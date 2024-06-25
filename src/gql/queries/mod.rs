@@ -139,6 +139,8 @@ pub struct Domains;
 )]
 pub struct ProjectToken;
 
+pub type SerializedTemplateConfig = serde_json::Value;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.graphql",
