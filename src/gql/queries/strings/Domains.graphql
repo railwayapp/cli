@@ -1,18 +1,20 @@
 query Domains(
-	$environmentId: String!
-	$projectId: String!
-	$serviceId: String!
+  $environmentId: String!
+  $projectId: String!
+  $serviceId: String!
 ) {
-	domains(
-		environmentId: $environmentId
-		projectId: $projectId
-		serviceId: $serviceId
-	) {
-		serviceDomains {
-			id
-		}
-		customDomains {
-			id
-		}
-	}
+  domains(
+    environmentId: $environmentId
+    projectId: $projectId
+    serviceId: $serviceId
+  ) {
+    serviceDomains {
+      id
+      domain
+    }
+    customDomains {
+      id
+      domain
+    }
+  }
 }

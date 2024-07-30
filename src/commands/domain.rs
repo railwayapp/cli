@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use anyhow::bail;
+use colored::Colorize;
 use is_terminal::IsTerminal;
+use queries::domains::DomainsDomains;
 
 use crate::{consts::TICK_STRING, controllers::project::get_project, errors::RailwayError};
 
@@ -48,8 +50,10 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         .await?
         .domains;
 
-    if !(domains.service_domains.is_empty() || domains.custom_domains.is_empty()) {
-        bail!("Domain already exists on service");
+    let domain_count = domains.service_domains.len() + domains.custom_domains.len();
+
+    if domain_count > 0 {
+        return print_existing_domains(&domains);
     }
 
     let vars = mutations::service_domain_create::Variables {
@@ -78,7 +82,11 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
 
         spinner.finish_and_clear();
 
-        println!("Service Domain created: {}", domain.bold());
+        let formatted_domain = format!("https://{}", domain);
+        println!(
+            "Service Domain created:\n🚀 {}",
+            formatted_domain.magenta().bold()
+        );
     } else {
         println!("Creating domain...");
 
@@ -91,7 +99,45 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         .service_domain_create
         .domain;
 
-        println!("Service Domain created: {}", domain.bold());
+        let formatted_domain = format!("https://{}", domain);
+        println!(
+            "Service Domain created:\n🚀 {}",
+            formatted_domain.magenta().bold()
+        );
+    }
+
+    Ok(())
+}
+
+fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
+    println!("Domains already exists on the service:");
+    let domain_count = domains.service_domains.len() + domains.custom_domains.len();
+
+    if domain_count == 1 {
+        let domain = domains
+            .service_domains
+            .get(0)
+            .map(|d| d.domain.clone())
+            .unwrap_or_else(|| {
+                domains
+                    .custom_domains
+                    .get(0)
+                    .map(|d| d.domain.clone())
+                    .unwrap_or_else(|| unreachable!())
+            });
+
+        let formatted_domain = format!("https://{}", domain);
+        println!("🚀 {}", formatted_domain.magenta().bold());
+        return Ok(());
+    }
+
+    for domain in &domains.custom_domains {
+        let formatted_domain = format!("https://{}", domain.domain);
+        println!("- {}", formatted_domain.magenta().bold());
+    }
+    for domain in &domains.service_domains {
+        let formatted_domain = format!("https://{}", domain.domain);
+        println!("- {}", formatted_domain.magenta().bold());
     }
 
     Ok(())
