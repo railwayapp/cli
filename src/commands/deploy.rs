@@ -162,7 +162,9 @@ pub async fn fetch_and_create(
             template: match &s.source {
                 Some(DeserializedServiceSource::Image { image }) => image.clone(),
                 // The `repo` is in the `${owner}/${repo}` format so we need to add the prefix
-                Some(DeserializedServiceSource::Repo { repo, .. }) => format!("{}{}", GITHUB_BASE_URL, repo),
+                Some(DeserializedServiceSource::Repo { repo, .. }) => {
+                    format!("{}{}", GITHUB_BASE_URL, repo)
+                }
                 None => s.name.clone(),
             },
             variables: (!variables.is_empty()).then_some(variables),
