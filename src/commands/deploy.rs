@@ -7,6 +7,8 @@ use crate::{consts::TICK_STRING, mutations::TemplateVolume, util::prompt::prompt
 
 use super::*;
 
+const GITHUB_BASE_URL: &str = "https://github.com/";
+
 /// Provisions a template into your project
 #[derive(Parser)]
 pub struct Args {
@@ -159,7 +161,8 @@ pub async fn fetch_and_create(
                 .transpose()?,
             template: match &s.source {
                 Some(DeserializedServiceSource::Image { image }) => image.clone(),
-                Some(DeserializedServiceSource::Repo { repo, .. }) => repo.clone(),
+                // The `repo` is in the `${owner}/${repo}` format so we need to add the prefix
+                Some(DeserializedServiceSource::Repo { repo, .. }) => format!("{}{}", GITHUB_BASE_URL, repo),
                 None => s.name.clone(),
             },
             variables: (!variables.is_empty()).then_some(variables),
