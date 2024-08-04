@@ -79,7 +79,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             }
         }
     });
-
     let environment = if let Some(environment) = args.environment {
         let env = project.environments.iter().find(|e| {
             (e.name.to_lowercase() == environment.to_lowercase())
@@ -91,6 +90,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         } else {
             return Err(RailwayError::EnvironmentNotFound(environment).into());
         }
+    } else if project.environments.len() == 1 {
+        project.environments.first().unwrap().clone()
     } else {
         prompt_options("Select an environment", project.environments)?
     };
