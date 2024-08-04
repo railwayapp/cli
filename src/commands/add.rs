@@ -49,12 +49,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .iter()
         .map(|v| {
             let mut split = v.split('=');
-            let key = split
-                .next()
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
+            let key = split.next().unwrap_or_default().trim().to_owned();
             let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
             (key, value)
         })

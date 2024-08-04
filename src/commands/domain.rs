@@ -116,12 +116,12 @@ fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
     if domain_count == 1 {
         let domain = domains
             .service_domains
-            .get(0)
+            .first()
             .map(|d| d.domain.clone())
             .unwrap_or_else(|| {
                 domains
                     .custom_domains
-                    .get(0)
+                    .first()
                     .map(|d| d.domain.clone())
                     .unwrap_or_else(|| unreachable!())
             });
