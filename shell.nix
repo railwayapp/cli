@@ -14,6 +14,7 @@ let
       rust
       act
       cargo-zigbuild
+      cargo-release
     ];
 
   # macOS only
