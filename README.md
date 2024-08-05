@@ -29,7 +29,6 @@ cargo install railwayapp --locked
 ### Homebrew
 
 ```bash 
-brew tap railwayapp/railway
 brew install railway
 ```
 
