@@ -184,6 +184,11 @@ pub async fn fetch_and_create(
     spinner.enable_steady_tick(Duration::from_millis(100));
     post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), vars).await?;
     spinner.finish_with_message(format!("Created {template}"));
+
+    let hostname = configs.get_host();
+    let url = format!("https://{hostname}/project/{}", linked_project.project);
+    println!("url: {}", url);
+
     Ok(())
 }
 
