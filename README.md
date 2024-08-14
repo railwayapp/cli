@@ -51,6 +51,17 @@ bash <(curl -fsSL cli.new) -r
 scoop install railway
 ```
 
+### Arch Linux AUR
+
+Install using Paru
+```bash
+paru -S railwayapp-cli
+```
+Install using Yay
+```bash
+yay -S railwayapp-cli
+```
+
 ### From source
 See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
 
