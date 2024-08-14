@@ -1,6 +1,7 @@
 use anyhow::bail;
 use std::{collections::BTreeMap, fmt::Display};
 use tokio::process::Command;
+use url::Url;
 use which::which;
 
 use crate::controllers::{
@@ -120,43 +121,12 @@ fn get_connect_command(
     database_type: DatabaseType,
     variables: BTreeMap<String, String>,
 ) -> Result<(String, Vec<String>)> {
-    let pass_arg; // Hack to get ownership of formatted string outside match
-    let default = &"".to_string();
-
-    let (cmd_name, args): (&str, Vec<&str>) = match &database_type {
-        DatabaseType::PostgreSQL => {
-            return get_postgres_command(&variables);
-        }
-        DatabaseType::Redis => {
-            return get_redis_command(&variables);
-        }
-        DatabaseType::MongoDB => {
-            return get_mongo_command(&variables);
-        }
-        DatabaseType::MySQL => {
-            // -p is a special case as it requires no whitespace between arg and value
-            pass_arg = format!("-p{}", variables.get("MYSQLPASSWORD").unwrap_or(default));
-            (
-                "mysql",
-                vec![
-                    "-h",
-                    variables.get("MYSQLHOST").unwrap_or(default),
-                    "-u",
-                    variables.get("MYSQLUSER").unwrap_or(default),
-                    "-P",
-                    variables.get("MYSQLPORT").unwrap_or(default),
-                    "-D",
-                    variables.get("MYSQLDATABASE").unwrap_or(default),
-                    pass_arg.as_str(),
-                ],
-            )
-        }
-    };
-
-    Ok((
-        cmd_name.to_string(),
-        args.iter().map(|s| s.to_string()).collect(),
-    ))
+    match &database_type {
+        DatabaseType::PostgreSQL => get_postgres_command(&variables),
+        DatabaseType::Redis => return get_redis_command(&variables),
+        DatabaseType::MongoDB => return get_mongo_command(&variables),
+        DatabaseType::MySQL => return get_mysql_command(&variables),
+    }
 }
 
 fn host_is_tcp_proxy(connect_url: String) -> bool {
@@ -209,6 +179,46 @@ fn get_mongo_command(variables: &BTreeMap<String, String>) -> Result<(String, Ve
     }
 
     Ok(("mongosh".to_string(), vec![connect_url]))
+}
+
+fn get_mysql_command(variables: &BTreeMap<String, String>) -> Result<(String, Vec<String>)> {
+    let connect_url = variables
+        .get("MYSQL_PUBLIC_URL")
+        .or_else(|| variables.get("MYSQL_URL"))
+        .map(|s| s.to_string())
+        .ok_or(RailwayError::ConnectionVariableNotFound(
+            "MYSQL_PUBLIC_URL".to_string(),
+        ))?;
+
+    if !host_is_tcp_proxy(connect_url.clone()) {
+        return Err(RailwayError::InvalidConnectionVariable.into());
+    }
+
+    let parsed_url =
+        Url::parse(&connect_url).map_err(|_err| RailwayError::InvalidConnectionVariable)?;
+
+    let host = parsed_url.host_str().unwrap_or("");
+    let user = parsed_url.username();
+    let password = parsed_url.password().unwrap_or("");
+    let port = parsed_url.port().unwrap_or(3306);
+    let database = parsed_url.path().trim_start_matches('/');
+
+    let pass_arg = format!("-p{}", password);
+
+    Ok((
+        "mysql".to_string(),
+        vec![
+            "-h".to_string(),
+            host.to_string(),
+            "-u".to_string(),
+            user.to_string(),
+            "-P".to_string(),
+            port.to_string(),
+            "-D".to_string(),
+            database.to_string(),
+            pass_arg,
+        ],
+    ))
 }
 
 #[cfg(test)]
@@ -363,6 +373,51 @@ mod test {
             variables.insert("MONGO_URL".to_string(), private_mongo_url.clone());
 
             let res = get_mongo_command(&variables);
+            assert!(res.is_err());
+            assert_eq!(
+                res.unwrap_err().to_string(),
+                RailwayError::InvalidConnectionVariable.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn test_gets_mysql_command() {
+        let private_mysql_url =
+            "mysql://user:password@mysql.railway.internal:3306/railway".to_string();
+        let public_mysql_url =
+            "mysql://user:password@roundhouse.proxy.rlwy.net:12345/railway".to_string();
+
+        // Valid MYSQL_PUBLIC_URL
+        {
+            let mut variables = BTreeMap::new();
+            variables.insert("MYSQL_PUBLIC_URL".to_string(), public_mysql_url.clone());
+            variables.insert("MYSQL_URL".to_string(), private_mysql_url.clone());
+
+            let (cmd, args) = get_mysql_command(&variables).unwrap();
+            assert_eq!(cmd, "mysql");
+            assert_eq!(
+                args,
+                vec![
+                    "-h".to_string(),
+                    "roundhouse.proxy.rlwy.net".to_string(),
+                    "-u".to_string(),
+                    "user".to_string(),
+                    "-P".to_string(),
+                    "12345".to_string(),
+                    "-D".to_string(),
+                    "railway".to_string(),
+                    "-ppassword".to_string(),
+                ]
+            );
+        }
+
+        // Invalid URL format
+        {
+            let mut variables = BTreeMap::new();
+            variables.insert("MYSQL_URL".to_string(), "invalid_url".to_string());
+
+            let res = get_mysql_command(&variables);
             assert!(res.is_err());
             assert_eq!(
                 res.unwrap_err().to_string(),
