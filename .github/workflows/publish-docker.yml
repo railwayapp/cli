@@ -1,0 +1,60 @@
+name: Publish to ghcr
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types:
+      - completed
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE_TAG: ghcr.io/${{ github.repository }}
+  ARTIFACT_TAG: x86_64-unknown-linux-musl
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+jobs:
+  containerize:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v4
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-binary-artifact-${{ env.ARTIFACT_TAG }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download version artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-tag-artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Retreive version from artifact
+        run: |
+          TEMP_VERSION=$(cat cli-version.txt | tr -d ' \r\n' | sed 's/^[^0-9]*//')
+          test -z $TEMP_VERSION && exit 1
+          echo "CLI_VERSION=$TEMP_VERSION" >> $GITHUB_ENV
+
+      - name: Login to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_BASE_TAG }}:${{ env.CLI_VERSION }}, ${{ env.IMAGE_BASE_TAG }}:latest
