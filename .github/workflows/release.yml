@@ -187,3 +187,21 @@ jobs:
           download-url: https://github.com/railwayapp/cli/releases/latest/download/railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+
+  notify-release:
+    name: Notify Release
+    needs: ["create-release", "build-release"]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Discord Deployment Status Notification
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DEPLOY_WEBHOOK }}
+          status: ${{ job.status }}
+          title: "Published CLI"
+          description: "Published CLI version ${{ needs.create-release.outputs.railway_version }} to Brew and NPM"
+          nofail: false
+          nodetail: false
+          username: Github Actions
+          avatar_url: https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png
