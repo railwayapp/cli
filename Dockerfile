@@ -1,13 +1,4 @@
-FROM rust:1-alpine3.18 as builder
+FROM alpine:3.20
 
-WORKDIR /app
-
-COPY . .
-
-RUN apk add --no-cache musl-dev openssl-dev
-
-RUN cargo build --release
-
-FROM alpine:3.18
-
-COPY --from=builder /app/target/release/railway /usr/bin/railway 
+COPY ./railway /usr/bin/railway
+RUN test -f /usr/bin/railway
