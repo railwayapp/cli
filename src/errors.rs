@@ -55,4 +55,10 @@ pub enum RailwayError {
 
     #[error("2FA code is incorrect. Please try again.")]
     InvalidTwoFactorCode,
+
+    #[error("Could not find a variable to connect to service with. Looking for {0}")]
+    ConnectionVariableNotFound(String),
+
+    #[error("Connection URL should point to the Railway TCP proxy")]
+    InvalidConnectionVariable,
 }
