@@ -62,6 +62,40 @@ Install using Yay
 yay -S railwayapp-cli
 ```
 
+### Docker
+
+Before using CLI in non-interactive environment make sure that you have created an access token (account or project scoped) and made it available via the `RAILWAY_TOKEN` environment variable.
+
+Install from the command line
+```bash
+docker pull ghcr.io/railwayapp/cli:latest
+```
+
+Use in GitHub Actions
+```yml
+deploy-job:
+  runs-on: ubuntu-latest
+  container: ghcr.io/railwayapp/cli:latest
+  env:
+    SVC_ID: my-service
+    RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  steps:
+    - uses: actions/checkout@v3
+    - run: railway up --service=${{ env.SVC_ID }} -d
+```
+
+Use in GitLab CICD
+```yml
+deploy-job:
+  image: ghcr.io/railwayapp/cli:latest
+  variables:
+    SVC_ID: my-service
+  script:
+    - railway up --service=$SVC_ID -d
+```
+
+\* GitLab can access a protected (secret) variable directly, all you need to do is to add it in CI/CD settings.
+
 ### From source
 See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
 
