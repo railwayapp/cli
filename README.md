@@ -64,7 +64,7 @@ yay -S railwayapp-cli
 
 ### Docker
 
-Before using CLI in non-interactive environment make sure that you have created an access token (account or project scoped) and made it available via the `RAILWAY_TOKEN` environment variable.
+Before using the CLI in a non-interactive environment, ensure you have created an access token (account or project-scoped) and set it as the `RAILWAY_TOKEN` environment variable. CI environments are automatically detected by the presence of `CI=true` variable. In these environments, only build logs will be streamed, and the CLI will exit with an appropriate code indicating success or failure.
 
 Install from the command line
 ```bash
@@ -81,7 +81,7 @@ deploy-job:
     RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
   steps:
     - uses: actions/checkout@v3
-    - run: railway up --service=${{ env.SVC_ID }} -d
+    - run: railway up --service=${{ env.SVC_ID }}
 ```
 
 Use in GitLab CICD
@@ -91,7 +91,7 @@ deploy-job:
   variables:
     SVC_ID: my-service
   script:
-    - railway up --service=$SVC_ID -d
+    - railway up --service=$SVC_ID
 ```
 
 \* GitLab can access a protected (secret) variable directly, all you need to do is to add it in CI/CD settings.
