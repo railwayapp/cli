@@ -94,7 +94,8 @@ deploy-job:
     - railway up --service=$SVC_ID
 ```
 
-\* GitLab can access a protected (secret) variable directly, all you need to do is to add it in CI/CD settings.
+> [!TIP]
+> GitLab can access a protected (secret) variable directly, all you need to do is to add it in CI/CD settings.
 
 ### From source
 See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
