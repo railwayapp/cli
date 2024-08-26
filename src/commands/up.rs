@@ -25,7 +25,7 @@ use crate::{
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
-    subscriptions::deployment_events::DeploymentEventStep,
+    subscriptions::deployment::DeploymentStatus,
     util::{
         logs::format_attr_log,
         prompt::{prompt_select, PromptService},
@@ -44,7 +44,7 @@ pub struct Args {
     detach: bool,
 
     #[clap(short, long)]
-    /// Only stream build logs and exit after it's done
+    /// Stream build logs only, then exit (equivalent to setting $CI=true).
     ci: bool,
 
     #[clap(short, long)]
@@ -319,62 +319,79 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // If the user is not in a terminal, don't stream logs
-    if !std::io::stdout().is_terminal() {
+    let ci_mode = Configs::env_is_ci() || args.ci;
+    if ci_mode {
+        println!("{}", "CI mode enabled".green().bold());
+    }
+
+    // If the user is not in a terminal AND if we are not in CI mode, don't stream logs
+    if !std::io::stdout().is_terminal() && !ci_mode {
         return Ok(());
     }
 
-    let build_deployment_id = deployment_id.clone();
-    let deploy_deployment_id = deployment_id.clone();
-
     //	Create vector of log streaming tasks
     //	Always stream build logs
+    let build_deployment_id = deployment_id.clone();
     let mut tasks = vec![tokio::task::spawn(async move {
         if let Err(e) =
             stream_build_logs(build_deployment_id, |log| println!("{}", log.message)).await
         {
             eprintln!("Failed to stream build logs: {}", e);
+
+            if ci_mode {
+                std::process::exit(1);
+            }
         }
     })];
 
-    // Stream deploy logs only if ci flag is not set
-    if !args.ci {
+    // Stream deploy logs only if is not in ci mode
+    if !ci_mode {
+        let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
             if let Err(e) = stream_deploy_logs(deploy_deployment_id, format_attr_log).await {
                 eprintln!("Failed to stream deploy logs: {}", e);
             }
         }));
     }
-    let mut stream = subscribe_graphql::<subscriptions::DeploymentEvents>(
-        subscriptions::deployment_events::Variables {
-            deployment_id: deployment_id.clone(),
-        },
-    )
-    .await?;
-    // If the build fails, we want to terminate the process
+
+    let mut stream =
+        subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
+            id: deployment_id.clone(),
+        })
+        .await?;
+
     tokio::task::spawn(async move {
-        while let Some(Ok(input)) = stream.next().await {
-            if let Some(data) = input.data {
-                if let Some(payload) = data.deployment_events.payload {
-                    if let Some(error) = payload.error {
-                        println!(
-                            "{}{}",
-                            "Build failed: ".red().bold(),
-                            if !error.is_empty() {
-                                format!(": {}", error.red().bold())
-                            } else {
-                                "unknown".dimmed().to_string()
-                            }
-                        );
+        while let Some(Ok(res)) = stream.next().await {
+            if let Some(errors) = res.errors {
+                eprintln!(
+                    "Failed to get deploy status: {}",
+                    errors
+                        .iter()
+                        .map(|err| err.to_string())
+                        .collect::<Vec<String>>()
+                        .join("; ")
+                );
+                if ci_mode {
+                    std::process::exit(1);
+                }
+            }
+            if let Some(data) = res.data {
+                match data.deployment.status {
+                    DeploymentStatus::SUCCESS => {
+                        println!("{}", "Deploy complete".green().bold());
+                        if ci_mode {
+                            std::process::exit(0);
+                        }
+                    }
+                    DeploymentStatus::FAILED => {
+                        println!("{}", "Deploy failed".red().bold());
                         std::process::exit(1);
                     }
-                }
-                if (data.deployment_events.step == DeploymentEventStep::DRAIN_INSTANCES)
-                    && data.deployment_events.completed_at.is_some()
-                    && args.ci
-                {
-                    println!("{}", "Deploy complete".green().bold());
-                    std::process::exit(0);
+                    DeploymentStatus::CRASHED => {
+                        println!("{}", "Deploy crashed".red().bold());
+                        std::process::exit(1);
+                    }
+                    _ => {}
                 }
             }
         }

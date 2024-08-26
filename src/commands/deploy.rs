@@ -135,7 +135,7 @@ pub async fn fetch_and_create(
             commit: None,
             has_domain: s.networking.as_ref().map(|n| !n.service_domains.is_empty()),
             healthcheck_path: s.deploy.as_ref().and_then(|d| d.healthcheck_path.clone()),
-            id: Some(id.clone()),
+            id: id.clone(),
             is_private: None,
             name: Some(s.name.clone()),
             owner: None,

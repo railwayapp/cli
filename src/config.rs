@@ -115,6 +115,12 @@ impl Configs {
         std::env::var("RAILWAY_API_TOKEN").ok()
     }
 
+    pub fn env_is_ci() -> bool {
+        std::env::var("CI")
+            .map(|val| val.trim().to_lowercase() == "true")
+            .unwrap_or(false)
+    }
+
     /// tries the environment variable and the config file
     pub fn get_railway_auth_token(&self) -> Option<String> {
         Self::get_railway_api_token().or(self

@@ -5,6 +5,7 @@ schema {
 }
 "The `BigInt` scalar type represents non-fractional signed whole numeric values."
 scalar BigInt
+scalar CanvasConfig
 "A date-time string at UTC, such as 2007-12-03T10:15:30Z, compliant with the `date-time` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar."
 scalar DateTime
 scalar DeploymentMeta
@@ -13,6 +14,7 @@ scalar EventProperties
 "The `JSON` scalar type represents JSON values as specified by [ECMA-404](http://www.ecma-international.org/publications/files/ECMA-ST/ECMA-404.pdf)."
 scalar JSON
 scalar SerializedTemplateConfig
+scalar ServiceInstanceLimit
 """
 The ServiceVariables scalar type represents values as the TypeScript type: Record<string, string>. Example: "{ foo: 'bar', baz: 'qux' }"
 """
@@ -131,6 +133,7 @@ type CustomDomain implements Domain {
   projectId: String
   serviceId: String!
   status: CustomDomainStatus!
+  targetPort: Int
   updatedAt: DateTime
 }
 type CustomDomainStatus {
@@ -219,6 +222,7 @@ type Deployment implements Node {
   service: Service!
   serviceId: String
   snapshotId: String
+  sockets: [DeploymentSocket!]!
   staticUrl: String
   status: DeploymentStatus!
   suggestAddServiceDomain: Boolean!
@@ -239,6 +243,13 @@ type DeploymentSnapshot implements Node {
   createdAt: DateTime!
   id: ID!
   updatedAt: DateTime!
+  variables: ServiceVariables!
+}
+type DeploymentSocket {
+  ipv6: Boolean!
+  port: Int!
+  processName: String!
+  updatedAt: Int!
 }
 type DeploymentTrigger implements Node {
   baseEnvironmentOverrideId: String
@@ -350,6 +361,10 @@ type Event implements Node {
   payload: JSON
   project: Project!
   projectId: String!
+}
+type GitHubAccess {
+  hasAccess: Boolean!
+  isPublic: Boolean!
 }
 type GitHubBranch {
   name: String!
@@ -470,8 +485,12 @@ type Mutation {
   customDomainCreate(input: CustomDomainCreateInput!): CustomDomain!
   "Deletes a custom domain."
   customDomainDelete(id: String!): Boolean!
+  "Updates a custom domain."
+  customDomainUpdate(environmentId: String!, id: String!, targetPort: Int): Boolean!
   "Migrate a customer to the hobby plan"
   customerMigrateToHobbyPlan(id: String!): Boolean!
+  "Toggle whether a customer is automatically withdrawing to credits"
+  customerTogglePayoutsToCredits(customerId: String!, input: customerTogglePayoutsToCreditsInput!): Boolean!
   "Cancels a deployment."
   deploymentCancel(id: String!): Boolean!
   "Redeploys a deployment."
@@ -518,6 +537,8 @@ type Mutation {
   githubRepoDeploy(input: GitHubRepoDeployInput!): Boolean!
   "Updates a GitHub repo through the linked template"
   githubRepoUpdate(input: GitHubRepoUpdateInput!): Boolean!
+  "Creates a new help station thread"
+  helpStationCreateThread(input: HelpStationFormInput!): String!
   "Import variables from a Heroku app into a Railway service. Returns the number of variables imports"
   herokuImportVariables(input: HerokuImportVariablesInput!): Int!
   "Create an integration for a project"
@@ -546,6 +567,8 @@ type Mutation {
   missingCommandAlert(input: MissingCommandAlertInput!): Boolean!
   "Create an observability dashboard"
   observabilityDashboardCreate(input: ObservabilityDashboardCreateInput!): Boolean!
+  "Reset an observability dashboard to default dashboard items"
+  observabilityDashboardReset(id: String!): Boolean!
   "Update an observability dashboard"
   observabilityDashboardUpdate(id: String!, input: [ObservabilityDashboardUpdateInput!]!): Boolean!
   "Creates a new plugin."
@@ -636,8 +659,14 @@ type Mutation {
   serviceDomainDelete(id: String!): Boolean!
   "Updates a service domain."
   serviceDomainUpdate(input: ServiceDomainUpdateInput!): Boolean!
+  "Add a feature flag for a service"
+  serviceFeatureFlagAdd(input: ServiceFeatureFlagToggleInput!): Boolean!
+  "Remove a feature flag for a service"
+  serviceFeatureFlagRemove(input: ServiceFeatureFlagToggleInput!): Boolean!
   "Deploy a service instance"
   serviceInstanceDeploy(environmentId: String!, serviceId: String!): Boolean!
+  "Update the resource limits for a service instance"
+  serviceInstanceLimitsUpdate(input: ServiceInstanceLimitsUpdateInput!): Boolean!
   "Redeploy a service instance"
   serviceInstanceRedeploy(environmentId: String!, serviceId: String!): Boolean!
   "Update a service instance"
@@ -687,7 +716,7 @@ type Mutation {
   "Deletes a template."
   templateDelete(id: String!, input: TemplateDeleteInput!): Boolean!
   "Deploys a template."
-  templateDeploy(input: TemplateDeployInput!): TemplateDeployPayload!
+  templateDeploy(input: TemplateDeployInput!): TemplateDeployPayload! @deprecated(reason: "Deprecated in favor of templateDeployV2")
   "Generate a template for a project"
   templateGenerate(input: TemplateGenerateInput!): Template!
   "Nullify the community thread slug for a template, if one is found with the provided slug"
@@ -726,6 +755,8 @@ type Mutation {
   userFlagsSet(input: UserFlagsSetInput!): Boolean!
   "Updates the profile for the authenticated user"
   userProfileUpdate(input: UserProfileUpdateInput!): Boolean!
+  "Disconnect your Railway account from Slack."
+  userSlackDisconnect: Boolean!
   "Update date of TermsAgreedOn"
   userTermsUpdate: User
   "Update currently logged in user"
@@ -866,6 +897,7 @@ type PrivateNetworkEndpoint {
 type Project implements Node {
   baseEnvironment: Environment
   baseEnvironmentId: String
+  botPrEnvironments: Boolean!
   createdAt: DateTime!
   deletedAt: DateTime
   deploymentTriggers(after: String, before: String, first: Int, last: Int): ProjectDeploymentTriggersConnection!
@@ -881,7 +913,6 @@ type Project implements Node {
   name: String!
   plugins(after: String, before: String, first: Int, last: Int): ProjectPluginsConnection!
   prDeploys: Boolean!
-  prForks: Boolean!
   projectPermissions(after: String, before: String, first: Int, last: Int): ProjectProjectPermissionsConnection!
   services(after: String, before: String, first: Int, last: Int): ProjectServicesConnection!
   subscriptionPlanLimit: SubscriptionPlanLimit!
@@ -1059,6 +1090,8 @@ type Query {
     filter: String,
     "Limit the number of logs returned (defaults 100, max 5000)"
     limit: Int,startDate: DateTime  ): [Log!]!
+  "Find a single DeploymentSnapshot"
+  deploymentSnapshot(deploymentId: String!): DeploymentSnapshot
   "All deployment triggers."
   deploymentTriggers(after: String, before: String, environmentId: String!, first: Int, last: Int, projectId: String!, serviceId: String!): QueryDeploymentTriggersConnection!
   "Get all deployments"
@@ -1081,6 +1114,8 @@ type Query {
     includeDeleted: Boolean,measurements: [MetricMeasurement!]!, projectId: String, teamId: String, userId: String  ): [EstimatedUsage!]!
   "Gets the events for a project."
   events(after: String, before: String, environmentId: String, filter: EventFilterInput, first: Int, last: Int, projectId: String!): QueryEventsConnection!
+  "Checks if user has access to GitHub repository"
+  gitHubRepoAccessAvailable(fullRepoName: String!): GitHubAccess!
   "Check if a repo name is available"
   githubIsRepoNameAvailable(fullRepoName: String!): Boolean!
   "Get branches for a GitHub repo that the authenticated user has access to"
@@ -1161,7 +1196,7 @@ type Query {
   projectTokens(after: String, before: String, first: Int, last: Int, projectId: String!): QueryProjectTokensConnection!
   "Gets all projects for a user or a team."
   projects(after: String, before: String, first: Int, includeDeleted: Boolean, last: Int, teamId: String, userId: String): QueryProjectsConnection!
-  "Get public Railway stats. Primarily used for the landing page."
+  "Get public Railway stats."
   publicStats: PublicStats!
   "Gets the ReferralInfo for the authenticated user."
   referralInfo: ReferralInfo!
@@ -1177,6 +1212,10 @@ type Query {
   serviceInstance(environmentId: String!, serviceId: String!): ServiceInstance!
   "Check if the upstream repo for a service has an update available"
   serviceInstanceIsUpdatable(environmentId: String!, serviceId: String!): Boolean!
+  "Get the resource limits for a service instance"
+  serviceInstanceLimitOverride(environmentId: String!, projectId: String!, serviceId: String!): ServiceInstanceLimit!
+  "Get the resource limits for a service instance"
+  serviceInstanceLimits(environmentId: String!, projectId: String!, serviceId: String!): ServiceInstanceLimit!
   "Gets all sessions for authenticated user."
   sessions(after: String, before: String, first: Int, last: Int): QuerySessionsConnection!
   "All TCP proxies for a service instance"
@@ -1191,8 +1230,6 @@ type Query {
   teamTemplates(after: String, before: String, first: Int, last: Int, teamId: String!): QueryTeamTemplatesConnection!
   "Get a template by code or GitHub owner and repo."
   template(code: String, owner: String, repo: String): Template!
-  "Convert a Heroku template to a (legacy) Railway template config object."
-  templateFromHerokuTemplate(repoUrl: String!): JSON!
   "Get the top 25 users with the most template kickback earnings."
   templateKickbacksLeaderboard: [TemplateKickbacksLeaderboard!]!
   "Get the source template for a project."
@@ -1214,6 +1251,8 @@ type Query {
     includeDeleted: Boolean,measurements: [MetricMeasurement!]!, projectId: String, startDate: DateTime, teamId: String, userId: String  ): [AggregatedUsage!]!
   "Get the user id corresponding to a Discord id"
   userIdForDiscordId(discordId: String!): String!
+  "Get the user id corresponding to a Slack id"
+  userIdForSlackId(slackId: String!): String
   "Get the total kickback earnings for a user."
   userKickbackEarnings(userId: String!): UserKickbackEarnings! @deprecated(reason: "This field is deprecated and will be removed in future versions.")
   "Get the public profile for a user"
@@ -1401,7 +1440,11 @@ type RefundRequest implements Node {
   userId: String!
 }
 type Region {
+  adminOnly: Boolean
+  country: String
+  location: String
   name: String!
+  region: String
 }
 type ResourceAccess {
   project: AccessRule!
@@ -1410,6 +1453,7 @@ type Service implements Node {
   createdAt: DateTime!
   deletedAt: DateTime
   deployments(after: String, before: String, first: Int, last: Int): ServiceDeploymentsConnection!
+  featureFlags: [ActiveServiceFeatureFlag!]!
   icon: String
   id: ID!
   name: String!
@@ -1417,6 +1461,7 @@ type Service implements Node {
   projectId: String!
   repoTriggers(after: String, before: String, first: Int, last: Int): ServiceRepoTriggersConnection!
   serviceInstances(after: String, before: String, first: Int, last: Int): ServiceServiceInstancesConnection!
+  templateServiceId: String
   templateThreadSlug: String
   updatedAt: DateTime!
 }
@@ -1437,6 +1482,7 @@ type ServiceDomain implements Domain {
   projectId: String
   serviceId: String!
   suffix: String
+  targetPort: Int
   updatedAt: DateTime
 }
 type ServiceInstance implements Node {
@@ -1517,6 +1563,8 @@ type Subscription {
     "Limit the number of logs returned (defaults 100, max 5000)"
     limit: Int
   ): [Log!]!
+  "Subscribe to updates for a specific deployment"
+  deployment(id: String!): Deployment!
   "Subscribe to deployment events for a specific deployment"
   deploymentEvents(id: String!): DeploymentEvent!
   "Stream logs for a deployment"
@@ -1583,6 +1631,8 @@ type TeamDirectSupportDiscordInfo {
 type TeamMember {
   avatar: String
   email: String!
+  "Only retrieved if requested by an admin"
+  featureFlags: [ActiveFeatureFlag!]
   id: String!
   name: String
   role: TeamRole!
@@ -1605,6 +1655,7 @@ type TeamProjectsConnectionEdge {
 }
 type Template implements Node {
   activeProjects: Int!
+  canvasConfig: CanvasConfig
   code: String!
   communityThreadSlug: String
   config: TemplateConfig!
@@ -1722,13 +1773,24 @@ type UserProfileResponse {
   avatar: String
   createdAt: DateTime!
   customerId: String
+  id: String!
   isTrialing: Boolean
   name: String
   profile: UserProfile!
+  "Gets all public projects for a user."
+  publicProjects(after: String, before: String, first: Int, last: Int): UserProfileResponsePublicProjectsConnection!
   publishedTemplates: [SimilarTemplate!]!
   state: String
   totalDeploys: Int!
   username: String
+}
+type UserProfileResponsePublicProjectsConnection {
+  edges: [UserProfileResponsePublicProjectsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+type UserProfileResponsePublicProjectsConnectionEdge {
+  cursor: String!
+  node: Project!
 }
 type UserProjectsConnection {
   edges: [UserProjectsConnectionEdge!]!
@@ -1842,6 +1904,7 @@ interface Domain {
   id: ID!
   projectId: String
   serviceId: String!
+  targetPort: Int
   updatedAt: DateTime
 }
 interface Node {
@@ -1849,12 +1912,10 @@ interface Node {
 }
 union PublicProjectInvitation = InviteCode | ProjectInvitation
 enum ActiveFeatureFlag {
-  DEPLOYMENTS_UI_V2
-  OBSERVABILITY_V2
-  SERVICE_GROUPS
-  STACKER_WORKFLOWS
-  TEMPLATE_CONFIG_PANE
-  TEMPLATE_SERVICE_EJECT
+  PRIORITY_BOARDING
+}
+enum ActiveServiceFeatureFlag {
+  PLACEHOLDER
 }
 enum Builder {
   HEROKU
@@ -2004,6 +2065,11 @@ enum ProjectUsageProperty {
   MEMORY_USAGE
   NETWORK_USAGE
 }
+enum PublicRuntime {
+  LEGACY
+  UNSPECIFIED
+  V2
+}
 enum ReferralStatus {
   REFEREE_CREDITED
   REFERRER_CREDITED
@@ -2108,6 +2174,7 @@ input CustomDomainCreateInput {
   environmentId: String!
   projectId: String!
   serviceId: String!
+  targetPort: Int
 }
 input DeploymentListInput {
   environmentId: String
@@ -2138,6 +2205,7 @@ input DeploymentTriggerUpdateInput {
 }
 input EgressGatewayCreateInput {
   environmentId: String!
+  region: String
   serviceId: String!
 }
 input EgressGatewayServiceTargetInput {
@@ -2197,6 +2265,12 @@ input GitHubRepoUpdateInput {
   environmentId: String!
   projectId: String!
   serviceId: String!
+}
+input HelpStationFormInput {
+  isPrivate: Boolean!
+  message: String!
+  subject: String!
+  topic: String!
 }
 input HerokuImportVariablesInput {
   environmentId: String!
@@ -2297,6 +2371,7 @@ input ProjectCreateInput {
   plugins: [String!]
   prDeploys: Boolean
   repo: ProjectCreateRepo
+  runtime: PublicRuntime
   teamId: String
 }
 input ProjectCreateRepo {
@@ -2338,12 +2413,12 @@ input ProjectTransferToTeamInput {
 }
 input ProjectUpdateInput {
   baseEnvironmentId: String
+  "Enable/disable pull request environments for PRs created by bots"
+  botPrEnvironments: Boolean
   description: String
   isPublic: Boolean
   name: String
   prDeploys: Boolean
-  "[Experimental] Will be deprecated eventually"
-  prForks: Boolean
 }
 input RecoveryCodeValidateInput {
   code: String!
@@ -2380,19 +2455,37 @@ input ServiceCreateInput {
   branch: String
   "Environment ID. If the specified environment is a fork, the service will only be created in it. Otherwise it will created in all environments that are not forks of other environments"
   environmentId: String
+  icon: String
   name: String
   projectId: String!
+  registryCredentials: RegistryCredentialsInput
   source: ServiceSourceInput
+  templateServiceId: String
   variables: ServiceVariables
 }
 input ServiceDomainCreateInput {
   environmentId: String!
   serviceId: String!
+  targetPort: Int
 }
 input ServiceDomainUpdateInput {
   domain: String!
   environmentId: String!
+  serviceDomainId: String
   serviceId: String!
+  targetPort: Int
+}
+input ServiceFeatureFlagToggleInput {
+  flag: ActiveServiceFeatureFlag!
+  serviceId: String!
+}
+input ServiceInstanceLimitsUpdateInput {
+  environmentId: String!
+  "Amount of memory in GB to allocate to the service instance"
+  memoryGB: Int
+  serviceId: String!
+  "Number of vCPUs to allocate to the service instance"
+  vCPUs: Int
 }
 input ServiceInstanceUpdateInput {
   buildCommand: String
@@ -2408,6 +2501,7 @@ input ServiceInstanceUpdateInput {
   restartPolicyMaxRetries: Int
   restartPolicyType: RestartPolicyType
   rootDirectory: String
+  sleepApplication: Boolean
   source: ServiceSourceInput
   startCommand: String
   watchPatterns: [String!]
@@ -2477,6 +2571,7 @@ input TemplateCloneInput {
   teamId: String
 }
 input TemplateCreateInput {
+  canvasConfig: CanvasConfig
   config: TemplateConfig!
   demoProjectId: String
   metadata: TemplateMetadata!
@@ -2497,7 +2592,7 @@ input TemplateDeployService {
   commit: String
   hasDomain: Boolean
   healthcheckPath: String
-  id: String
+  id: String!
   isPrivate: Boolean
   name: String
   owner: String
@@ -2516,6 +2611,7 @@ input TemplateGenerateInput {
 }
 input TemplatePublishInput {
   category: String!
+  demoProjectId: String
   description: String!
   image: String
   readme: String!
@@ -2537,6 +2633,7 @@ input TemplateServiceUpdateInput {
   id: String
 }
 input TemplateUpdateInput {
+  canvasConfig: CanvasConfig
   config: TemplateConfig!
   demoProjectId: String
   "An admin-only flag to force-update a template."
@@ -2627,6 +2724,9 @@ input WebhookCreateInput {
 }
 input WebhookUpdateInput {
   url: String!
+}
+input customerTogglePayoutsToCreditsInput {
+  isWithdrawingToCredits: Boolean!
 }
 "Exposes a URL that specifies the behavior of this scalar."
 directive @specifiedBy(
