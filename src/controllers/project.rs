@@ -10,8 +10,11 @@ use crate::{
         Configs,
     },
     errors::RailwayError,
+    LinkedProject,
 };
 use anyhow::{bail, Result};
+
+use super::environment::get_matched_environment;
 
 pub async fn get_project(
     client: &Client,
@@ -51,4 +54,35 @@ pub fn get_service(
     }
 
     bail!(RailwayError::ServiceNotFound(service_name))
+}
+
+pub async fn ensure_project_and_environment_exist(
+    client: &Client,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+) -> Result<()> {
+    let project = get_project(client, configs, linked_project.project.clone()).await?;
+
+    if project.deleted_at.is_some() {
+        bail!(RailwayError::ProjectDeleted);
+    }
+
+    let environment = get_matched_environment(
+        &project,
+        linked_project
+            .environment_name
+            .clone()
+            .unwrap_or("Production".to_string()),
+    );
+
+    match environment {
+        Ok(environment) => {
+            if environment.deleted_at.is_some() {
+                bail!(RailwayError::EnvironmentDeleted);
+            }
+        }
+        Err(_) => bail!(RailwayError::EnvironmentDeleted),
+    };
+
+    Ok(())
 }

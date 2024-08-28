@@ -1,5 +1,9 @@
 use super::*;
-use crate::{controllers::project::get_project, errors::RailwayError, table::Table};
+use crate::{
+    controllers::project::{ensure_project_and_environment_exist, get_project},
+    errors::RailwayError,
+    table::Table,
+};
 
 /// Show variables for active environment
 #[derive(Parser)]
@@ -17,6 +21,8 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let _vars = queries::project::Variables {
         id: linked_project.project.to_owned(),

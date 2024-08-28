@@ -1,7 +1,10 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::{consts::NON_INTERACTIVE_FAILURE, interact_or};
+use crate::{
+    consts::NON_INTERACTIVE_FAILURE, controllers::project::ensure_project_and_environment_exist,
+    interact_or,
+};
 
 use super::*;
 
@@ -15,6 +18,10 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let linked_project = configs.get_linked_project().await?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
     ::open::that(format!(
         "https://{hostname}/project/{}",
         linked_project.project

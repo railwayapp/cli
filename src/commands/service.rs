@@ -1,7 +1,7 @@
 use anyhow::bail;
 
 use crate::{
-    controllers::project::get_project,
+    controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
     util::prompt::{fake_select, prompt_options, PromptService},
 };
@@ -20,6 +20,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let services: Vec<_> = project
         .services

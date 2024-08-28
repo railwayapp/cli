@@ -24,6 +24,12 @@ pub enum RailwayError {
     #[error("Project not found. Run `railway link` to connect to a project.")]
     ProjectNotFound,
 
+    #[error("Project is deleted. Run `railway link` to connect to a project.")]
+    ProjectDeleted,
+
+    #[error("Environment is deleted. Run `railway environment` to connect to an environment.")]
+    EnvironmentDeleted,
+
     #[error("No projects found. Run `railway init` to create a new project")]
     NoProjects,
 
