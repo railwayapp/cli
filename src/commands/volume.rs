@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     consts::TICK_STRING,
-    controllers::project::get_project,
+    controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
     queries::project::{
         ProjectProject, ProjectProjectVolumesEdges,
@@ -88,6 +88,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
     let service = args.service.or_else(|| linked_project.service.clone());
     let environment = args

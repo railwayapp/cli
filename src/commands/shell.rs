@@ -1,7 +1,10 @@
 use anyhow::bail;
 use std::collections::BTreeMap;
 
-use crate::{controllers::project::get_project, errors::RailwayError};
+use crate::{
+    controllers::project::{ensure_project_and_environment_exist, get_project},
+    errors::RailwayError,
+};
 
 use super::*;
 
@@ -39,6 +42,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 

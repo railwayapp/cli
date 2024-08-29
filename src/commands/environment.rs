@@ -3,7 +3,10 @@ use std::fmt::Display;
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
-use crate::{controllers::project::get_project, interact_or, util::prompt::prompt_options};
+use crate::{
+    controllers::project::get_project, errors::RailwayError, interact_or,
+    util::prompt::prompt_options,
+};
 
 use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
 
@@ -20,6 +23,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    if project.deleted_at.is_some() {
+        bail!(RailwayError::ProjectDeleted);
+    }
+
     let environments = project
         .environments
         .edges

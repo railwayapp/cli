@@ -2,7 +2,9 @@ use colored::*;
 use std::time::Duration;
 
 use crate::{
-    consts::TICK_STRING, controllers::project::get_project, errors::RailwayError,
+    consts::TICK_STRING,
+    controllers::project::{ensure_project_and_environment_exist, get_project},
+    errors::RailwayError,
     util::prompt::prompt_confirm_with_default,
 };
 
@@ -25,7 +27,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
     let service_id = args.service.or_else(|| linked_project.service.clone()).ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
     let service = project
         .services
@@ -35,6 +41,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             s.node.id == service_id || s.node.name.to_lowercase() == service_id.to_lowercase()
         })
         .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
+
     let service_in_env = service
         .node
         .service_instances
@@ -42,6 +49,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .iter()
         .find(|a| a.node.environment_id == linked_project.environment)
         .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
+
     if let Some(ref latest) = service_in_env.node.latest_deployment {
         if latest.can_redeploy {
             if !args.bypass {

@@ -5,7 +5,11 @@ use colored::Colorize;
 use is_terminal::IsTerminal;
 use queries::domains::DomainsDomains;
 
-use crate::{consts::TICK_STRING, controllers::project::get_project, errors::RailwayError};
+use crate::{
+    consts::TICK_STRING,
+    controllers::project::{ensure_project_and_environment_exist, get_project},
+    errors::RailwayError,
+};
 
 use super::*;
 
@@ -19,6 +23,8 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
 
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 

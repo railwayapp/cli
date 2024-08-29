@@ -3,7 +3,10 @@ use is_terminal::IsTerminal;
 use serde::Deserialize;
 use std::{collections::BTreeMap, collections::HashMap, time::Duration};
 
-use crate::{consts::TICK_STRING, mutations::TemplateVolume, util::prompt::prompt_text};
+use crate::{
+    consts::TICK_STRING, controllers::project::ensure_project_and_environment_exist,
+    mutations::TemplateVolume, util::prompt::prompt_text,
+};
 
 use super::*;
 
@@ -76,6 +79,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     Ok(())
 }
+
 /// fetch database details via `TemplateDetail`
 /// create database via `TemplateDeploy`
 pub async fn fetch_and_create(
@@ -97,6 +101,8 @@ pub async fn fetch_and_create(
     let config = DeserializedEnvironment::deserialize(
         &details.template.serialized_config.unwrap_or_default(),
     )?;
+
+    ensure_project_and_environment_exist(client, configs, linked_project).await?;
 
     let mut services: Vec<mutations::template_deploy::TemplateDeployService> =
         Vec::with_capacity(config.services.len());

@@ -3,7 +3,10 @@ use is_terminal::IsTerminal;
 use std::collections::HashMap;
 use strum::IntoEnumIterator;
 
-use crate::{controllers::database::DatabaseType, util::prompt::prompt_multi_options};
+use crate::{
+    controllers::{database::DatabaseType, project::ensure_project_and_environment_exist},
+    util::prompt::prompt_multi_options,
+};
 
 use super::*;
 
@@ -27,9 +30,10 @@ pub struct Args {
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
-
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let databases = if args.database.is_empty() {
         if !std::io::stdout().is_terminal() {

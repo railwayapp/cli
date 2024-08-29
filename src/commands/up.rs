@@ -21,7 +21,7 @@ use crate::{
     controllers::{
         deployment::{stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
-        project::get_project,
+        project::{ensure_project_and_environment_exist, get_project},
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
@@ -86,6 +86,8 @@ pub async fn get_service_to_deploy(
     let linked_project = configs.get_linked_project().await?;
     let project = get_project(client, configs, linked_project.project.clone()).await?;
     let services = project.services.edges.iter().collect::<Vec<_>>();
+
+    ensure_project_and_environment_exist(client, configs, &linked_project).await?;
 
     let service = if let Some(service_arg) = service_arg {
         // If the user specified a service, use that

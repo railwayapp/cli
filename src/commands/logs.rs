@@ -4,7 +4,7 @@ use crate::{
     controllers::{
         deployment::{stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
-        project::get_project,
+        project::{ensure_project_and_environment_exist, get_project},
     },
     util::logs::format_attr_log,
 };
@@ -43,6 +43,8 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
