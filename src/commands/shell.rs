@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     controllers::project::{ensure_project_and_environment_exist, get_project},
+    controllers::variables::get_service_variables,
     errors::RailwayError,
 };
 
@@ -58,35 +59,25 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             .find(|s| s.node.name == service || s.node.id == service)
             .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
 
-        let vars = queries::variables_for_service_deployment::Variables {
-            environment_id: linked_project.environment.clone(),
-            project_id: linked_project.project.clone(),
-            service_id: service_id.node.id.clone(),
-        };
-
-        let mut variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
+        let mut variables = get_service_variables(
             &client,
-            configs.get_backboard(),
-            vars,
+            &configs,
+            linked_project.project.clone(),
+            linked_project.environment.clone(),
+            service_id.node.id.clone(),
         )
-        .await?
-        .variables_for_service_deployment;
+        .await?;
 
         all_variables.append(&mut variables);
     } else if let Some(service) = linked_project.service {
-        let vars = queries::variables_for_service_deployment::Variables {
-            environment_id: linked_project.environment.clone(),
-            project_id: linked_project.project.clone(),
-            service_id: service.clone(),
-        };
-
-        let mut variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
+        let mut variables = get_service_variables(
             &client,
-            configs.get_backboard(),
-            vars,
+            &configs,
+            linked_project.project.clone(),
+            linked_project.environment.clone(),
+            service.clone(),
         )
-        .await?
-        .variables_for_service_deployment;
+        .await?;
 
         all_variables.append(&mut variables);
     } else {

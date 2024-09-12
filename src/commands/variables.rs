@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     controllers::project::{ensure_project_and_environment_exist, get_project},
+    controllers::variables::get_service_variables,
     errors::RailwayError,
     table::Table,
 };
@@ -64,13 +65,14 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         return Err(RailwayError::NoServiceLinked.into());
     };
 
-    let variables = post_graphql::<queries::VariablesForServiceDeployment, _>(
+    let variables = get_service_variables(
         &client,
-        configs.get_backboard(),
-        vars,
+        &configs,
+        vars.project_id,
+        vars.environment_id,
+        vars.service_id,
     )
-    .await?
-    .variables_for_service_deployment;
+    .await?;
 
     if variables.is_empty() {
         eprintln!("No variables found");
