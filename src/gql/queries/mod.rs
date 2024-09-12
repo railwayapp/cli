@@ -2,7 +2,7 @@ use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 
 type DateTime = chrono::DateTime<chrono::Utc>;
-type ServiceVariables = std::collections::BTreeMap<String, String>;
+type ServiceVariables = std::collections::BTreeMap<String, Option<String>>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
