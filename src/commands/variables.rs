@@ -71,7 +71,8 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         vars.project_id,
         vars.environment_id,
         vars.service_id,
-    ).await?;
+    )
+    .await?;
 
     if variables.is_empty() {
         eprintln!("No variables found");
