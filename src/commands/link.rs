@@ -139,6 +139,19 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     configs.write()?;
 
+    println!("\n{}", "Project linked successfully! 🎉".green().bold());
+    println!("  Next steps:");
+    println!("    - {} Deploy your project", "railway up".magenta());
+    println!(
+        "    - {} {} Run a command locally with variables from Railway",
+        "railway run".magenta(),
+        "<command>".magenta().bold()
+    );
+    println!(
+        "    - {} See what else you can do",
+        "railway --help".magenta()
+    );
+
     Ok(())
 }
 
