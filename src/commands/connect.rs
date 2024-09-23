@@ -123,9 +123,9 @@ fn get_connect_command(
 ) -> Result<(String, Vec<String>)> {
     match &database_type {
         DatabaseType::PostgreSQL => get_postgres_command(&variables),
-        DatabaseType::Redis => return get_redis_command(&variables),
-        DatabaseType::MongoDB => return get_mongo_command(&variables),
-        DatabaseType::MySQL => return get_mysql_command(&variables),
+        DatabaseType::Redis => get_redis_command(&variables),
+        DatabaseType::MongoDB => get_mongo_command(&variables),
+        DatabaseType::MySQL => get_mysql_command(&variables),
     }
 }
 
