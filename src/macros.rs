@@ -27,9 +27,6 @@ macro_rules! commands_enum {
     );
 }
 
-
-
-
 /// Ensure running in a terminal or bail with the provided message
 #[macro_export]
 macro_rules! interact_or {
