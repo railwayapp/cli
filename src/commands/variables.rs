@@ -1,10 +1,13 @@
 use super::*;
 use crate::{
-    consts::TICK_STRING, controllers::{
+    consts::TICK_STRING,
+    controllers::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
         variables::get_service_variables,
-    }, errors::RailwayError, table::Table
+    },
+    errors::RailwayError,
+    table::Table,
 };
 use anyhow::bail;
 use std::{collections::BTreeMap, time::Duration};

@@ -7,7 +7,10 @@ use super::{
     *,
 };
 use crate::{
-    consts::TICK_STRING, controllers::{environment::get_matched_environment, project::get_project}, errors::RailwayError, util::prompt::prompt_confirm_with_default
+    consts::TICK_STRING,
+    controllers::{environment::get_matched_environment, project::get_project},
+    errors::RailwayError,
+    util::prompt::prompt_confirm_with_default,
 };
 
 /// Remove the most recent deployment
