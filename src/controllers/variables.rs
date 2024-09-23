@@ -28,7 +28,6 @@ pub async fn get_service_variables(
     let variables = response
         .variables_for_service_deployment
         .into_iter()
-        .filter_map(|(key, value)| value.map(|v| (key, v.to_string())))
         .collect();
 
     Ok(variables)

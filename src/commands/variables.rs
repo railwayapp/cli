@@ -1,21 +1,34 @@
 use super::*;
 use crate::{
-    controllers::project::{ensure_project_and_environment_exist, get_project},
-    controllers::variables::get_service_variables,
+    consts::TICK_STRING,
+    controllers::{
+        project::{ensure_project_and_environment_exist, get_project},
+        variables::get_service_variables,
+    },
     errors::RailwayError,
     table::Table,
 };
+use std::{collections::BTreeMap, time::Duration};
 
 /// Show variables for active environment
 #[derive(Parser)]
 pub struct Args {
-    /// Service to show variables for
+    /// The service to show/set variables for
     #[clap(short, long)]
     service: Option<String>,
 
     /// Show variables in KV format
     #[clap(short, long)]
     kv: bool,
+
+    /// The "{key}={value}" environment variable pair to set the service variables.
+    /// Example:
+    ///
+    /// ```bash
+    /// railway variables --set "MY_SPECIAL_ENV_VAR=1" --set "BACKEND_PORT=3000"
+    /// ```
+    #[clap(long)]
+    set: Vec<String>,
 }
 
 pub async fn command(args: Args, json: bool) -> Result<()> {
@@ -24,6 +37,62 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    if !args.set.is_empty() {
+        let variables: BTreeMap<String, String> = args
+            .set
+            .iter()
+            .filter_map(|v| {
+                let mut split = v.split('=');
+                let key = split.next()?.trim().to_owned();
+                let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some((key, value))
+                }
+            })
+            .collect();
+
+        let fmt_variables = variables
+            .keys()
+            .map(|k| k.bold().to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+
+        let spinner = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")
+                    .expect("Failed to set spinner template"),
+            )
+            .with_message(format!("Setting {fmt_variables}..."));
+
+        spinner.enable_steady_tick(Duration::from_millis(100));
+
+        let service_id = linked_project
+            .service
+            .clone()
+            .ok_or_else(|| RailwayError::NoServiceLinked)?;
+
+        let vars = mutations::variable_collection_upsert::Variables {
+            project_id: linked_project.project.clone(),
+            environment_id: linked_project.environment.clone(),
+            service_id,
+            variables,
+        };
+
+        post_graphql::<mutations::VariableCollectionUpsert, _>(
+            &client,
+            configs.get_backboard(),
+            vars,
+        )
+        .await?;
+
+        spinner.finish_with_message(format!("Set {fmt_variables}"));
+        return Ok(());
+    }
 
     let _vars = queries::project::Variables {
         id: linked_project.project.to_owned(),
