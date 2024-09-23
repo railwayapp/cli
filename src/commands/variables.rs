@@ -2,12 +2,14 @@ use super::*;
 use crate::{
     consts::TICK_STRING,
     controllers::{
+        environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
         variables::get_service_variables,
     },
     errors::RailwayError,
     table::Table,
 };
+use anyhow::bail;
 use std::{collections::BTreeMap, time::Duration};
 
 /// Show variables for active environment
@@ -16,6 +18,10 @@ pub struct Args {
     /// The service to show/set variables for
     #[clap(short, long)]
     service: Option<String>,
+
+    /// The environment to show/set variables for
+    #[clap(short, long)]
+    environment: Option<String>,
 
     /// Show variables in KV format
     #[clap(short, long)]
@@ -37,6 +43,30 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    let environment = args
+        .environment
+        .clone()
+        .unwrap_or(linked_project.environment.clone());
+
+    let services = project.services.edges.iter().collect::<Vec<_>>();
+
+    let environment_id = get_matched_environment(&project, environment)?.id;
+    let service_id = match (args.service, linked_project.service) {
+        // If the user specified a service, use that
+        (Some(service_arg), _) => services
+            .iter()
+            .find(|service| service.node.name == service_arg || service.node.id == service_arg)
+            .with_context(|| format!("Service '{service_arg}' not found"))?
+            .node
+            .id
+            .to_owned(),
+        // Otherwise if we have a linked service, use that
+        (_, Some(linked_service)) => linked_service,
+        // Otherwise it's a user error
+        _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
+    };
 
     if !args.set.is_empty() {
         let variables: BTreeMap<String, String> = args
@@ -71,14 +101,9 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
 
         spinner.enable_steady_tick(Duration::from_millis(100));
 
-        let service_id = linked_project
-            .service
-            .clone()
-            .ok_or_else(|| RailwayError::NoServiceLinked)?;
-
         let vars = mutations::variable_collection_upsert::Variables {
             project_id: linked_project.project.clone(),
-            environment_id: linked_project.environment.clone(),
+            environment_id,
             service_id,
             variables,
         };
@@ -94,52 +119,12 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let _vars = queries::project::Variables {
-        id: linked_project.project.to_owned(),
-    };
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let (vars, name) = if let Some(ref service) = args.service {
-        let service_name = project
-            .services
-            .edges
-            .iter()
-            .find(|edge| edge.node.id == *service || edge.node.name == *service)
-            .ok_or_else(|| RailwayError::ServiceNotFound(service.clone()))?;
-        (
-            queries::variables_for_service_deployment::Variables {
-                environment_id: linked_project.environment.clone(),
-                project_id: linked_project.project.clone(),
-                service_id: service_name.node.id.clone(),
-            },
-            service_name.node.name.clone(),
-        )
-    } else if let Some(ref service) = linked_project.service {
-        let service_name = project
-            .services
-            .edges
-            .iter()
-            .find(|edge| edge.node.id == *service)
-            .ok_or_else(|| RailwayError::ServiceNotFound(service.clone()))?;
-        (
-            queries::variables_for_service_deployment::Variables {
-                environment_id: linked_project.environment.clone(),
-                project_id: linked_project.project.clone(),
-                service_id: service.clone(),
-            },
-            service_name.node.name.clone(),
-        )
-    } else {
-        return Err(RailwayError::NoServiceLinked.into());
-    };
-
     let variables = get_service_variables(
         &client,
         &configs,
-        vars.project_id,
-        vars.environment_id,
-        vars.service_id,
+        project.id,
+        environment_id,
+        service_id.clone(),
     )
     .await?;
 
@@ -160,7 +145,16 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let table = Table::new(name, variables);
+    let table = Table::new(
+        services
+            .iter()
+            .find(|s| s.node.id == service_id)
+            .unwrap()
+            .node
+            .name
+            .clone(),
+        variables,
+    );
     table.print()?;
 
     Ok(())
