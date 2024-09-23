@@ -40,7 +40,7 @@ commands_enum!(
     domain,
     docs,
     down,
-    environment,
+    environment(env),
     init,
     link,
     list,
