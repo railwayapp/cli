@@ -130,6 +130,7 @@ impl Configs {
             .clone()
             .filter(|t| !t.is_empty()))
     }
+
     pub fn get_environment_id() -> Environment {
         match std::env::var("RAILWAY_ENV")
             .map(|env| env.to_lowercase())

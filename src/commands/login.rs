@@ -1,12 +1,14 @@
 use std::{net::SocketAddr, time::Duration};
 
 use crate::{
-    consts::TICK_STRING, interact_or, util::prompt::prompt_confirm_with_default_with_cancel,
+    consts::TICK_STRING, controllers::user::get_user, errors::RailwayError, interact_or,
+    util::prompt::prompt_confirm_with_default_with_cancel,
 };
 
 use super::*;
 
 use anyhow::bail;
+use colored::Colorize;
 use http_body_util::Full;
 use hyper::{body::Bytes, server::conn::http1, service::service_fn, Request, Response};
 use hyper_util::rt::tokio::TokioIo;
@@ -14,6 +16,7 @@ use is_terminal::IsTerminal;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use whoami::print_user;
 
 /// Login to your Railway account
 #[derive(Parser)]
@@ -27,6 +30,21 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     interact_or!("Cannot login in non-interactive mode");
 
     let mut configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    if Configs::get_railway_api_token().is_some() {
+        match get_user(&client, &configs).await {
+            Ok(user) => {
+                println!("{} found", "RAILWAY_TOKEN".bold());
+                print_user(user);
+                return Ok(());
+            }
+            Err(_e) => {
+                println!("Found invalid {}", "RAILWAY_TOKEN".bold());
+                return Err(RailwayError::InvalidRailwayToken.into());
+            }
+        }
+    }
 
     if args.browserless {
         return browserless_login().await;

@@ -13,6 +13,12 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
 
     let user: RailwayUser = get_user(&client, &configs).await?;
 
+    print_user(user);
+
+    Ok(())
+}
+
+pub fn print_user(user: RailwayUser) {
     if let Some(name) = user.name {
         println!(
             "Logged in as {} ({}) 👋",
@@ -22,6 +28,4 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     } else {
         println!("Logged in as {} 👋", user.email.bright_magenta().bold())
     }
-
-    Ok(())
 }
