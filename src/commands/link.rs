@@ -2,16 +2,14 @@ use colored::*;
 use std::fmt::Display;
 
 use crate::{
-    controllers::project::get_project,
     errors::RailwayError,
-    queries::project::ProjectProject,
     util::prompt::{fake_select, prompt_options},
 };
 
 use super::{
-    queries::{
-        projects::ProjectsProjectsEdgesNode,
-        user_projects::{UserProjectsMeProjectsEdgesNode, UserProjectsMeTeamsEdgesNode},
+    queries::user_projects::{
+        UserProjectsMeProjectsEdgesNode, UserProjectsMeTeamsEdgesNode,
+        UserProjectsMeTeamsEdgesNodeProjectsEdgesNode,
     },
     *,
 };
@@ -23,59 +21,89 @@ pub struct Args {
     /// Environment to link to
     environment: Option<String>,
 
-    /// Project ID to link to
-    #[clap(long, short)]
-    project_id: Option<String>,
+    /// Project to link to
+    #[clap(long, short, alias = "project_id")]
+    project: Option<String>,
 
     /// The service to link to
     #[clap(long, short)]
     service: Option<String>,
+
+    /// The team to link to. Use "personal" for your personal account
+    #[clap(long, short)]
+    team: Option<String>,
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-
-    let project = NormalisedProject::from(if let Some(project_id) = args.project_id {
-        let fetched_project = get_project(&client, &configs, project_id).await?;
-        // fake_select is used to mimic the user providing input in the terminal
-        // just for detail
-        if let Some(team) = fetched_project.clone().team {
-            fake_select("Select a team", &team.name);
-        }
-        fake_select("Select a project", fetched_project.name.as_str());
-        Project(ProjectType::Fetched(fetched_project))
-    } else {
-        let me = post_graphql::<queries::UserProjects, _>(
-            &client,
-            configs.get_backboard(),
-            queries::user_projects::Variables {},
-        )
-        .await?
-        .me;
-        let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
-        if teams.is_empty() {
-            // prompt projects on personal account
-            prompt_personal_projects(me)?
-        } else {
-            // prompt teams
-            let mut team_names = vec![Team::Personal];
-            team_names.extend(teams.into_iter().map(Team::Team));
-            match prompt_options("Select a team", team_names)? {
-                Team::Personal => prompt_personal_projects(me)?,
-                Team::Team(team) => {
-                    let vars = queries::projects::Variables {
-                        team_id: Some(team.id.clone()),
-                    };
-                    let projects = post_graphql::<queries::Projects, _>(
-                        &client,
-                        configs.get_backboard(),
-                        vars,
-                    )
-                    .await?
-                    .projects;
-                    prompt_team_projects(projects)?
+    let me = post_graphql::<queries::UserProjects, _>(
+        &client,
+        configs.get_backboard(),
+        queries::user_projects::Variables {},
+    )
+    .await?
+    .me;
+    let team = if let Some(team_arg) = args.team {
+        match team_arg.to_lowercase().as_str() {
+            "personal" => {
+                fake_select("Select a team", "Personal");
+                Team::Personal
+            }
+            _ => {
+                let team = me.teams.edges.iter().find(|team| {
+                    (team.node.name.to_lowercase() == team_arg.to_lowercase())
+                        || (team.node.id.to_lowercase() == team_arg.to_lowercase())
+                });
+                if let Some(team) = team {
+                    fake_select("Select a team", &team.node.name);
+                    Team::Team(&team.node)
+                } else {
+                    return Err(RailwayError::TeamNotFound(team_arg).into());
                 }
+            }
+        }
+    } else {
+        let teams: Vec<&UserProjectsMeTeamsEdgesNode> =
+            me.teams.edges.iter().map(|team| &team.node).collect();
+        let mut team_names = vec![Team::Personal];
+        team_names.extend(teams.into_iter().map(Team::Team));
+        prompt_options("Select a team", team_names)?
+    };
+
+    let project = NormalisedProject::from(match team {
+        Team::Personal => {
+            if let Some(project) = args.project {
+                let proj = me.projects.edges.iter().find(|pro| {
+                    (pro.node.id.to_lowercase() == project.to_lowercase())
+                        || (pro.node.name.to_lowercase() == project.to_lowercase())
+                });
+                if let Some(project) = proj {
+                    fake_select("Select a project", &project.node.name);
+                    Project(ProjectType::Personal(project.node.clone()))
+                } else {
+                    return Err(RailwayError::ProjectNotFound.into());
+                }
+            } else {
+                prompt_personal_projects(me)?
+            }
+        }
+        Team::Team(team) => {
+            if let Some(project) = args.project {
+                let proj = team.projects.edges.iter().find(|pro| {
+                    (pro.node.id.to_lowercase() == project.to_lowercase())
+                        || (pro.node.name.to_lowercase() == project.to_lowercase())
+                });
+                if let Some(project) = proj {
+                    fake_select("Select a project", &project.node.name);
+                    Project(ProjectType::Team(project.node.clone()))
+                } else {
+                    return Err(
+                        RailwayError::ProjectNotFoundInTeam(project, team.name.clone()).into(),
+                    );
+                }
+            } else {
+                prompt_team_projects(team.projects.clone())?
             }
         }
     });
@@ -86,14 +114,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 || (e.id.to_lowercase() == environment.to_lowercase())
         });
         if let Some(env) = env {
-            fake_select("Select an environment", env.name.as_str());
+            fake_select("Select an environment", &env.name);
             env.clone()
         } else {
             return Err(RailwayError::EnvironmentNotFound(environment).into());
         }
     } else if project.environments.len() == 1 {
         let env = project.environments[0].clone();
-        fake_select("Select an environment", env.name.as_str());
+        fake_select("Select an environment", &env.name);
         env
     } else {
         prompt_options("Select an environment", project.environments)?
@@ -143,9 +171,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 fn prompt_team_projects(
-    projects: queries::projects::ProjectsProjects,
+    projects: queries::user_projects::UserProjectsMeTeamsEdgesNodeProjects,
 ) -> Result<Project, anyhow::Error> {
-    let mut team_projects: Vec<ProjectsProjectsEdgesNode> = projects
+    let mut team_projects: Vec<
+        queries::user_projects::UserProjectsMeTeamsEdgesNodeProjectsEdgesNode,
+    > = projects
         .edges
         .iter()
         .cloned()
@@ -214,34 +244,6 @@ structstruck::strike! {
 impl From<Project> for NormalisedProject {
     fn from(value: Project) -> Self {
         match value.0 {
-            ProjectType::Fetched(fetched) => NormalisedProject::new(
-                fetched.id,
-                fetched.name,
-                fetched
-                    .environments
-                    .edges
-                    .into_iter()
-                    .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
-                    .collect(),
-                fetched
-                    .services
-                    .edges
-                    .into_iter()
-                    .map(|service| {
-                        NormalisedService::new(
-                            service.node.id,
-                            service.node.name,
-                            service
-                                .node
-                                .service_instances
-                                .edges
-                                .into_iter()
-                                .map(|instance| instance.node.environment_id)
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            ),
             ProjectType::Personal(personal) => NormalisedProject::new(
                 personal.id,
                 personal.name,
@@ -318,8 +320,7 @@ impl<'a> Display for Team<'a> {
 #[derive(Debug, Clone)]
 enum ProjectType {
     Personal(UserProjectsMeProjectsEdgesNode),
-    Team(ProjectsProjectsEdgesNode),
-    Fetched(ProjectProject),
+    Team(UserProjectsMeTeamsEdgesNodeProjectsEdgesNode),
 }
 
 #[derive(Debug, Clone)]
@@ -330,7 +331,6 @@ impl Display for Project {
         match &self.0 {
             ProjectType::Personal(personal) => write!(f, "{}", personal.name),
             ProjectType::Team(team_project) => write!(f, "{}", team_project.name),
-            ProjectType::Fetched(fetched) => write!(f, "{}", fetched.name),
         }
     }
 }
