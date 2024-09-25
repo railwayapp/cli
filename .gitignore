@@ -4,3 +4,4 @@ bin/railway
 .envrc
 .direnv/*
 .env
+.DS_Store
