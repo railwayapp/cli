@@ -13,6 +13,7 @@ use super::{
     },
     *,
 };
+use regex::Regex;
 
 /// Associate existing project with current directory, may specify projectId as an argument
 #[derive(Parser)]
@@ -44,31 +45,79 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     )
     .await?
     .me;
-    let team = if let Some(team_arg) = args.team {
-        match team_arg.to_lowercase().as_str() {
-            "personal" => {
+
+    let regex =
+        Regex::new(r#"(?i)^[0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}"#)
+            .unwrap();
+    let team = match (args.project.as_ref(), args.team.as_ref()) {
+        (Some(project), None) if regex.is_match(project) => {
+            // It's a project id, figure out team
+            if me
+                .projects
+                .edges
+                .iter()
+                .any(|pro| pro.node.id.eq_ignore_ascii_case(project))
+            {
                 fake_select("Select a team", "Personal");
                 Team::Personal
+            } else if let Some(team) = me.teams.edges.iter().find(|team| {
+                team.node
+                    .projects
+                    .edges
+                    .iter()
+                    .any(|proj| proj.node.id.eq_ignore_ascii_case(project))
+            }) {
+                fake_select("Select a team", &team.node.name);
+                Team::Team(&team.node)
+            } else {
+                dbg!("ouch");
+                return Err(RailwayError::ProjectNotFound.into());
             }
-            _ => {
-                let team = me.teams.edges.iter().find(|team| {
-                    (team.node.name.to_lowercase() == team_arg.to_lowercase())
-                        || (team.node.id.to_lowercase() == team_arg.to_lowercase())
-                });
-                if let Some(team) = team {
-                    fake_select("Select a team", &team.node.name);
-                    Team::Team(&team.node)
+        }
+        (Some(project), None) => {
+            // this means project name without team
+            if me.teams.edges.is_empty() {
+                // no teams, so it's personal
+                // if there is a project that has the same name
+                if me
+                    .projects
+                    .edges
+                    .iter()
+                    .any(|p| p.node.name.to_lowercase() == project.to_lowercase())
+                {
+                    fake_select("Select a team", "Personal");
+                    Team::Personal
                 } else {
-                    return Err(RailwayError::TeamNotFound(team_arg).into());
+                    return Err(RailwayError::ProjectNotFound.into());
+                }
+            } else {
+                prompt_teams(&me)?
+            }
+        }
+        (None, Some(team_arg)) | (Some(_), Some(team_arg)) => {
+            match team_arg.to_lowercase().as_str() {
+                "personal" => {
+                    fake_select("Select a team", "Personal");
+                    Team::Personal
+                }
+                _ => {
+                    if let Some(team) = me.teams.edges.iter().find(|team| {
+                        (team.node.name.to_lowercase() == team_arg.to_lowercase())
+                            || (team.node.id.to_lowercase() == team_arg.to_lowercase())
+                    }) {
+                        fake_select("Select a team", &team.node.name);
+                        Team::Team(&team.node)
+                    } else {
+                        return Err(RailwayError::TeamNotFound(team_arg.clone()).into());
+                    }
                 }
             }
         }
-    } else {
-        let teams: Vec<&UserProjectsMeTeamsEdgesNode> =
-            me.teams.edges.iter().map(|team| &team.node).collect();
-        let mut team_names = vec![Team::Personal];
-        team_names.extend(teams.into_iter().map(Team::Team));
-        prompt_options("Select a team", team_names)?
+        (None, None) if !me.teams.edges.is_empty() => prompt_teams(&me)?,
+        (None, None) => {
+            fake_select("Select a team", "Personal");
+            Team::Personal
+        },
     };
 
     let project = NormalisedProject::from(match team {
@@ -168,6 +217,14 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     configs.write()?;
 
     Ok(())
+}
+
+fn prompt_teams(me: &queries::user_projects::UserProjectsMe) -> Result<Team<'_>> {
+    let teams: Vec<&UserProjectsMeTeamsEdgesNode> =
+        me.teams.edges.iter().map(|team| &team.node).collect();
+    let mut team_names = vec![Team::Personal];
+    team_names.extend(teams.into_iter().map(Team::Team));
+    prompt_options("Select a team", team_names)
 }
 
 fn prompt_team_projects(
