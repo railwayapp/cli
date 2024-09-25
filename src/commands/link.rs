@@ -56,7 +56,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 .projects
                 .edges
                 .iter()
-                .any(|pro| pro.node.id.eq_ignore_ascii_case(project))
+                .any(|pro| pro.node.id.to_lowercase() == project.to_lowercase())
             {
                 fake_select("Select a team", "Personal");
                 Team::Personal
@@ -65,7 +65,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                     .projects
                     .edges
                     .iter()
-                    .any(|proj| proj.node.id.eq_ignore_ascii_case(project))
+                    .any(|proj| proj.node.id.to_lowercase() == project.to_lowercase())
             }) {
                 fake_select("Select a team", &team.node.name);
                 Team::Team(&team.node)
@@ -117,7 +117,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         (None, None) => {
             fake_select("Select a team", "Personal");
             Team::Personal
-        },
+        }
     };
 
     let project = NormalisedProject::from(match team {
