@@ -30,9 +30,7 @@ pub struct Args {
     /// The "{key}={value}" environment variable pair to set the service variables.
     /// Example:
     ///
-    /// ```bash
     /// railway variables --set "MY_SPECIAL_ENV_VAR=1" --set "BACKEND_PORT=3000"
-    /// ```
     #[clap(long)]
     set: Vec<String>,
 }
