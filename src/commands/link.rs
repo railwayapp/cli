@@ -216,24 +216,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     configs.write()?;
 
-    let linked_project = configs.get_linked_project().await?;
-    let project = get_project(&client, &configs, linked_project.project.to_owned()).await?;
-
-    println!(
-        "\n{} {} {}",
-        "Project".green(),
-        project.name.magenta().bold(),
-        "linked successfully! 🎉".green()
-    );
-    println!("  Next steps:");
-    println!("    - {} Deploy your project", "railway up".blue());
-    println!(
-        "    - {} {} Run a command locally with variables from Railway",
-        "railway run".blue(),
-        "<command>".blue().bold()
-    );
-    println!("    - {} See what else you can do", "railway --help".blue());
-
     Ok(())
 }
 
