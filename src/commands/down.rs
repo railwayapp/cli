@@ -9,6 +9,7 @@ use super::{
 use crate::{
     consts::TICK_STRING,
     controllers::{environment::get_matched_environment, project::get_project},
+    errors::RailwayError,
     util::prompt::prompt_confirm_with_default,
 };
 
@@ -55,7 +56,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // Otherwise if we have a linked service, use that
         (_, Some(linked_service)) => linked_service,
         // Otherwise it's a user error
-        _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
+        _ => bail!(RailwayError::NoServiceLinked),
     };
 
     let vars = queries::deployments::Variables {

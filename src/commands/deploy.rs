@@ -23,9 +23,7 @@ pub struct Args {
     /// To specify the variable for a single service prefix it with "{service}."
     /// Example:
     ///
-    /// ```bash
     /// railway deploy -t postgres -v "MY_SPECIAL_ENV_VAR=1" -v "Backend.Port=3000"
-    /// ```
     #[arg(short, long)]
     variable: Vec<String>,
 }

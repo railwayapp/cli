@@ -1,0 +1,5 @@
+mutation VariableCollectionUpsert($projectId: String!, $serviceId: String!, $environmentId: String!, $variables: EnvironmentVariables!) {
+  variableCollectionUpsert(
+    input: {projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, variables: $variables}
+  )
+}

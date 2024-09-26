@@ -10,15 +10,13 @@ scalar CanvasConfig
 scalar DateTime
 scalar DeploymentMeta
 scalar DisplayConfig
+"EnvironmentVariables is a custom scalar type that represents a map of environment variables."
+scalar EnvironmentVariables
 scalar EventProperties
 "The `JSON` scalar type represents JSON values as specified by [ECMA-404](http://www.ecma-international.org/publications/files/ECMA-ST/ECMA-404.pdf)."
 scalar JSON
 scalar SerializedTemplateConfig
 scalar ServiceInstanceLimit
-"""
-The ServiceVariables scalar type represents values as the TypeScript type: Record<string, string>. Example: "{ foo: 'bar', baz: 'qux' }"
-"""
-scalar ServiceVariables
 scalar SubscriptionPlanLimit
 scalar TemplateConfig
 scalar TemplateMetadata
@@ -239,11 +237,20 @@ type DeploymentEvent implements Node {
 type DeploymentEventPayload {
   error: String
 }
+type DeploymentInstanceExecution implements Node {
+  completedAt: DateTime
+  createdAt: DateTime!
+  deploymentId: String!
+  deploymentMeta: DeploymentMeta!
+  id: ID!
+  status: DeploymentInstanceStatus!
+  updatedAt: DateTime!
+}
 type DeploymentSnapshot implements Node {
   createdAt: DateTime!
   id: ID!
   updatedAt: DateTime!
-  variables: ServiceVariables!
+  variables: EnvironmentVariables!
 }
 type DeploymentSocket {
   ipv6: Boolean!
@@ -381,6 +388,47 @@ type HerokuApp {
   id: String!
   name: String!
 }
+"The result of a http logs query."
+type HttpLog {
+  "The client user agent"
+  clientUa: String!
+  "The deployment ID that was requested"
+  deploymentId: String!
+  "The deployment instance ID that was requested"
+  deploymentInstanceId: String!
+  "The downstream HTTP protocol version"
+  downstreamProto: String!
+  "The edge region the client connected to"
+  edgeRegion: String!
+  "The requested host"
+  host: String!
+  "The http status of the log"
+  httpStatus: Int!
+  "The request HTTP method"
+  method: String!
+  "The requested path"
+  path: String!
+  "The unique request ID"
+  requestId: String!
+  "Details about the upstream response"
+  responseDetails: String!
+  "Received bytes"
+  rxBytes: Int!
+  "The source IP of the request"
+  srcIp: String!
+  "The timestamp the log was created"
+  timestamp: String!
+  "The total duration the request took"
+  totalDuration: Int!
+  "Outgoing bytes"
+  txBytes: Int!
+  "The upstream address"
+  upstreamAddress: String!
+  "The upstream HTTP protocol version"
+  upstreamProto: String!
+  "How long the upstream request took to respond"
+  upstreamRqDuration: Int!
+}
 type Incident {
   id: String!
   message: String!
@@ -491,8 +539,12 @@ type Mutation {
   customerMigrateToHobbyPlan(id: String!): Boolean!
   "Toggle whether a customer is automatically withdrawing to credits"
   customerTogglePayoutsToCredits(customerId: String!, input: customerTogglePayoutsToCreditsInput!): Boolean!
+  "Approves a deployment."
+  deploymentApprove(id: String!): Boolean!
   "Cancels a deployment."
   deploymentCancel(id: String!): Boolean!
+  "Invoke a deployment instance execution."
+  deploymentInstanceExecutionCreate(input: DeploymentInstanceExecutionCreateInput!): Boolean!
   "Redeploys a deployment."
   deploymentRedeploy(id: String!, usePreviousImageTag: Boolean): Deployment!
   "Removes a deployment."
@@ -664,7 +716,7 @@ type Mutation {
   "Remove a feature flag for a service"
   serviceFeatureFlagRemove(input: ServiceFeatureFlagToggleInput!): Boolean!
   "Deploy a service instance"
-  serviceInstanceDeploy(environmentId: String!, serviceId: String!): Boolean!
+  serviceInstanceDeploy(commitSha: String, environmentId: String!, serviceId: String!): Boolean!
   "Update the resource limits for a service instance"
   serviceInstanceLimitsUpdate(input: ServiceInstanceLimitsUpdateInput!): Boolean!
   "Redeploy a service instance"
@@ -711,8 +763,6 @@ type Mutation {
   telemetrySend(input: TelemetrySendInput!): Boolean!
   "Duplicates an existing template"
   templateClone(input: TemplateCloneInput!): Template!
-  "Creates a template."
-  templateCreate(input: TemplateCreateInput!): Template!
   "Deletes a template."
   templateDelete(id: String!, input: TemplateDeleteInput!): Boolean!
   "Deploys a template."
@@ -727,8 +777,6 @@ type Mutation {
   templateServiceSourceEject(input: TemplateServiceSourceEjectInput!): Boolean!
   "Unpublishes a template."
   templateUnpublish(id: String!): Boolean!
-  "Updates a template."
-  templateUpdate(id: String!, input: TemplateUpdateInput!): Template!
   "Setup 2FA authorization for authenticated user."
   twoFactorInfoCreate(input: TwoFactorInfoCreateInput!): RecoveryCodes!
   "Deletes the TwoFactorInfo for the authenticated user."
@@ -1084,6 +1132,8 @@ type Query {
   deployment(id: String!): Deployment!
   "Get the deployment events for a deployment"
   deploymentEvents(after: String, before: String, first: Int, id: String!, last: Int): QueryDeploymentEventsConnection!
+  "Get the deployment instance executions for a deployment."
+  deploymentInstanceExecutions(after: String, before: String, first: Int, input: DeploymentInstanceExecutionListInput!, last: Int): QueryDeploymentInstanceExecutionsConnection!
   "Fetch logs for a deployment"
   deploymentLogs(deploymentId: String!, endDate: DateTime, 
     "Filter logs by a string. Providing an empty value will match all logs."
@@ -1108,7 +1158,7 @@ type Query {
   environmentPatches(after: String, before: String, environmentId: String!, first: Int, last: Int): QueryEnvironmentPatchesConnection!
   "Gets all environments for a project."
   environments(after: String, before: String, first: Int, isEphemeral: Boolean, last: Int, projectId: String!): QueryEnvironmentsConnection!
-  "Get the estimated total cost of the project at the end of the current billing cycle"
+  "Get the estimated total cost of the project at the end of the current billing cycle. If no `startDate` is provided, the usage for the current billing period of the project owner is returned."
   estimatedUsage(
     "Whether to include deleted projects in estimations."
     includeDeleted: Boolean,measurements: [MetricMeasurement!]!, projectId: String, teamId: String, userId: String  ): [EstimatedUsage!]!
@@ -1126,6 +1176,12 @@ type Query {
   githubWritableScopes: [String!]!
   "Get the Herokus apps for the current user"
   herokuApps: [HerokuApp!]!
+  "Fetch HTTP logs for a deployment"
+  httpLogs(deploymentId: String!, endDate: String, 
+    "Filter logs by a string. Providing an empty value will match all logs."
+    filter: String,
+    "Limit the number of logs returned (defaults 100, max 5000)"
+    limit: Int,startDate: String  ): [HttpLog!]!
   "Get an integration auth by provider providerId"
   integrationAuth(provider: String!, providerId: String!): IntegrationAuth!
   "Get all integration auths for a user"
@@ -1243,7 +1299,7 @@ type Query {
   ): QueryTemplatesConnection!
   "Gets the TwoFactorInfo for the authenticated user."
   twoFactorInfo: TwoFactorInfo!
-  "Get the usage for a single project or all projects for a user/team. If no `projectId` or `teamId` is provided, the usage for the current user is returned."
+  "Get the usage for a single project or all projects for a user/team. If no `projectId` or `teamId` is provided, the usage for the current user is returned. If no `startDate` is provided, the usage for the current billing period of the project owner is returned."
   usage(endDate: DateTime, 
     "What to group the aggregated usage by. By default, it is grouped over the entire project."
     groupBy: [MetricTag!],
@@ -1264,9 +1320,9 @@ type Query {
     "Provide a pluginId to get all variables for a specific plugin."
     pluginId: String,projectId: String!, 
     "Provide a serviceId to get all variables for a specific service."
-    serviceId: String,unrendered: Boolean  ): ServiceVariables!
+    serviceId: String,unrendered: Boolean  ): EnvironmentVariables!
   "All rendered variables that are required for a service deployment."
-  variablesForServiceDeployment(environmentId: String!, projectId: String!, serviceId: String!): ServiceVariables!
+  variablesForServiceDeployment(environmentId: String!, projectId: String!, serviceId: String!): EnvironmentVariables!
   "Get information about the user's Vercel accounts"
   vercelInfo: VercelInfo!
   "Get a single volume instance by id"
@@ -1291,6 +1347,14 @@ type QueryDeploymentEventsConnection {
 type QueryDeploymentEventsConnectionEdge {
   cursor: String!
   node: DeploymentEvent!
+}
+type QueryDeploymentInstanceExecutionsConnection {
+  edges: [QueryDeploymentInstanceExecutionsConnectionEdge!]!
+  pageInfo: PageInfo!
+}
+type QueryDeploymentInstanceExecutionsConnectionEdge {
+  cursor: String!
+  node: DeploymentInstanceExecution!
 }
 type QueryDeploymentTriggersConnection {
   edges: [QueryDeploymentTriggersConnectionEdge!]!
@@ -1440,11 +1504,24 @@ type RefundRequest implements Node {
   userId: String!
 }
 type Region {
-  adminOnly: Boolean
-  country: String
-  location: String
+  adminOnly: Boolean @deprecated(reason: "Use deploymentConstraints.adminOnly")
+  "Region country"
+  country: String!
+  deploymentConstraints: RegionDeploymentConstraints
+  location: String!
   name: String!
+  "Region is on Railway Metal"
+  railwayMetal: Boolean
   region: String
+}
+type RegionDeploymentConstraints {
+  "Admin only region"
+  adminOnly: Boolean
+  "Region doesn't allow volumes"
+  computeOnly: Boolean
+  runtimeExclusivity: [String!]
+  "Staging only region"
+  stagingOnly: Boolean
 }
 type ResourceAccess {
   project: AccessRule!
@@ -1507,6 +1584,7 @@ type ServiceInstance implements Node {
   restartPolicyType: RestartPolicyType!
   rootDirectory: String
   serviceId: String!
+  serviceName: String!
   sleepApplication: Boolean
   source: ServiceSource
   startCommand: String
@@ -1567,6 +1645,8 @@ type Subscription {
   deployment(id: String!): Deployment!
   "Subscribe to deployment events for a specific deployment"
   deploymentEvents(id: String!): DeploymentEvent!
+  "Subscribe to deployment instance executions for a specific deployment"
+  deploymentInstanceExecutions(input: DeploymentInstanceExecutionInput!): DeploymentInstanceExecution!
   "Stream logs for a deployment"
   deploymentLogs(deploymentId: String!, 
     "Filter logs by a string. Providing an empty value will match all logs."
@@ -1574,6 +1654,21 @@ type Subscription {
     "Limit the number of logs returned (defaults 100, max 5000)"
     limit: Int
   ): [Log!]!
+  "Stream HTTP logs for a deployment"
+  httpLogs(
+    "Latest date to look for logs after the anchor"
+    afterDate: String,
+    "Limit the number of logs returned after the anchor"
+    afterLimit: Int,
+    "Target date time to look for logs"
+    anchorDate: String,
+    "Oldest date to look for logs before the anchor"
+    beforeDate: String,
+    "Limit the number of logs returned before the anchor"
+    beforeLimit: Int,deploymentId: String!, 
+    "Filter logs using a query syntax"
+    filter: String
+  ): [HttpLog!]!
   "Stream logs for a plugin"
   pluginLogs(environmentId: String!, 
     "Filter logs by a string. Providing an empty value will match all logs."
@@ -1613,6 +1708,7 @@ type Team implements Node {
   isEligibleForDirectSupport: Boolean!
   members: [TeamMember!]!
   name: String!
+  preferredRegion: String
   projects(after: String, before: String, first: Int, last: Int): TeamProjectsConnection!
   slackChannelId: String
   teamPermissions: [TeamPermission!]!
@@ -1656,22 +1752,30 @@ type TeamProjectsConnectionEdge {
 type Template implements Node {
   activeProjects: Int!
   canvasConfig: CanvasConfig
+  category: String
   code: String!
   communityThreadSlug: String
   config: TemplateConfig!
   createdAt: DateTime!
   creator: TemplateCreator
   demoProjectId: String
+  description: String
+  guides: TemplateGuide
   health: Float
   id: ID!
+  image: String
   isApproved: Boolean!
   isV2Template: Boolean!
-  metadata: TemplateMetadata!
+  languages: [String!]
+  metadata: TemplateMetadata! @deprecated(reason: "Deprecated in favor of listing the fields individually.")
+  name: String!
   projects: Int!
+  readme: String
   serializedConfig: SerializedTemplateConfig
   services(after: String, before: String, first: Int, last: Int): TemplateServicesConnection!
   similarTemplates: [SimilarTemplate!]!
   status: TemplateStatus!
+  tags: [String!]
   teamId: String
   totalPayout: Float!
   userId: String
@@ -1685,6 +1789,10 @@ type TemplateCreator {
 type TemplateDeployPayload {
   projectId: String!
   workflowId: String
+}
+type TemplateGuide {
+  post: String
+  video: String
 }
 type TemplateKickbacksLeaderboard {
   total_amount: Float!
@@ -1821,6 +1929,7 @@ type Variable implements Node {
   environment: Environment!
   environmentId: String
   id: ID!
+  isSealed: Boolean!
   name: String!
   plugin: Plugin!
   pluginId: String
@@ -1912,9 +2021,11 @@ interface Node {
 }
 union PublicProjectInvitation = InviteCode | ProjectInvitation
 enum ActiveFeatureFlag {
+  DATABASE_UI_V2
   PRIORITY_BOARDING
 }
 enum ActiveServiceFeatureFlag {
+  OLD_CRON_EXPERIENCE
   PLACEHOLDER
 }
 enum Builder {
@@ -1976,12 +2087,24 @@ enum DeploymentEventStep {
   PUBLISH_IMAGE
   SNAPSHOT_CODE
 }
+enum DeploymentInstanceStatus {
+  CRASHED
+  CREATED
+  EXITED
+  INITIALIZING
+  REMOVED
+  REMOVING
+  RESTARTING
+  RUNNING
+  SKIPPED
+}
 enum DeploymentStatus {
   BUILDING
   CRASHED
   DEPLOYING
   FAILED
   INITIALIZING
+  NEEDS_APPROVAL
   QUEUED
   REMOVED
   REMOVING
@@ -2175,6 +2298,16 @@ input CustomDomainCreateInput {
   projectId: String!
   serviceId: String!
   targetPort: Int
+}
+input DeploymentInstanceExecutionCreateInput {
+  serviceInstanceId: String!
+}
+input DeploymentInstanceExecutionInput {
+  deploymentId: String!
+}
+input DeploymentInstanceExecutionListInput {
+  environmentId: String!
+  serviceId: String!
 }
 input DeploymentListInput {
   environmentId: String
@@ -2439,6 +2572,7 @@ input ResetPluginInput {
   environmentId: String!
 }
 input SendCommunityThreadNotificationEmailInput {
+  postEntryContent: String
   threadTitle: String!
   threadUrl: String!
   userIds: [String!]!
@@ -2461,7 +2595,7 @@ input ServiceCreateInput {
   registryCredentials: RegistryCredentialsInput
   source: ServiceSourceInput
   templateServiceId: String
-  variables: ServiceVariables
+  variables: EnvironmentVariables
 }
 input ServiceDomainCreateInput {
   environmentId: String!
@@ -2549,7 +2683,8 @@ input TeamPermissionChangeInput {
 }
 input TeamUpdateInput {
   avatar: String
-  name: String!
+  name: String
+  preferredRegion: String
 }
 input TeamUserInviteInput {
   code: String!
@@ -2568,14 +2703,6 @@ input TelemetrySendInput {
 }
 input TemplateCloneInput {
   code: String!
-  teamId: String
-}
-input TemplateCreateInput {
-  canvasConfig: CanvasConfig
-  config: TemplateConfig!
-  demoProjectId: String
-  metadata: TemplateMetadata!
-  services: [TemplateServiceCreateInput!]!
   teamId: String
 }
 input TemplateDeleteInput {
@@ -2602,7 +2729,7 @@ input TemplateDeployService {
   startCommand: String
   tcpProxyApplicationPort: Int
   template: String!
-  variables: ServiceVariables
+  variables: EnvironmentVariables
   volumes: [TemplateVolume!]
 }
 input TemplateGenerateInput {
@@ -2617,9 +2744,6 @@ input TemplatePublishInput {
   readme: String!
   teamId: String
 }
-input TemplateServiceCreateInput {
-  config: TemplateServiceConfig!
-}
 input TemplateServiceSourceEjectInput {
   projectId: String!
   repoName: String!
@@ -2627,20 +2751,6 @@ input TemplateServiceSourceEjectInput {
   "Provide multiple serviceIds when ejecting services from a monorepo."
   serviceIds: [String!]!
   upstreamUrl: String!
-}
-input TemplateServiceUpdateInput {
-  config: TemplateServiceConfig!
-  id: String
-}
-input TemplateUpdateInput {
-  canvasConfig: CanvasConfig
-  config: TemplateConfig!
-  demoProjectId: String
-  "An admin-only flag to force-update a template."
-  forceUpdate: Boolean = false
-  metadata: TemplateMetadata!
-  services: [TemplateServiceUpdateInput!]!
-  teamId: String
 }
 input TwoFactorInfoCreateInput {
   token: String!
@@ -2681,7 +2791,7 @@ input VariableCollectionUpsertInput {
   "When set to true, removes all existing variables before upserting the new collection."
   replace: Boolean = false
   serviceId: String
-  variables: ServiceVariables!
+  variables: EnvironmentVariables!
 }
 input VariableDeleteInput {
   environmentId: String!
