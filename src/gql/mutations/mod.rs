@@ -1,6 +1,5 @@
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
-type ServiceVariables = std::collections::BTreeMap<String, String>;
 type EnvironmentVariables = std::collections::BTreeMap<String, String>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
