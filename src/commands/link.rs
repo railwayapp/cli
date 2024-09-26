@@ -46,11 +46,144 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     .await?
     .me;
 
-    let regex =
+    let team = select_team(args.project.clone(), args.team, &me)?;
+
+    let project = select_project(team, args.project.clone(), &me)?;
+
+    let environment = select_environment(args.environment, &project)?;
+
+    let service = select_service(&project, &environment, args.service)?;
+
+    configs.link_project(
+        project.id,
+        Some(project.name),
+        environment.id,
+        Some(environment.name),
+    )?;
+    if let Some(service) = service {
+        configs.link_service(service.id)?;
+    }
+
+    configs.write()?;
+
+    Ok(())
+}
+
+fn select_service(
+    project: &NormalisedProject,
+    environment: &NormalisedEnvironment,
+    service: Option<String>,
+) -> Result<Option<NormalisedService>, anyhow::Error> {
+    let useful_services = project
+        .services
+        .iter()
+        .filter(|&a| {
+            a.service_instances
+                .iter()
+                .any(|instance| instance == &environment.id)
+        })
+        .cloned()
+        .collect::<Vec<NormalisedService>>();
+    let service = if !useful_services.is_empty() {
+        Some(if let Some(service) = service {
+            let service_norm = useful_services.iter().find(|s| {
+                (s.name.to_lowercase() == service.to_lowercase())
+                    || (s.id.to_lowercase() == service.to_lowercase())
+            });
+            if let Some(service) = service_norm {
+                fake_select("Select a service", &service.name);
+                service.clone()
+            } else {
+                return Err(RailwayError::ServiceNotFound(service).into());
+            }
+        } else {
+            prompt_options("Select a service", useful_services)?
+        })
+    } else {
+        None
+    };
+    Ok(service)
+}
+
+fn select_environment(
+    environment: Option<String>,
+    project: &NormalisedProject,
+) -> Result<NormalisedEnvironment, anyhow::Error> {
+    let environment = if let Some(environment) = environment {
+        let env = project.environments.iter().find(|e| {
+            (e.name.to_lowercase() == environment.to_lowercase())
+                || (e.id.to_lowercase() == environment.to_lowercase())
+        });
+        if let Some(env) = env {
+            fake_select("Select an environment", &env.name);
+            env.clone()
+        } else {
+            return Err(RailwayError::EnvironmentNotFound(environment).into());
+        }
+    } else if project.environments.len() == 1 {
+        let env = project.environments[0].clone();
+        fake_select("Select an environment", &env.name);
+        env
+    } else {
+        prompt_options("Select an environment", project.environments.clone())?
+    };
+    Ok(environment)
+}
+
+fn select_project(
+    team: Team<'_>,
+    project: Option<String>,
+    me: &queries::user_projects::UserProjectsMe,
+) -> Result<NormalisedProject, anyhow::Error> {
+    let project = NormalisedProject::from(match team {
+        Team::Personal => {
+            if let Some(project) = project {
+                let proj = me.projects.edges.iter().find(|pro| {
+                    (pro.node.id.to_lowercase() == project.to_lowercase())
+                        || (pro.node.name.to_lowercase() == project.to_lowercase())
+                });
+                if let Some(project) = proj {
+                    fake_select("Select a project", &project.node.name);
+                    Project(ProjectType::Personal(project.node.clone()))
+                } else {
+                    return Err(RailwayError::ProjectNotFound.into());
+                }
+            } else {
+                prompt_personal_projects(me)?
+            }
+        }
+        Team::Team(team) => {
+            if let Some(project) = project {
+                let proj = team.projects.edges.iter().find(|pro| {
+                    (pro.node.id.to_lowercase() == project.to_lowercase())
+                        || (pro.node.name.to_lowercase() == project.to_lowercase())
+                });
+                if let Some(project) = proj {
+                    fake_select("Select a project", &project.node.name);
+                    Project(ProjectType::Team(project.node.clone()))
+                } else {
+                    return Err(
+                        RailwayError::ProjectNotFoundInTeam(project, team.name.clone()).into(),
+                    );
+                }
+            } else {
+                prompt_team_projects(team.projects.clone())?
+            }
+        }
+    });
+    Ok(project)
+}
+
+fn select_team(
+    project: Option<String>,
+    team: Option<String>,
+    me: &queries::user_projects::UserProjectsMe,
+) -> Result<Team<'_>, anyhow::Error> {
+    let uuid_regex =
         Regex::new(r#"(?i)^[0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}"#)
             .unwrap();
-    let team = match (args.project.as_ref(), args.team.as_ref()) {
-        (Some(project), None) if regex.is_match(project) => {
+    let team = match (project.as_ref(), team.as_ref()) {
+        (Some(project), None) if uuid_regex.is_match(project) => {
             // It's a project id, figure out team
             if me
                 .projects
@@ -70,7 +203,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 fake_select("Select a team", &team.node.name);
                 Team::Team(&team.node)
             } else {
-                dbg!("ouch");
                 return Err(RailwayError::ProjectNotFound.into());
             }
         }
@@ -91,7 +223,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                     return Err(RailwayError::ProjectNotFound.into());
                 }
             } else {
-                prompt_teams(&me)?
+                prompt_teams(me)?
             }
         }
         (None, Some(team_arg)) | (Some(_), Some(team_arg)) => {
@@ -113,117 +245,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 }
             }
         }
-        (None, None) if !me.teams.edges.is_empty() => prompt_teams(&me)?,
+        (None, None) if !me.teams.edges.is_empty() => prompt_teams(me)?,
         (None, None) => {
             fake_select("Select a team", "Personal");
             Team::Personal
         }
     };
-
-    let project = NormalisedProject::from(match team {
-        Team::Personal => {
-            if let Some(project) = args.project {
-                let proj = me.projects.edges.iter().find(|pro| {
-                    (pro.node.id.to_lowercase() == project.to_lowercase())
-                        || (pro.node.name.to_lowercase() == project.to_lowercase())
-                });
-                if let Some(project) = proj {
-                    fake_select("Select a project", &project.node.name);
-                    Project(ProjectType::Personal(project.node.clone()))
-                } else {
-                    return Err(RailwayError::ProjectNotFound.into());
-                }
-            } else {
-                prompt_personal_projects(me)?
-            }
-        }
-        Team::Team(team) => {
-            if let Some(project) = args.project {
-                let proj = team.projects.edges.iter().find(|pro| {
-                    (pro.node.id.to_lowercase() == project.to_lowercase())
-                        || (pro.node.name.to_lowercase() == project.to_lowercase())
-                });
-                if let Some(project) = proj {
-                    fake_select("Select a project", &project.node.name);
-                    Project(ProjectType::Team(project.node.clone()))
-                } else {
-                    return Err(
-                        RailwayError::ProjectNotFoundInTeam(project, team.name.clone()).into(),
-                    );
-                }
-            } else {
-                prompt_team_projects(team.projects.clone())?
-            }
-        }
-    });
-
-    let environment = if let Some(environment) = args.environment {
-        let env = project.environments.iter().find(|e| {
-            (e.name.to_lowercase() == environment.to_lowercase())
-                || (e.id.to_lowercase() == environment.to_lowercase())
-        });
-        if let Some(env) = env {
-            fake_select("Select an environment", &env.name);
-            env.clone()
-        } else {
-            return Err(RailwayError::EnvironmentNotFound(environment).into());
-        }
-    } else if project.environments.len() == 1 {
-        let env = project.environments[0].clone();
-        fake_select("Select an environment", &env.name);
-        env
-    } else {
-        prompt_options("Select an environment", project.environments)?
-    };
-    let useful_services = project
-        .services
-        .iter()
-        .filter(|&a| {
-            a.service_instances
-                .iter()
-                .any(|instance| instance == &environment.id)
-        })
-        .cloned()
-        .collect::<Vec<NormalisedService>>();
-    let service = if !useful_services.is_empty() {
-        Some(if let Some(service) = args.service {
-            let service_norm = useful_services.iter().find(|s| {
-                (s.name.to_lowercase() == service.to_lowercase())
-                    || (s.id.to_lowercase() == service.to_lowercase())
-            });
-            if let Some(service) = service_norm {
-                fake_select("Select a service", &service.name);
-                service.clone()
-            } else {
-                // still link project and env
-                configs.link_project(
-                    project.id,
-                    Some(project.name),
-                    environment.id,
-                    Some(environment.name),
-                )?;
-                return Err(RailwayError::ServiceNotFound(service).into());
-            }
-        } else {
-            prompt_options("Select a service", useful_services)?
-        })
-    } else {
-        None
-    };
-
-    configs.link_project(
-        project.id,
-        Some(project.name),
-        environment.id,
-        Some(environment.name),
-    )?;
-    if let Some(service) = service {
-        configs.link_service(service.id)?;
-    }
-
-    configs.write()?;
-
-    Ok(())
+    Ok(team)
 }
 
 fn prompt_teams(me: &queries::user_projects::UserProjectsMe) -> Result<Team<'_>> {
@@ -255,7 +283,7 @@ fn prompt_team_projects(
 }
 
 fn prompt_personal_projects(
-    me: queries::user_projects::UserProjectsMe,
+    me: &queries::user_projects::UserProjectsMe,
 ) -> Result<Project, anyhow::Error> {
     let mut personal_projects = me
         .projects
