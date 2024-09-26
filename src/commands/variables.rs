@@ -163,6 +163,6 @@ async fn set_variables(
     };
     post_graphql::<mutations::VariableCollectionUpsert, _>(client, configs.get_backboard(), vars)
         .await?;
-    spinner.finish_with_message(format!("Set {fmt_variables}"));
+    spinner.finish_with_message(format!("Set variables {fmt_variables}"));
     Ok(())
 }
