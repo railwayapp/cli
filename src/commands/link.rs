@@ -195,6 +195,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 fake_select("Select a service", &service.name);
                 service.clone()
             } else {
+                // still link project and env
+                configs.link_project(
+                    project.id,
+                    Some(project.name),
+                    environment.id,
+                    Some(environment.name),
+                )?;
                 return Err(RailwayError::ServiceNotFound(service).into());
             }
         } else {
