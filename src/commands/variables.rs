@@ -67,53 +67,15 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     };
 
     if !args.set.is_empty() {
-        let variables: BTreeMap<String, String> = args
-            .set
-            .iter()
-            .filter_map(|v| {
-                let mut split = v.split('=');
-                let key = split.next()?.trim().to_owned();
-                let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
-                if value.is_empty() {
-                    None
-                } else {
-                    Some((key, value))
-                }
-            })
-            .collect();
-
-        let fmt_variables = variables
-            .keys()
-            .map(|k| k.bold().to_string())
-            .collect::<Vec<String>>()
-            .join(", ");
-
-        let spinner = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")
-                    .expect("Failed to set spinner template"),
-            )
-            .with_message(format!("Setting {fmt_variables}..."));
-
-        spinner.enable_steady_tick(Duration::from_millis(100));
-
-        let vars = mutations::variable_collection_upsert::Variables {
-            project_id: linked_project.project.clone(),
+        set_variables(
+            args.set,
+            linked_project.project.clone(),
             environment_id,
             service_id,
-            variables,
-        };
-
-        post_graphql::<mutations::VariableCollectionUpsert, _>(
             &client,
-            configs.get_backboard(),
-            vars,
+            &configs,
         )
         .await?;
-
-        spinner.finish_with_message(format!("Set {fmt_variables}"));
         return Ok(());
     }
 
@@ -155,5 +117,52 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
     );
     table.print()?;
 
+    Ok(())
+}
+
+async fn set_variables(
+    set: Vec<String>,
+    project: String,
+    environment_id: String,
+    service_id: String,
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<(), anyhow::Error> {
+    let variables: BTreeMap<String, String> = set
+        .iter()
+        .filter_map(|v| {
+            let mut split = v.split('=');
+            let key = split.next()?.trim().to_owned();
+            let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
+            if value.is_empty() {
+                None
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect();
+    let fmt_variables = variables
+        .keys()
+        .map(|k| k.bold().to_string())
+        .collect::<Vec<String>>()
+        .join(", ");
+    let spinner = indicatif::ProgressBar::new_spinner()
+        .with_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars(TICK_STRING)
+                .template("{spinner:.green} {msg}")
+                .expect("Failed to set spinner template"),
+        )
+        .with_message(format!("Setting {fmt_variables}..."));
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    let vars = mutations::variable_collection_upsert::Variables {
+        project_id: project,
+        environment_id,
+        service_id,
+        variables,
+    };
+    post_graphql::<mutations::VariableCollectionUpsert, _>(client, configs.get_backboard(), vars)
+        .await?;
+    spinner.finish_with_message(format!("Set {fmt_variables}"));
     Ok(())
 }
