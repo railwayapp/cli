@@ -56,13 +56,20 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     configs.link_project(
         project.id,
-        Some(project.name),
+        Some(project.name.clone()),
         environment.id,
         Some(environment.name),
     )?;
     if let Some(service) = service {
         configs.link_service(service.id)?;
     }
+
+    println!(
+        "\n{} {} {}",
+        "Project".green(),
+        project.name.magenta().bold(),
+        "linked successfully! 🎉".green()
+    );
 
     configs.write()?;
 
