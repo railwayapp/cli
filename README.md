@@ -98,7 +98,7 @@ deploy-job:
 > GitLab can access a protected (secret) variable directly, all you need to do is to add it in CI/CD settings.
 
 ### From source
-See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for information on setting up this repo locally.
 
 ## Documentation
 [View the full documentation](https://docs.railway.app)
@@ -107,4 +107,4 @@ See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING
 
 We would love to hear your feedback or suggestions. The best way to reach us is on [Discord](https://discord.gg/railway).
 
-We also welcome pull requests into this repo. See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
+We also welcome pull requests into this repo. See [CONTRIBUTING.md](CONTRIBUTING.md) for information on setting up this repo locally.
