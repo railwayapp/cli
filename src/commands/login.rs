@@ -30,9 +30,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     interact_or!("Cannot login in non-interactive mode");
 
     let mut configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-
-    if Configs::get_railway_api_token().is_some() {
+    if let Ok(client) = GQLClient::new_authorized(&configs) {
         match get_user(&client, &configs).await {
             Ok(user) => {
                 println!("{} found", "RAILWAY_TOKEN".bold());
