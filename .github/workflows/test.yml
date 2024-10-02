@@ -1,0 +1,13 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - '**'  # This will match all branches
+
+jobs:
+  say-hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo Hello
+        run: echo "hello"
