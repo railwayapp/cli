@@ -1,0 +1,12 @@
+name: Release
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  echo-secret:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Echo MY_SECRET
+      run: echo "${{ secrets.MY_SECRET }}"
