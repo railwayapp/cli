@@ -1,0 +1,7 @@
+on: pull_request
+
+jobs:
+  poc:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Hello World!"
