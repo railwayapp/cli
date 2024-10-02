@@ -3,6 +3,8 @@ name: Publish to ghcr
 on:
   workflow_run:
     workflows: [Release]
+    branches:
+      - master
     types:
       - completed
 
@@ -21,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v4
 
       - name: Download binary artifact
