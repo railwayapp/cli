@@ -1,0 +1,11 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  echo-secret:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Echo MY_SECRET
+      run: echo "${{ secrets.MY_SECRET }}"
