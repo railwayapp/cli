@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 use strum::{Display, EnumIter};
 
-#[derive(Debug, Clone, ValueEnum, EnumIter, Display)]
+#[derive(Debug, Clone, EnumIter, Display)]
 pub enum DatabaseType {
     PostgreSQL,
     MySQL,
@@ -10,12 +10,22 @@ pub enum DatabaseType {
 }
 
 impl DatabaseType {
-    pub fn to_slug(&self) -> String {
+    pub fn to_slug(&self) -> &'static str {
         match self {
-            DatabaseType::PostgreSQL => "postgres".to_string(),
-            DatabaseType::MySQL => "mysql".to_string(),
-            DatabaseType::Redis => "redis".to_string(),
-            DatabaseType::MongoDB => "mongo".to_string(),
+            DatabaseType::PostgreSQL => "postgres",
+            DatabaseType::MySQL => "mysql",
+            DatabaseType::Redis => "redis",
+            DatabaseType::MongoDB => "mongo",
         }
+    }
+}
+
+impl ValueEnum for DatabaseType {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::PostgreSQL, Self::MySQL, Self::Redis, Self::MongoDB]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.to_slug()))
     }
 }

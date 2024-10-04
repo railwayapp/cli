@@ -57,6 +57,8 @@ pub struct ServiceDomainCreate;
 )]
 pub struct ValidateTwoFactor;
 
+pub type SerializedTemplateConfig = serde_json::Value;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
