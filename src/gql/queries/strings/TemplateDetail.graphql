@@ -1,14 +1,7 @@
 query TemplateDetail($code: String!) {
   template(code: $code) {
     id
+    name
     serializedConfig
-    services {
-      edges {
-        node {
-          id
-          config
-        }
-      }
-    }
   }
 }
