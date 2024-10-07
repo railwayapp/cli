@@ -17,61 +17,59 @@ name = "railway"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.69"
-clap = { version = "4.1.9", features = ["derive", "suggestions"] }
-colored = "2.0.0"
-dirs = "4.0.0"
-serde = { version = "1.0.156", features = ["derive"] }
-serde_json = "1.0.94"
-reqwest = { version = "0.11.14", default-features = false, features = [
-  "rustls-tls",
+anyhow = "1.0.89"
+clap = { version = "4.5.19", features = ["derive", "suggestions"] }
+colored = "2.1.0"
+dirs = "5.0.1"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+reqwest = { version = "0.12.8", default-features = false, features = [
+  "rustls-tls", "json"
 ] }
-chrono = { version = "0.4.24", features = ["serde"], default-features = false }
-graphql_client = { version = "0.13.0", features = ["reqwest-rustls"] }
-paste = "1.0.12"
-tokio = { version = "1.38.0", features = ["full"] }
-clap_complete = "4.1.5"
-open = "4.0.1"
-inquire = "0.5.3"
-hyper = { version = "1.3.1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-base64 = "0.21.0"
-http-body-util = "0.1.0-rc.2"
+chrono = { version = "0.4.38", features = ["serde"], default-features = false }
+graphql_client = { version = "0.14.0", features = ["reqwest-rustls"] }
+paste = "1.0.15"
+tokio = { version = "1.40.0", features = ["full"] }
+clap_complete = "4.5.32"
+open = "5.3.0"
+inquire = "0.7.5"
+hyper = { version = "1.4.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1.9", features = ["tokio"] }
+base64 = "0.22.1"
+http-body-util = "0.1.2"
 rand = "0.8.5"
-hostname = "0.3.1"
-indicatif = "0.17.3"
-indoc = "2.0.1"
-console = "0.15.5"
+hostname = "0.4.0"
+indicatif = "0.17.8"
+indoc = "2.0.5"
+console = "0.15.8"
 box_drawing = "0.1.2"
-textwrap = "0.16.0"
+textwrap = "0.16.1"
 gzp = { version = "0.11.3", default-features = false, features = [
   "deflate_rust",
 ] }
-tar = "0.4.38"
+tar = "0.4.42"
 synchronized-writer = "1.1.11"
-ignore = "0.4.20"
-num_cpus = "1.15.0"
-url = "2.3.1"
-futures = { version = "0.3.27", default-features = false, features = [
+ignore = "0.4.23"
+num_cpus = "1.16.0"
+url = "2.5.2"
+futures = { version = "0.3.31", default-features = false, features = [
   "compat",
   "io-compat",
 ] }
-uuid = { version = "1.3.0", features = ["serde", "v4"] }
-httparse = "1.8.0"
 names = { version = "0.14.0", default-features = false }
-graphql-ws-client = { version = "0.8.0", features = [
+graphql-ws-client = { version = "0.10.2", features = [
   "client-graphql-client",
   "tungstenite",
 ] }
-async-tungstenite = { version = "0.25.0", features = [
+async-tungstenite = { version = "0.27.0", features = [
   "tokio-runtime",
   "tokio-rustls-native-certs",
 ] }
-is-terminal = "0.4.4"
-serde_with = "2.3.1"
-ctrlc = "3.2.5"
-which = "4.4.0"
-thiserror = "1.0.40"
+is-terminal = "0.4.13"
+serde_with = "3.11.0"
+ctrlc = "3.4.5"
+which = "6.0.3"
+thiserror = "1.0.64"
 winapi = { version = "0.3.9", features = [
   "minwindef",
   "tlhelp32",
@@ -79,10 +77,10 @@ winapi = { version = "0.3.9", features = [
   "handleapi",
   "winerror",
 ] }
-strum = { version = "0.26.1", features = ["derive"] }
+strum = { version = "0.26.3", features = ["derive"] }
 structstruck = "0.4.1"
-derive-new = "0.6.0"
-regex = "1.10.6"
+derive-new = "0.7.0"
+regex = "1.11.0"
 
 [profile.release]
 lto = "fat"
