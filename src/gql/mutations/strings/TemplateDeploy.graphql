@@ -1,6 +1,16 @@
-mutation TemplateDeploy($projectId: String!, $environmentId: String!, $services: [TemplateDeployService!]!, $templateCode: String!) {
-  templateDeploy(
-    input: {projectId: $projectId, environmentId: $environmentId, services: $services, templateCode: $templateCode}
+mutation TemplateDeploy(
+  $projectId: String!
+  $environmentId: String!
+  $templateId: String!
+  $serializedConfig: SerializedTemplateConfig!
+) {
+  templateDeployV2(
+    input: {
+      projectId: $projectId
+      environmentId: $environmentId
+      templateId: $templateId
+      serializedConfig: $serializedConfig
+    }
   ) {
     projectId
     workflowId
