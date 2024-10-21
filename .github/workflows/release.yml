@@ -7,7 +7,7 @@ env:
   MACOSX_DEPLOYMENT_TARGET: 10.7
 
 jobs:
-  create-draft-release:
+  create-release:
     name: Create Draft Release
     runs-on: ubuntu-latest
     outputs:
@@ -42,14 +42,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.CLI_VERSION }}
-          release_name: ${{ env.CLI_VERSION }}
           draft: true
           prerelease: false
           body: ${{steps.build_changelog.outputs.changelog}}
 
   build-release:
     name: Build Release Assets
-    needs: ["create-draft-release"]
+    needs: ["create-release"]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -156,6 +155,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.create-release.outputs.railway_version }}
+          draft: false
           files: railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}*
 
       - name: Install musl-tools
@@ -190,13 +190,10 @@ jobs:
 
   publish-release:
     name: Publish Release
-    needs: ["create-draft-release", "build-release"]
+    needs: ["create-release", "build-release"]
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Publish Release
         id: publish_release
         uses: softprops/action-gh-release@v2
@@ -208,7 +205,7 @@ jobs:
 
   notify-release:
     name: Notify Release
-    needs: ["create-draft-release", "build-release", "publish-release"]
+    needs: ["create-release", "build-release", "publish-release"]
     runs-on: ubuntu-latest
 
     steps:
