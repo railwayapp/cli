@@ -11,8 +11,6 @@ jobs:
     name: Create Draft Release
     runs-on: ubuntu-latest
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
       railway_version: ${{ env.CLI_VERSION }}
 
     steps:
@@ -205,7 +203,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.CLI_VERSION }}
+          tag_name: ${{ needs.create-release.outputs.railway_version }}
           draft: false
 
   notify-release:
