@@ -1,16 +1,15 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
-use serde::Deserialize;
-use std::{collections::BTreeMap, collections::HashMap, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::{
     consts::TICK_STRING, controllers::project::ensure_project_and_environment_exist,
-    mutations::TemplateVolume, util::prompt::prompt_text,
+    util::prompt::prompt_text,
 };
 
 use super::*;
-
-const GITHUB_BASE_URL: &str = "https://github.com/";
 
 /// Provisions a template into your project
 #[derive(Parser)]
@@ -18,6 +17,7 @@ pub struct Args {
     /// The code of the template to deploy
     #[arg(short, long)]
     template: Vec<String>,
+
     /// The "{key}={value}" environment variable pair to set the template variables
     ///
     /// To specify the variable for a single service prefix it with "{service}."
@@ -96,18 +96,14 @@ pub async fn fetch_and_create(
     )
     .await?;
 
-    let config = DeserializedEnvironment::deserialize(
+    let mut config = DeserializedTemplateConfig::deserialize(
         &details.template.serialized_config.unwrap_or_default(),
     )?;
 
     ensure_project_and_environment_exist(client, configs, linked_project).await?;
 
-    let mut services: Vec<mutations::template_deploy::TemplateDeployService> =
-        Vec::with_capacity(config.services.len());
-
-    for (id, s) in &config.services {
-        let mut variables = BTreeMap::new();
-        for (key, variable) in &s.variables {
+    for s in &mut config.services.values_mut() {
+        for (key, variable) in &mut s.variables {
             let value = if let Some(value) = vars.get(&format!("{}.{key}", s.name)) {
                 value.clone()
             } else if let Some(value) = vars.get(key) {
@@ -123,60 +119,10 @@ pub async fn fetch_and_create(
             } else {
                 continue;
             };
-            variables.insert(key.clone(), value);
+
+            variable.value = Some(value);
         }
-
-        let volumes: Vec<_> = s
-            .volume_mounts
-            .values()
-            .map(|volume| TemplateVolume {
-                mount_path: volume.mount_path.clone(),
-                name: None,
-            })
-            .collect();
-
-        services.push(mutations::template_deploy::TemplateDeployService {
-            commit: None,
-            has_domain: s.networking.as_ref().map(|n| !n.service_domains.is_empty()),
-            healthcheck_path: s.deploy.as_ref().and_then(|d| d.healthcheck_path.clone()),
-            id: id.clone(),
-            is_private: None,
-            name: Some(s.name.clone()),
-            owner: None,
-            root_directory: match &s.source {
-                Some(DeserializedServiceSource::Image { .. }) => None,
-                Some(DeserializedServiceSource::Repo { root_directory, .. }) => {
-                    root_directory.clone()
-                }
-                None => None,
-            },
-            service_icon: s.icon.clone(),
-            service_name: s.name.clone(),
-            start_command: s.deploy.as_ref().and_then(|d| d.start_command.clone()),
-            tcp_proxy_application_port: s
-                .networking
-                .as_ref()
-                .and_then(|n| n.tcp_proxies.keys().next().map(|k| k.parse::<i64>()))
-                .transpose()?,
-            template: match &s.source {
-                Some(DeserializedServiceSource::Image { image }) => image.clone(),
-                // The `repo` is in the `${owner}/${repo}` format so we need to add the prefix
-                Some(DeserializedServiceSource::Repo { repo, .. }) => {
-                    format!("{}{}", GITHUB_BASE_URL, repo)
-                }
-                None => s.name.clone(),
-            },
-            variables: (!variables.is_empty()).then_some(variables),
-            volumes: (!volumes.is_empty()).then_some(volumes),
-        });
     }
-
-    let vars = mutations::template_deploy::Variables {
-        project_id: linked_project.project.clone(),
-        environment_id: linked_project.environment.clone(),
-        services,
-        template_code: template.clone(),
-    };
 
     let spinner = indicatif::ProgressBar::new_spinner()
         .with_style(
@@ -185,53 +131,66 @@ pub async fn fetch_and_create(
                 .template("{spinner:.green} {msg}")?,
         )
         .with_message(format!("Creating {template}..."));
-    spinner.enable_steady_tick(Duration::from_millis(100));
-    post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), vars).await?;
-    spinner.finish_with_message(format!("Created {template}"));
 
-    let hostname = configs.get_host();
-    let url = format!("https://{hostname}/project/{}", linked_project.project);
-    println!("url: {}", url);
+    spinner.enable_steady_tick(Duration::from_millis(100));
+
+    let vars = mutations::template_deploy::Variables {
+        project_id: linked_project.project.clone(),
+        environment_id: linked_project.environment.clone(),
+        template_id: details.template.id,
+        serialized_config: serde_json::to_value(&config).context("Failed to serialize config")?,
+    };
+
+    post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), vars).await?;
+
+    spinner.finish_with_message(format!(
+        "🎉 Added {} to project",
+        details.template.name.green().bold(),
+    ));
 
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeserializedServiceNetworking {
     #[serde(default)]
     service_domains: HashMap<String, serde_json::Value>,
+
     #[serde(default)]
     tcp_proxies: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeserializedServiceVolumeMount {
     mount_path: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeserializedServiceVariable {
     #[serde(default)]
     default_value: Option<String>,
+
+    #[serde(default)]
+    value: Option<String>,
+
     #[serde(default)]
     description: Option<String>,
+
     #[serde(default)]
     is_optional: Option<bool>,
-    // #[serde(default)]
-    // generator: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeserializedServiceDeploy {
     healthcheck_path: Option<String>,
     start_command: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum DeserializedServiceSource {
     Image {
@@ -241,15 +200,12 @@ enum DeserializedServiceSource {
     Repo {
         root_directory: Option<String>,
         repo: String,
-        // branch: Option<String>,
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeserializedService {
-    // #[serde(default)]
-    // build: serde_json::Value,
+struct DeserializedTemplateService {
     #[serde(default)]
     deploy: Option<DeserializedServiceDeploy>,
 
@@ -269,9 +225,9 @@ struct DeserializedService {
     volume_mounts: HashMap<String, DeserializedServiceVolumeMount>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeserializedEnvironment {
+struct DeserializedTemplateConfig {
     #[serde(default)]
-    services: HashMap<String, DeserializedService>,
+    services: HashMap<String, DeserializedTemplateService>,
 }

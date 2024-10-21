@@ -16,14 +16,6 @@ pub struct Args {
     /// The name of the database to add
     #[arg(short, long, value_enum)]
     database: Vec<DatabaseType>,
-    /// The "{key}={value}" environment variable pair to set the template variables
-    ///
-    /// To specify the variable for a single service prefix it with "{service}."
-    /// Example:
-    ///
-    /// railway deploy -t postgres -v "MY_SPECIAL_ENV_VAR=1" -v "Backend.Port=3000"
-    #[arg(short, long)]
-    variable: Vec<String>,
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -46,27 +38,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         bail!("No database selected");
     }
 
-    let variables: HashMap<String, String> = args
-        .variable
-        .iter()
-        .map(|v| {
-            let mut split = v.split('=');
-            let key = split.next().unwrap_or_default().trim().to_owned();
-            let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
-            (key, value)
-        })
-        .filter(|(_, value)| !value.is_empty())
-        .collect();
-
     for db in databases {
-        if std::io::stdout().is_terminal() {
-            deploy::fetch_and_create(&client, &configs, db.to_slug(), &linked_project, &variables)
-                .await?;
-        } else {
-            println!("Creating {}...", db);
-            deploy::fetch_and_create(&client, &configs, db.to_slug(), &linked_project, &variables)
-                .await?;
-        }
+        deploy::fetch_and_create(
+            &client,
+            &configs,
+            db.to_slug().to_string(),
+            &linked_project,
+            &HashMap::new(),
+        )
+        .await?;
     }
 
     Ok(())
