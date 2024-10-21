@@ -7,8 +7,8 @@ env:
   MACOSX_DEPLOYMENT_TARGET: 10.7
 
 jobs:
-  create-release:
-    name: Create Release
+  create-draft-release:
+    name: Create Draft Release
     runs-on: ubuntu-latest
     outputs:
       railway_version: ${{ env.CLI_VERSION }}
@@ -26,29 +26,30 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Build Changelog
         id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v3.7.0
+        uses: mikepenz/release-changelog-builder-action@v5
         with:
           configuration: ".github/changelog-configuration.json"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create GitHub release
-        id: release
-        uses: softprops/action-gh-release@v1
+      - name: Create Draft GitHub release
+        id: create_release
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.CLI_VERSION }}
-          name: ${{ env.CLI_VERSION }}
+          release_name: ${{ env.CLI_VERSION }}
+          draft: true
+          prerelease: false
+          body: ${{steps.build_changelog.outputs.changelog}}
 
   build-release:
     name: Build Release Assets
-    needs: ["create-release"]
+    needs: ["create-draft-release"]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -106,7 +107,6 @@ jobs:
           args: --release --locked --target ${{ matrix.target }}
           use-cross: ${{ matrix.use-cross || matrix.os == 'ubuntu-latest' }}
 
-      # Using artifacts to avoid rebuilding cli or fetching from assets section of release page
       - name: Upload docker artifact
         if: ${{ matrix.docker-artifact }}
         uses: actions/upload-artifact@v4
@@ -151,7 +151,7 @@ jobs:
           cd -
 
       - name: Upload release archive
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -188,9 +188,27 @@ jobs:
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
 
+  publish-release:
+    name: Publish Release
+    needs: ["create-draft-release", "build-release"]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Publish Release
+        id: publish_release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.create-release.outputs.railway_version }}
+          draft: false
+
   notify-release:
     name: Notify Release
-    needs: ["create-release", "build-release"]
+    needs: ["create-draft-release", "build-release", "publish-release"]
     runs-on: ubuntu-latest
 
     steps:
