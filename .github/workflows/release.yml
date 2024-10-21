@@ -200,13 +200,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Publish Release
-        uses: eregon/publish-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          release_id: ${{ needs.create-draft-release.outputs.release_id }}
-
-      - name: Publish Release
         id: publish_release
         uses: softprops/action-gh-release@v2
         env:
