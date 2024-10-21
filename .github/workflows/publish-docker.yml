@@ -1,4 +1,4 @@
-name: Publish to ghcr
+name: Publish to GHCR
 
 on:
   workflow_run:
