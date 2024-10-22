@@ -189,6 +189,33 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release edit "${{ needs.create-release.outputs.railway_version }}" --draft=false
 
+  publish-npm:
+    name: Publish NPM
+    needs: ["create-release", "build-release", "publish-release"]
+    runs-on: ubuntu-lates
+
+    steps:
+      - name: Use Node.js 20
+        uses: actions/setup-node@v1
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Setup Git user
+        run: |
+          git config --global user.name "Github Bot"
+          git config --global user.email "github-bot@railway.app"
+
+      - name: Create .npmrc file
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: NPM publish
+        run: npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   notify-release:
     name: Notify Release
     needs: ["create-release", "build-release", "publish-release"]
