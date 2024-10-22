@@ -192,7 +192,7 @@ jobs:
   publish-npm:
     name: Publish NPM
     needs: ["create-release", "build-release", "publish-release"]
-    runs-on: ubuntu-lates
+    runs-on: ubuntu-latest
 
     steps:
       - name: Use Node.js
