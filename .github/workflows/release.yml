@@ -153,8 +153,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+        shell: bash
         run: |
-          gh release upload "${{ needs.create-release.outputs.railway_version }}" railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}*
+          gh release upload "${{ needs.create-release.outputs.railway_version }}" "railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}"
 
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -170,8 +171,11 @@ jobs:
 
       - name: Upload .deb package file
         if: matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "${{ needs.create-release.outputs.railway_version }}" railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb
+          gh release upload "${{ needs.create-release.outputs.railway_version }}" "railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb"
 
   publish-release:
     name: Publish Release
