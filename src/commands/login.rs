@@ -30,20 +30,22 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     interact_or!("Cannot login in non-interactive mode");
 
     let mut configs = Configs::new()?;
-    if let Ok(client) = GQLClient::new_authorized(&configs) {
-        match get_user(&client, &configs).await {
-            Ok(user) => {
-                println!("{} found", "RAILWAY_TOKEN".bold());
-                print_user(user);
-                return Ok(());
-            }
-            Err(_e) => {
-                println!("Found invalid {}", "RAILWAY_TOKEN".bold());
-                return Err(RailwayError::InvalidRailwayToken.into());
+
+    if Configs::get_railway_api_token().is_some() {
+        if let Ok(client) = GQLClient::new_authorized(&configs) {
+            match get_user(&client, &configs).await {
+                Ok(user) => {
+                    println!("{} found", "RAILWAY_TOKEN".bold());
+                    print_user(user);
+                    return Ok(());
+                }
+                Err(_e) => {
+                    println!("Found invalid {}", "RAILWAY_TOKEN".bold());
+                    return Err(RailwayError::InvalidRailwayToken.into());
+                }
             }
         }
     }
-
     if args.browserless {
         return browserless_login().await;
     }
