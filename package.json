@@ -1,6 +1,6 @@
 {
   "name": "@railway/cli",
-  "version": "3.17.6",
+  "version": "3.17.7",
   "description": "Develop and deploy code with zero configuration",
   "type": "module",
   "author": "Jake Runzer",
