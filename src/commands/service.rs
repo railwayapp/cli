@@ -1,10 +1,11 @@
-use anyhow::bail;
-
 use crate::{
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_options, PromptService},
+    util::prompt::{fake_select, prompt_options, prompt_text, PromptService},
 };
+use anyhow::bail;
+use clap::Subcommand;
+use reqwest::Client;
 
 use super::*;
 
@@ -13,6 +14,20 @@ use super::*;
 pub struct Args {
     /// The service ID/name to link
     service: Option<String>,
+
+    /// Create a new service
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Create a new service
+    Create {
+        /// The name of the new service to create
+        #[clap(long, short)]
+        name: Option<String>,
+    },
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
@@ -22,6 +37,35 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    if let Some(command) = args.command {
+        match command {
+            Commands::Create { name } => {
+                let name = if let Some(name) = name {
+                    fake_select("Enter a service name", &name);
+                    name
+                } else {
+                    // prompt for it
+                    prompt_text("Enter a service name")?
+                };
+                let service_id = create_service(
+                    &client,
+                    &configs,
+                    name.clone(),
+                    linked_project.project.clone(),
+                    linked_project.environment.clone(),
+                )
+                .await?;
+                // link the service
+                configs.link_service(service_id)?;
+                configs.write()?;
+                println!(
+                    "Succesfully created the service \"{}\" and linked to it",
+                    name.blue()
+                );
+            }
+        }
+        return Ok(());
+    }
 
     let services: Vec<_> = project
         .services
@@ -79,4 +123,21 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         bail!("No service found");
     }
     Ok(())
+}
+
+pub async fn create_service(
+    client: &Client,
+    configs: &Configs,
+    name: String,
+    project_id: String,
+    environment_id: String,
+) -> Result<String> {
+    let vars = mutations::service_create::Variables {
+        name: Some(name),
+        project_id,
+        environment_id,
+    };
+    let response =
+        post_graphql::<mutations::ServiceCreate, _>(client, configs.get_backboard(), vars).await?;
+    Ok(response.service_create.id)
 }
