@@ -20,6 +20,35 @@ pub fn prompt_text(message: &str) -> Result<String> {
         .context("Failed to prompt for options")
 }
 
+pub fn prompt_text_with_placeholder_if_blank(
+    message: &str,
+    placeholder: &str,
+    blank_message: &str,
+) -> Result<String> {
+    let select = inquire::Text::new(message);
+    select
+        .with_render_config(Configs::get_render_config())
+        .with_placeholder(placeholder)
+        .with_formatter(&|input: &str| {
+            if input.is_empty() {
+                String::from(blank_message)
+            } else {
+                input.to_string()
+            }
+        })
+        .prompt()
+        .context("Failed to prompt for options")
+}
+
+pub fn prompt_text_with_placeholder_disappear(message: &str, placeholder: &str) -> Result<String> {
+    let select = inquire::Text::new(message);
+    select
+        .with_render_config(Configs::get_render_config())
+        .with_placeholder(placeholder)
+        .prompt()
+        .context("Failed to prompt for options")
+}
+
 pub fn prompt_confirm_with_default(message: &str, default: bool) -> Result<bool> {
     let confirm = inquire::Confirm::new(message);
     confirm

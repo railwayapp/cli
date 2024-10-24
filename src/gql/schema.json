@@ -161,6 +161,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "BACKUPS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "OLD_CRON_EXPERIENCE"
             },
             {
@@ -3491,6 +3497,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "HEALTHCHECK"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "MIGRATE_VOLUMES"
             },
             {
               "deprecationReason": null,
@@ -8501,6 +8513,12 @@
         {
           "description": "A thing that can be measured on Railway.",
           "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "BACKUP_USAGE_GB"
+            },
             {
               "deprecationReason": null,
               "description": null,
@@ -13722,6 +13740,127 @@
                 "ofType": {
                   "kind": "SCALAR",
                   "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": "The id of the volume instance to create a backup of",
+                  "name": "volumeInstanceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Create backup of a volume instance",
+              "isDeprecated": false,
+              "name": "volumeInstanceBackupCreate",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "WorkflowId",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": "The volume instance's backup id",
+                  "name": "volumeInstanceBackupId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The volume instance's id",
+                  "name": "volumeInstanceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Deletes volume instance backup",
+              "isDeprecated": false,
+              "name": "volumeInstanceBackupDelete",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "WorkflowId",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": "The id of the backup to be restored from",
+                  "name": "volumeInstanceBackupId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The id of the volume instance to be restored from",
+                  "name": "volumeInstanceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Restore a volume instance from a backup",
+              "isDeprecated": false,
+              "name": "volumeInstanceBackupRestore",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "WorkflowId",
                   "ofType": null
                 }
               }
@@ -18953,6 +19092,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "BACKUP_USAGE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "CPU_USAGE"
             },
             {
@@ -23712,6 +23857,45 @@
                   "kind": "OBJECT",
                   "name": "VolumeInstance",
                   "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": "The id of the volume instance to list the backups of",
+                  "name": "volumeInstanceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "List backups of a volume instance",
+              "isDeprecated": false,
+              "name": "volumeInstanceBackupList",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "VolumeInstanceBackup",
+                      "ofType": null
+                    }
+                  }
                 }
               }
             },
@@ -32513,6 +32697,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "isOverLimit",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "softLimit",
               "type": {
                 "kind": "NON_NULL",
@@ -35169,6 +35369,73 @@
         {
           "description": null,
           "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "createdAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "id",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "referencedMB",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Int",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "usedMB",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Int",
+                "ofType": null
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "VolumeInstanceBackup",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
           "fields": null,
           "inputFields": [
             {
@@ -35711,6 +35978,29 @@
           "interfaces": null,
           "kind": "ENUM",
           "name": "WithdrawalStatusType",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workflowId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "WorkflowId",
           "possibleTypes": null
         },
         {
