@@ -16,7 +16,7 @@ pub struct Args {
     domain: Option<String>,
 }
 
-pub async fn command(args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args, json: bool) -> Result<()> {
     // it's too bad that we have to check twice, but I think the UX is better
     // if we immediately exit if the user enters an invalid domain
     if let Some(domain) = &args.domain {
@@ -40,7 +40,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let service = get_service(&linked_project, &project)?;
 
-    println!("Creating custom domain for service {}...", service.name);
+    if !json {
+        println!("Creating custom domain for service {}...", service.name);
+    }
 
     let domain = match args.domain {
         Some(domain) => domain,
@@ -80,6 +82,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let response =
         post_graphql::<mutations::CustomDomainCreate, _>(&client, configs.get_backboard(), vars)
             .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
 
     println!("Domain created: {}", response.custom_domain_create.domain);
 
