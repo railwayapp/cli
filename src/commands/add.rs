@@ -1,9 +1,13 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 use strum::{Display, EnumIs, EnumIter, IntoEnumIterator};
 
 use crate::{
+    consts::TICK_STRING,
     controllers::{database::DatabaseType, project::ensure_project_and_environment_exist},
     util::prompt::{
         fake_select, prompt_multi_options, prompt_options, prompt_text,
@@ -49,11 +53,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let type_of_create = if !args.database.is_empty() {
         fake_select("What do you need?", "Database");
         CreateKind::Database(args.database)
-    } else if args.service.is_some() {
-        fake_select("What do you need?", "Empty Service");
-        CreateKind::EmptyService {
-            name: prompt_name(args.service)?,
-        }
     } else if args.repo.is_some() {
         fake_select("What do you need?", "GitHub Repo");
         CreateKind::GithubRepo {
@@ -68,12 +67,19 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             variables: prompt_variables(args.variables)?,
             name: prompt_name(args.service)?,
         }
+    } else if args.service.is_some() {
+        fake_select("What do you need?", "Empty Service");
+        CreateKind::EmptyService {
+            name: prompt_name(args.service)?,
+            variables: prompt_variables(args.variables)?,
+        }
     } else {
         let need = prompt_options("What do you need?", CreateKind::iter().collect())?;
         match need {
             CreateKind::Database(_) => CreateKind::Database(prompt_database()?),
             CreateKind::EmptyService { .. } => CreateKind::EmptyService {
                 name: prompt_name(args.service)?,
+                variables: prompt_variables(args.variables)?,
             },
             CreateKind::GithubRepo { .. } => {
                 let repo = prompt_repo(args.repo)?;
@@ -141,7 +147,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             )
             .await?;
         }
-        CreateKind::EmptyService { name } => {
+        CreateKind::EmptyService { name, variables } => {
             create_service(
                 name,
                 &linked_project,
@@ -149,7 +155,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 &mut configs,
                 None,
                 None,
-                None,
+                variables,
             )
             .await?;
         }
@@ -169,7 +175,8 @@ fn prompt_repo(repo: Option<String>) -> Result<String> {
         fake_select("Enter a repo", &repo);
         return Ok(repo);
     }
-    prompt_text("Enter a repo")
+
+    prompt_text_with_placeholder_disappear("Enter a repo", "<user/org>/<repo name>")
 }
 
 fn prompt_image(image: Option<String>) -> Result<String> {
@@ -189,17 +196,24 @@ fn prompt_name(service: Option<Option<String>>) -> Result<Option<String>> {
             fake_select("Enter a service name", "<randomly generated>");
             Ok(None)
         }
-    } else {
+    } else if std::io::stdout().is_terminal() {
         return Ok(Some(prompt_text_with_placeholder_if_blank(
             "Enter a service name",
             "<leave blank for randomly generated>",
             "<randomly generated>",
         )?)
         .filter(|s| !s.trim().is_empty()));
+    } else {
+        fake_select("Enter a service name", "<randomly generated>");
+        Ok(None)
     }
 }
 
 fn prompt_variables(variables: Vec<String>) -> Result<Option<BTreeMap<String, String>>> {
+    if !std::io::stdout().is_terminal() && variables.is_empty() {
+        fake_select("Enter a variable", "");
+        return Ok(None);
+    }
     if variables.is_empty() {
         let mut variables = BTreeMap::<String, String>::new();
         loop {
@@ -244,6 +258,8 @@ fn prompt_variables(variables: Vec<String>) -> Result<Option<BTreeMap<String, St
     Ok(Some(variables))
 }
 
+type Variables = Option<BTreeMap<String, String>>;
+
 async fn create_service(
     service: Option<String>,
     linked_project: &LinkedProject,
@@ -251,24 +267,49 @@ async fn create_service(
     configs: &mut Configs,
     repo: Option<String>,
     image: Option<String>,
-    variables: Option<BTreeMap<String, String>>,
+    variables: Variables,
 ) -> Result<(), anyhow::Error> {
+    let spinner = indicatif::ProgressBar::new_spinner()
+        .with_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars(TICK_STRING)
+                .template("{spinner:.green} {msg}")?,
+        )
+        .with_message("Creating service...");
+    spinner.enable_steady_tick(Duration::from_millis(100));
     let source = mutations::service_create::ServiceSourceInput { repo, image };
+    let branch = if let Some(repo) = &source.repo {
+        let repos = post_graphql::<queries::GitHubRepos, _>(
+            client,
+            &configs.get_backboard(),
+            queries::git_hub_repos::Variables {},
+        )
+        .await?
+        .github_repos;
+        let repo = repos
+            .iter()
+            .find(|r| r.full_name == *repo)
+            .ok_or(anyhow::anyhow!("repo not found"))?;
+        Some(repo.default_branch.clone())
+    } else {
+        None
+    };
     let vars = mutations::service_create::Variables {
         name: service,
         project_id: linked_project.project.clone(),
         environment_id: linked_project.environment.clone(),
         source: Some(source),
         variables,
+        branch,
     };
     let s =
         post_graphql::<mutations::ServiceCreate, _>(client, &configs.get_backboard(), vars).await?;
     configs.link_service(s.service_create.id)?;
     configs.write()?;
-    println!(
+    spinner.finish_with_message(format!(
         "Succesfully created the service \"{}\" and linked to it",
         s.service_create.name.blue()
-    );
+    ));
     Ok(())
 }
 
@@ -277,7 +318,7 @@ enum CreateKind {
     #[strum(to_string = "GitHub Repo")]
     GithubRepo {
         repo: String,
-        variables: Option<BTreeMap<String, String>>,
+        variables: Variables,
         name: Option<String>,
     },
     #[strum(to_string = "Database")]
@@ -285,9 +326,12 @@ enum CreateKind {
     #[strum(to_string = "Docker Image")]
     DockerImage {
         image: String,
-        variables: Option<BTreeMap<String, String>>,
+        variables: Variables,
         name: Option<String>,
     },
     #[strum(to_string = "Empty Service")]
-    EmptyService { name: Option<String> },
+    EmptyService {
+        name: Option<String>,
+        variables: Variables,
+    },
 }

@@ -27,12 +27,5 @@
     "@napi-rs/triples": "^1.1.0",
     "node-fetch": "^3.1.0",
     "tar": "^6.1.11"
-  },
-  "module": "index.ts",
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5.0.0"
   }
 }

@@ -1,6 +1,3 @@
-use anyhow::bail;
-use is_terminal::IsTerminal;
-
 use crate::{
     consts::NON_INTERACTIVE_FAILURE, interact_or, util::prompt::prompt_confirm_with_default,
 };

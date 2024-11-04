@@ -161,12 +161,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "BACKUPS"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "OLD_CRON_EXPERIENCE"
             },
             {
@@ -22590,7 +22584,18 @@
               }
             },
             {
-              "args": [],
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "projectId",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                }
+              ],
               "deprecationReason": null,
               "description": "List available regions",
               "isDeprecated": false,
@@ -26247,6 +26252,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "region",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "teamId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",

@@ -1,12 +1,10 @@
 use std::fmt::Display;
 
-use anyhow::bail;
-use is_terminal::IsTerminal;
-
 use crate::{
     controllers::project::get_project, errors::RailwayError, interact_or,
     util::prompt::prompt_options,
 };
+use anyhow::bail;
 
 use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
 
