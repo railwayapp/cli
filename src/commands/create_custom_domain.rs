@@ -1,5 +1,6 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
+use std::cmp::max;
 
 use crate::{
     controllers::project::{ensure_project_and_environment_exist, get_project},
@@ -85,21 +86,59 @@ pub async fn create_custom_domain(domain: String, port: Option<u16>, json: bool)
         &response.custom_domain_create.status.dns_records[0].zone
     );
 
-    println!("\tType\tHost\tValue");
-    for record in response.custom_domain_create.status.dns_records {
-        let not_empty_hostlabel = if record.hostlabel.is_empty() {
-            "@".into()
-        } else {
-            record.hostlabel
-        };
-        println!(
-            "\t{}\t{}\t{}",
-            record.record_type, not_empty_hostlabel, record.required_value,
-        );
-    }
+    print_domains(response.custom_domain_create.status.dns_records);
 
     println!("\nNote: if the Host is \"@\", the DNS record should be created for the root of the domain.");
     println!("Please be aware that DNS records can take up to 72 hours to propagate worldwide.");
 
     Ok(())
+}
+
+fn print_domains(
+    domains: Vec<
+        mutations::custom_domain_create::CustomDomainCreateCustomDomainCreateStatusDnsRecords,
+    >,
+) {
+    let (padding_type, padding_hostlabel, padding_value) =
+        domains
+            .iter()
+            .fold((5, 5, 5), |(max_type, max_hostlabel, max_value), d| {
+                (
+                    max(max_type, d.record_type.to_string().len()),
+                    max(max_hostlabel, d.hostlabel.to_string().len()),
+                    max(max_value, d.required_value.to_string().len()),
+                )
+            });
+
+    // Add padding to each maximum length
+    let [padding_type, padding_hostlabel, padding_value] =
+        [padding_type + 3, padding_hostlabel + 3, padding_value + 3];
+
+    // Print the header with consistent padding
+    println!(
+        "\t{:<width_type$}{:<width_host$}{:<width_value$}",
+        "Type",
+        "Host",
+        "Value",
+        width_type = padding_type,
+        width_host = padding_hostlabel,
+        width_value = padding_value
+    );
+
+    // Print each domain entry with the same padding
+    for domain in &domains {
+        println!(
+            "\t{:<width_type$}{:<width_host$}{:<width_value$}",
+            domain.record_type.to_string(),
+            if domain.hostlabel.is_empty() {
+                "@"
+            } else {
+                &domain.hostlabel
+            },
+            domain.required_value,
+            width_type = padding_type,
+            width_host = padding_hostlabel,
+            width_value = padding_value
+        );
+    }
 }
