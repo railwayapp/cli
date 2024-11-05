@@ -1,6 +1,5 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
-use regex::Regex;
 
 use crate::{
     controllers::project::{ensure_project_and_environment_exist, get_project},
@@ -12,10 +11,6 @@ use domain::{creating_domain_spiner, get_service};
 use super::*;
 
 pub async fn create_custom_domain(domain: String, port: Option<u16>, json: bool) -> Result<()> {
-    if !is_valid_domain(&domain) {
-        bail!("Invalid domain");
-    }
-
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
@@ -92,18 +87,19 @@ pub async fn create_custom_domain(domain: String, port: Option<u16>, json: bool)
 
     println!("\tType\tHost\tValue");
     for record in response.custom_domain_create.status.dns_records {
+        let not_empty_hostlabel = if record.hostlabel.is_empty() {
+            "@".into()
+        } else {
+            record.hostlabel
+        };
         println!(
             "\t{}\t{}\t{}",
-            record.record_type, record.hostlabel, record.required_value,
+            record.record_type, not_empty_hostlabel, record.required_value,
         );
     }
 
-    println!("\nPlease be aware that DNS records can take up to 72 hours to propagate worldwide.");
+    println!("\nNote: if the Host is \"@\", the DNS record should be created for the root of the domain.");
+    println!("Please be aware that DNS records can take up to 72 hours to propagate worldwide.");
 
     Ok(())
-}
-
-fn is_valid_domain(domain: &str) -> bool {
-    let domain_regex = Regex::new(r"^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$").unwrap();
-    domain_regex.is_match(domain)
 }
