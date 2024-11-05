@@ -27,13 +27,18 @@ macro_rules! commands_enum {
     );
 }
 
+use is_terminal::IsTerminal;
+
+pub fn is_stdout_terminal() -> bool {
+    std::io::stdout().is_terminal()
+}
+
 /// Ensure running in a terminal or bail with the provided message
 #[macro_export]
 macro_rules! interact_or {
     ($message:expr) => {
-        if !std::io::stdout().is_terminal() {
-            use anyhow::bail;
-            bail!($message);
+        if !$crate::macros::is_stdout_terminal() {
+            ::anyhow::bail!($message);
         }
     };
 }

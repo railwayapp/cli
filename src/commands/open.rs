@@ -1,6 +1,3 @@
-use anyhow::bail;
-use is_terminal::IsTerminal;
-
 use crate::{
     consts::NON_INTERACTIVE_FAILURE, controllers::project::ensure_project_and_environment_exist,
     interact_or,

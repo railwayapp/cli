@@ -148,3 +148,11 @@ pub type SerializedTemplateConfig = serde_json::Value;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct TemplateDetail;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/GitHubRepos.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct GitHubRepos;

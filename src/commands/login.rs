@@ -7,12 +7,10 @@ use crate::{
 
 use super::*;
 
-use anyhow::bail;
 use colored::Colorize;
 use http_body_util::Full;
 use hyper::{body::Bytes, server::conn::http1, service::service_fn, Request, Response};
 use hyper_util::rt::tokio::TokioIo;
-use is_terminal::IsTerminal;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
