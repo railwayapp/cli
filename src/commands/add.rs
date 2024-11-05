@@ -17,7 +17,7 @@ use crate::{
 
 use super::*;
 
-/// Provision a database into your project
+/// Add a service to your project
 #[derive(Parser)]
 pub struct Args {
     /// The name of the database to add
