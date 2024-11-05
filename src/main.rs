@@ -58,8 +58,7 @@ commands_enum!(
     variables,
     whoami,
     volume,
-    redeploy,
-    custom_domain
+    redeploy
 );
 
 #[tokio::main]
