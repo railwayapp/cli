@@ -1,8 +1,7 @@
-use std::time::Duration;
+use std::{cmp::max, time::Duration};
 
 use anyhow::bail;
 use colored::Colorize;
-use create_custom_domain::create_custom_domain;
 use is_terminal::IsTerminal;
 use queries::domains::DomainsDomains;
 use serde_json::json;
@@ -48,10 +47,6 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    if project.services.edges.is_empty() {
-        bail!(RailwayError::NoServices);
-    }
-
     let service = get_service(&linked_project, &project)?;
 
     let vars = queries::domains::Variables {
@@ -69,11 +64,9 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         return print_existing_domains(&domains);
     }
 
-    let spinner = if std::io::stdout().is_terminal() && !json {
-        Some(creating_domain_spiner(None)?)
-    } else {
-        None
-    };
+    let spinner = (std::io::stdout().is_terminal() && !json)
+        .then(|| creating_domain_spiner(None))
+        .and_then(|s| s.ok());
 
     let vars = mutations::service_domain_create::Variables {
         service_id: service.id.clone(),
@@ -144,7 +137,7 @@ fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
 pub fn get_service<'a>(
     linked_project: &'a LinkedProject,
     project: &'a queries::project::ProjectProject,
-) -> Result<&'a queries::project::ProjectProjectServicesEdgesNode, anyhow::Error> {
+) -> anyhow::Result<&'a queries::project::ProjectProjectServicesEdgesNode> {
     let services = project.services.edges.iter().collect::<Vec<_>>();
 
     if services.is_empty() {
@@ -167,6 +160,10 @@ pub fn get_service<'a>(
         }
     }
 
+    if !std::io::stdout().is_terminal() {
+        bail!(RailwayError::NoServices);
+    }
+
     let service = prompt_options("Select a service", services)?;
 
     Ok(&service.node)
@@ -183,4 +180,132 @@ pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicat
     spinner.enable_steady_tick(Duration::from_millis(100));
 
     Ok(spinner)
+}
+
+async fn create_custom_domain(domain: String, port: Option<u16>, json: bool) -> Result<()> {
+    let configs = Configs::new()?;
+
+    let client = GQLClient::new_authorized(&configs)?;
+    let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    let service = get_service(&linked_project, &project)?;
+
+    let spinner = (std::io::stdout().is_terminal() && !json)
+        .then(|| {
+            creating_domain_spiner(Some(format!(
+                "Creating custom domain for service {}{}...",
+                service.name,
+                port.map(|p| format!(" on port {}", p)).unwrap_or_default()
+            )))
+        })
+        .and_then(|s| s.ok());
+
+    let is_available = post_graphql::<queries::CustomDomainAvailable, _>(
+        &client,
+        configs.get_backboard(),
+        queries::custom_domain_available::Variables {
+            domain: domain.clone(),
+        },
+    )
+    .await?
+    .custom_domain_available
+    .available;
+
+    if !is_available {
+        bail!("Domain is not available:\n\t{}", domain);
+    }
+
+    let vars = mutations::custom_domain_create::Variables {
+        input: mutations::custom_domain_create::CustomDomainCreateInput {
+            domain: domain.clone(),
+            environment_id: linked_project.environment.clone(),
+            project_id: linked_project.project.clone(),
+            service_id: service.id.clone(),
+            target_port: port.map(|p| p as i64),
+        },
+    };
+
+    let response =
+        post_graphql::<mutations::CustomDomainCreate, _>(&client, configs.get_backboard(), vars)
+            .await?;
+
+    spinner.map(|s| s.finish_and_clear());
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    println!("Domain created: {}", response.custom_domain_create.domain);
+
+    if response.custom_domain_create.status.dns_records.is_empty() {
+        // Should never happen (would only be possible in a backend bug)
+        // but just in case
+        bail!("No DNS records found. Please check the Railway dashboard for more information.");
+    }
+
+    println!(
+        "To finish setting up your custom domain, add the following to the DNS records for {}:\n",
+        &response.custom_domain_create.status.dns_records[0].zone
+    );
+
+    print_dns(response.custom_domain_create.status.dns_records);
+
+    println!("\nNote: if the Host is \"@\", the DNS record should be created for the root of the domain.");
+    println!("Please be aware that DNS records can take up to 72 hours to propagate worldwide.");
+
+    Ok(())
+}
+
+fn print_dns(
+    domains: Vec<
+        mutations::custom_domain_create::CustomDomainCreateCustomDomainCreateStatusDnsRecords,
+    >,
+) {
+    let (padding_type, padding_hostlabel, padding_value) =
+        domains
+            .iter()
+            .fold((5, 5, 5), |(max_type, max_hostlabel, max_value), d| {
+                (
+                    max(max_type, d.record_type.to_string().len()),
+                    max(max_hostlabel, d.hostlabel.to_string().len()),
+                    max(max_value, d.required_value.to_string().len()),
+                )
+            });
+
+    // Add padding to each maximum length
+    let [padding_type, padding_hostlabel, padding_value] =
+        [padding_type + 3, padding_hostlabel + 3, padding_value + 3];
+
+    // Print the header with consistent padding
+    println!(
+        "\t{:<width_type$}{:<width_host$}{:<width_value$}",
+        "Type",
+        "Host",
+        "Value",
+        width_type = padding_type,
+        width_host = padding_hostlabel,
+        width_value = padding_value
+    );
+
+    // Print each domain entry with the same padding
+    for domain in &domains {
+        println!(
+            "\t{:<width_type$}{:<width_host$}{:<width_value$}",
+            domain.record_type.to_string(),
+            if domain.hostlabel.is_empty() {
+                "@"
+            } else {
+                &domain.hostlabel
+            },
+            domain.required_value,
+            width_type = padding_type,
+            width_host = padding_hostlabel,
+            width_value = padding_value
+        );
+    }
 }

@@ -6,7 +6,6 @@ pub(super) use colored::Colorize;
 pub mod add;
 pub mod completion;
 pub mod connect;
-pub mod create_custom_domain;
 pub mod deploy;
 pub mod docs;
 pub mod domain;
