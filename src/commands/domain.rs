@@ -10,7 +10,6 @@ use crate::{
     consts::TICK_STRING,
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
-    util::prompt::prompt_options,
 };
 
 use super::*;
@@ -24,6 +23,10 @@ pub struct Args {
     #[clap(short, long)]
     port: Option<u16>,
 
+    /// The name of the service to use
+    #[clap(short, long)]
+    service: Option<String>,
+
     /// Optionally, specify a custom domain to use. If not specified, a domain will be generated.
     ///
     /// Specifying a custom domain will also return the required DNS records
@@ -33,7 +36,7 @@ pub struct Args {
 
 pub async fn command(args: Args, json: bool) -> Result<()> {
     if let Some(domain) = args.domain {
-        create_custom_domain(domain, args.port, json).await?;
+        create_custom_domain(domain, args.port, args.service, json).await?;
 
         return Ok(());
     }
@@ -47,7 +50,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let service = get_service(&linked_project, &project)?;
+    let service = get_service(&linked_project, &project, args.service)?;
 
     let vars = queries::domains::Variables {
         project_id: linked_project.project.clone(),
@@ -137,6 +140,7 @@ fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
 pub fn get_service<'a>(
     linked_project: &'a LinkedProject,
     project: &'a queries::project::ProjectProject,
+    service_name: Option<String>,
 ) -> anyhow::Result<&'a queries::project::ProjectProjectServicesEdgesNode> {
     let services = project.services.edges.iter().collect::<Vec<_>>();
 
@@ -146,6 +150,19 @@ pub fn get_service<'a>(
 
     if project.services.edges.len() == 1 {
         return Ok(&project.services.edges[0].node);
+    }
+
+    if let Some(service_name) = service_name {
+        if let Some(service) = project
+            .services
+            .edges
+            .iter()
+            .find(|s| s.node.name == service_name)
+        {
+            return Ok(&service.node);
+        }
+
+        bail!(RailwayError::ServiceNotFound(service_name));
     }
 
     if let Some(service) = linked_project.service.clone() {
@@ -160,13 +177,7 @@ pub fn get_service<'a>(
         }
     }
 
-    if !std::io::stdout().is_terminal() {
-        bail!(RailwayError::NoServices);
-    }
-
-    let service = prompt_options("Select a service", services)?;
-
-    Ok(&service.node)
+    bail!(RailwayError::NoServices);
 }
 
 pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicatif::ProgressBar> {
@@ -182,7 +193,12 @@ pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicat
     Ok(spinner)
 }
 
-async fn create_custom_domain(domain: String, port: Option<u16>, json: bool) -> Result<()> {
+async fn create_custom_domain(
+    domain: String,
+    port: Option<u16>,
+    service_name: Option<String>,
+    json: bool,
+) -> Result<()> {
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
@@ -192,7 +208,7 @@ async fn create_custom_domain(domain: String, port: Option<u16>, json: bool) -> 
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let service = get_service(&linked_project, &project)?;
+    let service = get_service(&linked_project, &project, service_name)?;
 
     let spinner = (std::io::stdout().is_terminal() && !json)
         .then(|| {
