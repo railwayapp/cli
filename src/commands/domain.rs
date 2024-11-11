@@ -259,20 +259,22 @@ async fn create_custom_domain(
     println!("Domain created: {}", response.custom_domain_create.domain);
 
     if response.custom_domain_create.status.dns_records.is_empty() {
-        // Should never happen (would only be possible in a backend bug)
-        // but just in case
+        // This case should be impossible, but added error handling for safety.
+        //
+        // It can only occur if the backend is not returning the correct data,
+        // and in that case, the post_graphql call should have already errored.
         bail!("No DNS records found. Please check the Railway dashboard for more information.");
     }
 
     println!(
-        "To finish setting up your custom domain, add the following to the DNS records for {}:\n",
+        "To finish setting up your custom domain, add the following DNS records to {}:\n",
         &response.custom_domain_create.status.dns_records[0].zone
     );
 
     print_dns(response.custom_domain_create.status.dns_records);
 
-    println!("\nNote: if the Host is \"@\", the DNS record should be created for the root of the domain.");
-    println!("Please be aware that DNS records can take up to 72 hours to propagate worldwide.");
+    println!("\nNote: if the Name is \"@\", the DNS record should be created for the root of the domain.");
+    println!("*DNS changes can take up to 72 hours to propagate worldwide.");
 
     Ok(())
 }
@@ -282,18 +284,19 @@ fn print_dns(
         mutations::custom_domain_create::CustomDomainCreateCustomDomainCreateStatusDnsRecords,
     >,
 ) {
-    let (padding_type, padding_hostlabel, padding_value) =
-        domains
-            .iter()
-            .fold((5, 5, 5), |(max_type, max_hostlabel, max_value), d| {
-                (
-                    max(max_type, d.record_type.to_string().len()),
-                    max(max_hostlabel, d.hostlabel.to_string().len()),
-                    max(max_value, d.required_value.to_string().len()),
-                )
-            });
+    // I benchmarked this iter().fold() and it's faster than using 3x iter().map()
+    let (padding_type, padding_hostlabel, padding_value) = domains
+        .iter()
+        // Minimum length should be 8, but we add 3 for extra padding so 8-3 = 5
+        .fold((5, 5, 5), |(max_type, max_hostlabel, max_value), d| {
+            (
+                max(max_type, d.record_type.to_string().len()),
+                max(max_hostlabel, d.hostlabel.len()),
+                max(max_value, d.required_value.len()),
+            )
+        });
 
-    // Add padding to each maximum length
+    // Add extra minimum padding to each length
     let [padding_type, padding_hostlabel, padding_value] =
         [padding_type + 3, padding_hostlabel + 3, padding_value + 3];
 
@@ -301,7 +304,7 @@ fn print_dns(
     println!(
         "\t{:<width_type$}{:<width_host$}{:<width_value$}",
         "Type",
-        "Host",
+        "Name",
         "Value",
         width_type = padding_type,
         width_host = padding_hostlabel,
