@@ -12,6 +12,14 @@ pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
         .context("Failed to prompt for options")
 }
 
+pub fn prompt_options_skippable<T: Display>(message: &str, options: Vec<T>) -> Result<Option<T>> {
+    let select = inquire::Select::new(message, options);
+    select
+        .with_render_config(Configs::get_render_config())
+        .prompt_skippable()
+        .context("Failed to prompt for options")
+}
+
 pub fn prompt_text(message: &str) -> Result<String> {
     let select = inquire::Text::new(message);
     select

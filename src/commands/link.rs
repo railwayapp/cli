@@ -3,7 +3,7 @@ use std::fmt::Display;
 
 use crate::{
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_options},
+    util::prompt::{fake_select, prompt_options, prompt_options_skippable},
 };
 
 use super::{
@@ -91,21 +91,22 @@ fn select_service(
         })
         .cloned()
         .collect::<Vec<NormalisedService>>();
+
     let service = if !useful_services.is_empty() {
-        Some(if let Some(service) = service {
+        if let Some(service) = service {
             let service_norm = useful_services.iter().find(|s| {
                 (s.name.to_lowercase() == service.to_lowercase())
                     || (s.id.to_lowercase() == service.to_lowercase())
             });
             if let Some(service) = service_norm {
                 fake_select("Select a service", &service.name);
-                service.clone()
+                Some(service.clone())
             } else {
                 return Err(RailwayError::ServiceNotFound(service).into());
             }
         } else {
-            prompt_options("Select a service", useful_services)?
-        })
+            prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+        }
     } else {
         None
     };
