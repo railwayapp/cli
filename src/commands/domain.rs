@@ -19,11 +19,11 @@ use super::*;
 /// There is a maximum of 1 railway provided domain per service.
 #[derive(Parser)]
 pub struct Args {
-    /// The service to generate a domain for
+    /// The port to connect to the domain
     #[clap(short, long)]
     port: Option<u16>,
 
-    /// The name of the service to use
+    /// The name of the service to generate the domain for
     #[clap(short, long)]
     service: Option<String>,
 
@@ -37,10 +37,13 @@ pub struct Args {
 pub async fn command(args: Args, json: bool) -> Result<()> {
     if let Some(domain) = args.domain {
         create_custom_domain(domain, args.port, args.service, json).await?;
-
-        return Ok(());
+    } else {
+        create_service_domain(args.service, json).await?;
     }
+    Ok(())
+}
 
+async fn create_service_domain(service_name: Option<String>, json: bool) -> Result<()> {
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
@@ -50,7 +53,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let service = get_service(&linked_project, &project, args.service)?;
+    let service = get_service(&linked_project, &project, service_name)?;
 
     let vars = queries::domains::Variables {
         project_id: linked_project.project.clone(),
