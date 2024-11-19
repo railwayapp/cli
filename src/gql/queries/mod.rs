@@ -66,6 +66,12 @@ pub struct TemplateServiceConfigIcon {
 pub struct Project;
 pub type RailwayProject = project::ProjectProject;
 
+impl std::fmt::Display for project::ProjectProjectServicesEdges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.node.name)
+    }
+}
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -156,3 +162,11 @@ pub struct TemplateDetail;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct GitHubRepos;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CustomDomainAvailable.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CustomDomainAvailable;

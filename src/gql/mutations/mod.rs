@@ -1,6 +1,9 @@
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 type EnvironmentVariables = std::collections::BTreeMap<String, String>;
+use chrono::{DateTime as DateTimeType, Utc};
+
+pub type DateTime = DateTimeType<Utc>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -148,3 +151,25 @@ pub struct VariableCollectionUpsert;
     skip_serializing_none
 )]
 pub struct ServiceCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CustomDomainCreate;
+
+impl std::fmt::Display for custom_domain_create::DNSRecordType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DNS_RECORD_TYPE_CNAME => write!(f, "CNAME"),
+            Self::DNS_RECORD_TYPE_A => write!(f, "A"),
+            Self::DNS_RECORD_TYPE_NS => write!(f, "NS"),
+            Self::DNS_RECORD_TYPE_UNSPECIFIED => write!(f, "UNSPECIFIED"),
+            Self::UNRECOGNIZED => write!(f, "UNRECOGNIZED"),
+            Self::Other(s) => write!(f, "{}", s),
+        }
+    }
+}

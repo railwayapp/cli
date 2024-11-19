@@ -161,6 +161,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "BACKUPS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "OLD_CRON_EXPERIENCE"
             },
             {

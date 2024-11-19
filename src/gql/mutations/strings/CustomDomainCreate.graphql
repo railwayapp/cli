@@ -1,0 +1,33 @@
+mutation CustomDomainCreate($input: CustomDomainCreateInput!) {
+  customDomainCreate(input: $input) {
+    id
+    domain
+    createdAt
+    updatedAt
+    serviceId
+    environmentId
+    projectId
+    targetPort
+    status {
+      dnsRecords {
+        hostlabel
+        fqdn
+        recordType
+        requiredValue
+        currentValue
+        status
+        zone
+        purpose
+      }
+      cdnProvider
+      certificates {
+        issuedAt
+        expiresAt
+        domainNames
+        fingerprintSha256
+        keyType
+      }
+      certificateStatus
+    }
+  }
+}
