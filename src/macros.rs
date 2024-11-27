@@ -7,7 +7,7 @@ macro_rules! commands_enum {
             enum Commands {
                 $(
                     #[clap(
-                        $(aliases = &[$( stringify!($alias) ),*])?
+                        $(visible_aliases = &[$( stringify!($alias) ),*])?
                     )]
                     [<$module:camel>]($module::Args),
                 )*
