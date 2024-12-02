@@ -58,7 +58,8 @@ commands_enum!(
     variables,
     whoami,
     volume,
-    redeploy
+    redeploy,
+    check_updates
 );
 
 #[tokio::main]
