@@ -57,4 +57,7 @@ macro_rules! check_update {
             );
         }
     }};
+    ($configs:expr) => {{
+        check_update!($configs, false);
+    }};
 }

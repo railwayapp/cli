@@ -3,6 +3,7 @@ use is_terminal::IsTerminal;
 use std::fmt::Display;
 
 use crate::{
+    check_update,
     errors::RailwayError,
     util::prompt::{fake_select, prompt_options, prompt_options_skippable},
 };
@@ -38,6 +39,9 @@ pub struct Args {
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
+
+    check_update!(configs);
+
     let client = GQLClient::new_authorized(&configs)?;
     let me = post_graphql::<queries::UserProjects, _>(
         &client,

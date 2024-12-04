@@ -21,6 +21,7 @@ mod macros;
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 #[clap(propagate_version = true)]
+// #[clap(author, about, long_about = None)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -64,6 +65,23 @@ commands_enum!(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // intercept the args
+    {
+        let args: Vec<String> = std::env::args().collect();
+
+        let flags: Vec<String> = vec!["--version", "-V", "-h", "--help", "help"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let check_version = args.into_iter().any(|arg| flags.contains(&arg));
+
+        if check_version {
+            let mut configs = Configs::new()?;
+            check_update!(configs, false);
+        }
+    }
+
     let cli = Args::parse();
 
     match Commands::exec(cli).await {
