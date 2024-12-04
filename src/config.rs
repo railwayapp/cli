@@ -7,8 +7,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
+use is_terminal::IsTerminal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -42,6 +44,7 @@ pub struct RailwayUser {
 pub struct RailwayConfig {
     pub projects: BTreeMap<String, LinkedProject>,
     pub user: RailwayUser,
+    pub last_update_check: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug)]
@@ -56,6 +59,13 @@ pub enum Environment {
     Staging,
     Dev,
 }
+
+#[derive(Deserialize)]
+struct GithubApiRelease {
+    tag_name: String,
+}
+
+const GITHUB_API_RELEASE_URL: &str = "https://api.github.com/repos/railwayapp/cli/releases/latest";
 
 impl Configs {
     pub fn new() -> Result<Self> {
@@ -79,6 +89,7 @@ impl Configs {
                     RailwayConfig {
                         projects: BTreeMap::new(),
                         user: RailwayUser { token: None },
+                        last_update_check: None,
                     }
                 });
 
@@ -95,6 +106,7 @@ impl Configs {
             root_config: RailwayConfig {
                 projects: BTreeMap::new(),
                 user: RailwayUser { token: None },
+                last_update_check: None,
             },
         })
     }
@@ -103,6 +115,7 @@ impl Configs {
         self.root_config = RailwayConfig {
             projects: BTreeMap::new(),
             user: RailwayUser { token: None },
+            last_update_check: None,
         };
         Ok(())
     }
@@ -312,5 +325,44 @@ impl Configs {
         fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
 
         Ok(())
+    }
+
+    pub async fn check_update(&mut self, force: bool) -> anyhow::Result<Option<String>> {
+        // outputting would break json output on CI
+        if !std::io::stdout().is_terminal() && !force {
+            return Ok(None);
+        }
+
+        let should_update = if let Some(last_update_check) = self.root_config.last_update_check {
+            Utc::now().date_naive() != last_update_check.date_naive() || force
+        } else {
+            true
+        };
+
+        if !should_update {
+            return Ok(None);
+        }
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(GITHUB_API_RELEASE_URL)
+            .header("User-Agent", "railwayapp")
+            .send()
+            .await?;
+
+        self.root_config.last_update_check = Some(Utc::now());
+        self.write()
+            .context("Failed to write config in should_update")?;
+
+        let response = response.json::<GithubApiRelease>().await?;
+        let latest_version = response.tag_name.trim_start_matches('v');
+
+        let current_version = env!("CARGO_PKG_VERSION");
+
+        if latest_version == current_version {
+            return Ok(None);
+        }
+
+        Ok(Some(latest_version.to_owned()))
     }
 }
