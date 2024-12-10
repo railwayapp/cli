@@ -352,7 +352,7 @@ impl Configs {
 
         self.root_config.last_update_check = Some(Utc::now());
         self.write()
-            .context("Failed to write config in should_update")?;
+            .context("Failed to save time since last update check")?;
 
         let response = response.json::<GithubApiRelease>().await?;
         let latest_version = response.tag_name.trim_start_matches('v');
