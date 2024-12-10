@@ -13,22 +13,22 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
     if json {
         let result = configs.check_update(true).await;
 
-        if let Ok(Some(latest_version)) = result {
-            let json = json!({
-                "latest_version": latest_version,
-                "current_version": env!("CARGO_PKG_VERSION"),
-            });
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        } else {
-            let json = json!({
-                "latest_version": None::<String>,
-                "current_version": env!("CARGO_PKG_VERSION"),
-            });
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
+        let json = json!({
+            "latest_version": result.ok().flatten().as_ref(),
+            "current_version": env!("CARGO_PKG_VERSION"),
+        });
+
+        println!("{}", serde_json::to_string_pretty(&json)?);
+
         return Ok(());
     }
 
-    check_update!(configs, true);
+    let is_latest = check_update!(configs, true);
+    if is_latest {
+        println!(
+            "You are on the latest version of the CLI, v{}",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     Ok(())
 }

@@ -55,6 +55,9 @@ macro_rules! check_update {
                 latest_version.yellow(),
                 "https://docs.railway.com/guides/cli".purple(),
             );
+            false
+        } else {
+            true
         }
     }};
     ($configs:expr) => {{
