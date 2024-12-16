@@ -50,6 +50,8 @@ jobs:
     name: Build Release Assets
     needs: ["create-release"]
     runs-on: ${{ matrix.os }}
+    env:
+        RUSTFLAGS: ${{ matrix.rustflags || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -84,6 +86,10 @@ jobs:
 
           - target: x86_64-pc-windows-gnu
             os: windows-latest
+
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            rustflags: -C target-feature=+crt-static
 
           - target: i686-pc-windows-gnu
             os: ubuntu-latest
