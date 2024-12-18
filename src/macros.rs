@@ -42,25 +42,3 @@ macro_rules! interact_or {
         }
     };
 }
-
-#[macro_export]
-macro_rules! check_update {
-    ($obj:expr, $force:expr) => {{
-        let result = $obj.check_update($force).await;
-
-        if let Ok(Some(latest_version)) = result {
-            println!(
-                "{} v{} visit {} for more info",
-                "New version available:".green().bold(),
-                latest_version.yellow(),
-                "https://docs.railway.com/guides/cli".purple(),
-            );
-            false
-        } else {
-            true
-        }
-    }};
-    ($configs:expr) => {{
-        check_update!($configs, false);
-    }};
-}

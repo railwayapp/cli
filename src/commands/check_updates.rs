@@ -1,4 +1,4 @@
-use crate::check_update;
+use crate::util::check_update::check_update;
 
 use super::*;
 use serde_json::json;
@@ -23,7 +23,7 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let is_latest = check_update!(configs, true);
+    let is_latest = check_update(&mut configs, true).await?;
     if is_latest {
         println!(
             "You are on the latest version of the CLI, v{}",
