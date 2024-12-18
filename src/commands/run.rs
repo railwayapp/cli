@@ -2,14 +2,16 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    check_update,
     controllers::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
         variables::get_service_variables,
     },
     errors::RailwayError,
-    util::prompt::{prompt_select, PromptService},
+    util::{
+        check_update::check_update_command,
+        prompt::{prompt_select, PromptService},
+    },
 };
 
 use super::{queries::project::ProjectProject, *};
@@ -76,7 +78,7 @@ async fn get_service(
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     // only needs to be mutable for the update check
     let mut configs = Configs::new()?;
-    check_update!(configs);
+    check_update_command(&mut configs).await?;
     let configs = configs; // so we make it immutable again
 
     let client = GQLClient::new_authorized(&configs)?;

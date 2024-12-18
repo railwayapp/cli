@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 use commands::*;
+use util::check_update::check_update_command;
 
 mod client;
 mod config;
@@ -68,17 +69,12 @@ async fn main() -> Result<()> {
     // intercept the args
     {
         let args: Vec<String> = std::env::args().collect();
-
-        let flags: Vec<String> = vec!["--version", "-V", "-h", "--help", "help"]
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        let check_version = args.into_iter().any(|arg| flags.contains(&arg));
+        let flags = ["--version", "-V", "-h", "--help", "help"];
+        let check_version = args.into_iter().any(|arg| flags.contains(&arg.as_str()));
 
         if check_version {
             let mut configs = Configs::new()?;
-            check_update!(configs, false);
+            check_update_command(&mut configs).await?;
         }
     }
 
