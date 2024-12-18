@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 use commands::*;
+use util::check_update::check_update_command;
 
 mod client;
 mod config;
@@ -21,6 +22,7 @@ mod macros;
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 #[clap(propagate_version = true)]
+// #[clap(author, about, long_about = None)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -58,11 +60,24 @@ commands_enum!(
     variables,
     whoami,
     volume,
-    redeploy
+    redeploy,
+    check_updates
 );
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // intercept the args
+    {
+        let args: Vec<String> = std::env::args().collect();
+        let flags = ["--version", "-V", "-h", "--help", "help"];
+        let check_version = args.into_iter().any(|arg| flags.contains(&arg.as_str()));
+
+        if check_version {
+            let mut configs = Configs::new()?;
+            check_update_command(&mut configs).await?;
+        }
+    }
+
     let cli = Args::parse();
 
     match Commands::exec(cli).await {

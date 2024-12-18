@@ -29,3 +29,5 @@ pub mod up;
 pub mod variables;
 pub mod volume;
 pub mod whoami;
+
+pub mod check_updates;

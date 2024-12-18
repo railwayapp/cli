@@ -24,9 +24,13 @@ dirs = "5.0.1"
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
 reqwest = { version = "0.12.8", default-features = false, features = [
-  "rustls-tls", "json"
+  "rustls-tls",
+  "json",
 ] }
-chrono = { version = "0.4.38", features = ["serde"], default-features = false }
+chrono = { version = "0.4.38", features = [
+  "serde",
+  "clock",
+], default-features = false }
 graphql_client = { version = "0.14.0", features = ["reqwest-rustls"] }
 paste = "1.0.15"
 tokio = { version = "1.40.0", features = ["full"] }

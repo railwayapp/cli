@@ -3,7 +3,10 @@ use std::fmt::Display;
 
 use crate::{
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_options, prompt_options_skippable},
+    util::{
+        check_update::check_update_command,
+        prompt::{fake_select, prompt_options, prompt_options_skippable},
+    },
 };
 
 use super::{
@@ -37,6 +40,9 @@ pub struct Args {
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
+
+    check_update_command(&mut configs).await?;
+
     let client = GQLClient::new_authorized(&configs)?;
     let me = post_graphql::<queries::UserProjects, _>(
         &client,
