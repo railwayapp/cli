@@ -76,7 +76,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 #[derive(Debug, Clone)]
 struct Environment<'a>(&'a ProjectProjectEnvironmentsEdgesNode);
 
-impl<'a> Display for Environment<'a> {
+impl Display for Environment<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.name)
     }

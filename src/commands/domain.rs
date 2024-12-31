@@ -252,7 +252,9 @@ async fn create_custom_domain(
         post_graphql::<mutations::CustomDomainCreate, _>(&client, configs.get_backboard(), vars)
             .await?;
 
-    spinner.map(|s| s.finish_and_clear());
+    if let Some(s) = spinner {
+        s.finish_and_clear()
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
