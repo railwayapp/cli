@@ -338,16 +338,12 @@ is_build_available() {
 UNINSTALL=0
 HELP=0
 
-CARGOTOML="$(curl -fsSL https://raw.githubusercontent.com/railwayapp/cli/master/Cargo.toml)"
-ALL_VERSIONS="$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' <<EOH
-"$CARGOTOML"
-EOH
-)"
-IFS=$'\n' read -r VERSION <<EOH
-$ALL_VERSIONS
-EOH
+DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name": "v.*"' | cut -d'"' -f4 | cut -c2-)
 
-DEFAULT_VERSION="$VERSION"
+if [ -z "$DEFAULT_VERSION" ]; then
+  error "Failed to fetch latest version from GitHub"
+  exit 1
+fi
 
 
 # defaults
