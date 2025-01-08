@@ -462,7 +462,7 @@ if [ "$UNINSTALL" = 1 ]; then
 
   info "$msg"
   ${sudo} rm "$(which railway)"
-  ${sudo} rm /tmp/railway
+  ${sudo} rm -f /tmp/railway 2>/dev/null || true
 
   info "Removed railway"
   exit 0
