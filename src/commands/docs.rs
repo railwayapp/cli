@@ -17,6 +17,6 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
         return Ok(());
     }
 
-    ::open::that("https://docs.railway.app/")?;
+    ::open::that("https://docs.railway.com")?;
     Ok(())
 }

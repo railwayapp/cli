@@ -3,7 +3,7 @@ name = "railwayapp"
 version = "3.20.1"
 edition = "2021"
 license = "MIT"
-authors = ["Railway <contact@railway.app>"]
+authors = ["Railway <contact@railway.com>"]
 description = "Interact with Railway via CLI"
 readme = "README.md"
 homepage = "https://github.com/railwayapp/cli"
@@ -24,7 +24,8 @@ dirs = "5.0.1"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.134"
 reqwest = { version = "0.12.12", default-features = false, features = [
-  "rustls-tls", "json"
+  "rustls-tls",
+  "json",
 ] }
 chrono = { version = "0.4.39", features = ["serde"], default-features = false }
 graphql_client = { version = "0.14.0", features = ["reqwest-rustls"] }

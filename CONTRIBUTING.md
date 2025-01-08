@@ -29,5 +29,5 @@ cargo install graphql_client_cli
 Then, run the following command to generate the schema:
 
 ```sh
-graphql-client introspect-schema https://backboard.railway.app/graphql/v2 > src/gql/schema.json
+graphql-client introspect-schema https://backboard.railway.com/graphql/v2 > src/gql/schema.json
 ```

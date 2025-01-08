@@ -146,9 +146,9 @@ impl Configs {
 
     pub fn get_host(&self) -> &'static str {
         match Self::get_environment_id() {
-            Environment::Production => "railway.app",
-            Environment::Staging => "railway-staging.app",
-            Environment::Dev => "railway-develop.app",
+            Environment::Production => "railway.com",
+            Environment::Staging => "railway-staging.com",
+            Environment::Dev => "railway-develop.com",
         }
     }
 
