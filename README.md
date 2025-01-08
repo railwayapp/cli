@@ -4,9 +4,9 @@
 [![CI](https://github.com/railwayapp/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/railwayapp/cliv3/actions/workflows/ci.yml)
 [![cargo audit](https://github.com/railwayapp/cli/actions/workflows/cargo-audit.yml/badge.svg)](https://github.com/railwayapp/cli/actions/workflows/cargo-audit.yml)
 
-This is the command line interface for [Railway](https://railway.app). Use it to connect your code to Railway's infrastructure without needing to worry about environment variables or configuration.
+This is the command line interface for [Railway](https://railway.com). Use it to connect your code to Railway's infrastructure without needing to worry about environment variables or configuration.
 
-[View the docs](https://docs.railway.app/develop/cli)
+[View the docs](https://docs.railway.com/develop/cli)
 
 The Railway command line interface (CLI) connects your code to your Railway project from the command line.
 
@@ -18,29 +18,33 @@ The Railway CLI allows you to
 - Create services and databases right from the comfort of your fingertips
 
 ## Status
+
 Currently pre-release. We are looking for feedback and suggestions. Please join our [Discord](https://discord.gg/railway) to provide feedback.
 
 ## Installation
 
 ### Cargo
+
 ```bash
 cargo install railwayapp --locked
 ```
 
 ### Homebrew
 
-```bash 
+```bash
 brew install railway
 ```
 
 ### NPM
+
 ```bash
 npm install -g @railway/cli
 ```
 
 ### Bash
+
 ```bash
-# Install 
+# Install
 bash <(curl -fsSL cli.new)
 
 # Uninstall
@@ -48,6 +52,7 @@ bash <(curl -fsSL cli.new) -r
 ```
 
 ### Scoop
+
 ```ps1
 scoop install railway
 ```
@@ -55,10 +60,13 @@ scoop install railway
 ### Arch Linux AUR
 
 Install using Paru
+
 ```bash
 paru -S railwayapp-cli
 ```
+
 Install using Yay
+
 ```bash
 yay -S railwayapp-cli
 ```
@@ -68,11 +76,13 @@ yay -S railwayapp-cli
 Before using the CLI in a non-interactive environment, ensure you have created an access token (only project-tokens are supported as of now) and set it as the `RAILWAY_TOKEN` environment variable. CI environments are automatically detected by the presence of `CI=true` variable. In these environments, only build logs will be streamed, and the CLI will exit with an appropriate code indicating success or failure.
 
 Install from the command line
+
 ```bash
 docker pull ghcr.io/railwayapp/cli:latest
 ```
 
 Use in GitHub Actions
+
 ```yml
 deploy-job:
   runs-on: ubuntu-latest
@@ -86,6 +96,7 @@ deploy-job:
 ```
 
 Use in GitLab CICD
+
 ```yml
 deploy-job:
   image: ghcr.io/railwayapp/cli:latest
@@ -99,10 +110,12 @@ deploy-job:
 > GitLab can access a protected (secret) variable directly, all you need to do is to add it in CI/CD settings.
 
 ### From source
+
 See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repo locally.
 
 ## Documentation
-[View the full documentation](https://docs.railway.app)
+
+[View the full documentation](https://docs.railway.com)
 
 ## Feedback
 
