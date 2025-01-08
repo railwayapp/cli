@@ -408,7 +408,7 @@ enum Team<'a> {
     Personal,
 }
 
-impl<'a> Display for Team<'a> {
+impl Display for Team<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Team::Team(team) => write!(f, "{}", team.name),
