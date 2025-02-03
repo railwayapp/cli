@@ -29,6 +29,7 @@ pub struct Args {
 #[derive(Subcommand)]
 pub enum EnvironmentCommand {
     /// Create a new environment
+    #[clap(visible_alias = "create")]
     New(NewArgs),
 
     /// Delete an environment
