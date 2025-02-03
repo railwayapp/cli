@@ -20,8 +20,8 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     ::open::that(format!(
-        "https://{hostname}/project/{}",
-        linked_project.project
+        "https://{hostname}/project/{}?environmentId={}",
+        linked_project.project, linked_project.environment
     ))?;
     Ok(())
 }
