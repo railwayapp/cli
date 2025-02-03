@@ -75,10 +75,11 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 async fn new_environment(args: NewArgs) -> Result<()> {
-    let configs = Configs::new()?;
+    let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let project_id = project.id.clone();
     let is_terminal = std::io::stdout().is_terminal();
 
     let name = select_name_new(&args, is_terminal)?;
@@ -111,12 +112,14 @@ async fn new_environment(args: NewArgs) -> Result<()> {
         "created! 🎉".green()
     ));
     let env_id = response.environment_create.id.clone();
-
+    let env_name = response.environment_create.name.clone();
     if !service_variables.is_empty() {
-        upsert_variables(configs, client, project, service_variables, env_id).await?;
+        upsert_variables(&configs, client, project, service_variables, env_id.clone()).await?;
     } else {
         println!();
     }
+
+    configs.link_project(project_id, linked_project.name.clone(), env_id, Some(env_name))?;
 
     Ok(())
 }
@@ -270,7 +273,7 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
 }
 
 async fn upsert_variables(
-    configs: Configs,
+    configs: &Configs,
     client: reqwest::Client,
     project: queries::project::ProjectProject,
     service_variables: Vec<(String, (String, String))>,
