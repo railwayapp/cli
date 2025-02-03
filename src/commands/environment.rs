@@ -119,7 +119,12 @@ async fn new_environment(args: NewArgs) -> Result<()> {
         println!();
     }
 
-    configs.link_project(project_id, linked_project.name.clone(), env_id, Some(env_name))?;
+    configs.link_project(
+        project_id,
+        linked_project.name.clone(),
+        env_id,
+        Some(env_name),
+    )?;
 
     Ok(())
 }
