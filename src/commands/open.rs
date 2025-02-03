@@ -21,8 +21,7 @@ pub async fn command(_args: Args, _json: bool) -> Result<()> {
 
     ::open::that(format!(
         "https://{hostname}/project/{}?environmentId={}",
-        linked_project.project,
-        linked_project.environment
+        linked_project.project, linked_project.environment
     ))?;
     Ok(())
 }
