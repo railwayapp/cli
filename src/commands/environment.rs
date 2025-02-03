@@ -114,6 +114,8 @@ async fn new_environment(args: NewArgs) -> Result<()> {
 
     if !service_variables.is_empty() {
         upsert_variables(configs, client, project, service_variables, env_id).await?;
+    } else {
+        println!();
     }
 
     Ok(())
