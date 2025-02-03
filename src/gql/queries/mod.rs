@@ -61,7 +61,7 @@ pub struct TemplateServiceConfigIcon {
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/Project.graphql",
-    response_derives = "Debug, Serialize, Clone"
+    response_derives = "Debug, Serialize, Clone, PartialEq"
 )]
 pub struct Project;
 pub type RailwayProject = project::ProjectProject;
