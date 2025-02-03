@@ -57,6 +57,18 @@ pub fn prompt_text_with_placeholder_disappear(message: &str, placeholder: &str) 
         .context("Failed to prompt for options")
 }
 
+pub fn prompt_text_with_placeholder_disappear_skippable(
+    message: &str,
+    placeholder: &str,
+) -> Result<Option<String>> {
+    let select = inquire::Text::new(message);
+    select
+        .with_render_config(Configs::get_render_config())
+        .with_placeholder(placeholder)
+        .prompt_skippable()
+        .context("Failed to prompt for options")
+}
+
 pub fn prompt_confirm_with_default(message: &str, default: bool) -> Result<bool> {
     let confirm = inquire::Confirm::new(message);
     confirm
@@ -97,7 +109,7 @@ pub fn fake_select(message: &str, selected: &str) {
     println!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PromptService<'a>(pub &'a ProjectProjectServicesEdgesNode);
 
 impl Display for PromptService<'_> {

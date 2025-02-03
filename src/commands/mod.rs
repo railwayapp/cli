@@ -1,6 +1,6 @@
 pub(super) use crate::{client::*, config::*, gql::*};
 pub(super) use anyhow::{Context, Result};
-pub(super) use clap::Parser;
+pub(super) use clap::{Parser, Subcommand};
 pub(super) use colored::Colorize;
 
 pub mod add;
