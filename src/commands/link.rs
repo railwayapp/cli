@@ -1,4 +1,5 @@
 use colored::*;
+use is_terminal::IsTerminal;
 use std::fmt::Display;
 
 use crate::{
@@ -104,8 +105,10 @@ fn select_service(
             } else {
                 return Err(RailwayError::ServiceNotFound(service).into());
             }
-        } else {
+        } else if std::io::stdout().is_terminal() {
             prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+        } else {
+            None 
         }
     } else {
         None
