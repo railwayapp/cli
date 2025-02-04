@@ -108,7 +108,7 @@ fn select_service(
         } else if std::io::stdout().is_terminal() {
             prompt_options_skippable("Select a service <esc to skip>", useful_services)?
         } else {
-            None 
+            None
         }
     } else {
         None
