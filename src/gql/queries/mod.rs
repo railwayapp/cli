@@ -2,7 +2,7 @@ use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 
 type DateTime = chrono::DateTime<chrono::Utc>;
-type EnvironmentVariables = std::collections::BTreeMap<String, String>;
+type EnvironmentVariables = std::collections::BTreeMap<String, Option<String>>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +109,8 @@ pub struct UserProjects;
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/VariablesForServiceDeployment.graphql",
-    response_derives = "Debug, Serialize, Clone"
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
 )]
 pub struct VariablesForServiceDeployment;
 

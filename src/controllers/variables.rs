@@ -28,6 +28,13 @@ pub async fn get_service_variables(
     let variables = response
         .variables_for_service_deployment
         .into_iter()
+        .filter_map(|var| {
+            if let Some(value) = var.1 {
+                Some((var.0, value))
+            } else {
+                None
+            }
+        })
         .collect();
 
     Ok(variables)
