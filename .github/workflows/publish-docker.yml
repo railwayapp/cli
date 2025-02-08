@@ -72,10 +72,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Extract CLI version from tag
+        run: echo "CLI_VERSION=$(echo '${{ github.event.inputs.tag }}' | tr -d ' \r\n' | sed 's/^[^0-9]*//')" >> $GITHUB_ENV
+
       - name: Download release binary
         run: |
           wget --header='Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
-          https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag }}/railway-${{ github.event.inputs.tag }}-x86_64-unknown-linux-musl.tar.gz -O - | tar xvfz -
+          https://github.com/${{ github.repository }}/releases/download/v${{ env.CLI_VERSION }}/railway-v${{ env.CLI_VERSION }}-x86_64-unknown-linux-musl.tar.gz -O - | tar xvfz -
 
       - name: Test run the binary
         run: ./railway --version
@@ -93,4 +96,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_BASE_TAG }}:${{ github.event.inputs.tag }}, ${{ env.IMAGE_BASE_TAG }}:latest
+          tags: ${{ env.IMAGE_BASE_TAG }}:${{ env.CLI_VERSION }}, ${{ env.IMAGE_BASE_TAG }}:latest
