@@ -6,6 +6,11 @@ on:
     types:
       - completed
   workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        description: Release tag to containerize
+        required: true
 
 env:
   REGISTRY: ghcr.io
@@ -64,23 +69,16 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
-      - name: 'Checkout'
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - id: tag
-        name: Get latest release tag
-        run: |
-          curl -H 'Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' https://api.github.com/repos/${{ github.repository }}/tags | \
-          jq -r '.[-1].name' | \
-          xargs -I {} echo "tag={}" >> "$GITHUB_OUTPUT"
-
-      - name: Download the binary
+      - name: Download release binary
         run: |
           wget --header='Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
-          https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/railway-${{ steps.tag.outputs.tag }}-x86_64-unknown-linux-musl.tar.gz -O railway.tar.gz
+          https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag }}/railway-${{ github.event.inputs.tag }}-x86_64-unknown-linux-musl.tar.gz -O - | tar xvfz -
 
-      - name: Extract the binary
-        run: tar -xf railway.tar.gz
+      - name: Test run the binary
+        run: ./railway --version
 
       - name: Login to ghcr
         uses: docker/login-action@v3
@@ -95,4 +93,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_BASE_TAG }}:${{ steps.tag.outputs.tag }}, ${{ env.IMAGE_BASE_TAG }}:latest
+          tags: ${{ env.IMAGE_BASE_TAG }}:${{ github.event.inputs.tag }}, ${{ env.IMAGE_BASE_TAG }}:latest
