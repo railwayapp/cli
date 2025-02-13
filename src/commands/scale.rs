@@ -1,19 +1,21 @@
-use crate::config;
 use clap::{Arg, Command};
 use futures::executor::block_on;
-use serde::Serialize;
+use std::collections::HashMap;
 
-use super::{
-    queries::{
-        projects::ProjectsProjectsEdgesNode, user_projects::UserProjectsMeProjectsEdgesNode,
-    },
-    *,
-};
+use super::*;
+/// Dynamic flags workaround
+/// Unfortunately, we aren't able to use the Parser derive macro when working with dynamic flags,
+/// meaning we have to implement most of the traits for the Args struct manually.
+pub struct Args {
+    // This field will collect any of the dynamically generated flags
+    pub dynamic: HashMap<String, u16>,
+}
 
-/// List all projects in your Railway account
-#[derive(Parser, Debug)]
-pub struct Args {}
+pub async fn command(args: Args, _json: bool) -> Result<()> {
+    Ok(())
+}
 
+/// This function generates flags that are appended to the command at runtime.
 pub fn get_dynamic_args(cmd: Command) -> Command {
     if !std::env::args().any(|f| f.eq_ignore_ascii_case("scale")) {
         // if the command has nothing to do with railway scale, dont make the web request.
@@ -54,9 +56,64 @@ pub fn get_dynamic_args(cmd: Command) -> Command {
     })
 }
 
-pub async fn command(args: Args, json: bool) -> Result<()> {
-    // Args::command().;
-    println!("hello");
-    println!("{:?}", args);
-    Ok(())
+impl clap::FromArgMatches for Args {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let mut dynamic = HashMap::new();
+        // Iterate through all provided argument keys.
+        // Adjust the static key names if you add any to your Args struct.
+        for key in matches.ids() {
+            if key == "json" {
+                continue;
+            }
+            // If the flag value can be interpreted as a u16, insert it.
+            if let Some(val) = matches.get_one::<u16>(key.as_str()) {
+                dynamic.insert(key.to_string(), *val);
+            }
+        }
+        Ok(Args { dynamic })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl clap::Args for Args {
+    fn group_id() -> Option<clap::Id> {
+        Some(clap::Id::from("Args"))
+    }
+    fn augment_args<'b>(__clap_app: clap::Command) -> clap::Command {
+        {
+            let __clap_app = __clap_app.group(clap::ArgGroup::new("Args").multiple(true).args({
+                let members: [clap::Id; 0usize] = [];
+                members
+            }));
+            __clap_app
+                .about("Control the number of instances running in each region")
+                .long_about(None)
+        }
+    }
+    fn augment_args_for_update<'b>(__clap_app: clap::Command) -> clap::Command {
+        {
+            let __clap_app = __clap_app.group(clap::ArgGroup::new("Args").multiple(true).args({
+                let members: [clap::Id; 0usize] = [];
+                members
+            }));
+            __clap_app
+                .about("Control the number of instances running in each region")
+                .long_about(None)
+        }
+    }
+}
+
+impl clap::CommandFactory for Args {
+    fn command<'b>() -> clap::Command {
+        let __clap_app = clap::Command::new("railwayapp");
+        <Args as clap::Args>::augment_args(__clap_app)
+    }
+    fn command_for_update<'b>() -> clap::Command {
+        let __clap_app = clap::Command::new("railwayapp");
+        <Args as clap::Args>::augment_args_for_update(__clap_app)
+    }
 }
