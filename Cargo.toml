@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.95"
-clap = { version = "4.5.23", features = ["derive", "suggestions"] }
+clap = { version = "4.5.23", features = ["derive", "suggestions", "cargo"] }
 colored = "2.2.0"
 dirs = "5.0.1"
 serde = { version = "1.0.217", features = ["derive"] }
@@ -56,6 +56,7 @@ url = "2.5.4"
 futures = { version = "0.3.31", default-features = false, features = [
   "compat",
   "io-compat",
+  "executor"
 ] }
 names = { version = "0.14.0", default-features = false }
 graphql-ws-client = { version = "0.11.1", features = [
