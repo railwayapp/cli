@@ -45,6 +45,7 @@ pub struct RailwayConfig {
     pub projects: BTreeMap<String, LinkedProject>,
     pub user: RailwayUser,
     pub last_update_check: Option<DateTime<Utc>>,
+    pub new_version_available: Option<String>,
 }
 
 #[derive(Debug)]
@@ -90,6 +91,7 @@ impl Configs {
                         projects: BTreeMap::new(),
                         user: RailwayUser { token: None },
                         last_update_check: None,
+                        new_version_available: None,
                     }
                 });
 
@@ -107,6 +109,7 @@ impl Configs {
                 projects: BTreeMap::new(),
                 user: RailwayUser { token: None },
                 last_update_check: None,
+                new_version_available: None,
             },
         })
     }
@@ -116,6 +119,7 @@ impl Configs {
             projects: BTreeMap::new(),
             user: RailwayUser { token: None },
             last_update_check: None,
+            new_version_available: None,
         };
         Ok(())
     }

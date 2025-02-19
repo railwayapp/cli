@@ -8,10 +8,7 @@ use crate::{
         variables::get_service_variables,
     },
     errors::RailwayError,
-    util::{
-        check_update::check_update_command,
-        prompt::{prompt_select, PromptService},
-    },
+    util::prompt::{prompt_select, PromptService},
 };
 
 use super::{queries::project::ProjectProject, *};
@@ -77,9 +74,7 @@ async fn get_service(
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     // only needs to be mutable for the update check
-    let mut configs = Configs::new()?;
-    check_update_command(&mut configs).await?;
-    let configs = configs; // so we make it immutable again
+    let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;

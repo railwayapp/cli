@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::util::{check_update::check_update_command, prompt::prompt_select};
+use crate::util::prompt::prompt_select;
 
 use super::{queries::user_projects::UserProjectsMeTeamsEdgesNode, *};
 
@@ -15,8 +15,6 @@ pub struct Args {
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
-
-    check_update_command(&mut configs).await?;
 
     let client = GQLClient::new_authorized(&configs)?;
 

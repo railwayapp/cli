@@ -14,8 +14,3 @@ pub async fn check_update(configs: &mut crate::Configs, force: bool) -> anyhow::
         Ok(true)
     }
 }
-
-pub async fn check_update_command(configs: &mut crate::Configs) -> anyhow::Result<()> {
-    check_update(configs, false).await?;
-    Ok(())
-}

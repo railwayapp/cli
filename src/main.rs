@@ -1,9 +1,9 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{error::ErrorKind, Parser, Subcommand};
 
 mod commands;
 use commands::*;
-use util::check_update::check_update_command;
+use is_terminal::IsTerminal;
 
 mod client;
 mod config;
@@ -63,36 +63,111 @@ commands_enum!(
     check_updates
 );
 
+fn spawn_update_task() -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
+    tokio::spawn(async {
+        if !std::io::stdout().is_terminal() {
+            return Ok::<(), anyhow::Error>(());
+        }
+
+        let mut configs = Configs::new()?;
+        let result = configs.check_update(false).await;
+        if let Ok(Some(latest_version)) = result {
+            configs.root_config.new_version_available = Some(latest_version);
+        }
+        configs.write()?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+async fn handle_update_task(handle: tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
+    match handle.await {
+        Ok(Ok(_)) => {} // Task completed successfully
+        Ok(Err(e)) => {
+            if !std::io::stdout().is_terminal() {
+                eprintln!("Failed to check for updates (not fatal)");
+                eprintln!("{}", e);
+            }
+        }
+        Err(e) => {
+            eprintln!("Check Updates: Task panicked or failed to execute.");
+            eprintln!("{}", e);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // intercept the args
-    {
-        let args: Vec<String> = std::env::args().collect();
-        let flags = ["--version", "-V", "-h", "--help", "help"];
-        let check_version = args.into_iter().any(|arg| flags.contains(&arg.as_str()));
-
-        if check_version {
-            let mut configs = Configs::new()?;
-            check_update_command(&mut configs).await?;
+    if std::io::stdout().is_terminal() {
+        let mut configs = Configs::new()?;
+        if let Some(new_version_available) = configs.root_config.new_version_available {
+            println!(
+                "{} v{} visit {} for more info",
+                "New version available:".green().bold(),
+                new_version_available.yellow(),
+                "https://docs.railway.com/guides/cli".purple(),
+            );
+            configs.root_config.new_version_available = None;
+            configs.write()?;
         }
     }
 
-    let cli = Args::parse();
+    let check_updates_handle = spawn_update_task();
 
-    match Commands::exec(cli).await {
-        Ok(_) => {}
+    // Trace from where Args::parse() bubbles an error to where it gets caught
+    // and handled.
+    //
+    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/derive.rs#L30-L42
+    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L233-L237
+    //
+    // This code tells us what exit code to use:
+    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L221-L227
+    //
+    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L206-L208
+    //
+    // This code tells us what stream to print the error to:
+    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215
+    //
+    // pub(crate) fn stream(&self) -> Stream {
+    //     match self.kind() {
+    //         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => Stream::Stdout,
+    //         _ => Stream::Stderr,
+    //     }
+    // }
+
+    let cli = match Args::try_parse() {
+        Ok(args) => args,
+        // Cases where Clap usually exits the process with and prints to stdout.
+        Err(e) if e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            eprintln!("{}", e);
+            handle_update_task(check_updates_handle).await;
+            std::process::exit(2); // Exit 2 (default)
+        }
+        // Clap's source code specifically says that these errors should be
+        // printed to stdout and exit with a status of 0.
+        Err(e) if e.kind() == ErrorKind::DisplayHelp || e.kind() == ErrorKind::DisplayVersion => {
+            println!("{}", e);
+            handle_update_task(check_updates_handle).await;
+            std::process::exit(0); // Exit 0 (because of error kind)
+        }
         Err(e) => {
-            // If the user cancels the operation, we want to exit successfully
-            // This can happen if Ctrl+C is pressed during a prompt
-            if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string()
-            {
-                return Ok(());
-            }
-
-            eprintln!("{:?}", e);
-            std::process::exit(1);
+            eprintln!("Error parsing arguments: {}", e);
+            handle_update_task(check_updates_handle).await;
+            std::process::exit(2); // Exit 2 (default)
         }
+    };
+
+    let exec_result = Commands::exec(cli).await;
+
+    if let Err(e) = exec_result {
+        if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string() {
+            return Ok(()); // Exit gracefully if interrupted
+        }
+        eprintln!("{:?}", e);
+        handle_update_task(check_updates_handle).await;
+        std::process::exit(1);
     }
+
+    handle_update_task(check_updates_handle).await;
 
     Ok(())
 }
