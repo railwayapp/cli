@@ -1,9 +1,12 @@
+use std::cmp::Ordering;
+
 use anyhow::Result;
 use clap::{error::ErrorKind, Parser, Subcommand};
 
 mod commands;
 use commands::*;
 use is_terminal::IsTerminal;
+use util::compare_semver::compare_semver;
 
 mod client;
 mod config;
@@ -63,13 +66,12 @@ commands_enum!(
     check_updates
 );
 
-fn spawn_update_task() -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
-    tokio::spawn(async {
+fn spawn_update_task(mut configs: Configs) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
+    tokio::spawn(async move {
         if !std::io::stdout().is_terminal() {
             return Ok::<(), anyhow::Error>(());
         }
 
-        let mut configs = Configs::new()?;
         let result = configs.check_update(false).await;
         if let Ok(Some(latest_version)) = result {
             configs.root_config.new_version_available = Some(latest_version);
@@ -79,39 +81,48 @@ fn spawn_update_task() -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
     })
 }
 
-async fn handle_update_task(handle: tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
-    match handle.await {
-        Ok(Ok(_)) => {} // Task completed successfully
-        Ok(Err(e)) => {
-            if !std::io::stdout().is_terminal() {
-                eprintln!("Failed to check for updates (not fatal)");
+async fn handle_update_task(handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>) {
+    if let Some(handle) = handle {
+        match handle.await {
+            Ok(Ok(_)) => {} // Task completed successfully
+            Ok(Err(e)) => {
+                if !std::io::stdout().is_terminal() {
+                    eprintln!("Failed to check for updates (not fatal)");
+                    eprintln!("{}", e);
+                }
+            }
+            Err(e) => {
+                eprintln!("Check Updates: Task panicked or failed to execute.");
                 eprintln!("{}", e);
             }
-        }
-        Err(e) => {
-            eprintln!("Check Updates: Task panicked or failed to execute.");
-            eprintln!("{}", e);
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Avoid grabbing configs multiple times, and avoid grabbing configs if we're not in a terminal
+    let mut check_updates_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>> = None;
     if std::io::stdout().is_terminal() {
         let mut configs = Configs::new()?;
-        if let Some(new_version_available) = configs.root_config.new_version_available {
-            println!(
-                "{} v{} visit {} for more info",
-                "New version available:".green().bold(),
-                new_version_available.yellow(),
-                "https://docs.railway.com/guides/cli".purple(),
-            );
-            configs.root_config.new_version_available = None;
-            configs.write()?;
+        if let Some(new_version_available) = &configs.root_config.new_version_available {
+            match compare_semver(env!("CARGO_PKG_VERSION"), &new_version_available) {
+                Ordering::Less => {
+                    println!(
+                        "{} v{} visit {} for more info",
+                        "New version available:".green().bold(),
+                        new_version_available.yellow(),
+                        "https://docs.railway.com/guides/cli".purple(),
+                    );
+                }
+                _ => {
+                    configs.root_config.new_version_available = None;
+                    configs.write()?;
+                }
+            }
         }
+        check_updates_handle = Some(spawn_update_task(configs));
     }
-
-    let check_updates_handle = spawn_update_task();
 
     // Trace from where Args::parse() bubbles an error to where it gets caught
     // and handled.
