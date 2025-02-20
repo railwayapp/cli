@@ -184,16 +184,20 @@ fn compare_precedence(a: &str, b: &str) -> Ordering {
     let a_precedence = get_precedence(a_major.trim());
     let b_precedence = get_precedence(b_major.trim());
 
-    if a_precedence != b_precedence {
-        return a_precedence.cmp(&b_precedence);
-    }
-
-    a_numeric
-        .parse::<u8>()
-        .unwrap_or(0)
-        .cmp(&b_numeric.parse::<u8>().unwrap_or(0))
+    a_precedence.cmp(&b_precedence).then(
+        a_numeric
+            .parse::<u8>()
+            .unwrap_or(0)
+            .cmp(&b_numeric.parse::<u8>().unwrap_or(0)),
+    )
 }
 
+fn parse_version(a: &str) -> Vec<u8> {
+    a.split('.').filter_map(|s| s.parse::<u8>().ok()).collect()
+}
+
+/// Compare two semver strings. This function assumes that no numerical parts
+/// of the version are larger than u8::MAX (255).
 pub fn compare_semver(a: &str, b: &str) -> Ordering {
     let (a, _) = a.split_once('+').unwrap_or((a, ""));
     let (b, _) = b.split_once('+').unwrap_or((b, ""));
@@ -205,14 +209,8 @@ pub fn compare_semver(a: &str, b: &str) -> Ordering {
     let (a_version, a_build) = a.split_once('-').unwrap_or((a, ""));
     let (b_version, b_build) = b.split_once('-').unwrap_or((b, ""));
 
-    let a_version: Vec<u8> = a_version
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let b_version: Vec<u8> = b_version
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let a_version: Vec<u8> = parse_version(a_version);
+    let b_version: Vec<u8> = parse_version(b_version);
 
     for (a, b) in a_version.iter().zip(b_version.iter()) {
         match a.cmp(b) {
