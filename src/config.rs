@@ -1,7 +1,7 @@
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
-    fs,
-    fs::{create_dir_all, File},
+    fs::{self, create_dir_all, File},
     io::Read,
     path::PathBuf,
 };
@@ -17,6 +17,7 @@ use crate::{
     client::{post_graphql, GQLClient},
     commands::queries,
     errors::RailwayError,
+    util::compare_semver::compare_semver,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -337,14 +338,10 @@ impl Configs {
             return Ok(None);
         }
 
-        let should_update = if let Some(last_update_check) = self.root_config.last_update_check {
-            Utc::now().date_naive() != last_update_check.date_naive() || force
-        } else {
-            true
-        };
-
-        if !should_update {
-            return Ok(None);
+        if let Some(last_update_check) = self.root_config.last_update_check {
+            if Utc::now().date_naive() == last_update_check.date_naive() && !force {
+                return Ok(None);
+            }
         }
 
         let client = reqwest::Client::new();
@@ -361,12 +358,9 @@ impl Configs {
         let response = response.json::<GithubApiRelease>().await?;
         let latest_version = response.tag_name.trim_start_matches('v');
 
-        let current_version = env!("CARGO_PKG_VERSION");
-
-        if latest_version == current_version {
-            return Ok(None);
+        match compare_semver(env!("CARGO_PKG_VERSION"), &latest_version) {
+            Ordering::Less => Ok(Some(latest_version.to_owned())),
+            _ => Ok(None),
         }
-
-        Ok(Some(latest_version.to_owned()))
     }
 }

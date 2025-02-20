@@ -147,12 +147,6 @@ async fn main() -> Result<()> {
 
     let cli = match Args::try_parse() {
         Ok(args) => args,
-        // Cases where Clap usually exits the process with and prints to stdout.
-        Err(e) if e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-            eprintln!("{}", e);
-            handle_update_task(check_updates_handle).await;
-            std::process::exit(2); // Exit 2 (default)
-        }
         // Clap's source code specifically says that these errors should be
         // printed to stdout and exit with a status of 0.
         Err(e) if e.kind() == ErrorKind::DisplayHelp || e.kind() == ErrorKind::DisplayVersion => {
@@ -161,7 +155,7 @@ async fn main() -> Result<()> {
             std::process::exit(0); // Exit 0 (because of error kind)
         }
         Err(e) => {
-            eprintln!("Error parsing arguments: {}", e);
+            eprintln!("{}", e);
             handle_update_task(check_updates_handle).await;
             std::process::exit(2); // Exit 2 (default)
         }
