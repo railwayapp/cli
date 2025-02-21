@@ -1,5 +1,68 @@
 use std::cmp::Ordering;
 
+// N=3, much faster than BTreeMap
+fn get_precedence(a: &str) -> u8 {
+    match a {
+        "" => 5,
+        "rc" => 4,
+        "beta" => 3,
+        "alpha" => 2,
+        _ => 1,
+    }
+}
+
+fn compare_precedence(a: &str, b: &str) -> Ordering {
+    if a == b {
+        return Ordering::Equal;
+    }
+
+    let (a_major, a_numeric) = a.split_once('.').unwrap_or((a, ""));
+    let (b_major, b_numeric) = b.split_once('.').unwrap_or((b, ""));
+
+    let a_precedence = get_precedence(a_major.trim());
+    let b_precedence = get_precedence(b_major.trim());
+
+    a_precedence.cmp(&b_precedence).then(
+        a_numeric
+            .parse::<u8>()
+            .unwrap_or(0)
+            .cmp(&b_numeric.parse::<u8>().unwrap_or(0)),
+    )
+}
+
+fn parse_version(a: &str) -> Vec<u8> {
+    a.split('.').filter_map(|s| s.parse::<u8>().ok()).collect()
+}
+
+/// Compare two semver strings. This function assumes that no numerical parts
+/// of the version are larger than u8::MAX (255).
+pub fn compare_semver(a: &str, b: &str) -> Ordering {
+    let (a, _) = a.split_once('+').unwrap_or((a, ""));
+    let (b, _) = b.split_once('+').unwrap_or((b, ""));
+
+    if a == b {
+        return Ordering::Equal;
+    }
+
+    let (a_version, a_build) = a.split_once('-').unwrap_or((a, ""));
+    let (b_version, b_build) = b.split_once('-').unwrap_or((b, ""));
+
+    let a_version: Vec<u8> = parse_version(a_version);
+    let b_version: Vec<u8> = parse_version(b_version);
+
+    for (a, b) in a_version.iter().zip(b_version.iter()) {
+        match a.cmp(b) {
+            Ordering::Equal => continue,
+            x => return x,
+        }
+    }
+
+    a_build
+        .is_empty()
+        .cmp(&b_build.is_empty())
+        .then(compare_precedence(a_build, b_build))
+}
+
 #[cfg(test)]
 mod tests {
     use super::compare_semver;
@@ -160,67 +223,4 @@ mod tests {
         );
         assert_eq!(compare_semver("1.0.0-rc.1", "1.0.0"), Ordering::Less);
     }
-}
-
-// N=3, much faster than BTreeMap
-fn get_precedence(a: &str) -> u8 {
-    match a {
-        "" => 5,
-        "rc" => 4,
-        "beta" => 3,
-        "alpha" => 2,
-        _ => 1,
-    }
-}
-
-fn compare_precedence(a: &str, b: &str) -> Ordering {
-    if a == b {
-        return Ordering::Equal;
-    }
-
-    let (a_major, a_numeric) = a.split_once('.').unwrap_or((a, ""));
-    let (b_major, b_numeric) = b.split_once('.').unwrap_or((b, ""));
-
-    let a_precedence = get_precedence(a_major.trim());
-    let b_precedence = get_precedence(b_major.trim());
-
-    a_precedence.cmp(&b_precedence).then(
-        a_numeric
-            .parse::<u8>()
-            .unwrap_or(0)
-            .cmp(&b_numeric.parse::<u8>().unwrap_or(0)),
-    )
-}
-
-fn parse_version(a: &str) -> Vec<u8> {
-    a.split('.').filter_map(|s| s.parse::<u8>().ok()).collect()
-}
-
-/// Compare two semver strings. This function assumes that no numerical parts
-/// of the version are larger than u8::MAX (255).
-pub fn compare_semver(a: &str, b: &str) -> Ordering {
-    let (a, _) = a.split_once('+').unwrap_or((a, ""));
-    let (b, _) = b.split_once('+').unwrap_or((b, ""));
-
-    if a == b {
-        return Ordering::Equal;
-    }
-
-    let (a_version, a_build) = a.split_once('-').unwrap_or((a, ""));
-    let (b_version, b_build) = b.split_once('-').unwrap_or((b, ""));
-
-    let a_version: Vec<u8> = parse_version(a_version);
-    let b_version: Vec<u8> = parse_version(b_version);
-
-    for (a, b) in a_version.iter().zip(b_version.iter()) {
-        match a.cmp(b) {
-            Ordering::Equal => continue,
-            x => return x,
-        }
-    }
-
-    a_build
-        .is_empty()
-        .cmp(&b_build.is_empty())
-        .then(compare_precedence(a_build, b_build))
 }
