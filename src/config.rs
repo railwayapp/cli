@@ -57,6 +57,12 @@ pub enum Environment {
     Dev,
 }
 
+pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 10;
+pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 5;
+pub const SSH_RECONNECT_DELAY_SECS: u64 = 1;
+pub const SSH_MAX_RECONNECT_ATTEMPTS: u32 = 3;
+pub const SSH_MAX_EMPTY_MESSAGES: u32 = 5;
+
 impl Configs {
     pub fn new() -> Result<Self> {
         let environment = Self::get_environment_id();
@@ -150,6 +156,12 @@ impl Configs {
             Environment::Staging => "railway-staging.com",
             Environment::Dev => "railway-develop.com",
         }
+    }
+
+    /// Returns the host and path for relay server without protocol (e.g. "backboard.railway.com/relay")
+    /// Protocol is omitted to allow flexibility between https:// and wss:// usage
+    pub fn get_relay_host_path(&self) -> String {
+        format!("backboard.{}/relay", self.get_host())
     }
 
     pub fn get_backboard(&self) -> String {
