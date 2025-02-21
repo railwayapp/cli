@@ -1,6 +1,8 @@
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 type EnvironmentVariables = std::collections::BTreeMap<String, String>;
+#[allow(clippy::upper_case_acronyms)] // graphql client expects a type called JSON
+type JSON = serde_json::Value;
 use chrono::{DateTime as DateTimeType, Utc};
 
 pub type DateTime = DateTimeType<Utc>;
@@ -160,6 +162,15 @@ pub struct ServiceCreate;
     skip_serializing_none
 )]
 pub struct CustomDomainCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/UpdateRegions.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct UpdateRegions;
 
 #[derive(GraphQLQuery)]
 #[graphql(
