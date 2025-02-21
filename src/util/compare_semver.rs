@@ -30,8 +30,17 @@ fn compare_precedence(a: &str, b: &str) -> Ordering {
     )
 }
 
-fn parse_version(a: &str) -> Vec<u8> {
-    a.split('.').filter_map(|s| s.parse::<u8>().ok()).collect()
+fn parse_version(a: &str) -> [u8; 3] {
+    let mut out = [0; 3];
+    for (i, n) in a
+        .split('.')
+        .filter_map(|s| s.parse::<u8>().ok())
+        .take(3)
+        .enumerate()
+    {
+        out[i] = n;
+    }
+    out
 }
 
 /// Compare two semver strings. This function assumes that no numerical parts
@@ -47,8 +56,8 @@ pub fn compare_semver(a: &str, b: &str) -> Ordering {
     let (a_version, a_build) = a.split_once('-').unwrap_or((a, ""));
     let (b_version, b_build) = b.split_once('-').unwrap_or((b, ""));
 
-    let a_version: Vec<u8> = parse_version(a_version);
-    let b_version: Vec<u8> = parse_version(b_version);
+    let a_version = parse_version(a_version);
+    let b_version = parse_version(b_version);
 
     for (a, b) in a_version.iter().zip(b_version.iter()) {
         match a.cmp(b) {
@@ -222,5 +231,32 @@ mod tests {
             Ordering::Less
         );
         assert_eq!(compare_semver("1.0.0-rc.1", "1.0.0"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_different_lengths() {
+        assert_eq!(compare_semver("1.0", "1.0.2"), Ordering::Less);
+        assert_eq!(compare_semver("1.0.2", "1.0"), Ordering::Greater);
+
+        assert_eq!(compare_semver("1.0-alpha", "1.0.2"), Ordering::Less);
+        assert_eq!(compare_semver("1.0.2", "1.0-alpha"), Ordering::Greater);
+
+        assert_eq!(compare_semver("1", "1.0.2"), Ordering::Less);
+        assert_eq!(compare_semver("1.0.2", "1"), Ordering::Greater);
+
+        assert_eq!(compare_semver("1", "2"), Ordering::Less);
+        assert_eq!(compare_semver("2", "1"), Ordering::Greater);
+
+        assert_eq!(compare_semver("1-alpha", "2"), Ordering::Less);
+        assert_eq!(compare_semver("2", "1-alpha"), Ordering::Greater);
+
+        assert_eq!(compare_semver("1", "1.1"), Ordering::Less);
+        assert_eq!(compare_semver("1.1", "1"), Ordering::Greater);
+
+        assert_eq!(compare_semver("1.0", "1"), Ordering::Equal);
+        assert_eq!(compare_semver("1", "1.0"), Ordering::Equal);
+
+        assert_eq!(compare_semver("0.1", "1"), Ordering::Less);
+        assert_eq!(compare_semver("1", "0.1"), Ordering::Greater);
     }
 }
