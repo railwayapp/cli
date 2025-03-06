@@ -115,7 +115,7 @@ impl TerminalClient {
             .header("X-Railway-Environment-Id", params.environment_id.clone());
 
         if let Some(instance_id) = params.deployment_instance_id.as_ref() {
-            request = request.header("X-Railway-Deployment-Instance", instance_id);
+            request = request.header("X-Railway-Deployment-Instance-Id", instance_id);
         }
 
         let request = request.body(())?;
