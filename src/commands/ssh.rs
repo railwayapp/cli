@@ -1,29 +1,85 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use is_terminal::IsTerminal;
+use reqwest::Client;
 use tokio::io::AsyncReadExt;
 use tokio::select;
 
-use super::*;
-use crate::{consts::TICK_STRING, controllers::terminal::TerminalClient};
+use super::{
+    queries::deployments::{DeploymentListInput, DeploymentStatus, DeploymentStatusInput},
+    *,
+};
+use crate::{
+    consts::TICK_STRING,
+    controllers::{
+        environment::get_matched_environment, project::get_project, service::get_or_prompt_service,
+        terminal::TerminalClient,
+    },
+    util::prompt::{prompt_select, PromptService},
+};
 
 /// Connect to a service via SSH
 #[derive(Parser)]
 pub struct Args {
-    /// Project to connect to
-    #[arg(value_name = "project-name")]
-    project: String,
+    /// Project to connect to (defaults to linked project)
+    #[clap(short, long)]
+    project: Option<String>,
 
-    /// Service to connect to
-    #[arg(value_name = "service-name")]
-    service: String,
+    #[clap(short, long)]
+    /// Service to connect to (defaults to linked service)
+    service: Option<String>,
 
-    /// Deployment instance ID to connect to
+    #[clap(short, long)]
+    /// Environment to connect to (defaults to linked environment)
+    environment: Option<String>,
+
+    #[clap(short, long)]
+    /// Deployment instance ID to connect to (defaults to first active instance)
     #[arg(long = "deployment-instance", value_name = "deployment-instance-id")]
     deployment_instance: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct SSHConnectParams {
+    project_id: String,
+    environment_id: String,
+    service_id: String,
+    deployment_instance_id: Option<String>,
+}
+
+async fn get_ssh_connect_params(
+    args: Args,
+    configs: &Configs,
+    client: &Client,
+) -> Result<SSHConnectParams> {
+    let linked_project = configs.get_linked_project().await?;
+
+    let project_id = args.project.unwrap_or(linked_project.project.clone());
+    let project = get_project(client, configs, project_id.clone()).await?;
+
+    let environment = args
+        .environment
+        .clone()
+        .unwrap_or(linked_project.environment.clone());
+    let environment_id = get_matched_environment(&project, environment)?.id;
+
+    let service_id = get_or_prompt_service(linked_project.clone(), project, args.service)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
+
+    Ok(SSHConnectParams {
+        project_id,
+        environment_id,
+        service_id,
+        deployment_instance_id: args.deployment_instance,
+    })
+}
+
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    let params = get_ssh_connect_params(args, &configs, &client).await?;
+
     let token = configs
         .get_railway_auth_token()
         .context("No authentication token found. Please login first with 'railway login'")?;
@@ -43,9 +99,9 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut client = TerminalClient::new(
         &ws_url,
         &token,
-        &args.project,
-        &args.service,
-        args.deployment_instance.as_deref(),
+        &params.project_id,
+        &params.service_id,
+        params.deployment_instance_id.as_deref(),
     )
     .await?;
 
