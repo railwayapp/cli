@@ -11,8 +11,10 @@ use super::{
 use crate::{
     consts::TICK_STRING,
     controllers::{
-        environment::get_matched_environment, project::get_project, service::get_or_prompt_service,
-        terminal::TerminalClient,
+        environment::get_matched_environment,
+        project::get_project,
+        service::get_or_prompt_service,
+        terminal::{SSHConnectParams, TerminalClient},
     },
     util::prompt::{prompt_select, PromptService},
 };
@@ -36,14 +38,6 @@ pub struct Args {
     /// Deployment instance ID to connect to (defaults to first active instance)
     #[arg(long = "deployment-instance", value_name = "deployment-instance-id")]
     deployment_instance: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct SSHConnectParams {
-    project_id: String,
-    environment_id: String,
-    service_id: String,
-    deployment_instance_id: Option<String>,
 }
 
 async fn get_ssh_connect_params(
@@ -96,14 +90,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
 
-    let mut client = TerminalClient::new(
-        &ws_url,
-        &token,
-        &params.project_id,
-        &params.service_id,
-        params.deployment_instance_id.as_deref(),
-    )
-    .await?;
+    let mut client = TerminalClient::new(&ws_url, &token, &params).await?;
 
     if !std::io::stdout().is_terminal() {
         anyhow::bail!("SSH connection requires a terminal");

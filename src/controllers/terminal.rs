@@ -13,6 +13,14 @@ use crate::commands::{
     SSH_MESSAGE_TIMEOUT_SECS, SSH_RECONNECT_DELAY_SECS,
 };
 
+#[derive(Clone, Debug)]
+pub struct SSHConnectParams {
+    pub project_id: String,
+    pub environment_id: String,
+    pub service_id: String,
+    pub deployment_instance_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ClientMessage {
     pub r#type: String,
@@ -60,18 +68,11 @@ pub struct TerminalClient {
 }
 
 impl TerminalClient {
-    pub async fn new(
-        url: &str,
-        token: &str,
-        project: &str,
-        service: &str,
-        deployment_instance: Option<&str>,
-    ) -> Result<Self> {
+    pub async fn new(url: &str, token: &str, params: &SSHConnectParams) -> Result<Self> {
         let url = Url::parse(url)?;
 
         for attempt in 1..=SSH_MAX_RECONNECT_ATTEMPTS {
-            match Self::attempt_connection(&url, token, project, service, deployment_instance).await
-            {
+            match Self::attempt_connection(&url, token, params).await {
                 Ok(ws_stream) => {
                     return Ok(Self { ws_stream });
                 }
@@ -97,9 +98,7 @@ impl TerminalClient {
     async fn attempt_connection(
         url: &Url,
         token: &str,
-        project: &str,
-        service: &str,
-        deployment_instance: Option<&str>,
+        params: &SSHConnectParams,
     ) -> Result<WebSocketStream<async_tungstenite::tokio::ConnectStream>> {
         let key = generate_key();
 
@@ -111,11 +110,12 @@ impl TerminalClient {
             .header("Connection", "Upgrade")
             .header("Sec-WebSocket-Version", "13")
             .header("Host", url.host_str().unwrap_or(""))
-            .header("X-Railway-Project-Id", project)
-            .header("X-Railway-Service-Id", service);
+            .header("X-Railway-Project-Id", params.project_id.clone())
+            .header("X-Railway-Service-Id", params.service_id.clone())
+            .header("X-Railway-Environment-Id", params.environment_id.clone());
 
-        if let Some(instance) = deployment_instance {
-            request = request.header("X-Railway-Deployment-Instance", instance);
+        if let Some(instance_id) = params.deployment_instance_id.as_ref() {
+            request = request.header("X-Railway-Deployment-Instance", instance_id);
         }
 
         let request = request.body(())?;
