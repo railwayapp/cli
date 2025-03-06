@@ -221,7 +221,7 @@ impl TerminalClient {
                             }
                         },
                         "error" => {
-                            bail!("Server error: {}", server_msg.payload.message);
+                            bail!(server_msg.payload.message);
                         }
                         "pty_closed" => {
                             return Ok(());

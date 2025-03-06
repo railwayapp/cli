@@ -111,8 +111,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                         std::process::exit(0);
                     }
                     Err(e) => {
-                        eprintln!("Error handling server messages: {}", e);
-                        break;
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
                     }
                 }
             }
