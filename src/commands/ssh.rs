@@ -1,13 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use is_terminal::IsTerminal;
 use reqwest::Client;
 use tokio::io::AsyncReadExt;
 use tokio::select;
 
-use super::{
-    queries::deployments::{DeploymentListInput, DeploymentStatus, DeploymentStatusInput},
-    *,
-};
+use super::*;
 use crate::{
     consts::TICK_STRING,
     controllers::{
@@ -16,7 +13,6 @@ use crate::{
         service::get_or_prompt_service,
         terminal::{SSHConnectParams, TerminalClient},
     },
-    util::prompt::{prompt_select, PromptService},
 };
 
 /// Connect to a service via SSH
@@ -111,6 +107,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
 
+    let mut exit_code = None;
+
     // Main event loop
     loop {
         select! {
@@ -149,13 +147,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             result = client.handle_server_messages() => {
                 match result {
                    Ok(()) => {
-                        // PTY session has ended, exit immediately
-                        drop(raw_mode);
-                        std::process::exit(0);
+                        exit_code = Some(0);
+                        break;
                     }
                     Err(e) => {
                         eprintln!("Error: {}", e);
-                        std::process::exit(1);
+                        exit_code = Some(1);
+                        break;
                     }
                 }
             }
@@ -163,5 +161,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     }
 
     drop(raw_mode);
+
+    if let Some(code) = exit_code {
+        std::process::exit(code);
+    }
+
     Ok(())
 }
