@@ -22,6 +22,7 @@ pub mod redeploy;
 pub mod run;
 pub mod service;
 pub mod shell;
+pub mod ssh;
 pub mod starship;
 pub mod status;
 pub mod unlink;

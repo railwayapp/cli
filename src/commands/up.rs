@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::bail;
+use anyhow::{bail, Result};
 
 use futures::StreamExt;
 use gzp::{deflate::Gzip, ZBuilder};
@@ -22,6 +22,7 @@ use crate::{
         deployment::{stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
+        service::get_or_prompt_service,
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
@@ -78,52 +79,6 @@ pub struct UpErrorResponse {
     pub message: String,
 }
 
-pub async fn get_service_to_deploy(
-    configs: &Configs,
-    client: &Client,
-    service_arg: Option<String>,
-) -> Result<Option<String>> {
-    let linked_project = configs.get_linked_project().await?;
-    let project = get_project(client, configs, linked_project.project.clone()).await?;
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-
-    ensure_project_and_environment_exist(client, configs, &linked_project).await?;
-
-    let service = if let Some(service_arg) = service_arg {
-        // If the user specified a service, use that
-        let service_id = services
-            .iter()
-            .find(|service| service.node.name == service_arg || service.node.id == service_arg);
-        if let Some(service_id) = service_id {
-            Some(service_id.node.id.to_owned())
-        } else {
-            bail!("Service not found");
-        }
-    } else if let Some(service) = linked_project.service {
-        // If the user didn't specify a service, but we have a linked service, use that
-        Some(service)
-    } else {
-        // If the user didn't specify a service, and we don't have a linked service, get the first service
-
-        if services.is_empty() {
-            // If there are no services, backboard will generate one for us
-            None
-        } else {
-            // If there are multiple services, prompt the user to select one
-            if std::io::stdout().is_terminal() {
-                let prompt_services: Vec<_> =
-                    services.iter().map(|s| PromptService(&s.node)).collect();
-                let service = prompt_select("Select a service to deploy to", prompt_services)
-                    .context("Please specify a service to deploy to via the `--service` flag.")?;
-                Some(service.0.id.clone())
-            } else {
-                bail!("Multiple services found. Please specify a service to deploy to via the `--service` flag.")
-            }
-        }
-    };
-    Ok(service)
-}
-
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let hostname = configs.get_host();
@@ -144,7 +99,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .unwrap_or(linked_project.environment.clone());
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service = get_service_to_deploy(&configs, &client, args.service).await?;
+    let service = get_or_prompt_service(linked_project.clone(), project, args.service).await?;
 
     let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()
