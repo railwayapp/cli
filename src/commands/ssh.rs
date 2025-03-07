@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use is_terminal::IsTerminal;
 use reqwest::Client;
 use tokio::io::AsyncReadExt;
 use tokio::select;
@@ -87,10 +86,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
 
     let mut client = TerminalClient::new(&ws_url, &token, &params).await?;
-
-    if !std::io::stdout().is_terminal() {
-        anyhow::bail!("SSH connection requires a terminal");
-    }
 
     let size = termion::terminal_size()?;
     client.send_window_size(size.0, size.1).await?;
