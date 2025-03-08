@@ -5,13 +5,15 @@ use async_tungstenite::{tungstenite::Message, WebSocketStream};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{interval, sleep, timeout, Duration};
 use url::Url;
 
 use crate::commands::{
     SSH_CONNECTION_TIMEOUT_SECS, SSH_MAX_EMPTY_MESSAGES, SSH_MAX_RECONNECT_ATTEMPTS,
     SSH_MESSAGE_TIMEOUT_SECS, SSH_RECONNECT_DELAY_SECS,
 };
+
+const SSH_PING_INTERVAL_SECS: u64 = 10;
 
 #[derive(Clone, Debug)]
 pub struct SSHConnectParams {
@@ -190,70 +192,96 @@ impl TerminalClient {
             .map_err(|e| anyhow::anyhow!("Failed to send signal: {}", e))?;
         Ok(())
     }
+
+    async fn send_ping(&mut self) -> Result<()> {
+        self.send_message(Message::Ping(vec![]))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send ping: {}", e))?;
+        Ok(())
+    }
+
     pub async fn handle_server_messages(&mut self) -> Result<()> {
         let mut consecutive_empty_messages = 0;
 
-        while let Some(msg) = self.ws_stream.next().await {
-            let msg = msg.map_err(|e| anyhow::anyhow!("WebSocket error: {}", e))?;
+        let mut ping_interval = interval(Duration::from_secs(SSH_PING_INTERVAL_SECS));
 
-            match msg {
-                Message::Text(text) => {
-                    let server_msg: ServerMessage = serde_json::from_str(&text)
-                        .map_err(|e| anyhow::anyhow!("Failed to parse server message: {}", e))?;
+        loop {
+            tokio::select! {
+                msg_option = self.ws_stream.next() => {
+                    match msg_option {
+                        Some(msg_result) => {
+                            let msg = msg_result.map_err(|e| anyhow::anyhow!("WebSocket error: {}", e))?;
 
-                    match server_msg.r#type.as_str() {
-                        "session_data" => match server_msg.payload.data {
-                            DataPayload::String(text) => {
-                                consecutive_empty_messages = 0;
-                                print!("{}", text);
-                                std::io::stdout().flush()?;
-                            }
-                            DataPayload::Buffer { data } => {
-                                consecutive_empty_messages = 0;
-                                std::io::stdout().write_all(&data)?;
-                                std::io::stdout().flush()?;
-                            }
-                            DataPayload::Empty {} => {
-                                consecutive_empty_messages += 1;
-                                if consecutive_empty_messages >= SSH_MAX_EMPTY_MESSAGES {
-                                    bail!("Received too many empty messages in a row, connection may be stale");
+                            match msg {
+                                Message::Text(text) => {
+                                    let server_msg: ServerMessage = serde_json::from_str(&text)
+                                        .map_err(|e| anyhow::anyhow!("Failed to parse server message: {}", e))?;
+
+                                    match server_msg.r#type.as_str() {
+                                        "session_data" => match server_msg.payload.data {
+                                            DataPayload::String(text) => {
+                                                consecutive_empty_messages = 0;
+                                                print!("{}", text);
+                                                std::io::stdout().flush()?;
+                                            }
+                                            DataPayload::Buffer { data } => {
+                                                consecutive_empty_messages = 0;
+                                                std::io::stdout().write_all(&data)?;
+                                                std::io::stdout().flush()?;
+                                            }
+                                            DataPayload::Empty {} => {
+                                                consecutive_empty_messages += 1;
+                                                if consecutive_empty_messages >= SSH_MAX_EMPTY_MESSAGES {
+                                                    bail!("Received too many empty messages in a row, connection may be stale");
+                                                }
+                                            }
+                                        },
+                                        "error" => {
+                                            bail!(server_msg.payload.message);
+                                        }
+                                        "pty_closed" => {
+                                            return Ok(());
+                                        }
+                                        unknown_type => {
+                                            eprintln!("Warning: Received unknown message type: {}", unknown_type);
+                                        }
+                                    }
+                                }
+                                Message::Close(frame) => {
+                                    if let Some(frame) = frame {
+                                        bail!(
+                                            "WebSocket closed with code {}: {}",
+                                            frame.code,
+                                            frame.reason
+                                        );
+                                    } else {
+                                        bail!("WebSocket closed unexpectedly");
+                                    }
+                                }
+                                Message::Ping(data) => {
+                                    self.send_message(Message::Pong(data)).await?;
+                                }
+                                Message::Pong(data) => {
+                                    // Pong recevied
+                                }
+                                Message::Binary(_) => {
+                                    eprintln!("Warning: Unexpected binary message received");
+                                }
+                                Message::Frame(_) => {
+                                    eprintln!("Warning: Unexpected raw frame received");
                                 }
                             }
                         },
-                        "error" => {
-                            bail!(server_msg.payload.message);
-                        }
-                        "pty_closed" => {
-                            return Ok(());
-                        }
-                        unknown_type => {
-                            eprintln!("Warning: Received unknown message type: {}", unknown_type);
+                        None => {
+                            bail!("WebSocket connection closed unexpectedly");
                         }
                     }
-                }
-                Message::Close(frame) => {
-                    if let Some(frame) = frame {
-                        bail!(
-                            "WebSocket closed with code {}: {}",
-                            frame.code,
-                            frame.reason
-                        );
-                    } else {
-                        bail!("WebSocket closed unexpectedly");
-                    }
-                }
-                Message::Ping(_) | Message::Pong(_) => {
-                    // Just acknowledge these silently...they keep the connection alive
-                }
-                Message::Binary(_) => {
-                    eprintln!("Warning: Unexpected binary message received");
-                }
-                Message::Frame(_) => {
-                    eprintln!("Warning: Unexpected raw frame received");
+                },
+
+                _ = ping_interval.tick() => {
+                    self.send_ping().await?;
                 }
             }
         }
-
-        bail!("WebSocket connection closed unexpectedly");
     }
 }
