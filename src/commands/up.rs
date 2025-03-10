@@ -4,14 +4,13 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use futures::StreamExt;
 use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
 use is_terminal::IsTerminal;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
@@ -21,16 +20,13 @@ use crate::{
     controllers::{
         deployment::{stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project},
+        project::get_project,
         service::get_or_prompt_service,
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::{
-        logs::format_attr_log,
-        prompt::{prompt_select, PromptService},
-    },
+    util::logs::format_attr_log
 };
 
 use super::*;

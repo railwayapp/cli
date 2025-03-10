@@ -1,7 +1,12 @@
 use anyhow::{bail, Result};
-use async_tungstenite::tungstenite::handshake::client::generate_key;
-use async_tungstenite::tungstenite::http::Request;
-use async_tungstenite::{tungstenite::Message, WebSocketStream};
+use async_tungstenite::{
+    tungstenite::{
+        handshake::client::generate_key,
+        http::Request,
+        Message
+    },
+    WebSocketStream
+};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -10,10 +15,8 @@ use url::Url;
 
 use crate::commands::{
     SSH_CONNECTION_TIMEOUT_SECS, SSH_MAX_EMPTY_MESSAGES, SSH_MAX_RECONNECT_ATTEMPTS,
-    SSH_MESSAGE_TIMEOUT_SECS, SSH_RECONNECT_DELAY_SECS,
+    SSH_MESSAGE_TIMEOUT_SECS, SSH_RECONNECT_DELAY_SECS, SSH_PING_INTERVAL_SECS
 };
-
-const SSH_PING_INTERVAL_SECS: u64 = 10;
 
 #[derive(Clone, Debug)]
 pub struct SSHConnectParams {
@@ -25,7 +28,8 @@ pub struct SSHConnectParams {
 
 #[derive(Debug, Serialize)]
 pub struct ClientMessage {
-    pub r#type: String,
+    #[serde(rename = "type")]
+    pub kind: String,
     pub payload: ClientPayload,
 }
 
@@ -39,7 +43,8 @@ pub enum ClientPayload {
 
 #[derive(Debug, Deserialize)]
 struct ServerMessage {
-    r#type: String,
+    #[serde(rename = "type")]
+    kind: String,
     payload: ServerPayload,
 }
 
@@ -154,7 +159,7 @@ impl TerminalClient {
 
     pub async fn send_data(&mut self, data: &str) -> Result<()> {
         let message = ClientMessage {
-            r#type: "session_data".to_string(),
+            kind: "session_data".to_string(),
             payload: ClientPayload::Data {
                 data: data.to_string(),
             },
@@ -169,7 +174,7 @@ impl TerminalClient {
 
     pub async fn send_window_size(&mut self, cols: u16, rows: u16) -> Result<()> {
         let message = ClientMessage {
-            r#type: "window_resize".to_string(),
+            kind: "window_resize".to_string(),
             payload: ClientPayload::WindowSize { cols, rows },
         };
 
@@ -182,7 +187,7 @@ impl TerminalClient {
 
     pub async fn send_signal(&mut self, signal: u8) -> Result<()> {
         let message = ClientMessage {
-            r#type: "signal".to_string(),
+            kind: "signal".to_string(),
             payload: ClientPayload::Signal { signal },
         };
 
@@ -217,7 +222,7 @@ impl TerminalClient {
                                     let server_msg: ServerMessage = serde_json::from_str(&text)
                                         .map_err(|e| anyhow::anyhow!("Failed to parse server message: {}", e))?;
 
-                                    match server_msg.r#type.as_str() {
+                                    match server_msg.kind.as_str() {
                                         "session_data" => match server_msg.payload.data {
                                             DataPayload::String(text) => {
                                                 consecutive_empty_messages = 0;
@@ -261,15 +266,13 @@ impl TerminalClient {
                                 Message::Ping(data) => {
                                     self.send_message(Message::Pong(data)).await?;
                                 }
-                                Message::Pong(data) => {
-                                    // Pong recevied
-                                }
                                 Message::Binary(_) => {
                                     eprintln!("Warning: Unexpected binary message received");
                                 }
                                 Message::Frame(_) => {
                                     eprintln!("Warning: Unexpected raw frame received");
                                 }
+                                Message::Pong(_) => {}
                             }
                         },
                         None => {

@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
-use futures_util::FutureExt;
 use reqwest::Client;
 use tokio::io::AsyncReadExt;
 use tokio::select;
