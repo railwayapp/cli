@@ -167,8 +167,7 @@ pub struct CustomDomainCreate;
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/UpdateRegions.graphql",
-    response_derives = "Debug, Serialize, Clone",
-    skip_serializing_none
+    response_derives = "Debug, Serialize, Clone"
 )]
 pub struct UpdateRegions;
 

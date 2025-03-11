@@ -1,24 +1,327 @@
-use clap::{Arg, Command};
+use crate::{
+    consts::TICK_STRING,
+    controllers::environment::get_matched_environment,
+    errors::RailwayError,
+    util::prompt::{
+        prompt_select_with_cancel, prompt_text,
+        prompt_u64_with_placeholder_and_validation_and_cancel,
+    },
+};
+use anyhow::bail;
+use clap::{Arg, Command, Parser};
+use country_emoji::flag;
 use futures::executor::block_on;
-use serde_json::json;
-use std::collections::HashMap;
+use is_terminal::IsTerminal;
+use json_dotpath::DotPaths as _;
+use serde_json::{json, Map, Value};
+use std::{cmp::Ordering, collections::HashMap, fmt::Display, time::Duration};
+use struct_field_names_as_array::FieldNamesAsArray;
 
 use super::*;
 /// Dynamic flags workaround
 /// Unfortunately, we aren't able to use the Parser derive macro when working with dynamic flags,
 /// meaning we have to implement most of the traits for the Args struct manually.
+struct DynamicArgs(HashMap<String, u64>);
+
+#[derive(Parser, FieldNamesAsArray)]
 pub struct Args {
-    // This field will collect any of the dynamically generated flags
-    pub dynamic: HashMap<String, u16>,
+    #[clap(flatten)]
+    dynamic: DynamicArgs,
+
+    /// The service to scale (defaults to linked service)
+    #[clap(long, short)]
+    service: Option<String>,
+
+    /// The environment the service is in (defaults to linked environment)
+    #[clap(long, short)]
+    environment: Option<String>,
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
-    let mut configs = Configs::new()?;
+    let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+    let project = post_graphql::<queries::Project, _>(
+        &client,
+        configs.get_backboard(),
+        queries::project::Variables {
+            id: linked_project.project.clone(),
+        },
+    )
+    .await?
+    .project;
+    let environment = args
+        .environment
+        .clone()
+        .unwrap_or(linked_project.environment.clone());
+    let (existing, latest_id) = get_existing_config(&args, &linked_project, project, environment)?;
+    let new_config = convert_hashmap_into_map(
+        if args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
+            prompt_for_regions(&configs, &client, &existing).await?
+        } else if args.dynamic.0.is_empty() {
+            bail!("Please specify regions via the flags when not running in a terminal")
+        } else {
+            args.dynamic.0
+        },
+    );
+    if new_config.is_empty() {
+        println!("No changes made");
+        return Ok(());
+    }
+    let region_data = merge_config(existing, new_config);
+    handle_2fa(&configs, &client).await?;
+    update_regions_and_redeploy(configs, client, linked_project, latest_id, region_data).await?;
 
-    
     Ok(())
+}
+
+async fn prompt_for_regions(
+    configs: &Configs,
+    client: &reqwest::Client,
+    existing: &Value,
+) -> Result<HashMap<String, u64>> {
+    let mut updated: HashMap<String, u64> = HashMap::new();
+    let mut regions = post_graphql::<queries::Regions, _>(
+        client,
+        configs.get_backboard(),
+        queries::regions::Variables,
+    )
+    .await
+    .expect("couldn't get regions");
+    loop {
+        let get_replicas_amount = |name: String| {
+            let before = if let Some(num) = existing.get(name.clone()) {
+                num.get("numReplicas").unwrap().as_u64().unwrap() // fine to unwrap, API only returns ones that have a replica
+            } else {
+                0
+            };
+            let after = if let Some(new_value) = updated.get(&name) {
+                *new_value
+            } else {
+                before
+            };
+            (before, after)
+        };
+        regions.regions.sort_by(|a, b| {
+            get_replicas_amount(b.name.clone())
+                .1
+                .cmp(&get_replicas_amount(a.name.clone()).1)
+        });
+        let regions = regions
+            .regions
+            .iter()
+            .map(|f| {
+                PromptRegion(
+                    f.clone(),
+                    format!(
+                        "{} {}{}{}",
+                        flag(&f.country).unwrap_or_default(),
+                        f.location,
+                        if f.railway_metal.unwrap_or_default() {
+                            " (METAL)".bold().purple().to_string()
+                        } else {
+                            String::new()
+                        },
+                        {
+                            let (before, after) = get_replicas_amount(f.name.clone());
+                            let amount = format!(
+                                " ({} replica{})",
+                                after,
+                                if after == 1 { "" } else { "s" }
+                            );
+                            match after.cmp(&before) {
+                                Ordering::Equal if after == 0 => String::new().normal(),
+                                Ordering::Equal => amount.yellow(),
+                                Ordering::Greater => amount.green(),
+                                Ordering::Less => amount.red(),
+                            }
+                            .to_string()
+                        }
+                    ),
+                )
+            })
+            .collect::<Vec<PromptRegion>>();
+        let p = prompt_select_with_cancel("Select a region <esc to finish>", regions)?;
+        if let Some(region) = p {
+            let amount_before = if let Some(updated) = updated.get(&region.0.name) {
+                *updated
+            } else if let Some(previous) = existing.as_object().unwrap().get(&region.0.name) {
+                previous.get("numReplicas").unwrap().as_u64().unwrap()
+            } else {
+                0
+            };
+            let prompted = prompt_u64_with_placeholder_and_validation_and_cancel(
+                format!(
+                    "Enter the amount of replicas for {} <esc to go back>",
+                    region.0.name.clone()
+                )
+                .as_str(),
+                amount_before.to_string().as_str(),
+            )?;
+            if let Some(prompted) = prompted {
+                let parse: u64 = prompted.parse()?;
+                updated.insert(region.0.name.clone(), parse);
+            } else {
+                // esc pressed when entering number, go back to selecting regions
+                continue;
+            }
+        } else {
+            // they pressed esc to cancel
+            break;
+        }
+    }
+    Ok(updated.clone())
+}
+
+async fn update_regions_and_redeploy(
+    configs: Configs,
+    client: reqwest::Client,
+    linked_project: LinkedProject,
+    latest_id: Option<String>,
+    region_data: Value,
+) -> Result<(), anyhow::Error> {
+    let spinner = indicatif::ProgressBar::new_spinner()
+        .with_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars(TICK_STRING)
+                .template("{spinner:.green} {msg}")?,
+        )
+        .with_message("Updating regions...");
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    post_graphql::<mutations::UpdateRegions, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::update_regions::Variables {
+            environment_id: linked_project.environment,
+            service_id: linked_project.service.unwrap(),
+            multi_region_config: region_data,
+        },
+    )
+    .await?;
+    spinner.finish_with_message("Regions updated");
+    if let Some(latest) = latest_id {
+        let spinner = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message("Redeploying...");
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        post_graphql::<mutations::DeploymentRedeploy, _>(
+            &client,
+            configs.get_backboard(),
+            mutations::deployment_redeploy::Variables { id: latest },
+        )
+        .await?;
+        spinner.finish_with_message("Redeployed");
+    };
+    Ok(())
+}
+
+fn merge_config(existing: Value, new_config: Map<String, Value>) -> Value {
+    let mut map = match existing {
+        Value::Object(object) => object,
+        _ => unreachable!(), // will always be a map
+    };
+    map.extend(new_config);
+    Value::Object(map)
+}
+
+async fn handle_2fa(configs: &Configs, client: &reqwest::Client) -> Result<(), anyhow::Error> {
+    let is_two_factor_enabled = {
+        let vars = queries::two_factor_info::Variables {};
+
+        let info = post_graphql::<queries::TwoFactorInfo, _>(client, configs.get_backboard(), vars)
+            .await?
+            .two_factor_info;
+
+        info.is_verified
+    };
+    if is_two_factor_enabled {
+        let token = prompt_text("Enter your 2FA code")?;
+        let vars = mutations::validate_two_factor::Variables { token };
+
+        let valid =
+            post_graphql::<mutations::ValidateTwoFactor, _>(client, configs.get_backboard(), vars)
+                .await?
+                .two_factor_info_validate;
+
+        if !valid {
+            return Err(RailwayError::InvalidTwoFactorCode.into());
+        }
+    };
+    Ok(())
+}
+
+fn convert_hashmap_into_map(map: HashMap<String, u64>) -> Map<String, Value> {
+    let new_config = map.iter().fold(Map::new(), |mut map, (key, val)| {
+        map.insert(
+            key.clone(),
+            if *val == 0 {
+                Value::Null // this is how the dashboard does it
+            } else {
+                json!({ "numReplicas": val })
+            },
+        );
+        map
+    });
+    new_config
+}
+
+fn get_existing_config(
+    args: &Args,
+    linked_project: &LinkedProject,
+    project: queries::project::ProjectProject,
+    environment: String,
+) -> Result<(Value, Option<String>), anyhow::Error> {
+    let environment_id = get_matched_environment(&project, environment)?.id;
+    let service_input: &String = args.service.as_ref().unwrap_or(linked_project.service.as_ref().expect("No service linked. Please either specify a service with the --service flag or link one with `railway service`"));
+    let mut id: Option<String> = None;
+    let service_meta = if let Some(service) = project.services.edges.iter().find(|p| {
+        (p.node.id == *service_input)
+            || (p.node.name.to_lowercase() == service_input.to_lowercase())
+    }) {
+        // check that service exists in that environment
+        if let Some(instance) = service
+            .node
+            .service_instances
+            .edges
+            .iter()
+            .find(|p| p.node.environment_id == environment_id)
+        {
+            if let Some(latest) = &instance.node.latest_deployment {
+                id = Some(latest.id.clone());
+                if let Some(meta) = &latest.meta {
+                    let deploy = meta
+                        .dot_get::<Value>("serviceManifest.deploy")?
+                        .expect("Very old deployment, please redeploy");
+                    if let Some(c) = deploy.dot_get::<Value>("multiRegionConfig")? {
+                        Some(c)
+                    } else if let Some(region) = deploy.dot_get::<Value>("region")? {
+                        // old deployments only have numReplicas and a region field...
+                        let mut map = Map::new();
+                        let replicas = deploy.dot_get::<Value>("numReplicas")?.unwrap_or(json!(1));
+                        map.insert(region.to_string(), json!({ "numReplicas": replicas }));
+                        Some(json!({
+                            "multiRegionConfig": map
+                        }))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            bail!("Service not found in the environment")
+        }
+    } else {
+        None
+    };
+    Ok((service_meta.unwrap_or(Value::Object(Map::new())), id))
 }
 
 /// This function generates flags that are appended to the command at runtime.
@@ -62,21 +365,21 @@ pub fn get_dynamic_args(cmd: Command) -> Command {
     })
 }
 
-impl clap::FromArgMatches for Args {
+impl clap::FromArgMatches for DynamicArgs {
     fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         let mut dynamic = HashMap::new();
         // Iterate through all provided argument keys.
         // Adjust the static key names if you add any to your Args struct.
         for key in matches.ids() {
-            if key == "json" {
+            if key == "json" || Args::FIELD_NAMES_AS_ARRAY.contains(&key.as_str()) {
                 continue;
             }
-            // If the flag value can be interpreted as a u16, insert it.
-            if let Some(val) = matches.get_one::<u16>(key.as_str()) {
+            // If the flag value can be interpreted as a u64, insert it.
+            if let Some(val) = matches.get_one::<u64>(key.as_str()) {
                 dynamic.insert(key.to_string(), *val);
             }
         }
-        Ok(Args { dynamic })
+        Ok(DynamicArgs(dynamic))
     }
 
     fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
@@ -85,41 +388,36 @@ impl clap::FromArgMatches for Args {
     }
 }
 
-impl clap::Args for Args {
+impl clap::Args for DynamicArgs {
     fn group_id() -> Option<clap::Id> {
-        Some(clap::Id::from("Args"))
+        // Do not create an argument group for dynamic flags
+        None
     }
-    fn augment_args<'b>(__clap_app: clap::Command) -> clap::Command {
-        {
-            let __clap_app = __clap_app.group(clap::ArgGroup::new("Args").multiple(true).args({
-                let members: [clap::Id; 0usize] = [];
-                members
-            }));
-            __clap_app
-                .about("Control the number of instances running in each region")
-                .long_about(None)
-        }
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        // Leave the command unchanged; dynamic flags will be handled via FromArgMatches
+        cmd
     }
-    fn augment_args_for_update<'b>(__clap_app: clap::Command) -> clap::Command {
-        {
-            let __clap_app = __clap_app.group(clap::ArgGroup::new("Args").multiple(true).args({
-                let members: [clap::Id; 0usize] = [];
-                members
-            }));
-            __clap_app
-                .about("Control the number of instances running in each region")
-                .long_about(None)
-        }
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        cmd
     }
 }
 
-impl clap::CommandFactory for Args {
+impl clap::CommandFactory for DynamicArgs {
     fn command<'b>() -> clap::Command {
         let __clap_app = clap::Command::new("railwayapp");
-        <Args as clap::Args>::augment_args(__clap_app)
+        <DynamicArgs as clap::Args>::augment_args(__clap_app)
     }
     fn command_for_update<'b>() -> clap::Command {
         let __clap_app = clap::Command::new("railwayapp");
-        <Args as clap::Args>::augment_args_for_update(__clap_app)
+        <DynamicArgs as clap::Args>::augment_args_for_update(__clap_app)
+    }
+}
+
+/// Formatting done manually
+pub struct PromptRegion(pub queries::regions::RegionsRegions, pub String);
+
+impl Display for PromptRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.1)
     }
 }

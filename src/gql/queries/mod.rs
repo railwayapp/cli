@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 type DateTime = chrono::DateTime<chrono::Utc>;
 type EnvironmentVariables = std::collections::BTreeMap<String, Option<String>>;
+//type DeploymentMeta = std::collections::BTreeMap<String, serde_json::Value>;
+type DeploymentMeta = serde_json::Value;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
