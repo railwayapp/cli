@@ -124,27 +124,7 @@ async fn main() -> Result<()> {
         check_updates_handle = Some(spawn_update_task(configs));
     }
 
-    // Trace from where Args::parse() bubbles an error to where it gets caught
-    // and handled.
-    //
-    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/derive.rs#L30-L42
-    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L233-L237
-    //
-    // This code tells us what exit code to use:
-    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L221-L227
-    //
-    // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L206-L208
-    //
-    // This code tells us what stream to print the error to:
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215
-    //
-    // pub(crate) fn stream(&self) -> Stream {
-    //     match self.kind() {
-    //         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => Stream::Stdout,
-    //         _ => Stream::Stderr,
-    //     }
-    // }
-
     let cli = match Args::try_parse() {
         Ok(args) => args,
         // Clap's source code specifically says that these errors should be
@@ -152,12 +132,12 @@ async fn main() -> Result<()> {
         Err(e) if e.kind() == ErrorKind::DisplayHelp || e.kind() == ErrorKind::DisplayVersion => {
             println!("{}", e);
             handle_update_task(check_updates_handle).await;
-            std::process::exit(0); // Exit 0 (because of error kind)
+            std::process::exit(0);
         }
         Err(e) => {
             eprintln!("{}", e);
             handle_update_task(check_updates_handle).await;
-            std::process::exit(2); // Exit 2 (default)
+            std::process::exit(2); // The default behavior is exit 2
         }
     };
 
