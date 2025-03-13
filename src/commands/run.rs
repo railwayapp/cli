@@ -73,7 +73,9 @@ async fn get_service(
 }
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
+    // only needs to be mutable for the update check
     let configs = Configs::new()?;
+
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
