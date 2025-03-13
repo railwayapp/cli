@@ -55,6 +55,7 @@ commands_enum!(
     run,
     service,
     shell,
+    ssh,
     starship,
     status,
     unlink,
