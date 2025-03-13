@@ -28,6 +28,7 @@ pub mod run;
 pub mod scale;
 pub mod service;
 pub mod shell;
+pub mod ssh;
 pub mod starship;
 pub mod status;
 pub mod unlink;
@@ -35,3 +36,5 @@ pub mod up;
 pub mod variables;
 pub mod volume;
 pub mod whoami;
+
+pub mod check_updates;

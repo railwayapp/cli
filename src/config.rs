@@ -1,20 +1,23 @@
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
-    fs,
-    fs::{create_dir_all, File},
+    fs::{self, create_dir_all, File},
     io::Read,
     path::PathBuf,
 };
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
+use is_terminal::IsTerminal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     client::{post_graphql, GQLClient},
     commands::queries,
     errors::RailwayError,
+    util::compare_semver::compare_semver,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -42,6 +45,8 @@ pub struct RailwayUser {
 pub struct RailwayConfig {
     pub projects: BTreeMap<String, LinkedProject>,
     pub user: RailwayUser,
+    pub last_update_check: Option<DateTime<Utc>>,
+    pub new_version_available: Option<String>,
 }
 
 #[derive(Debug)]
@@ -56,6 +61,19 @@ pub enum Environment {
     Staging,
     Dev,
 }
+
+#[derive(Deserialize)]
+struct GithubApiRelease {
+    tag_name: String,
+}
+
+const GITHUB_API_RELEASE_URL: &str = "https://api.github.com/repos/railwayapp/cli/releases/latest";
+
+pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 10;
+pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 5;
+pub const SSH_RECONNECT_DELAY_SECS: u64 = 1;
+pub const SSH_MAX_RECONNECT_ATTEMPTS: u32 = 3;
+pub const SSH_MAX_EMPTY_MESSAGES: u32 = 5;
 
 impl Configs {
     pub fn new() -> Result<Self> {
@@ -79,6 +97,8 @@ impl Configs {
                     RailwayConfig {
                         projects: BTreeMap::new(),
                         user: RailwayUser { token: None },
+                        last_update_check: None,
+                        new_version_available: None,
                     }
                 });
 
@@ -95,6 +115,8 @@ impl Configs {
             root_config: RailwayConfig {
                 projects: BTreeMap::new(),
                 user: RailwayUser { token: None },
+                last_update_check: None,
+                new_version_available: None,
             },
         })
     }
@@ -103,6 +125,8 @@ impl Configs {
         self.root_config = RailwayConfig {
             projects: BTreeMap::new(),
             user: RailwayUser { token: None },
+            last_update_check: None,
+            new_version_available: None,
         };
         Ok(())
     }
@@ -150,6 +174,12 @@ impl Configs {
             Environment::Staging => "railway-staging.com",
             Environment::Dev => "railway-develop.com",
         }
+    }
+
+    /// Returns the host and path for relay server without protocol (e.g. "backboard.railway.com/relay")
+    /// Protocol is omitted to allow flexibility between https:// and wss:// usage
+    pub fn get_relay_host_path(&self) -> String {
+        format!("backboard.{}/relay", self.get_host())
     }
 
     pub fn get_backboard(&self) -> String {
@@ -312,5 +342,37 @@ impl Configs {
         fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
 
         Ok(())
+    }
+
+    pub async fn check_update(&mut self, force: bool) -> anyhow::Result<Option<String>> {
+        // outputting would break json output on CI
+        if !std::io::stdout().is_terminal() && !force {
+            return Ok(None);
+        }
+
+        if let Some(last_update_check) = self.root_config.last_update_check {
+            if Utc::now().date_naive() == last_update_check.date_naive() && !force {
+                return Ok(None);
+            }
+        }
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(GITHUB_API_RELEASE_URL)
+            .header("User-Agent", "railwayapp")
+            .send()
+            .await?;
+
+        self.root_config.last_update_check = Some(Utc::now());
+        self.write()
+            .context("Failed to save time since last update check")?;
+
+        let response = response.json::<GithubApiRelease>().await?;
+        let latest_version = response.tag_name.trim_start_matches('v');
+
+        match compare_semver(env!("CARGO_PKG_VERSION"), &latest_version) {
+            Ordering::Less => Ok(Some(latest_version.to_owned())),
+            _ => Ok(None),
+        }
     }
 }

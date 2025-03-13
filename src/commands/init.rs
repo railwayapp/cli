@@ -15,6 +15,7 @@ pub struct Args {
 
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
+
     let client = GQLClient::new_authorized(&configs)?;
 
     let vars = queries::user_projects::Variables {};
