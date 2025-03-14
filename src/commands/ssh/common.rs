@@ -1,3 +1,4 @@
+// src/commands/ssh/common.rs
 use anyhow::{anyhow, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
@@ -20,18 +21,62 @@ pub async fn get_ssh_connect_params(
     configs: &Configs,
     client: &Client,
 ) -> Result<SSHConnectParams> {
-    let linked_project = configs.get_linked_project().await?;
+    let has_project = args.project.is_some();
+    let has_service = args.service.is_some();
+    let has_environment = args.environment.is_some();
 
-    let project_id = args.project.unwrap_or(linked_project.project.clone());
+    let provided_args_count = [has_project, has_service, has_environment]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+
+    // Either all main args must be provided or none
+    if provided_args_count > 0 && provided_args_count < 3 {
+        if !has_project {
+            return Err(anyhow!(
+                "Must provide project when setting service or environment"
+            ));
+        }
+        if !has_environment {
+            return Err(anyhow!(
+                "Must provide environment when setting project or service"
+            ));
+        }
+        if !has_service {
+            return Err(anyhow!(
+                "Must provide service when setting project or environment"
+            ));
+        }
+    }
+
+    if provided_args_count == 3 {
+        // All args are provided, use them directly
+        let project_id = args.project.unwrap();
+        let project = get_project(client, configs, project_id.clone()).await?;
+
+        let environment = args.environment.unwrap();
+        let environment_id = get_matched_environment(&project, environment)?.id;
+
+        let service_id = args.service.unwrap();
+
+        return Ok(SSHConnectParams {
+            project_id,
+            environment_id,
+            service_id,
+            deployment_instance_id: args.deployment_instance,
+        });
+    }
+
+    // No args provided... use linked project
+    let linked_project = configs.get_linked_project().await?;
+    let project_id = linked_project.project.clone();
     let project = get_project(client, configs, project_id.clone()).await?;
 
-    let environment = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
+    let environment = linked_project.environment.clone();
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service_id = get_or_prompt_service(linked_project.clone(), project, args.service)
+    // Use the linked service if available, otherwise prompt the user
+    let service_id = get_or_prompt_service(linked_project.clone(), project, None)
         .await?
         .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
 
