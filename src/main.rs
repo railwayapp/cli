@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use anyhow::Result;
-use clap::{error::ErrorKind, Parser, Subcommand};
+use clap::error::ErrorKind;
 
 mod commands;
 use commands::*;
@@ -51,7 +51,7 @@ commands!(
     whoami,
     volume,
     redeploy,
-    scale
+    scale,
     check_updates
 );
 
@@ -90,15 +90,13 @@ async fn handle_update_task(handle: Option<tokio::task::JoinHandle<Result<(), an
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = build_args().get_matches();
-    match exec_cli(args).await {
-        Ok(_) => {}
+    let args = build_args().try_get_matches();
     // Avoid grabbing configs multiple times, and avoid grabbing configs if we're not in a terminal
     let mut check_updates_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>> = None;
     if std::io::stdout().is_terminal() {
         let mut configs = Configs::new()?;
         if let Some(new_version_available) = &configs.root_config.new_version_available {
-            match compare_semver(env!("CARGO_PKG_VERSION"), &new_version_available) {
+            match compare_semver(env!("CARGO_PKG_VERSION"), new_version_available) {
                 Ordering::Less => {
                     println!(
                         "{} v{} visit {} for more info",
@@ -117,7 +115,7 @@ async fn main() -> Result<()> {
     }
 
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215
-    let cli = match Args::try_parse() {
+    let cli = match args {
         Ok(args) => args,
         // Clap's source code specifically says that these errors should be
         // printed to stdout and exit with a status of 0.
@@ -133,7 +131,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let exec_result = Commands::exec(cli).await;
+    let exec_result = exec_cli(cli).await;
 
     if let Err(e) = exec_result {
         if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string() {
