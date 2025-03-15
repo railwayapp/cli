@@ -1,0 +1,8 @@
+query Regions {
+    regions {
+        name
+        country
+        railwayMetal
+        location
+    }
+}

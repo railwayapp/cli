@@ -1,0 +1,7 @@
+mutation UpdateRegions($environmentId: String!, $serviceId: String!, $multiRegionConfig: JSON!) {
+  serviceInstanceUpdate(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    input: {multiRegionConfig: $multiRegionConfig}
+  )
+}
