@@ -33,9 +33,6 @@ pub enum RailwayError {
     #[error("Environment is deleted. Run `railway environment` to connect to an environment.")]
     EnvironmentDeleted,
 
-    #[error("No projects found. Run `railway init` to create a new project")]
-    NoProjects,
-
     #[error("Project does not have any services")]
     NoServices,
 
@@ -49,6 +46,9 @@ pub enum RailwayError {
 
     #[error("Service \"{0}\" not found.\nRun `railway service` to connect to a service.")]
     ServiceNotFound(String),
+
+    #[error("No workspace found.")]
+    NoWorkspaceFound,
 
     #[error("Team \"{0}\" not found.")]
     TeamNotFound(String),

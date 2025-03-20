@@ -9,8 +9,7 @@ use crate::{
 
 use super::{
     queries::user_projects::{
-        UserProjectsMeProjectsEdgesNode, UserProjectsMeTeamsEdgesNode,
-        UserProjectsMeTeamsEdgesNodeProjectsEdgesNode,
+        UserProjectsMeTeamsEdgesNode, UserProjectsMeTeamsEdgesNodeProjectsEdgesNode,
     },
     *,
 };
@@ -50,7 +49,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let team = select_team(args.project.clone(), args.team, &me)?;
 
-    let project = select_project(team, args.project.clone(), &me)?;
+    let project = select_project(team, args.project.clone())?;
 
     let environment = select_environment(args.environment, &project)?;
 
@@ -145,25 +144,8 @@ fn select_environment(
 fn select_project(
     team: Team<'_>,
     project: Option<String>,
-    me: &queries::user_projects::UserProjectsMe,
 ) -> Result<NormalisedProject, anyhow::Error> {
     let project = NormalisedProject::from(match team {
-        Team::Personal => {
-            if let Some(project) = project {
-                let proj = me.projects.edges.iter().find(|pro| {
-                    (pro.node.id.to_lowercase() == project.to_lowercase())
-                        || (pro.node.name.to_lowercase() == project.to_lowercase())
-                });
-                if let Some(project) = proj {
-                    fake_select("Select a project", &project.node.name);
-                    Project(ProjectType::Personal(project.node.clone()))
-                } else {
-                    return Err(RailwayError::ProjectNotFound.into());
-                }
-            } else {
-                prompt_personal_projects(me)?
-            }
-        }
         Team::Team(team) => {
             if let Some(project) = project {
                 let proj = team.projects.edges.iter().find(|pro| {
@@ -197,15 +179,7 @@ fn select_team(
     let team = match (project.as_ref(), team.as_ref()) {
         (Some(project), None) if uuid_regex.is_match(project) => {
             // It's a project id, figure out team
-            if me
-                .projects
-                .edges
-                .iter()
-                .any(|pro| pro.node.id.to_lowercase() == project.to_lowercase())
-            {
-                fake_select("Select a team", "Personal");
-                Team::Personal
-            } else if let Some(team) = me.teams.edges.iter().find(|team| {
+            if let Some(team) = me.teams.edges.iter().find(|team| {
                 team.node
                     .projects
                     .edges
@@ -218,32 +192,16 @@ fn select_team(
                 return Err(RailwayError::ProjectNotFound.into());
             }
         }
-        (Some(project), None) => {
+        (Some(_), None) => {
             // this means project name without team
             if me.teams.edges.is_empty() {
-                // no teams, so it's personal
-                // if there is a project that has the same name
-                if me
-                    .projects
-                    .edges
-                    .iter()
-                    .any(|p| p.node.name.to_lowercase() == project.to_lowercase())
-                {
-                    fake_select("Select a team", "Personal");
-                    Team::Personal
-                } else {
-                    return Err(RailwayError::ProjectNotFound.into());
-                }
+                return Err(RailwayError::ProjectNotFound.into());
             } else {
                 prompt_teams(me)?
             }
         }
         (None, Some(team_arg)) | (Some(_), Some(team_arg)) => {
             match team_arg.to_lowercase().as_str() {
-                "personal" => {
-                    fake_select("Select a team", "Personal");
-                    Team::Personal
-                }
                 _ => {
                     if let Some(team) = me.teams.edges.iter().find(|team| {
                         (team.node.name.to_lowercase() == team_arg.to_lowercase())
@@ -258,10 +216,7 @@ fn select_team(
             }
         }
         (None, None) if !me.teams.edges.is_empty() => prompt_teams(me)?,
-        (None, None) => {
-            fake_select("Select a team", "Personal");
-            Team::Personal
-        }
+        (None, None) => return Err(RailwayError::NoWorkspaceFound.into()),
     };
     Ok(team)
 }
@@ -269,7 +224,7 @@ fn select_team(
 fn prompt_teams(me: &queries::user_projects::UserProjectsMe) -> Result<Team<'_>> {
     let teams: Vec<&UserProjectsMeTeamsEdgesNode> =
         me.teams.edges.iter().map(|team| &team.node).collect();
-    let mut team_names = vec![Team::Personal];
+    let mut team_names = vec![];
     team_names.extend(teams.into_iter().map(Team::Team));
     prompt_options("Select a team", team_names)
 }
@@ -290,27 +245,6 @@ fn prompt_team_projects(
         .iter()
         .cloned()
         .map(|project| Project(ProjectType::Team(project)))
-        .collect::<Vec<Project>>();
-    prompt_options("Select a project", prompt_projects)
-}
-
-fn prompt_personal_projects(
-    me: &queries::user_projects::UserProjectsMe,
-) -> Result<Project, anyhow::Error> {
-    let mut personal_projects = me
-        .projects
-        .edges
-        .iter()
-        .map(|project| &project.node)
-        .collect::<Vec<&UserProjectsMeProjectsEdgesNode>>();
-    if personal_projects.is_empty() {
-        return Err(RailwayError::NoProjects.into());
-    }
-    personal_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let prompt_projects = personal_projects
-        .iter()
-        .cloned()
-        .map(|project| Project(ProjectType::Personal(project.clone())))
         .collect::<Vec<Project>>();
     prompt_options("Select a project", prompt_projects)
 }
@@ -348,34 +282,6 @@ structstruck::strike! {
 impl From<Project> for NormalisedProject {
     fn from(value: Project) -> Self {
         match value.0 {
-            ProjectType::Personal(personal) => NormalisedProject::new(
-                personal.id,
-                personal.name,
-                personal
-                    .environments
-                    .edges
-                    .into_iter()
-                    .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
-                    .collect(),
-                personal
-                    .services
-                    .edges
-                    .into_iter()
-                    .map(|service| {
-                        NormalisedService::new(
-                            service.node.id,
-                            service.node.name,
-                            service
-                                .node
-                                .service_instances
-                                .edges
-                                .into_iter()
-                                .map(|instance| instance.node.environment_id)
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            ),
             ProjectType::Team(team) => NormalisedProject::new(
                 team.id,
                 team.name,
@@ -409,21 +315,18 @@ impl From<Project> for NormalisedProject {
 #[derive(Debug, Clone)]
 enum Team<'a> {
     Team(&'a UserProjectsMeTeamsEdgesNode),
-    Personal,
 }
 
 impl Display for Team<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Team::Team(team) => write!(f, "{}", team.name),
-            Team::Personal => write!(f, "{}", "Personal".bold()),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 enum ProjectType {
-    Personal(UserProjectsMeProjectsEdgesNode),
     Team(UserProjectsMeTeamsEdgesNodeProjectsEdgesNode),
 }
 
@@ -433,7 +336,6 @@ struct Project(ProjectType);
 impl Display for Project {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
-            ProjectType::Personal(personal) => write!(f, "{}", personal.name),
             ProjectType::Team(team_project) => write!(f, "{}", team_project.name),
         }
     }

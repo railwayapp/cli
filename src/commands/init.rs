@@ -34,7 +34,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let team_id = match team {
         Team::Team(team) => Some(team.id.clone()),
-        _ => None,
     };
 
     let vars = mutations::project_create::Variables {
@@ -84,18 +83,17 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 fn get_team_names(teams: Vec<&UserProjectsMeTeamsEdgesNode>) -> Vec<Team> {
-    let mut team_names = teams
+    let team_names = teams
         .iter()
         .map(|team| Team::Team(team))
         .collect::<Vec<_>>();
-    team_names.insert(0, Team::Personal);
     team_names
 }
 
 fn prompt_team(teams: Vec<Team>) -> Result<Team> {
     // If there is only the personal team, return None
     if teams.len() == 1 {
-        return Ok(Team::Personal);
+        return Ok(teams[0].clone());
     }
     let team = prompt_select("Team", teams)?;
     Ok(team)
@@ -132,14 +130,12 @@ fn prompt_project_name() -> Result<String> {
 #[derive(Debug, Clone)]
 enum Team<'a> {
     Team(&'a UserProjectsMeTeamsEdgesNode),
-    Personal,
 }
 
 impl Display for Team<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Team::Team(team) => write!(f, "{}", team.name),
-            Team::Personal => write!(f, "{}", "Personal".bold()),
         }
     }
 }

@@ -1,42 +1,5 @@
 query UserProjects {
   me {
-    projects {
-      edges {
-        node {
-          id
-          name
-          createdAt
-          updatedAt
-          team {
-            id
-            name
-          }
-          environments {
-            edges {
-              node {
-                id
-                name
-              }
-            }
-          }
-          services {
-            edges {
-              node {
-                id
-                name
-                serviceInstances {
-                  edges {
-                    node {
-                      environmentId
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
     teams {
       edges {
         node {

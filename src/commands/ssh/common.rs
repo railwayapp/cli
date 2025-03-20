@@ -1,5 +1,5 @@
 // src/commands/ssh/common.rs
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use tokio::time::Duration;
@@ -113,7 +113,6 @@ pub async fn establish_connection(
     ws_url: &str,
     token: &str,
     params: &SSHConnectParams,
-    spinner: &ProgressBar,
 ) -> Result<TerminalClient> {
     let mut client = TerminalClient::new(ws_url, token, params).await?;
 

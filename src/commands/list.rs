@@ -1,11 +1,6 @@
 use serde::Serialize;
 
-use super::{
-    queries::{
-        projects::ProjectsProjectsEdgesNode, user_projects::UserProjectsMeProjectsEdgesNode,
-    },
-    *,
-};
+use super::{queries::projects::ProjectsProjectsEdgesNode, *};
 
 /// List all projects in your Railway account
 #[derive(Parser)]
@@ -21,35 +16,9 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
         .await?
         .me;
 
-    let mut personal_projects: Vec<_> = me
-        .projects
-        .edges
-        .iter()
-        .map(|project| &project.node)
-        .collect();
-    // Sort by most recently updated (matches dashboard behavior)
-    personal_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
-    let mut all_projects: Vec<_> = personal_projects
-        .iter()
-        .map(|project| Project::Me((*project).clone()))
-        .collect();
+    let mut all_projects: Vec<_> = vec![];
 
     let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
-    if !json {
-        println!("{}", "Personal".bold());
-        for project in &personal_projects {
-            let project_name = if linked_project.is_some()
-                && project.id == linked_project.as_ref().unwrap().project
-            {
-                project.name.purple().bold()
-            } else {
-                project.name.white()
-            };
-            println!("  {project_name}");
-        }
-    }
-
     for team in teams {
         if !json {
             println!();
@@ -95,6 +64,5 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum Project {
-    Me(UserProjectsMeProjectsEdgesNode),
     Team(ProjectsProjectsEdgesNode),
 }

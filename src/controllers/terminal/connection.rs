@@ -2,12 +2,11 @@ use anyhow::{bail, Result};
 use async_tungstenite::tungstenite::handshake::client::generate_key;
 use async_tungstenite::tungstenite::http::Request;
 use async_tungstenite::WebSocketStream;
-use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout, Duration};
 use url::Url;
 
 use crate::commands::ssh::{
-    SSH_CONNECTION_TIMEOUT_SECS, SSH_MAX_RECONNECT_ATTEMPTS, SSH_MESSAGE_TIMEOUT_SECS,
+    SSH_CONNECTION_TIMEOUT_SECS, SSH_MAX_RECONNECT_ATTEMPTS,
     SSH_RECONNECT_DELAY_SECS,
 };
 use crate::consts::get_user_agent;
