@@ -3,7 +3,6 @@ use clap::Parser;
 
 use crate::client::GQLClient;
 use crate::config::Configs;
-use crate::controllers::terminal::SSHConnectParams;
 
 pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
 pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 10;
@@ -58,7 +57,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let spinner = create_spinner(running_command);
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
-    let mut terminal_client = establish_connection(&ws_url, &token, &params, &spinner).await?;
+    let mut terminal_client = establish_connection(&ws_url, &token, &params).await?;
 
     if running_command {
         // Run single command

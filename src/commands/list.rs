@@ -1,8 +1,8 @@
 use serde::Serialize;
 
 use super::{
-    queries::{
-        projects::ProjectsProjectsEdgesNode, user_projects::UserProjectsMeProjectsEdgesNode,
+    queries::user_projects::{
+        UserProjectsExternalWorkspacesProjects, UserProjectsMeWorkspacesTeamProjectsEdgesNode,
     },
     *,
 };
@@ -17,74 +17,66 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await.ok();
 
     let vars = queries::user_projects::Variables {};
-    let me = post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars)
-        .await?
-        .me;
+    let mut response =
+        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
 
-    let mut personal_projects: Vec<_> = me
-        .projects
-        .edges
-        .iter()
-        .map(|project| &project.node)
-        .collect();
-    // Sort by most recently updated (matches dashboard behavior)
-    personal_projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let mut all_projects = Vec::new();
 
-    let mut all_projects: Vec<_> = personal_projects
-        .iter()
-        .map(|project| Project::Me((*project).clone()))
-        .collect();
-
-    let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
-    if !json {
-        println!("{}", "Personal".bold());
-        for project in &personal_projects {
-            let project_name = if linked_project.is_some()
-                && project.id == linked_project.as_ref().unwrap().project
-            {
-                project.name.purple().bold()
-            } else {
-                project.name.white()
-            };
-            println!("  {project_name}");
-        }
-    }
-
-    for team in teams {
+    response.me.workspaces.sort_by(|a, b| b.id.cmp(&a.id));
+    for workspace in response.me.workspaces {
         if !json {
             println!();
-            println!("{}", team.name.bold());
+            println!("{}", workspace.name.bold());
         }
-        {
-            let vars = queries::projects::Variables {
-                team_id: Some(team.id.clone()),
-            };
 
-            let projects =
-                post_graphql::<queries::Projects, _>(&client, configs.get_backboard(), vars)
-                    .await?
-                    .projects;
-
-            let mut projects: Vec<_> = projects.edges.iter().map(|project| &project.node).collect();
-            projects.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
-            let mut team_projects: Vec<_> = projects
-                .iter()
-                .map(|project| Project::Team((*project).clone()))
-                .collect();
-            all_projects.append(&mut team_projects);
+        if let Some(mut team) = workspace.team {
+            team.projects
+                .edges
+                .sort_by(|a, b| b.node.updated_at.cmp(&a.node.updated_at));
             if !json {
-                for project in &projects {
+                for project in &team.projects.edges {
                     let project_name = if linked_project.is_some()
-                        && project.id == linked_project.as_ref().unwrap().project
+                        && project.node.id == linked_project.as_ref().unwrap().project
                     {
-                        project.name.purple().bold()
+                        project.node.name.purple().bold()
                     } else {
-                        project.name.white()
+                        project.node.name.white()
                     };
                     println!("  {project_name}");
                 }
             }
+
+            all_projects.extend(
+                team.projects
+                    .edges
+                    .into_iter()
+                    .map(|edge| Project::Team(edge.node)),
+            );
         }
+    }
+
+    response.external_workspaces.sort_by(|a, b| b.id.cmp(&a.id));
+    for mut workspace in response.external_workspaces {
+        workspace
+            .projects
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        if !json {
+            println!();
+            println!("{}", workspace.name.bold());
+
+            for project in &workspace.projects {
+                let project_name = if linked_project.is_some()
+                    && project.id == linked_project.as_ref().unwrap().project
+                {
+                    project.name.purple().bold()
+                } else {
+                    project.name.white()
+                };
+                println!("  {project_name}");
+            }
+        }
+        all_projects.extend(workspace.projects.into_iter().map(|p| Project::External(p)));
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&all_projects)?);
@@ -95,6 +87,6 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum Project {
-    Me(UserProjectsMeProjectsEdgesNode),
-    Team(ProjectsProjectsEdgesNode),
+    External(UserProjectsExternalWorkspacesProjects),
+    Team(UserProjectsMeWorkspacesTeamProjectsEdgesNode),
 }

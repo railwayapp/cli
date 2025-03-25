@@ -1,35 +1,34 @@
 query UserProjects {
-  me {
+  externalWorkspaces {
+    id
+    name
+    teamId
     projects {
-      edges {
-        node {
-          id
-          name
-          createdAt
-          updatedAt
-          team {
+      id
+      name
+      createdAt
+      updatedAt
+      team {
+        id
+        name
+      }
+      environments {
+        edges {
+          node {
             id
             name
           }
-          environments {
-            edges {
-              node {
-                id
-                name
-              }
-            }
-          }
-          services {
-            edges {
-              node {
-                id
-                name
-                serviceInstances {
-                  edges {
-                    node {
-                      environmentId
-                    }
-                  }
+        }
+      }
+      services {
+        edges {
+          node {
+            id
+            name
+            serviceInstances {
+              edges {
+                node {
+                  environmentId
                 }
               }
             }
@@ -37,40 +36,41 @@ query UserProjects {
         }
       }
     }
-    teams {
-      edges {
-        node {
-          id
-          name
-          projects {
-            edges {
-              node {
+  }
+  me {
+    workspaces {
+      id
+      name
+      team {
+        id
+        projects {
+          edges {
+            node {
+              id
+              name
+              createdAt
+              updatedAt
+              team {
                 id
                 name
-                createdAt
-                updatedAt
-                team {
-                  id
-                  name
-                }
-                environments {
-                  edges {
-                    node {
-                      id
-                      name
-                    }
+              }
+              environments {
+                edges {
+                  node {
+                    id
+                    name
                   }
                 }
-                services {
-                  edges {
-                    node {
-                      id
-                      name
-                      serviceInstances {
-                        edges {
-                          node {
-                            environmentId
-                          }
+              }
+              services {
+                edges {
+                  node {
+                    id
+                    name
+                    serviceInstances {
+                      edges {
+                        node {
+                          environmentId
                         }
                       }
                     }

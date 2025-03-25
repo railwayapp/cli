@@ -1,8 +1,11 @@
 use std::fmt::Display;
 
-use crate::util::prompt::prompt_select;
+use crate::util::prompt::{fake_select, prompt_select};
 
-use super::{queries::user_projects::UserProjectsMeTeamsEdgesNode, *};
+use super::{
+    queries::user_projects::{UserProjectsExternalWorkspaces, UserProjectsMeWorkspaces},
+    *,
+};
 
 /// Create a new project
 #[derive(Parser)]
@@ -19,28 +22,32 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     let vars = queries::user_projects::Variables {};
-    let me = post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars)
-        .await?
-        .me;
+    let response =
+        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
 
-    let teams: Vec<_> = me.teams.edges.iter().map(|team| &team.node).collect();
-    let team_names = get_team_names(teams);
-    let team = prompt_team(team_names)?;
+    let mut workspaces: Vec<Workspace> = response
+        .me
+        .workspaces
+        .into_iter()
+        .map(|w| Workspace::Member(w))
+        .collect();
+    workspaces.extend(
+        response
+            .external_workspaces
+            .into_iter()
+            .map(|w| Workspace::External(w)),
+    );
+    let workspace = prompt_workspace(workspaces)?;
 
     let project_name = match args.name {
         Some(name) => name,
         None => prompt_project_name()?,
     };
 
-    let team_id = match team {
-        Team::Team(team) => Some(team.id.clone()),
-        _ => None,
-    };
-
     let vars = mutations::project_create::Variables {
         name: Some(project_name),
         description: None,
-        team_id,
+        team_id: workspace.team_id(),
     };
     let project_create =
         post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
@@ -67,7 +74,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         "{} {} on {}",
         "Created project".green().bold(),
         project_create.name.bold(),
-        team
+        workspace,
     );
 
     println!(
@@ -83,22 +90,13 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     Ok(())
 }
 
-fn get_team_names(teams: Vec<&UserProjectsMeTeamsEdgesNode>) -> Vec<Team> {
-    let mut team_names = teams
-        .iter()
-        .map(|team| Team::Team(team))
-        .collect::<Vec<_>>();
-    team_names.insert(0, Team::Personal);
-    team_names
-}
-
-fn prompt_team(teams: Vec<Team>) -> Result<Team> {
-    // If there is only the personal team, return None
-    if teams.len() == 1 {
-        return Ok(Team::Personal);
+fn prompt_workspace(workspaces: Vec<Workspace>) -> Result<Workspace> {
+    if workspaces.len() == 1 {
+        fake_select("Select a workspace", &workspaces[0].name());
+        return Ok(workspaces[0].clone());
     }
-    let team = prompt_select("Team", teams)?;
-    Ok(team)
+    let workspace = prompt_select("Select a workspace", workspaces)?;
+    Ok(workspace)
 }
 
 fn prompt_project_name() -> Result<String> {
@@ -130,16 +128,33 @@ fn prompt_project_name() -> Result<String> {
 }
 
 #[derive(Debug, Clone)]
-enum Team<'a> {
-    Team(&'a UserProjectsMeTeamsEdgesNode),
-    Personal,
+enum Workspace {
+    External(UserProjectsExternalWorkspaces),
+    Member(UserProjectsMeWorkspaces),
 }
 
-impl Display for Team<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Workspace {
+    pub fn name(&self) -> &str {
         match self {
-            Team::Team(team) => write!(f, "{}", team.name),
-            Team::Personal => write!(f, "{}", "Personal".bold()),
+            Self::External(w) => w.name.as_str(),
+            Self::Member(w) => w.name.as_str(),
         }
+    }
+
+    pub fn team_id(&self) -> Option<String> {
+        match self {
+            Self::External(w) => w.team_id.clone(),
+            Self::Member(w) => w.team.as_ref().map(|t| t.id.clone()),
+        }
+    }
+}
+
+impl Display for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::External(w) => w.name.as_str(),
+            Self::Member(w) => w.name.as_str(),
+        };
+        write!(f, "{name}")
     }
 }

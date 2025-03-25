@@ -169,7 +169,6 @@ impl TerminalClient {
     /// Process incoming messages from the server
     pub async fn handle_server_messages(&mut self) -> Result<()> {
         let mut consecutive_empty_messages = 0;
-        let mut exit_code: Option<i32> = None;
 
         let mut ping_interval = interval(Duration::from_secs(SSH_PING_INTERVAL_SECS));
 
