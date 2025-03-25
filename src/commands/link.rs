@@ -1,21 +1,14 @@
-use chrono::{DateTime, Utc};
 use colored::*;
 use is_terminal::IsTerminal;
-use serde::Serialize;
 use std::fmt::Display;
 
 use crate::{
     errors::RailwayError,
     util::prompt::{fake_select, prompt_options, prompt_options_skippable},
+    workspace::{workspaces, Project, Workspace},
 };
 
-use super::{
-    queries::user_projects::{
-        UserProjectsExternalWorkspaces, UserProjectsExternalWorkspacesProjects,
-        UserProjectsMeWorkspaces, UserProjectsMeWorkspacesTeamProjectsEdgesNode,
-    },
-    *,
-};
+use super::*;
 
 /// Associate existing project with current directory, may specify projectId as an argument
 #[derive(Parser)]
@@ -40,15 +33,8 @@ pub struct Args {
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
 
-    let client = GQLClient::new_authorized(&configs)?;
-    let response = post_graphql::<queries::UserProjects, _>(
-        &client,
-        configs.get_backboard(),
-        queries::user_projects::Variables {},
-    )
-    .await?;
-
-    let workspace = select_workspace(args.project.clone(), args.team, response)?;
+    let workspaces = workspaces().await?;
+    let workspace = select_workspace(args.project.clone(), args.team, workspaces)?;
 
     let project = select_project(workspace, args.project.clone())?;
 
@@ -174,72 +160,41 @@ fn select_project(
 fn select_workspace(
     project: Option<String>,
     workspace_name: Option<String>,
-    response: queries::user_projects::ResponseData,
+    workspaces: Vec<Workspace>,
 ) -> Result<Workspace, anyhow::Error> {
     let workspace = match (project, workspace_name) {
         (Some(project), None) => {
             // It's a project id or name, figure out workspace
-            if let Some(workspace) = response.external_workspaces.iter().find(|w| {
-                w.projects.iter().any(|pro| {
-                    pro.id.to_lowercase() == project.to_lowercase()
-                        || pro.name.to_lowercase() == project.to_lowercase()
+            if let Some(workspace) = workspaces.iter().find(|w| {
+                w.projects().iter().any(|pro| {
+                    pro.id().to_lowercase() == project.to_lowercase()
+                        || pro.name().to_lowercase() == project.to_lowercase()
                 })
             }) {
-                fake_select("Select a workspace", &workspace.name);
-                Workspace::External(workspace.clone())
-            } else if let Some(w) = response.me.workspaces.iter().find(|w| {
-                w.team.as_ref().map_or(false, |t| {
-                    t.projects.edges.iter().any(|pro| {
-                        pro.node.id.to_lowercase() == project.to_lowercase()
-                            || pro.node.name.to_lowercase() == project.to_lowercase()
-                    })
-                })
-            }) {
-                fake_select("Select a workspace", &w.name);
-                Workspace::Member(w.clone())
+                fake_select("Select a workspace", workspace.name());
+                workspace.clone()
             } else {
-                prompt_workspaces(response)?
+                prompt_workspaces(workspaces)?
             }
         }
         (None, Some(team_arg)) | (Some(_), Some(team_arg)) => {
-            if let Some(workspace) = response.me.workspaces.iter().find(|w| {
-                (w.name.to_lowercase() == team_arg.to_lowercase())
-                    || w.team
-                        .as_ref()
-                        .map_or(false, |t| t.id.to_lowercase() == team_arg.to_lowercase())
+            if let Some(workspace) = workspaces.iter().find(|w| {
+                w.team_id()
+                    .map_or(false, |id| id.to_lowercase() == team_arg.to_lowercase())
+                    || w.name().to_lowercase() == team_arg.to_lowercase()
             }) {
-                fake_select("Select a workspace", &workspace.name);
-                Workspace::Member(workspace.clone())
-            } else if let Some(workspace) = response.external_workspaces.iter().find(|w| {
-                (w.name.to_lowercase() == team_arg.to_lowercase())
-                    || w.team_id
-                        .iter()
-                        .any(|team_id| team_id.to_lowercase() == team_arg.to_lowercase())
-            }) {
-                fake_select("Select a workspace", &workspace.name);
-                Workspace::External(workspace.clone())
+                fake_select("Select a workspace", workspace.name());
+                workspace.clone()
             } else {
                 return Err(RailwayError::TeamNotFound(team_arg.clone()).into());
             }
         }
-        (None, None) => prompt_workspaces(response)?,
+        (None, None) => prompt_workspaces(workspaces)?,
     };
     Ok(workspace)
 }
 
-fn prompt_workspaces(response: queries::user_projects::ResponseData) -> Result<Workspace> {
-    let mut workspaces: Vec<Workspace> = response
-        .me
-        .workspaces
-        .into_iter()
-        .map(|w| Workspace::Member(w))
-        .collect();
-    workspaces.extend(
-        response
-            .external_workspaces
-            .into_iter()
-            .map(|w| Workspace::External(w)),
-    );
+fn prompt_workspaces(workspaces: Vec<Workspace>) -> Result<Workspace> {
     if workspaces.is_empty() {
         return Err(RailwayError::NoProjects.into());
     }
@@ -250,8 +205,7 @@ fn prompt_workspaces(response: queries::user_projects::ResponseData) -> Result<W
     prompt_options("Select a workspace", workspaces)
 }
 
-fn prompt_team_projects(mut projects: Vec<Project>) -> Result<Project, anyhow::Error> {
-    projects.sort_by(|a, b| b.updated_at().cmp(&a.updated_at()));
+fn prompt_team_projects(projects: Vec<Project>) -> Result<Project, anyhow::Error> {
     prompt_options("Select a project", projects)
 }
 
@@ -344,88 +298,6 @@ impl From<Project> for NormalisedProject {
                     })
                     .collect(),
             ),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Workspace {
-    External(UserProjectsExternalWorkspaces),
-    Member(UserProjectsMeWorkspaces),
-}
-
-impl Workspace {
-    pub fn name(&self) -> &str {
-        let name = match self {
-            Self::External(w) => w.name.as_str(),
-            Self::Member(w) => w.name.as_str(),
-        };
-        name
-    }
-
-    pub fn projects(&self) -> Vec<Project> {
-        match self {
-            Self::External(w) => w
-                .projects
-                .iter()
-                .cloned()
-                .map(|p| Project::External(p))
-                .collect(),
-            Self::Member(w) => w.team.as_ref().map_or_else(Vec::new, |t| {
-                t.projects
-                    .edges
-                    .iter()
-                    .cloned()
-                    .map(|e| Project::Team(e.node))
-                    .collect()
-            }),
-        }
-    }
-}
-
-impl Display for Workspace {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Self::External(w) => w.name.as_str(),
-            Self::Member(w) => w.name.as_str(),
-        };
-        write!(f, "{name}")
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-enum Project {
-    External(UserProjectsExternalWorkspacesProjects),
-    Team(UserProjectsMeWorkspacesTeamProjectsEdgesNode),
-}
-
-impl Project {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::External(w) => &w.id,
-            Self::Team(w) => &w.id,
-        }
-    }
-    pub fn name(&self) -> &str {
-        match self {
-            Self::External(w) => &w.name,
-            Self::Team(w) => &w.name,
-        }
-    }
-    pub fn updated_at(&self) -> DateTime<Utc> {
-        match self {
-            Self::External(w) => w.updated_at,
-            Self::Team(w) => w.updated_at,
-        }
-    }
-}
-
-impl Display for Project {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Team(team_project) => write!(f, "{}", team_project.name),
-            Self::External(team_project) => write!(f, "{}", team_project.name),
         }
     }
 }

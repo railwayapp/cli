@@ -1,11 +1,7 @@
-use std::fmt::Display;
-
 use crate::util::prompt::{fake_select, prompt_select};
+use crate::workspace::{workspaces, Workspace};
 
-use super::{
-    queries::user_projects::{UserProjectsExternalWorkspaces, UserProjectsMeWorkspaces},
-    *,
-};
+use super::*;
 
 /// Create a new project
 #[derive(Parser)]
@@ -21,22 +17,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let client = GQLClient::new_authorized(&configs)?;
 
-    let vars = queries::user_projects::Variables {};
-    let response =
-        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
-
-    let mut workspaces: Vec<Workspace> = response
-        .me
-        .workspaces
-        .into_iter()
-        .map(|w| Workspace::Member(w))
-        .collect();
-    workspaces.extend(
-        response
-            .external_workspaces
-            .into_iter()
-            .map(|w| Workspace::External(w)),
-    );
+    let workspaces = workspaces().await?;
     let workspace = prompt_workspace(workspaces)?;
 
     let project_name = match args.name {
@@ -125,36 +106,4 @@ fn prompt_project_name() -> Result<String> {
     };
 
     Ok(name)
-}
-
-#[derive(Debug, Clone)]
-enum Workspace {
-    External(UserProjectsExternalWorkspaces),
-    Member(UserProjectsMeWorkspaces),
-}
-
-impl Workspace {
-    pub fn name(&self) -> &str {
-        match self {
-            Self::External(w) => w.name.as_str(),
-            Self::Member(w) => w.name.as_str(),
-        }
-    }
-
-    pub fn team_id(&self) -> Option<String> {
-        match self {
-            Self::External(w) => w.team_id.clone(),
-            Self::Member(w) => w.team.as_ref().map(|t| t.id.clone()),
-        }
-    }
-}
-
-impl Display for Workspace {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Self::External(w) => w.name.as_str(),
-            Self::Member(w) => w.name.as_str(),
-        };
-        write!(f, "{name}")
-    }
 }
