@@ -1,6 +1,5 @@
 use anyhow::Result;
 use crossterm::terminal;
-use futures_util::FutureExt;
 use tokio::io::AsyncReadExt;
 use tokio::select;
 

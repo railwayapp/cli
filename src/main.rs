@@ -17,6 +17,7 @@ mod gql;
 mod subscription;
 mod table;
 mod util;
+mod workspace;
 
 #[macro_use]
 mod macros;

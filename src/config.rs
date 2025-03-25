@@ -69,12 +69,6 @@ struct GithubApiRelease {
 
 const GITHUB_API_RELEASE_URL: &str = "https://api.github.com/repos/railwayapp/cli/releases/latest";
 
-pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 10;
-pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 5;
-pub const SSH_RECONNECT_DELAY_SECS: u64 = 1;
-pub const SSH_MAX_RECONNECT_ATTEMPTS: u32 = 3;
-pub const SSH_MAX_EMPTY_MESSAGES: u32 = 5;
-
 impl Configs {
     pub fn new() -> Result<Self> {
         let environment = Self::get_environment_id();
