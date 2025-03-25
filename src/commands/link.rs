@@ -1,3 +1,4 @@
+use anyhow::bail;
 use colored::*;
 use is_terminal::IsTerminal;
 use std::fmt::Display;
@@ -185,6 +186,8 @@ fn select_workspace(
             }) {
                 fake_select("Select a workspace", workspace.name());
                 workspace.clone()
+            } else if team_arg.to_lowercase() == "personal" {
+                bail!(RailwayError::NoPersonalWorkspace);
             } else {
                 return Err(RailwayError::TeamNotFound(team_arg.clone()).into());
             }
