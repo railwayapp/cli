@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use futures::StreamExt;
 use gzp::{deflate::Gzip, ZBuilder};
