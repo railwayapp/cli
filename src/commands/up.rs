@@ -143,8 +143,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         let mut archive = Builder::new(&mut parz);
         let mut builder = WalkBuilder::new(deploy_paths.project_path);
         builder.add_custom_ignore_filename(".railwayignore");
-        if !args.no_gitignore {
-            builder.add_custom_ignore_filename(".gitignore");
+        if args.no_gitignore {
+            builder.git_ignore(false);
         }
 
         let walker = builder.follow_links(true).hidden(false);
