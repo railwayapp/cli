@@ -1,10 +1,8 @@
 use crate::{
     consts::TICK_STRING,
     controllers::environment::get_matched_environment,
-    errors::RailwayError,
     util::prompt::{
-        prompt_select_with_cancel, prompt_text,
-        prompt_u64_with_placeholder_and_validation_and_cancel,
+        prompt_select_with_cancel, prompt_u64_with_placeholder_and_validation_and_cancel,
     },
 };
 use anyhow::bail;
@@ -54,7 +52,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .environment
         .clone()
         .unwrap_or(linked_project.environment.clone());
-    let (existing, latest_id) = get_existing_config(&args, &linked_project, project, environment)?;
+    let existing = get_existing_config(&args, &linked_project, project, environment)?;
     let new_config = convert_hashmap_into_map(
         if args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
             prompt_for_regions(&configs, &client, &existing).await?
@@ -69,8 +67,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         return Ok(());
     }
     let region_data = merge_config(existing, new_config);
-    handle_2fa(&configs, &client).await?;
-    update_regions_and_redeploy(configs, client, linked_project, latest_id, region_data).await?;
+    update_regions_and_redeploy(configs, client, linked_project, region_data).await?;
 
     Ok(())
 }
@@ -110,6 +107,7 @@ async fn prompt_for_regions(
         let regions = regions
             .regions
             .iter()
+            .filter(|r| r.railway_metal.unwrap_or_default())
             .map(|f| {
                 PromptRegion(
                     f.clone(),
@@ -177,7 +175,6 @@ async fn update_regions_and_redeploy(
     configs: Configs,
     client: reqwest::Client,
     linked_project: LinkedProject,
-    latest_id: Option<String>,
     region_data: Value,
 ) -> Result<(), anyhow::Error> {
     let spinner = indicatif::ProgressBar::new_spinner()
@@ -192,30 +189,31 @@ async fn update_regions_and_redeploy(
         &client,
         configs.get_backboard(),
         mutations::update_regions::Variables {
-            environment_id: linked_project.environment,
-            service_id: linked_project.service.unwrap(),
+            environment_id: linked_project.environment.clone(),
+            service_id: linked_project.service.clone().unwrap(),
             multi_region_config: region_data,
         },
     )
     .await?;
     spinner.finish_with_message("Regions updated");
-    if let Some(latest) = latest_id {
-        let spinner = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message("Redeploying...");
-        spinner.enable_steady_tick(Duration::from_millis(100));
-        post_graphql::<mutations::DeploymentRedeploy, _>(
-            &client,
-            configs.get_backboard(),
-            mutations::deployment_redeploy::Variables { id: latest },
+    let spinner = indicatif::ProgressBar::new_spinner()
+        .with_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars(TICK_STRING)
+                .template("{spinner:.green} {msg}")?,
         )
-        .await?;
-        spinner.finish_with_message("Redeployed");
-    };
+        .with_message("Redeploying...");
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    post_graphql::<mutations::ServiceInstanceDeploy, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::service_instance_deploy::Variables {
+            environment_id: linked_project.environment,
+            service_id: linked_project.service.unwrap(),
+        },
+    )
+    .await?;
+    spinner.finish_with_message("Redeployed");
     Ok(())
 }
 
@@ -226,32 +224,6 @@ fn merge_config(existing: Value, new_config: Map<String, Value>) -> Value {
     };
     map.extend(new_config);
     Value::Object(map)
-}
-
-async fn handle_2fa(configs: &Configs, client: &reqwest::Client) -> Result<(), anyhow::Error> {
-    let is_two_factor_enabled = {
-        let vars = queries::two_factor_info::Variables {};
-
-        let info = post_graphql::<queries::TwoFactorInfo, _>(client, configs.get_backboard(), vars)
-            .await?
-            .two_factor_info;
-
-        info.is_verified
-    };
-    if is_two_factor_enabled {
-        let token = prompt_text("Enter your 2FA code")?;
-        let vars = mutations::validate_two_factor::Variables { token };
-
-        let valid =
-            post_graphql::<mutations::ValidateTwoFactor, _>(client, configs.get_backboard(), vars)
-                .await?
-                .two_factor_info_validate;
-
-        if !valid {
-            return Err(RailwayError::InvalidTwoFactorCode.into());
-        }
-    };
-    Ok(())
 }
 
 fn convert_hashmap_into_map(map: HashMap<String, u64>) -> Map<String, Value> {
@@ -274,10 +246,9 @@ fn get_existing_config(
     linked_project: &LinkedProject,
     project: queries::project::ProjectProject,
     environment: String,
-) -> Result<(Value, Option<String>), anyhow::Error> {
+) -> Result<Value> {
     let environment_id = get_matched_environment(&project, environment)?.id;
     let service_input: &String = args.service.as_ref().unwrap_or(linked_project.service.as_ref().expect("No service linked. Please either specify a service with the --service flag or link one with `railway service`"));
-    let mut id: Option<String> = None;
     let service_meta = if let Some(service) = project.services.edges.iter().find(|p| {
         (p.node.id == *service_input)
             || (p.node.name.to_lowercase() == service_input.to_lowercase())
@@ -291,7 +262,6 @@ fn get_existing_config(
             .find(|p| p.node.environment_id == environment_id)
         {
             if let Some(latest) = &instance.node.latest_deployment {
-                id = Some(latest.id.clone());
                 if let Some(meta) = &latest.meta {
                     let deploy = meta
                         .dot_get::<Value>("serviceManifest.deploy")?
@@ -321,7 +291,7 @@ fn get_existing_config(
     } else {
         None
     };
-    Ok((service_meta.unwrap_or(Value::Object(Map::new())), id))
+    Ok(service_meta.unwrap_or(Value::Object(Map::new())))
 }
 
 /// This function generates flags that are appended to the command at runtime.

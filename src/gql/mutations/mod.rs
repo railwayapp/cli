@@ -183,6 +183,14 @@ pub struct EnvironmentCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceInstanceDeploy.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceInstanceDeploy;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/EnvironmentDelete.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
