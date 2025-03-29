@@ -24,6 +24,11 @@ pub enum RailwayError {
     #[error("No linked project found. Run railway link to connect to a project")]
     NoLinkedProject,
 
+    #[error(
+        "Personal workspaces are no longer supported. Please specify a workspace by id or name"
+    )]
+    NoPersonalWorkspace,
+
     #[error("Project not found. Run `railway link` to connect to a project.")]
     ProjectNotFound,
 

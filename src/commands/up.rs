@@ -11,7 +11,6 @@ use gzp::{deflate::Gzip, ZBuilder};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
 use is_terminal::IsTerminal;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use synchronized_writer::SynchronizedWriter;
 use tar::Builder;
@@ -21,16 +20,13 @@ use crate::{
     controllers::{
         deployment::{stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project},
+        project::get_project,
         service::get_or_prompt_service,
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::{
-        logs::format_attr_log,
-        prompt::{prompt_select, PromptService},
-    },
+    util::logs::format_attr_log,
 };
 
 use super::*;
@@ -61,6 +57,10 @@ pub struct Args {
     no_gitignore: bool,
 
     #[clap(long)]
+    /// Use the path argument as the prefix for the archive instead of the project directory.
+    path_as_root: bool,
+
+    #[clap(long)]
     /// Verbose output
     verbose: bool,
 }
@@ -84,12 +84,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
-    let prefix: PathBuf = configs.get_closest_linked_project_directory()?.into();
 
-    let path = match args.path {
-        Some(path) => path,
-        None => prefix.clone(),
-    };
+    let deploy_paths = get_deploy_paths(&args, &linked_project)?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
@@ -145,10 +141,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     {
         let mut archive = Builder::new(&mut parz);
-        let mut builder = WalkBuilder::new(path);
+        let mut builder = WalkBuilder::new(deploy_paths.project_path);
         builder.add_custom_ignore_filename(".railwayignore");
-        if !args.no_gitignore {
-            builder.add_custom_ignore_filename(".gitignore");
+        if args.no_gitignore {
+            builder.git_ignore(false);
         }
 
         let walker = builder.follow_links(true).hidden(false);
@@ -177,7 +173,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 {
                     continue;
                 }
-                let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
+                let stripped =
+                    PathBuf::from(".").join(path.strip_prefix(&deploy_paths.archive_prefix_path)?);
                 archive.append_path_with_name(path, stripped)?;
             }
         } else {
@@ -190,7 +187,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 {
                     continue;
                 }
-                let stripped = PathBuf::from(".").join(path.strip_prefix(&prefix)?);
+                let stripped =
+                    PathBuf::from(".").join(path.strip_prefix(&deploy_paths.archive_prefix_path)?);
                 archive.append_path_with_name(path, stripped)?;
             }
         }
@@ -362,4 +360,33 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     futures::future::join_all(tasks).await;
 
     Ok(())
+}
+
+struct DeployPaths {
+    project_path: PathBuf,
+    archive_prefix_path: PathBuf,
+}
+
+fn get_deploy_paths(args: &Args, linked_project: &LinkedProject) -> Result<DeployPaths> {
+    if args.path_as_root {
+        if args.path.is_none() {
+            bail!("--path-as-root requires a path to be specified");
+        }
+
+        let path = args.path.clone().unwrap();
+        Ok(DeployPaths {
+            project_path: path.clone(),
+            archive_prefix_path: path,
+        })
+    } else {
+        let project_dir: PathBuf = linked_project.project_path.clone().into();
+        let project_path = match args.path {
+            Some(ref path) => path.clone(),
+            None => project_dir.clone(),
+        };
+        Ok(DeployPaths {
+            project_path,
+            archive_prefix_path: project_dir,
+        })
+    }
 }

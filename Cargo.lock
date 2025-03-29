@@ -1945,7 +1945,7 @@ dependencies = [
 
 [[package]]
 name = "railwayapp"
-version = "3.22.2"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "async-tungstenite",
@@ -1982,7 +1982,6 @@ dependencies = [
  "open",
  "paste",
  "rand",
- "regex",
  "reqwest 0.12.12",
  "serde",
  "serde_json",
@@ -2048,18 +2047,6 @@ dependencies = [
  "getrandom",
  "libredox",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "regex"
-version = "1.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b544ef1b4eac5dc2db33ea63606ae9ffcfac26c1416a2806ae0bf5f56b201191"
-dependencies = [
- "aho-corasick",
- "memchr",
- "regex-automata",
- "regex-syntax",
 ]
 
 [[package]]
