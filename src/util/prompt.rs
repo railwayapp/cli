@@ -1,4 +1,5 @@
 use colored::*;
+use inquire::validator::{Validation, ValueRequiredValidator};
 use std::fmt::Display;
 
 use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
@@ -25,6 +26,27 @@ pub fn prompt_text(message: &str) -> Result<String> {
     select
         .with_render_config(Configs::get_render_config())
         .prompt()
+        .context("Failed to prompt for options")
+}
+
+pub fn prompt_u64_with_placeholder_and_validation_and_cancel(
+    message: &str,
+    placeholder: &str,
+) -> Result<Option<String>> {
+    let validator = |input: &str| {
+        if input.parse::<u64>().is_ok() {
+            Ok(Validation::Valid)
+        } else {
+            Ok(Validation::Invalid("Not a valid number".into()))
+        }
+    };
+    let select = inquire::Text::new(message);
+    select
+        .with_render_config(Configs::get_render_config())
+        .with_placeholder(placeholder)
+        .with_validator(ValueRequiredValidator::new("Input most not be empty"))
+        .with_validator(validator)
+        .prompt_skippable()
         .context("Failed to prompt for options")
 }
 
@@ -102,6 +124,13 @@ pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
     inquire::Select::new(message, options)
         .with_render_config(Configs::get_render_config())
         .prompt()
+        .context("Failed to prompt for select")
+}
+
+pub fn prompt_select_with_cancel<T: Display>(message: &str, options: Vec<T>) -> Result<Option<T>> {
+    inquire::Select::new(message, options)
+        .with_render_config(Configs::get_render_config())
+        .prompt_skippable()
         .context("Failed to prompt for select")
 }
 
