@@ -305,33 +305,6 @@ async fn delete(
         false,
     )?;
     if confirm {
-        let is_two_factor_enabled = {
-            let vars = queries::two_factor_info::Variables {};
-
-            let info =
-                post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-                    .await?
-                    .two_factor_info;
-
-            info.is_verified
-        };
-
-        if is_two_factor_enabled {
-            let token = prompt_text("Enter your 2FA code")?;
-            let vars = mutations::validate_two_factor::Variables { token };
-
-            let valid = post_graphql::<mutations::ValidateTwoFactor, _>(
-                &client,
-                configs.get_backboard(),
-                vars,
-            )
-            .await?
-            .two_factor_info_validate;
-
-            if !valid {
-                return Err(RailwayError::InvalidTwoFactorCode.into());
-            }
-        }
         let volume_id = volume.0.volume.id.clone();
         let p = post_graphql::<mutations::VolumeDelete, _>(
             &client,

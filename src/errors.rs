@@ -73,9 +73,6 @@ pub enum RailwayError {
     #[error("Volume {0} not found.")]
     VolumeNotFound(String),
 
-    #[error("2FA code is incorrect. Please try again.")]
-    InvalidTwoFactorCode,
-
     #[error("Could not find a variable to connect to the service with. Looking for \"{0}\".")]
     ConnectionVariableNotFound(String),
 

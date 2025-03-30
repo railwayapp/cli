@@ -52,14 +52,6 @@ pub struct ProjectCreate;
 )]
 pub struct ServiceDomainCreate;
 
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/ValidateTwoFactor.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct ValidateTwoFactor;
-
 pub type SerializedTemplateConfig = serde_json::Value;
 
 #[derive(GraphQLQuery)]

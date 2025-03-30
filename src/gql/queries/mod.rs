@@ -92,14 +92,6 @@ pub type RailwayUser = user_meta::UserMetaMe;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/queries/strings/TwoFactorInfo.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct TwoFactorInfo;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/UserProjects.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
