@@ -6,7 +6,7 @@ use tokio::time::{sleep, timeout, Duration};
 use url::Url;
 
 use crate::commands::ssh::{
-    SSH_CONNECTION_TIMEOUT_SECS, SSH_MAX_RECONNECT_ATTEMPTS, SSH_RECONNECT_DELAY_SECS,
+    SSH_CONNECTION_TIMEOUT_SECS, SSH_CONNECT_DELAY_SECS, SSH_MAX_CONNECT_ATTEMPTS,
 };
 use crate::consts::get_user_agent;
 
@@ -26,24 +26,20 @@ pub async fn establish_connection(
 ) -> Result<WebSocketStream<async_tungstenite::tokio::ConnectStream>> {
     let url = Url::parse(url)?;
 
-    for attempt in 1..=SSH_MAX_RECONNECT_ATTEMPTS {
+    for attempt in 1..=SSH_MAX_CONNECT_ATTEMPTS {
         match attempt_connection(&url, token, params).await {
             Ok(ws_stream) => {
                 return Ok(ws_stream);
             }
             Err(e) => {
-                if attempt == SSH_MAX_RECONNECT_ATTEMPTS {
+                if attempt == SSH_MAX_CONNECT_ATTEMPTS {
                     bail!(
                         "Failed to establish connection after {} attempts: {}",
-                        SSH_MAX_RECONNECT_ATTEMPTS,
+                        SSH_MAX_CONNECT_ATTEMPTS,
                         e
                     );
                 }
-                eprintln!(
-                    "Connection attempt {} failed: {}. Retrying in {} seconds...",
-                    attempt, e, SSH_RECONNECT_DELAY_SECS
-                );
-                sleep(Duration::from_secs(SSH_RECONNECT_DELAY_SECS)).await;
+                sleep(Duration::from_secs(SSH_CONNECT_DELAY_SECS)).await;
             }
         }
     }
