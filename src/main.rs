@@ -116,6 +116,9 @@ async fn main() -> Result<()> {
                         new_version_available.yellow(),
                         "https://docs.railway.com/guides/cli".purple(),
                     );
+                    // Don't show the message again (for 24 hours)
+                    configs.root_config.new_version_available = None;
+                    configs.write()?;
                 }
                 _ => {
                     configs.root_config.new_version_available = None;
