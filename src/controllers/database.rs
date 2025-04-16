@@ -6,6 +6,8 @@ pub enum DatabaseType {
     PostgreSQL,
     MySQL,
     Redis,
+    KeyDB,
+    Valkey,
     MongoDB,
 }
 
@@ -15,6 +17,8 @@ impl DatabaseType {
             DatabaseType::PostgreSQL => "postgres",
             DatabaseType::MySQL => "mysql",
             DatabaseType::Redis => "redis",
+            DatabaseType::KeyDB => "keydb",
+            DatabaseType::Valkey => "valkey",
             DatabaseType::MongoDB => "mongo",
         }
     }

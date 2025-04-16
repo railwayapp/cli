@@ -89,6 +89,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                     Some(DatabaseType::PostgreSQL)
                 } else if image.contains("redis") {
                     Some(DatabaseType::Redis)
+                } else if image.contains("keydb") {
+                    Some(DatabaseType::KeyDB)
+                } else if image.contains("valkey") {
+                    Some(DatabaseType::Valkey)
                 } else if image.contains("mongo") {
                     Some(DatabaseType::MongoDB)
                 } else if image.contains("mysql") {
@@ -124,6 +128,8 @@ fn get_connect_command(
     match &database_type {
         DatabaseType::PostgreSQL => get_postgres_command(&variables),
         DatabaseType::Redis => get_redis_command(&variables),
+        DatabaseType::KeyDB => get_keydb_command(&variables),
+        DatabaseType::Valkey => get_valkey_command(&variables),
         DatabaseType::MongoDB => get_mongo_command(&variables),
         DatabaseType::MySQL => get_mysql_command(&variables),
     }
@@ -156,6 +162,38 @@ fn get_redis_command(variables: &BTreeMap<String, String>) -> Result<(String, Ve
         .map(|s| s.to_string())
         .ok_or(RailwayError::ConnectionVariableNotFound(
             "REDIS_PUBLIC_URL".to_string(),
+        ))?;
+
+    if !host_is_tcp_proxy(connect_url.clone()) {
+        return Err(RailwayError::InvalidConnectionVariable.into());
+    }
+
+    Ok(("redis-cli".to_string(), vec!["-u".to_string(), connect_url]))
+}
+
+fn get_keydb_command(variables: &BTreeMap<String, String>) -> Result<(String, Vec<String>)> {
+    let connect_url = variables
+        .get("KEYDB_PUBLIC_URL")
+        .or_else(|| variables.get("KEYDB_URL"))
+        .map(|s| s.to_string())
+        .ok_or(RailwayError::ConnectionVariableNotFound(
+            "KEYDB_PUBLIC_URL".to_string(),
+        ))?;
+
+    if !host_is_tcp_proxy(connect_url.clone()) {
+        return Err(RailwayError::InvalidConnectionVariable.into());
+    }
+
+    Ok(("redis-cli".to_string(), vec!["-u".to_string(), connect_url]))
+}
+
+fn get_valkey_command(variables: &BTreeMap<String, String>) -> Result<(String, Vec<String>)> {
+    let connect_url = variables
+        .get("VALKEY_PUBLIC_URL")
+        .or_else(|| variables.get("VALKEY_URL"))
+        .map(|s| s.to_string())
+        .ok_or(RailwayError::ConnectionVariableNotFound(
+            "VALKEY_PUBLIC_URL".to_string(),
         ))?;
 
     if !host_is_tcp_proxy(connect_url.clone()) {
