@@ -2,6 +2,9 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
+    commands::ssh::common::{
+        create_spinner, establish_connection, execute_command, get_ssh_connect_params,
+    },
     controllers::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
@@ -23,6 +26,12 @@ pub struct Args {
     /// Environment to pull variables from (defaults to linked environment)
     #[clap(short, long)]
     environment: Option<String>,
+
+    /// Run a command remotely on the linked service, whilst creating a duplicate of the linked service.
+    /// TODO: how much time?
+    /// The service the command is ran on will be disconnected from upstream, and will be automatically deleted after a period of time. (TBD)
+    #[clap(short, long)]
+    remote: bool,
 
     /// Args to pass to the command
     #[clap(trailing_var_arg = true)]
@@ -80,6 +89,65 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    if args.remote {
+        let params = get_ssh_connect_params(
+            (
+                None, /* run doesn't have a project flag */
+                args.service.clone(),
+                args.environment.clone(),
+                None, /* default to latest deployment */
+            ),
+            &configs,
+            &client,
+        )
+        .await?;
+
+        let token = configs
+            .get_railway_auth_token()
+            .context("No authentication token found. Please login first with 'railway login'")?;
+
+        let spinner = create_spinner(true);
+
+        let ws_url = format!("wss://{}", configs.get_relay_host_path());
+        let mut terminal_client = establish_connection(&ws_url, &token, &params).await?;
+
+        // Run single command
+        let run_command = tokio::spawn(async move {
+            let e = execute_command(&mut terminal_client, args.args.clone(), spinner).await;
+            if let Err(e) = e {
+                bail!("Failed to execute command: {e:?}")
+            } else {
+                Ok(())
+            }
+        });
+        // Now, we need to:
+        // 1. Duplicate the current service
+        // 2. Disconnect the current service (the one the command is running on) from upstream
+        let api_changes: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
+            // 1. duplicate
+            // TODO: this will be a single API call.
+
+            // 2. disconnect upstream from original service
+
+            post_graphql::<mutations::UpdateServiceSource, _>(
+                &client,
+                configs.get_backboard(),
+                mutations::update_service_source::Variables {
+                    environment_id: params.environment_id,
+                    service_id: params.service_id,
+                    repo: None, // disconnect
+                },
+            )
+            .await?;
+
+            Ok(())
+        });
+        let (ran, changed) = tokio::join!(run_command, api_changes);
+        ran??;
+        changed??;
+        return Ok(());
+    }
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 

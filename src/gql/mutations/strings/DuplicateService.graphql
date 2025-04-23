@@ -1,0 +1,7 @@
+mutation DuplicateService($projectId: String!, $environmentId: String!, $templateServiceId: String, $name: String!) {
+  serviceCreate(
+    input: {projectId: $projectId, environmentId: $environmentId, templateServiceId: $templateServiceId, name: $name}
+  ) {
+    id
+  }
+}

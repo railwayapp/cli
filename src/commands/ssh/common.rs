@@ -13,78 +13,57 @@ use crate::controllers::{
     terminal::{SSHConnectParams, TerminalClient},
 };
 
-use super::Args;
-
 /// Creates a connection parameters object from command line arguments
+///
+/// (project, service, environment, deployment instance id)
 pub async fn get_ssh_connect_params(
-    args: Args,
+    args: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
     configs: &Configs,
     client: &Client,
 ) -> Result<SSHConnectParams> {
-    let has_project = args.project.is_some();
-    let has_service = args.service.is_some();
-    let has_environment = args.environment.is_some();
-
-    let provided_args_count = [has_project, has_service, has_environment]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
-    // Either all main args must be provided or none
-    if provided_args_count > 0 && provided_args_count < 3 {
-        if !has_project {
-            return Err(anyhow!(
-                "Must provide project when setting service or environment"
-            ));
-        }
-        if !has_environment {
-            return Err(anyhow!(
-                "Must provide environment when setting project or service"
-            ));
-        }
-        if !has_service {
-            return Err(anyhow!(
-                "Must provide service when setting project or environment"
-            ));
-        }
-    }
-
-    if provided_args_count == 3 {
-        // All args are provided, use them directly
-        let project_id = args.project.unwrap();
-        let project = get_project(client, configs, project_id.clone()).await?;
-
-        let environment = args.environment.unwrap();
-        let environment_id = get_matched_environment(&project, environment)?.id;
-
-        let service_id = args.service.unwrap();
-
-        return Ok(SSHConnectParams {
-            project_id,
-            environment_id,
-            service_id,
-            deployment_instance_id: args.deployment_instance,
-        });
-    }
-
-    // No args provided... use linked project
     let linked_project = configs.get_linked_project().await?;
-    let project_id = linked_project.project.clone();
+    let project_id = match args.0 {
+        Some(p) => p,
+        None => linked_project.project.clone(),
+    };
+    let service = match args.1 {
+        Some(s) => Some(s),
+        None => linked_project.service.clone(),
+    };
     let project = get_project(client, configs, project_id.clone()).await?;
-
-    let environment = linked_project.environment.clone();
-    let environment_id = get_matched_environment(&project, environment)?.id;
+    let environment_id = get_matched_environment(
+        &project,
+        match args.2 {
+            Some(s) => s,
+            None => linked_project.environment.clone(),
+        },
+    )?
+    .id;
 
     // Use the linked service if available, otherwise prompt the user
-    let service_id = get_or_prompt_service(linked_project.clone(), project, None)
+    let service_id = get_or_prompt_service(linked_project.clone(), &project, service)
         .await?
-        .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
-
+        .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag, or link one with `railway link`."))?;
+    let service = project
+        .services
+        .edges
+        .iter()
+        .find(|s| s.node.id == service_id.as_str())
+        .unwrap()
+        .node
+        .clone();
     Ok(SSHConnectParams {
         project_id,
         environment_id,
         service_id,
-        deployment_instance_id: args.deployment_instance,
+        deployment_instance_id: args.3,
+        name: service.name.clone(),
+        template_service_id: service.template_service_id,
     })
 }
 

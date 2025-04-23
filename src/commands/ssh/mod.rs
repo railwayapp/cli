@@ -10,7 +10,7 @@ pub const SSH_MAX_RECONNECT_ATTEMPTS: usize = 3;
 pub const SSH_RECONNECT_DELAY_SECS: u64 = 5;
 pub const SSH_MAX_EMPTY_MESSAGES: usize = 100;
 
-mod common;
+pub mod common;
 mod platform;
 
 use common::*;
@@ -45,7 +45,17 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let params = get_ssh_connect_params(args.clone(), &configs, &client).await?;
+    let params = get_ssh_connect_params(
+        (
+            args.project,
+            args.service,
+            args.environment,
+            args.deployment_instance,
+        ),
+        &configs,
+        &client,
+    )
+    .await?;
 
     let token = configs
         .get_railway_auth_token()
