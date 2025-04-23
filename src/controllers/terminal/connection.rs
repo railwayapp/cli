@@ -16,8 +16,6 @@ pub struct SSHConnectParams {
     pub environment_id: String,
     pub service_id: String,
     pub deployment_instance_id: Option<String>,
-    pub name: String,
-    pub template_service_id: Option<String>,
 }
 
 /// Establishes a WebSocket connection

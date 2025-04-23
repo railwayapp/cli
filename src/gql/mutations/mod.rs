@@ -182,15 +182,6 @@ pub struct EnvironmentDelete;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/DuplicateService.graphql",
-    response_derives = "Debug, Serialize, Clone",
-    skip_serializing_none
-)]
-pub struct DuplicateService;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/UpdateServiceSource.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

@@ -49,21 +49,11 @@ pub async fn get_ssh_connect_params(
     let service_id = get_or_prompt_service(linked_project.clone(), &project, service)
         .await?
         .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag, or link one with `railway link`."))?;
-    let service = project
-        .services
-        .edges
-        .iter()
-        .find(|s| s.node.id == service_id.as_str())
-        .unwrap()
-        .node
-        .clone();
     Ok(SSHConnectParams {
         project_id,
         environment_id,
         service_id,
         deployment_instance_id: args.3,
-        name: service.name.clone(),
-        template_service_id: service.template_service_id,
     })
 }
 
