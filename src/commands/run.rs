@@ -135,14 +135,26 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             )
             .await?;
 
-            // 2. disconnect upstream from original service
+            // 2. create initial deployment
+
+            post_graphql::<mutations::CreateInitialDeployment, _>(
+                &client,
+                configs.get_backboard(),
+                mutations::create_initial_deployment::Variables {
+                    service_id: params.service_id.clone(),
+                    environment_id: params.environment_id.clone(),
+                },
+            )
+            .await?;
+
+            // 3. disconnect upstream from original service
 
             post_graphql::<mutations::UpdateServiceSource, _>(
                 &client,
                 configs.get_backboard(),
                 mutations::update_service_source::Variables {
-                    environment_id: params.environment_id,
-                    service_id: params.service_id,
+                    environment_id: params.environment_id.clone(),
+                    service_id: params.service_id.clone(),
                     repo: None, // disconnect
                 },
             )
