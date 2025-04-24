@@ -28,8 +28,7 @@ pub struct Args {
     environment: Option<String>,
 
     /// Run a command remotely on the linked service, whilst creating a duplicate of the linked service.
-    /// TODO: how much time?
-    /// The service the command is ran on will be disconnected from upstream, and will be automatically deleted after a period of time. (TBD)
+    /// The service the command is ran on will be disconnected from upstream, and will be automatically deleted after 24 hours.
     #[clap(short, long)]
     remote: bool,
 
@@ -126,7 +125,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // 2. Disconnect the current service (the one the command is running on) from upstream
         let api_changes: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
             // 1. duplicate
-            // TODO: this will be a single API call.
+
+            post_graphql::<mutations::DuplicateService, _>(
+                &client,
+                configs.get_backboard(),
+                mutations::duplicate_service::Variables {
+                    id: params.service_id.clone(),
+                },
+            )
+            .await?;
 
             // 2. disconnect upstream from original service
 

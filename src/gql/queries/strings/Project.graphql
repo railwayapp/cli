@@ -29,8 +29,7 @@ query Project($id: String!) {
                 environmentId
                 latestDeployment {
                   canRedeploy
-                  id
-                  meta
+                  id             
                 }
                 source {
                   repo

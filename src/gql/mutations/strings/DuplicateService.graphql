@@ -1,0 +1,5 @@
+mutation DuplicateService($id:String!) {
+  serviceDuplicate(id: $id) {
+		id
+  }
+}
