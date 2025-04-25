@@ -6,8 +6,8 @@ use crate::config::Configs;
 
 pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
 pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 10;
-pub const SSH_MAX_RECONNECT_ATTEMPTS: usize = 3;
-pub const SSH_RECONNECT_DELAY_SECS: u64 = 5;
+pub const SSH_MAX_CONNECT_ATTEMPTS: usize = 3;
+pub const SSH_CONNECT_DELAY_SECS: u64 = 5;
 pub const SSH_MAX_EMPTY_MESSAGES: usize = 100;
 
 mod common;

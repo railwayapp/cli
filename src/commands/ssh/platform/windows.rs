@@ -2,6 +2,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use futures_util::stream::StreamExt;
+use std::io::Write;
 use tokio::io::AsyncReadExt;
 use tokio::select;
 use tokio::time::Duration;
@@ -23,13 +24,18 @@ pub async fn run_interactive_session(client: &mut TerminalClient) -> Result<()> 
 
     // Event handling differs based on available features
     #[cfg(feature = "event-stream")]
-    let run_result = run_with_event_stream(client, &mut stdin, &mut stdin_buf).await;
+    let run_result =
+        run_with_event_stream(client, &mut stdin, &mut stdin_buf, &mut exit_code).await;
 
     #[cfg(not(feature = "event-stream"))]
-    let run_result = run_with_polling(client, &mut stdin, &mut stdin_buf).await;
+    let run_result = run_with_polling(client, &mut stdin, &mut stdin_buf, &mut exit_code).await;
 
     // Clean up terminal
     let _ = terminal::disable_raw_mode();
+
+    // Ensure cursor is visible with ANSI escape sequence
+    print!("\x1b[?25h");
+    std::io::stdout().flush()?;
 
     if let Some(code) = exit_code {
         std::process::exit(code);
@@ -43,14 +49,18 @@ async fn run_with_event_stream(
     client: &mut TerminalClient,
     stdin: &mut tokio::io::Stdin,
     stdin_buf: &mut [u8; 1024],
+    exit_code: &mut Option<i32>,
 ) -> Result<()> {
     let mut event_stream = crossterm::event::EventStream::new();
     let mut exit_code = None;
 
     loop {
+        // Check if the shell is ready for input
+        let is_ready = client.is_ready();
+
         select! {
             // Handle crossterm events for Windows with event-stream
-            maybe_event = event_stream.next().fuse() => {
+            maybe_event = event_stream.next().fuse(), if is_ready => {
                 match maybe_event {
                     Some(Ok(Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. }))) if modifiers.contains(KeyModifiers::CONTROL) => {
                         // Handle Ctrl+C like SIGINT
@@ -76,7 +86,7 @@ async fn run_with_event_stream(
                 }
             },
 
-            result = stdin.read(stdin_buf) => {
+            result = stdin.read(stdin_buf), if is_ready => {
                 match result {
                     Ok(0) => break, // EOF
                     Ok(n) => {
@@ -94,12 +104,12 @@ async fn run_with_event_stream(
             result = client.handle_server_messages() => {
                 match result {
                    Ok(()) => {
-                        exit_code = Some(0);
+                        *exit_code = Some(0);
                         break;
                     }
                     Err(e) => {
                         eprintln!("Error: {}", e);
-                        exit_code = Some(1);
+                        *exit_code = Some(1);
                         break;
                     }
                 }
@@ -119,13 +129,17 @@ async fn run_with_polling(
     client: &mut TerminalClient,
     stdin: &mut tokio::io::Stdin,
     stdin_buf: &mut [u8; 1024],
+    exit_code: &mut Option<i32>,
 ) -> Result<()> {
     let event_poll_timeout = Duration::from_millis(100);
     let mut exit_code = None;
 
     loop {
+        // Check if the shell is ready for input
+        let is_ready = client.is_ready();
+
         select! {
-            result = stdin.read(stdin_buf) => {
+            result = stdin.read(stdin_buf), if is_ready => {
                 match result {
                     Ok(0) => break, // EOF
                     Ok(n) => {
@@ -143,12 +157,12 @@ async fn run_with_polling(
             result = client.handle_server_messages() => {
                 match result {
                    Ok(()) => {
-                        exit_code = Some(0);
+                        *exit_code = Some(0);
                         break;
                     }
                     Err(e) => {
                         eprintln!("Error: {}", e);
-                        exit_code = Some(1);
+                        *exit_code = Some(1);
                         break;
                     }
                 }
@@ -156,7 +170,7 @@ async fn run_with_polling(
 
             // Poll for crossterm events
             _ = tokio::time::sleep(event_poll_timeout) => {
-                if event::poll(Duration::from_millis(0))? {
+                if is_ready && event::poll(Duration::from_millis(0))? {
                     match event::read()? {
                         Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. }) if modifiers.contains(KeyModifiers::CONTROL) => {
                             // Handle Ctrl+C like SIGINT

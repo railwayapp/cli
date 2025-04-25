@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::terminal;
+use std::io::Write;
 use tokio::io::AsyncReadExt;
 use tokio::select;
 
@@ -28,34 +29,45 @@ pub async fn run_interactive_session(client: &mut TerminalClient) -> Result<()> 
 
     // Main event loop
     loop {
+        // Check if shell is ready for input
+        let is_ready = client.is_ready();
+
         select! {
             // Handle window resizes
             _ = sigwinch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
-                    client.send_window_size(cols, rows).await?;
+                   if is_ready {
+                        client.send_window_size(cols, rows).await?;
+                    }
                 }
                 continue;
             }
             // Handle signals
             _ = sigint.recv() => {
-                client.send_signal(2).await?; // SIGINT
+                if is_ready {
+                    client.send_signal(2).await?; // SIGINT
+                }
                 continue;
             }
             _ = sigterm.recv() => {
-                client.send_signal(15).await?; // SIGTERM
+                if is_ready {
+                    client.send_signal(15).await?; // SIGTERM
+                }
                 break;
             }
             // Handle input from terminal
             result = stdin.read(&mut stdin_buf) => {
-                match result {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        let data = String::from_utf8_lossy(&stdin_buf[..n]);
-                        client.send_data(&data).await?;
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading from stdin: {}", e);
-                        break;
+                if is_ready {
+                    match result {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            let data = String::from_utf8_lossy(&stdin_buf[..n]);
+                            client.send_data(&data).await?;
+                        }
+                        Err(e) => {
+                            eprintln!("Error reading from stdin: {}", e);
+                            break;
+                        }
                     }
                 }
             }
@@ -79,6 +91,9 @@ pub async fn run_interactive_session(client: &mut TerminalClient) -> Result<()> 
     // Clean up terminal when done
     let _ = terminal::disable_raw_mode();
 
+    // Ensure cursor is visible with ANSI escape sequence
+    print!("\x1b[?25h");
+    std::io::stdout().flush()?;
     if let Some(code) = exit_code {
         std::process::exit(code);
     }
