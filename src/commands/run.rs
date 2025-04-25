@@ -131,6 +131,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
                 configs.get_backboard(),
                 mutations::duplicate_service::Variables {
                     id: params.service_id.clone(),
+                    environment_id: params.environment_id.clone(),
                 },
             )
             .await?;

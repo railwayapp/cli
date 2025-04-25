@@ -1,5 +1,5 @@
-mutation DuplicateService($id:String!) {
-  serviceDuplicate(id: $id) {
+mutation DuplicateService($id:String!, $environmentId:String!) {
+  serviceDuplicate(id: $id, envId: $environmentId) {
 		id
   }
 }
