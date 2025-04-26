@@ -57,7 +57,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let spinner = create_spinner(running_command);
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
-    let mut terminal_client = establish_connection(&ws_url, &token, &params).await?;
+    let mut terminal_client =
+        crate::commands::ssh::common::create_terminal_client(&ws_url, &token, &params).await?;
 
     if running_command {
         // Run single command
@@ -66,6 +67,6 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         // Initialize interactive shell (default to bash)
         initialize_shell(&mut terminal_client, Some("bash".to_string()), spinner).await?;
         // Run the platform-specific event loop (unix/windows implements terminals differently)
-        run_interactive_session(&mut terminal_client).await
+        run_interactive_session(terminal_client).await
     }
 }
