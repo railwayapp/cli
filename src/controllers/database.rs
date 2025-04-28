@@ -18,7 +18,7 @@ impl DatabaseType {
             DatabaseType::MySQL => "mysql",
             DatabaseType::Redis => "redis",
             DatabaseType::KeyDB => "keydb",
-            DatabaseType::Valkey => "valkey",
+            DatabaseType::Valkey => "pQYeJx", // We set this beacuse in "add" command, the template id "valkey" does not exist. So we set it to "pQYeJx" to avoid "template not found" error.
             DatabaseType::MongoDB => "mongo",
         }
     }
