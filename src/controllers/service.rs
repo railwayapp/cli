@@ -9,7 +9,7 @@ use crate::{
 
 pub async fn get_or_prompt_service(
     linked_project: LinkedProject,
-    project: ProjectProject,
+    project: &ProjectProject,
     service_arg: Option<String>,
 ) -> Result<Option<String>> {
     let services = project.services.edges.iter().collect::<Vec<_>>();

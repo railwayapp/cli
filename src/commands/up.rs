@@ -95,7 +95,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         .unwrap_or(linked_project.environment.clone());
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service = get_or_prompt_service(linked_project.clone(), project, args.service).await?;
+    let service = get_or_prompt_service(linked_project.clone(), &project, args.service).await?;
 
     let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()

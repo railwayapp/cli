@@ -1,0 +1,7 @@
+mutation UpdateServiceSource($environmentId: String!, $serviceId: String!, $repo: String) {
+  serviceInstanceUpdate(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    input: {source: {repo: $repo}}
+  )
+}

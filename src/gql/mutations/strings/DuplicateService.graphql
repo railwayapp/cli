@@ -1,0 +1,5 @@
+mutation DuplicateService($id:String!, $environmentId:String!) {
+  serviceDuplicate(serviceId: $id, environmentId: $environmentId) {
+		id
+  }
+}
