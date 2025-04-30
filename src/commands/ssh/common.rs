@@ -13,32 +13,32 @@ use crate::controllers::{
     terminal::{SSHConnectParams, TerminalClient},
 };
 
+pub struct SSHArguments {
+    pub project: Option<String>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+    pub deployment_instance_id: Option<String>,
+}
+
 /// Creates a connection parameters object from command line arguments
-///
-/// (project, service, environment, deployment instance id)
 pub async fn get_ssh_connect_params(
-    args: (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ),
+    args: SSHArguments,
     configs: &Configs,
     client: &Client,
 ) -> Result<SSHConnectParams> {
     let linked_project = configs.get_linked_project().await?;
-    let project_id = match args.0 {
+    let project_id = match args.project {
         Some(p) => p,
         None => linked_project.project.clone(),
     };
-    let service = match args.1 {
+    let service = match args.service {
         Some(s) => Some(s),
         None => linked_project.service.clone(),
     };
     let project = get_project(client, configs, project_id.clone()).await?;
     let environment_id = get_matched_environment(
         &project,
-        match args.2 {
+        match args.environment {
             Some(s) => s,
             None => linked_project.environment.clone(),
         },
@@ -53,7 +53,7 @@ pub async fn get_ssh_connect_params(
         project_id,
         environment_id,
         service_id,
-        deployment_instance_id: args.3,
+        deployment_instance_id: args.deployment_instance_id,
     })
 }
 

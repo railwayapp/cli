@@ -3,7 +3,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     commands::ssh::common::{
-        create_spinner, establish_connection, execute_command, get_ssh_connect_params,
+        create_spinner, establish_connection, execute_command, get_ssh_connect_params, SSHArguments,
     },
     controllers::{
         environment::get_matched_environment,
@@ -91,12 +91,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     if args.remote {
         let params = get_ssh_connect_params(
-            (
-                None, /* run doesn't have a project flag */
-                args.service.clone(),
-                args.environment.clone(),
-                None, /* default to latest deployment */
-            ),
+            SSHArguments {
+                project: None,
+                service: args.service,
+                environment: args.environment,
+                deployment_instance_id: None,
+            },
             &configs,
             &client,
         )

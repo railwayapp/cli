@@ -46,12 +46,12 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     let params = get_ssh_connect_params(
-        (
-            args.project,
-            args.service,
-            args.environment,
-            args.deployment_instance,
-        ),
+        SSHArguments {
+            project: args.project,
+            service: args.service,
+            environment: args.environment,
+            deployment_instance_id: args.deployment_instance,
+        },
         &configs,
         &client,
     )
