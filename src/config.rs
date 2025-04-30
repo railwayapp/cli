@@ -364,7 +364,7 @@ impl Configs {
         let response = response.json::<GithubApiRelease>().await?;
         let latest_version = response.tag_name.trim_start_matches('v');
 
-        match compare_semver(env!("CARGO_PKG_VERSION"), &latest_version) {
+        match compare_semver(env!("CARGO_PKG_VERSION"), latest_version) {
             Ordering::Less => Ok(Some(latest_version.to_owned())),
             _ => Ok(None),
         }

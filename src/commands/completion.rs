@@ -13,7 +13,7 @@ pub struct Args {
 pub async fn command(args: Args, _json: bool) -> Result<()> {
     generate(
         args.shell,
-        &mut crate::Args::command(),
+        &mut self::Args::command(),
         "railway",
         &mut io::stdout(),
     );
