@@ -248,10 +248,10 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         }
 
         if status == 413 {
+            let err = res.text().await?;
             let filesize = arc.lock().unwrap().len();
             return Err(RailwayError::FailedToUpload(format!(
-                "Failed to upload code. File too large ({} bytes)",
-                filesize
+                "Failed to upload code. File too large ({filesize} bytes): {err}",
             )))?;
         }
 
