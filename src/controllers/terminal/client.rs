@@ -42,7 +42,7 @@ impl TerminalClient {
                     .map_err(|e| anyhow::anyhow!("Failed to parse server message: {}", e))?;
 
                 if server_msg.r#type != "welcome" {
-                    bail!("Expected welcome message, received: {}", server_msg.r#type);
+                    bail!("Expected welcome message, received: {:?}", server_msg);
                 }
 
                 return Ok(client);
