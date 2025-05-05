@@ -3,6 +3,11 @@ pub(super) use anyhow::{Context, Result};
 pub(super) use clap::{Parser, Subcommand};
 pub(super) use colored::Colorize;
 
+pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
+    // no-op
+    cmd
+}
+
 pub mod add;
 pub mod completion;
 pub mod connect;
@@ -20,6 +25,7 @@ pub mod logs;
 pub mod open;
 pub mod redeploy;
 pub mod run;
+pub mod scale;
 pub mod service;
 pub mod shell;
 pub mod ssh;

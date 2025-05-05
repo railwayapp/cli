@@ -1,0 +1,3 @@
+mutation ServiceInstanceDeploy($environmentId: String!, $serviceId: String!) {
+  serviceInstanceDeployV2(environmentId: $environmentId, serviceId: $serviceId)
+}
