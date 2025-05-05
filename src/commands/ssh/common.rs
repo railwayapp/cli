@@ -1,4 +1,3 @@
-// src/commands/ssh/common.rs
 use anyhow::{anyhow, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
@@ -15,7 +14,6 @@ use crate::controllers::{
 
 use super::Args;
 
-/// Creates a connection parameters object from command line arguments
 pub async fn get_ssh_connect_params(
     args: Args,
     configs: &Configs,
@@ -30,7 +28,6 @@ pub async fn get_ssh_connect_params(
         .filter(|&&x| x)
         .count();
 
-    // Either all main args must be provided or none
     if provided_args_count > 0 && provided_args_count < 3 {
         if !has_project {
             return Err(anyhow!(
@@ -50,7 +47,6 @@ pub async fn get_ssh_connect_params(
     }
 
     if provided_args_count == 3 {
-        // All args are provided, use them directly
         let project_id = args.project.unwrap();
         let project = get_project(client, configs, project_id.clone()).await?;
 
@@ -67,7 +63,6 @@ pub async fn get_ssh_connect_params(
         });
     }
 
-    // No args provided... use linked project
     let linked_project = configs.get_linked_project().await?;
     let project_id = linked_project.project.clone();
     let project = get_project(client, configs, project_id.clone()).await?;
@@ -75,7 +70,6 @@ pub async fn get_ssh_connect_params(
     let environment = linked_project.environment.clone();
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    // Use the linked service if available, otherwise prompt the user
     let service_id = get_or_prompt_service(linked_project.clone(), project, None)
         .await?
         .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
@@ -108,26 +102,35 @@ pub fn create_spinner(running_command: bool) -> ProgressBar {
     spinner
 }
 
-/// Establishes a connection to the terminal service
-pub async fn establish_connection(
+pub async fn create_terminal_client(
     ws_url: &str,
     token: &str,
     params: &SSHConnectParams,
 ) -> Result<TerminalClient> {
-    let mut client = TerminalClient::new(ws_url, token, params).await?;
+    let client = TerminalClient::new(ws_url, token, params).await?;
+    Ok(client)
+}
 
-    // Wait a moment for the connection to stabilize before sending terminal size
-    tokio::time::sleep(Duration::from_millis(300)).await;
+pub async fn initialize_shell(
+    client: &mut TerminalClient,
+    shell: Option<String>,
+    spinner: ProgressBar,
+) -> Result<()> {
+    client.init_shell(shell).await?;
 
-    // Get and send initial terminal size
+    client.wait_for_shell_ready(5).await?;
+
+    spinner.finish_with_message("Connected to interactive shell");
+
+    crossterm::terminal::enable_raw_mode()?;
+
     if let Ok((cols, rows)) = crossterm::terminal::size() {
         client.send_window_size(cols, rows).await?;
     }
 
-    Ok(client)
+    Ok(())
 }
 
-/// Executes a single command and waits for completion
 pub async fn execute_command(
     client: &mut TerminalClient,
     command_args: Vec<String>,
@@ -152,22 +155,4 @@ pub async fn execute_command(
             std::process::exit(1);
         }
     }
-}
-
-/// Initializes an interactive shell session for the provided TerminalClient
-pub async fn initialize_shell(
-    client: &mut TerminalClient,
-    shell: Option<String>,
-    spinner: ProgressBar,
-) -> Result<()> {
-    client.init_shell(shell).await?;
-    spinner.finish_with_message("Connected to interactive shell");
-
-    crossterm::terminal::enable_raw_mode()?;
-
-    if let Ok((cols, rows)) = crossterm::terminal::size() {
-        client.send_window_size(cols, rows).await?;
-    }
-
-    Ok(())
 }

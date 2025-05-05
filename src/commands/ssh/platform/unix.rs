@@ -1,7 +1,9 @@
 use anyhow::Result;
 use crossterm::terminal;
+use std::io::Write;
 use tokio::io::AsyncReadExt;
 use tokio::select;
+use tokio::sync::mpsc;
 
 use crate::controllers::terminal::TerminalClient;
 
@@ -18,58 +20,150 @@ pub async fn setup_signal_handlers() -> Result<(
     Ok((sigint, sigterm, sigwinch))
 }
 
+// Messages that can be sent to the UI task
+enum UiMessage {
+    // Server message handler has completed with exit code
+    ServerDone(i32),
+    // Shell is ready for input (combines ready and not in command progress)
+    ReadyForInput(bool),
+    // Shell is ready (needed for signals and window resizing)
+    ShellReady(bool),
+}
+
+// Messages that can be sent to the server task
+enum ServerMessage {
+    // Send data to the server
+    SendData(String),
+    // Send a signal to the server
+    SendSignal(u8),
+    // Resize the terminal window
+    WindowResize(u16, u16),
+}
+
 /// Run the interactive SSH session with Unix-specific event handling
-pub async fn run_interactive_session(client: &mut TerminalClient) -> Result<()> {
+pub async fn run_interactive_session(mut client: TerminalClient) -> Result<()> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 1024];
     let mut exit_code = None;
 
+    let (ui_tx, mut ui_rx) = mpsc::channel::<UiMessage>(100);
+    let (server_tx, mut server_rx) = mpsc::channel::<ServerMessage>(100);
+
+    let mut shell_ready = client.is_ready();
+    let mut ready_for_input = client.is_ready_for_input();
+
+    tokio::spawn(async move {
+        loop {
+            select! {
+                // Handle incoming messages from the UI task
+                Some(msg) = server_rx.recv() => {
+                    match msg {
+                        ServerMessage::SendData(data) => {
+                            if let Err(e) = client.send_data(&data).await {
+                                eprintln!("Error sending data: {}", e);
+                                let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+                                break;
+                            }
+                        },
+                        ServerMessage::SendSignal(signal) => {
+                            if let Err(e) = client.send_signal(signal).await {
+                                eprintln!("Error sending signal: {}", e);
+                            }
+                        },
+                        ServerMessage::WindowResize(cols, rows) => {
+                            if let Err(e) = client.send_window_size(cols, rows).await {
+                                eprintln!("Error resizing window: {}", e);
+                            }
+                        }
+                    }
+                },
+
+                // Process messages from the server
+                result = client.handle_server_messages() => {
+                    match result {
+                        Ok(()) => {
+                            let _ = ui_tx.send(UiMessage::ServerDone(0)).await;
+                        },
+                        Err(e) => {
+                            eprintln!("Error in server messages: {}", e);
+                            let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if shell_ready != client.is_ready() {
+                shell_ready = client.is_ready();
+                let _ = ui_tx.send(UiMessage::ShellReady(shell_ready)).await;
+            }
+
+            if ready_for_input != client.is_ready_for_input() {
+                ready_for_input = client.is_ready_for_input();
+                let _ = ui_tx.send(UiMessage::ReadyForInput(ready_for_input)).await;
+            }
+        }
+    });
+
     let (mut sigint, mut sigterm, mut sigwinch) = setup_signal_handlers().await?;
 
-    // Main event loop
+    // Main event loop for input and signals
     loop {
         select! {
             // Handle window resizes
             _ = sigwinch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
-                    client.send_window_size(cols, rows).await?;
+                   if shell_ready {
+                        let _ = server_tx.send(ServerMessage::WindowResize(cols, rows)).await;
+                   }
                 }
                 continue;
             }
+
             // Handle signals
             _ = sigint.recv() => {
-                client.send_signal(2).await?; // SIGINT
+                if shell_ready {
+                    let _ = server_tx.send(ServerMessage::SendSignal(2)).await; // SIGINT
+                }
                 continue;
             }
+
             _ = sigterm.recv() => {
-                client.send_signal(15).await?; // SIGTERM
+                if shell_ready {
+                    let _ = server_tx.send(ServerMessage::SendSignal(15)).await; // SIGTERM
+                }
                 break;
             }
-            // Handle input from terminal
+
+            // Handle input from terminal - only send if ready for input
             result = stdin.read(&mut stdin_buf) => {
-                match result {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        let data = String::from_utf8_lossy(&stdin_buf[..n]);
-                        client.send_data(&data).await?;
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading from stdin: {}", e);
-                        break;
+                if ready_for_input {
+                    match result {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            let data = String::from_utf8_lossy(&stdin_buf[..n]).to_string();
+                            let _ = server_tx.send(ServerMessage::SendData(data)).await;
+                        }
+                        Err(e) => {
+                            eprintln!("Error reading from stdin: {}", e);
+                            break;
+                        }
                     }
                 }
             }
-            // Handle messages from server
-            result = client.handle_server_messages() => {
-                match result {
-                   Ok(()) => {
-                        exit_code = Some(0);
+
+            // Process messages from server task
+            Some(msg) = ui_rx.recv() => {
+                match msg {
+                    UiMessage::ServerDone(code) => {
+                        exit_code = Some(code);
                         break;
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        exit_code = Some(1);
-                        break;
+                    },
+                    UiMessage::ShellReady(ready) => {
+                        shell_ready = ready;
+                    },
+                    UiMessage::ReadyForInput(input_ready) => {
+                        ready_for_input = input_ready;
                     }
                 }
             }
@@ -78,6 +172,10 @@ pub async fn run_interactive_session(client: &mut TerminalClient) -> Result<()> 
 
     // Clean up terminal when done
     let _ = terminal::disable_raw_mode();
+
+    // Ensure cursor is visible with ANSI escape sequence
+    print!("\x1b[?25h");
+    std::io::stdout().flush()?;
 
     if let Some(code) = exit_code {
         std::process::exit(code);
