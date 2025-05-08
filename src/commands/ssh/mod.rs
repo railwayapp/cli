@@ -1,12 +1,16 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use tokio::time::Duration;
+use std::time::Duration;
 
-use crate::client::GQLClient;
-use crate::config::Configs;
-use crate::consts::TICK_STRING;
-use crate::controllers::terminal::{SSHConnectParams, TerminalClient};
+use crate::{
+    client::GQLClient,
+    config::Configs,
+    consts::TICK_STRING,
+    controllers::terminal::{self, TerminalClient},
+};
+
+use self::platform::SessionTermination;
 
 pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
 pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 10;
@@ -41,7 +45,7 @@ pub struct Args {
     deployment_instance: Option<String>,
 
     /// SSH into the service inside a tmux session. Installs tmux if it's not installed
-    #[arg(long = "tmux")]
+    #[clap(long)]
     tmux: bool,
 
     /// Command to execute instead of starting an interactive shell
@@ -74,45 +78,57 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
         initialize_shell(&mut terminal_client, Some("bash".to_string()), spinner).await?;
 
         // Run the platform-specific event loop (unix/windows implements terminals differently)
-        let exit_code = run_interactive_session(terminal_client).await?;
-        if exit_code != 0 {
-            std::process::exit(exit_code);
+        match run_interactive_session(terminal_client).await? {
+            SessionTermination::Complete => {}
+            term => {
+                eprintln!("{}", term.message());
+                std::process::exit(term.exit_code());
+            }
         }
     }
 
     Ok(())
 }
 
-async fn run_tmux_session(params: &SSHConnectParams) -> Result<()> {
+async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
     let tmux_exists = check_if_command_exists(params, "tmux").await?;
 
     if !tmux_exists {
         install_tmux(params).await?;
     }
 
-    let mut terminal_client = create_client(params).await?;
-    let spinner = create_spinner(true);
+    loop {
+        let mut terminal_client = create_client(params).await?;
+        let spinner = create_spinner(true);
 
-    initialize_shell(&mut terminal_client, Some("bash".to_string()), spinner).await?;
+        initialize_shell(&mut terminal_client, Some("bash".to_string()), spinner).await?;
 
-    terminal_client
-        .send_data("exec tmux new-session -A -s railway\n")
-        .await?;
+        // terminal_client
+        //     .send_data("exec tmux new-session -A -s railway\n")
+        //     .await?;
 
-    // Run the platform-specific event loop (unix/windows implements terminals differently)
-    let result = run_interactive_session(terminal_client).await;
+        send_window_size(&mut terminal_client).await?;
 
-    println!("Result: {:?}", result);
+        let termination = run_interactive_session(terminal_client).await?;
 
-    if let Err(err) = result {
-        println!("Error running tmux session: {}", err);
-        std::process::exit(1);
+        match termination {
+            SessionTermination::Complete => {
+                break;
+            }
+            SessionTermination::ConnectionReset => {
+                continue;
+            }
+            term => {
+                eprintln!("{}", term.message());
+                std::process::exit(term.exit_code());
+            }
+        };
     }
 
     Ok(())
 }
 
-async fn install_tmux(params: &SSHConnectParams) -> Result<()> {
+async fn install_tmux(params: &terminal::SSHConnectParams) -> Result<()> {
     let command = "apt-get update && apt-get install -y tmux";
 
     let spinner = ProgressBar::new_spinner()
@@ -139,7 +155,10 @@ async fn install_tmux(params: &SSHConnectParams) -> Result<()> {
     Ok(())
 }
 
-pub async fn check_if_command_exists(params: &SSHConnectParams, command: &str) -> Result<bool> {
+pub async fn check_if_command_exists(
+    params: &terminal::SSHConnectParams,
+    command: &str,
+) -> Result<bool> {
     let mut terminal_client = create_client(params).await?;
     let spinner = create_spinner(true);
 
@@ -150,7 +169,7 @@ pub async fn check_if_command_exists(params: &SSHConnectParams, command: &str) -
     Ok(result.is_ok())
 }
 
-async fn create_client(params: &SSHConnectParams) -> Result<TerminalClient> {
+async fn create_client(params: &terminal::SSHConnectParams) -> Result<TerminalClient> {
     let configs = Configs::new()?;
     let token = configs
         .get_railway_auth_token()

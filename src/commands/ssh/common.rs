@@ -126,6 +126,12 @@ pub async fn initialize_shell(
 
     crossterm::terminal::enable_raw_mode()?;
 
+    send_window_size(client).await?;
+
+    Ok(())
+}
+
+pub async fn send_window_size(client: &mut TerminalClient) -> Result<()> {
     if let Ok((cols, rows)) = crossterm::terminal::size() {
         client.send_window_size(cols, rows).await?;
     }
@@ -160,15 +166,20 @@ pub async fn execute_command_with_result(
     client.send_command(&wrapped_command, wrapped_args).await?;
 
     let mut buffer = Cursor::new(Vec::new());
-    client
+    match client
         .handle_server_messages_with_writer(&mut buffer, false)
-        .await?;
-
-    spinner.finish_and_clear();
-
-    let output = String::from_utf8(buffer.into_inner())?;
-
-    Ok(output)
+        .await
+    {
+        Ok(_) => {
+            spinner.finish_and_clear();
+            let output = String::from_utf8(buffer.into_inner())?;
+            Ok(output)
+        }
+        Err(e) => {
+            spinner.finish_and_clear();
+            Err(e)
+        }
+    }
 }
 
 fn get_terminal_command(command: String) -> Result<(String, Vec<String>)> {
@@ -181,19 +192,3 @@ fn get_terminal_command(command: String) -> Result<(String, Vec<String>)> {
 
     Ok((wrapped_command.to_string(), wrapped_args))
 }
-
-// pub async fn check_if_command_exists(
-//     client: &mut TerminalClient,
-//     spinner: ProgressBar,
-//     command: &str,
-// ) -> bool {
-//     println!("Checking if command exists: {}", command);
-//     let result = execute_command_with_result(
-//         client,
-//         vec!["which".to_string(), command.to_string()],
-//         spinner,
-//     )
-//     .await;
-
-//     result.is_ok()
-// }
