@@ -1,3 +1,5 @@
+use std::io::Cursor;
+
 use anyhow::{anyhow, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
@@ -133,19 +135,11 @@ pub async fn initialize_shell(
 
 pub async fn execute_command(
     client: &mut TerminalClient,
-    command_args: Vec<String>,
+    command: String,
     spinner: ProgressBar,
 ) -> Result<()> {
-    if command_args.is_empty() {
-        return Err(anyhow!("No command specified"));
-    }
-
-    let full_command = command_args.join(" ");
-    let wrapped_command = "sh";
-    let wrapped_args = vec!["-c".to_string(), full_command];
-
-    client.send_command(wrapped_command, wrapped_args).await?;
-
+    let (wrapped_command, wrapped_args) = get_terminal_command(command)?;
+    client.send_command(&wrapped_command, wrapped_args).await?;
     spinner.finish_and_clear();
 
     match client.handle_server_messages().await {
@@ -156,3 +150,50 @@ pub async fn execute_command(
         }
     }
 }
+
+pub async fn execute_command_with_result(
+    client: &mut TerminalClient,
+    command: String,
+    spinner: ProgressBar,
+) -> Result<String> {
+    let (wrapped_command, wrapped_args) = get_terminal_command(command)?;
+    client.send_command(&wrapped_command, wrapped_args).await?;
+
+    let mut buffer = Cursor::new(Vec::new());
+    client
+        .handle_server_messages_with_writer(&mut buffer, false)
+        .await?;
+
+    spinner.finish_and_clear();
+
+    let output = String::from_utf8(buffer.into_inner())?;
+
+    Ok(output)
+}
+
+fn get_terminal_command(command: String) -> Result<(String, Vec<String>)> {
+    if command.is_empty() {
+        return Err(anyhow!("No command specified"));
+    }
+
+    let wrapped_command = "sh";
+    let wrapped_args = vec!["-c".to_string(), command];
+
+    Ok((wrapped_command.to_string(), wrapped_args))
+}
+
+// pub async fn check_if_command_exists(
+//     client: &mut TerminalClient,
+//     spinner: ProgressBar,
+//     command: &str,
+// ) -> bool {
+//     println!("Checking if command exists: {}", command);
+//     let result = execute_command_with_result(
+//         client,
+//         vec!["which".to_string(), command.to_string()],
+//         spinner,
+//     )
+//     .await;
+
+//     result.is_ok()
+// }
