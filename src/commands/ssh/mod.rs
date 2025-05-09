@@ -101,13 +101,11 @@ async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
             }
         };
 
-        // Start a tmux session
-        initialize_shell(
-            &mut terminal_client,
-            Some("tmux new-session -A -s railway".to_string()),
-            &mut spinner,
-        )
-        .await?;
+        // Start
+        initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
+        terminal_client
+            .send_data("exec tmux new-session -A -s railway\n")
+            .await?;
 
         // Resend the window size after starting a tmux session
         send_window_size(&mut terminal_client).await?;
