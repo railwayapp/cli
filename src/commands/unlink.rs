@@ -34,7 +34,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
             service.node.name.bold(),
             project.name.bold()
         );
-        let confirmed = if std::io::stdout().is_terminal() {
+        let is_interactive_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        let confirmed = if is_interactive_tty {
             prompt_confirm_with_default("Are you sure you want to unlink this service?", true)?
         } else {
             true
