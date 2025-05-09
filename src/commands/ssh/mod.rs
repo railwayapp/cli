@@ -101,7 +101,7 @@ async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
             }
         };
 
-        // Start
+        // Start tmux session
         initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
         terminal_client
             .send_data("exec tmux new-session -A -s railway\n")
