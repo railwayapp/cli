@@ -1,11 +1,10 @@
 use anyhow::Result;
 use crossterm::terminal;
-use std::io::Write;
 use tokio::io::AsyncReadExt;
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::commands::ssh::platform::{parse_server_error, SessionTermination};
+use crate::commands::ssh::common::{parse_server_error, reset_terminal, SessionTermination};
 use crate::controllers::terminal::TerminalClient;
 
 /// Set up Unix-specific signal handlers
@@ -180,11 +179,7 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<Sessi
     }
 
     // Clean up terminal when done
-    let _ = terminal::disable_raw_mode();
-
-    // Ensure cursor is visible with ANSI escape sequence
-    print!("\x1b[?25h");
-    std::io::stdout().flush()?;
+    reset_terminal(false)?;
 
     Ok(termination.unwrap_or(SessionTermination::Complete))
 }

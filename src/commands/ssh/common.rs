@@ -3,6 +3,8 @@ use std::io::Cursor;
 use anyhow::{anyhow, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
+use std::io::Write;
+use tokio::io::AsyncReadExt;
 use tokio::time::Duration;
 
 use crate::config::Configs;
@@ -15,6 +17,70 @@ use crate::controllers::{
 };
 
 use super::Args;
+
+#[derive(Debug)]
+pub enum SessionTermination {
+    /// Session has been successfully closed
+    Complete,
+
+    /// Shell initialization failed
+    InitShellError(String),
+
+    /// Error reading from stdin
+    StdinError(String),
+
+    /// Error sending data to the server
+    SendError(String),
+
+    /// Server error occurred
+    ServerError(String),
+
+    /// Connection to the server was closed unexpectedly
+    ConnectionReset,
+}
+
+impl SessionTermination {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            SessionTermination::Complete => 0,
+            SessionTermination::InitShellError(_) => 1,
+            SessionTermination::StdinError(_) => 2,
+            SessionTermination::SendError(_) => 3,
+            SessionTermination::ServerError(_) => 4,
+            SessionTermination::ConnectionReset => 5,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            SessionTermination::Complete => "",
+            SessionTermination::InitShellError(msg) => msg,
+            SessionTermination::StdinError(msg) => msg,
+            SessionTermination::SendError(msg) => msg,
+            SessionTermination::ServerError(msg) => msg,
+            SessionTermination::ConnectionReset => {
+                "Connection to the server was closed unexpectedly"
+            }
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        match self {
+            SessionTermination::Complete => false,
+            _ => true,
+        }
+    }
+}
+
+pub fn parse_server_error(error: String) -> SessionTermination {
+    if error.contains("Connection reset without closing handshake")
+        || error.contains("WebSocket closed unexpectedly")
+    {
+        SessionTermination::ConnectionReset
+    } else {
+        SessionTermination::ServerError(error)
+    }
+}
 
 pub async fn get_ssh_connect_params(
     args: Args,
@@ -191,4 +257,24 @@ fn get_terminal_command(command: String) -> Result<(String, Vec<String>)> {
     let wrapped_args = vec!["-c".to_string(), command];
 
     Ok((wrapped_command.to_string(), wrapped_args))
+}
+
+/// Reset the terminal state, clear the screen, and make the cursor visible
+pub fn reset_terminal(clear_screen: bool) -> anyhow::Result<()> {
+    let _ = crossterm::terminal::disable_raw_mode();
+
+    if clear_screen {
+        // Clear screen, move cursor to home position, and reset all attributes
+        print!("\x1b[2J\x1b[H\x1b[0m");
+    } else {
+        // Just reset attributes
+        print!("\x1b[0m");
+    }
+
+    // Ensure cursor is visible
+    print!("\x1b[?25h");
+
+    std::io::stdout().flush()?;
+
+    Ok(())
 }

@@ -8,7 +8,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
-use crate::commands::ssh::platform::SessionTermination;
+use crate::commands::ssh::common::{parse_server_error, reset_terminal, SessionTermination};
 use crate::controllers::terminal::TerminalClient;
 
 // stub function because Windows does not support signals
@@ -45,11 +45,7 @@ pub async fn run_interactive_session(client: TerminalClient) -> Result<SessionTe
     let result = run_with_polling(client).await;
 
     // Clean up terminal
-    let _ = terminal::disable_raw_mode();
-
-    // Ensure cursor is visible with ANSI escape sequence
-    print!("\x1b[?25h");
-    std::io::stdout().flush()?;
+    reset_terminal()?;
 
     result
 }

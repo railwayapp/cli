@@ -10,8 +10,6 @@ use crate::{
     controllers::terminal::{self, TerminalClient},
 };
 
-use self::platform::SessionTermination;
-
 pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
 pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 10;
 pub const SSH_MAX_CONNECT_ATTEMPTS: usize = 3;
@@ -103,9 +101,9 @@ async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
 
         initialize_shell(&mut terminal_client, Some("bash".to_string()), spinner).await?;
 
-        // terminal_client
-        //     .send_data("exec tmux new-session -A -s railway\n")
-        //     .await?;
+        terminal_client
+            .send_data("exec tmux new-session -A -s railway\n")
+            .await?;
 
         send_window_size(&mut terminal_client).await?;
 
@@ -116,6 +114,13 @@ async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
                 break;
             }
             SessionTermination::ConnectionReset => {
+                // Clean up terminal screen before reconnecting
+                reset_terminal(true)?;
+
+                // Add a small delay before reconnecting
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                println!("Connection reset. Reconnecting...");
                 continue;
             }
             term => {
