@@ -43,7 +43,7 @@ pub struct Args {
 
     /// SSH into the service inside a tmux session. Installs tmux if it's not installed
     #[clap(long)]
-    tmux: bool,
+    session: bool,
 
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
@@ -56,8 +56,8 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
     let params = get_ssh_connect_params(args.clone(), &configs, &client).await?;
 
-    if args.tmux {
-        run_tmux_session(&params).await?;
+    if args.session {
+        run_persistent_session(&params).await?;
         return Ok(());
     }
 
@@ -87,7 +87,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
+async fn run_persistent_session(params: &terminal::SSHConnectParams) -> Result<()> {
     ensure_tmux_is_installed(params).await?;
 
     loop {
