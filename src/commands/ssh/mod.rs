@@ -6,8 +6,8 @@ use std::time::Duration;
 use crate::{
     client::GQLClient,
     config::Configs,
-    consts::TICK_STRING,
     controllers::terminal::{self, TerminalClient},
+    util::progress::{create_spinner, fail_spinner},
 };
 
 pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
@@ -65,15 +65,15 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
     // Determine if we're running a command or interactive shell
     let running_command = !args.command.is_empty();
 
-    let spinner = create_spinner(running_command);
-    let mut terminal_client = create_client(&params).await?;
+    let mut spinner = create_spinner("Connecting to service...".to_string());
+    let mut terminal_client = create_client(&params, &mut spinner).await?;
 
     if running_command {
         // Run single command
         execute_command(&mut terminal_client, args.command.join(" "), spinner).await?;
     } else {
         // Initialize interactive shell (default to bash)
-        initialize_shell(&mut terminal_client, Some("bash".to_string()), spinner).await?;
+        initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
 
         // Run the platform-specific event loop (unix/windows implements terminals differently)
         match run_interactive_session(terminal_client).await? {
@@ -89,22 +89,28 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 }
 
 async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
-    let tmux_exists = check_if_command_exists(params, "tmux").await?;
-
-    if !tmux_exists {
-        install_tmux(params).await?;
-    }
+    ensure_tmux_is_installed(params).await?;
 
     loop {
-        let mut terminal_client = create_client(params).await?;
-        let spinner = create_spinner(true);
+        let mut spinner = create_spinner("Connecting to service...".to_string());
 
-        initialize_shell(&mut terminal_client, Some("bash".to_string()), spinner).await?;
+        let mut terminal_client = match create_client(params, &mut spinner).await {
+            Ok(tc) => tc,
+            Err(e) => {
+                fail_spinner(&mut spinner, format!("{}", e));
+                std::process::exit(1);
+            }
+        };
 
-        terminal_client
-            .send_data("exec tmux new-session -A -s railway\n")
-            .await?;
+        // Start a tmux session
+        initialize_shell(
+            &mut terminal_client,
+            Some("tmux new-session -A -s railway".to_string()),
+            &mut spinner,
+        )
+        .await?;
 
+        // Resend the window size after starting a tmux session
         send_window_size(&mut terminal_client).await?;
 
         let termination = run_interactive_session(terminal_client).await?;
@@ -130,58 +136,40 @@ async fn run_tmux_session(params: &terminal::SSHConnectParams) -> Result<()> {
         };
     }
 
+    reset_terminal(false)?;
+
     Ok(())
 }
 
-async fn install_tmux(params: &terminal::SSHConnectParams) -> Result<()> {
-    let command = "apt-get update && apt-get install -y tmux";
+/// Installs tmux with apt-get if not already installed
+async fn ensure_tmux_is_installed(params: &terminal::SSHConnectParams) -> Result<()> {
+    let command = "which tmux || (apt-get update && apt-get install -y tmux)";
 
-    let spinner = ProgressBar::new_spinner()
-        .with_style(
-            ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")
-                .expect("Failed to create spinner template"),
-        )
-        .with_message("Installing tmux...");
-
-    spinner.enable_steady_tick(Duration::from_millis(100));
-
-    let mut terminal_client = create_client(params).await?;
+    let mut spinner = create_spinner("Installing tmux...".to_string());
+    let mut terminal_client = create_client(params, &mut spinner).await?;
 
     let result =
-        execute_command_with_result(&mut terminal_client, command.to_string(), spinner).await;
+        execute_command_with_result(&mut terminal_client, command.to_string(), &mut spinner).await;
 
     if let Err(err) = result {
-        println!("Error installing tmux: {}", err);
+        fail_spinner(&mut spinner, format!("Error installing tmux: {}", err));
         std::process::exit(1);
     }
 
     Ok(())
 }
 
-pub async fn check_if_command_exists(
+async fn create_client(
     params: &terminal::SSHConnectParams,
-    command: &str,
-) -> Result<bool> {
-    let mut terminal_client = create_client(params).await?;
-    let spinner = create_spinner(true);
-
-    let result =
-        execute_command_with_result(&mut terminal_client, format!("which {}", command), spinner)
-            .await;
-
-    Ok(result.is_ok())
-}
-
-async fn create_client(params: &terminal::SSHConnectParams) -> Result<TerminalClient> {
+    spinner: &mut ProgressBar,
+) -> Result<TerminalClient> {
     let configs = Configs::new()?;
     let token = configs
         .get_railway_auth_token()
         .context("No authentication token found. Please login first with 'railway login'")?;
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
-    let terminal_client = create_terminal_client(&ws_url, &token, &params).await?;
+    let terminal_client = create_terminal_client(&ws_url, &token, &params, spinner).await?;
 
     Ok(terminal_client)
 }

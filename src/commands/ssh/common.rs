@@ -15,6 +15,7 @@ use crate::controllers::{
     service::get_or_prompt_service,
     terminal::{SSHConnectParams, TerminalClient},
 };
+use crate::util::progress::success_spinner;
 
 use super::Args;
 
@@ -150,45 +151,46 @@ pub async fn get_ssh_connect_params(
     })
 }
 
-pub fn create_spinner(running_command: bool) -> ProgressBar {
-    let message = if running_command {
-        "Connecting to execute command..."
-    } else {
-        "Connecting to service..."
-    };
+// pub fn create_spinner(running_command: bool) -> ProgressBar {
+//     let message = if running_command {
+//         "Connecting to execute command..."
+//     } else {
+//         "Connecting to service..."
+//     };
 
-    let spinner = ProgressBar::new_spinner()
-        .with_style(
-            ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")
-                .expect("Failed to create spinner template"),
-        )
-        .with_message(message);
+//     let spinner = ProgressBar::new_spinner()
+//         .with_style(
+//             ProgressStyle::default_spinner()
+//                 .tick_chars(TICK_STRING)
+//                 .template("{spinner:.green} {msg}")
+//                 .expect("Failed to create spinner template"),
+//         )
+//         .with_message(message);
 
-    spinner.enable_steady_tick(Duration::from_millis(100));
-    spinner
-}
+//     spinner.enable_steady_tick(Duration::from_millis(100));
+//     spinner
+// }
 
 pub async fn create_terminal_client(
     ws_url: &str,
     token: &str,
     params: &SSHConnectParams,
+    spinner: &mut ProgressBar,
 ) -> Result<TerminalClient> {
-    let client = TerminalClient::new(ws_url, token, params).await?;
+    let client = TerminalClient::new(ws_url, token, params, spinner).await?;
     Ok(client)
 }
 
 pub async fn initialize_shell(
     client: &mut TerminalClient,
     shell: Option<String>,
-    spinner: ProgressBar,
+    spinner: &mut ProgressBar,
 ) -> Result<()> {
     client.init_shell(shell).await?;
 
     client.wait_for_shell_ready(5).await?;
 
-    spinner.finish_with_message("Connected to interactive shell");
+    success_spinner(spinner, "Connected to interactive shell".to_string());
 
     crossterm::terminal::enable_raw_mode()?;
 
@@ -226,7 +228,7 @@ pub async fn execute_command(
 pub async fn execute_command_with_result(
     client: &mut TerminalClient,
     command: String,
-    spinner: ProgressBar,
+    spinner: &mut ProgressBar,
 ) -> Result<String> {
     let (wrapped_command, wrapped_args) = get_terminal_command(command)?;
     client.send_command(&wrapped_command, wrapped_args).await?;

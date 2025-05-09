@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use async_tungstenite::tungstenite::Message;
 use async_tungstenite::WebSocketStream;
 use futures_util::stream::StreamExt;
+use indicatif::ProgressBar;
 use std::io::Write;
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout, Duration};
@@ -21,9 +22,14 @@ pub struct TerminalClient {
 }
 
 impl TerminalClient {
-    pub async fn new(url: &str, token: &str, params: &SSHConnectParams) -> Result<Self> {
+    pub async fn new(
+        url: &str,
+        token: &str,
+        params: &SSHConnectParams,
+        spinner: &mut ProgressBar,
+    ) -> Result<Self> {
         // Use the correct establish_connection function that handles authentication
-        let ws_stream = establish_connection(url, token, params).await?;
+        let ws_stream = establish_connection(url, token, params, spinner).await?;
 
         let mut client = Self {
             ws_stream,
