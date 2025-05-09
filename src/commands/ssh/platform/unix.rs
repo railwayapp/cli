@@ -1,10 +1,10 @@
 use anyhow::Result;
 use crossterm::terminal;
-use std::io::Write;
 use tokio::io::AsyncReadExt;
 use tokio::select;
 use tokio::sync::mpsc;
 
+use crate::commands::ssh::common::{parse_server_error, reset_terminal, SessionTermination};
 use crate::controllers::terminal::TerminalClient;
 
 /// Set up Unix-specific signal handlers
@@ -22,8 +22,8 @@ pub async fn setup_signal_handlers() -> Result<(
 
 // Messages that can be sent to the UI task
 enum UiMessage {
-    // Server message handler has completed with exit code
-    ServerDone(i32),
+    // Server message handler has completed with termination status
+    ServerDone(SessionTermination),
     // Shell is ready for input (combines ready and not in command progress)
     ReadyForInput(bool),
     // Shell is ready (needed for signals and window resizing)
@@ -41,10 +41,10 @@ enum ServerMessage {
 }
 
 /// Run the interactive SSH session with Unix-specific event handling
-pub async fn run_interactive_session(mut client: TerminalClient) -> Result<()> {
+pub async fn run_interactive_session(mut client: TerminalClient) -> Result<SessionTermination> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 1024];
-    let mut exit_code = None;
+    let mut termination = None;
 
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiMessage>(100);
     let (server_tx, mut server_rx) = mpsc::channel::<ServerMessage>(100);
@@ -61,7 +61,11 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<()> {
                         ServerMessage::SendData(data) => {
                             if let Err(e) = client.send_data(&data).await {
                                 eprintln!("Error sending data: {}", e);
-                                let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+
+                                let _ = ui_tx.send(UiMessage::ServerDone(
+                                    SessionTermination::SendError(e.to_string())
+                                )).await;
+
                                 break;
                             }
                         },
@@ -76,17 +80,20 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<()> {
                             }
                         }
                     }
-                },
+                }
 
                 // Process messages from the server
                 result = client.handle_server_messages() => {
                     match result {
                         Ok(()) => {
-                            let _ = ui_tx.send(UiMessage::ServerDone(0)).await;
+                            let _ = ui_tx.send(UiMessage::ServerDone(
+                                SessionTermination::Complete
+                            )).await;
                         },
                         Err(e) => {
-                            eprintln!("Error in server messages: {}", e);
-                            let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+                            let _ = ui_tx.send(UiMessage::ServerDone(
+                                parse_server_error(e.to_string())
+                            )).await;
                         }
                     }
                     break;
@@ -146,6 +153,7 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!("Error reading from stdin: {}", e);
+                            termination = Some(SessionTermination::StdinError(e.to_string()));
                             break;
                         }
                     }
@@ -155,8 +163,8 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<()> {
             // Process messages from server task
             Some(msg) = ui_rx.recv() => {
                 match msg {
-                    UiMessage::ServerDone(code) => {
-                        exit_code = Some(code);
+                    UiMessage::ServerDone(term) => {
+                        termination = Some(term);
                         break;
                     },
                     UiMessage::ShellReady(ready) => {
@@ -171,15 +179,7 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<()> {
     }
 
     // Clean up terminal when done
-    let _ = terminal::disable_raw_mode();
+    reset_terminal(false)?;
 
-    // Ensure cursor is visible with ANSI escape sequence
-    print!("\x1b[?25h");
-    std::io::stdout().flush()?;
-
-    if let Some(code) = exit_code {
-        std::process::exit(code);
-    }
-
-    Ok(())
+    Ok(termination.unwrap_or(SessionTermination::Complete))
 }

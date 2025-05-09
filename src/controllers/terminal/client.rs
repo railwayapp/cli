@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use async_tungstenite::tungstenite::Message;
 use async_tungstenite::WebSocketStream;
 use futures_util::stream::StreamExt;
+use indicatif::ProgressBar;
 use std::io::Write;
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout, Duration};
@@ -21,9 +22,14 @@ pub struct TerminalClient {
 }
 
 impl TerminalClient {
-    pub async fn new(url: &str, token: &str, params: &SSHConnectParams) -> Result<Self> {
+    pub async fn new(
+        url: &str,
+        token: &str,
+        params: &SSHConnectParams,
+        spinner: &mut ProgressBar,
+    ) -> Result<Self> {
         // Use the correct establish_connection function that handles authentication
-        let ws_stream = establish_connection(url, token, params).await?;
+        let ws_stream = establish_connection(url, token, params, spinner).await?;
 
         let mut client = Self {
             ws_stream,
@@ -45,7 +51,7 @@ impl TerminalClient {
                     bail!("Expected welcome message, received: {:?}", server_msg);
                 }
 
-                return Ok(client);
+                Ok(client)
             } else {
                 bail!("Expected text message for welcome, received different message type");
             }
@@ -198,7 +204,11 @@ impl TerminalClient {
     }
 
     /// Process incoming messages from the server
-    pub async fn handle_server_messages(&mut self) -> Result<()> {
+    pub async fn handle_server_messages_with_writer<W: Write>(
+        &mut self,
+        writer: &mut W,
+        fail_on_exit_code: bool,
+    ) -> Result<i32> {
         let mut consecutive_empty_messages = 0;
 
         let mut ping_interval = interval(Duration::from_secs(SSH_PING_INTERVAL_SECS));
@@ -218,16 +228,16 @@ impl TerminalClient {
                                         "session_data" => match server_msg.payload.data {
                                             DataPayload::String(text) => {
                                                 if !text.trim().is_empty() {
-                                                    print!("{}", text);
-                                                    std::io::stdout().flush()?;
+                                                    writer.write_all(text.as_bytes())?;
+                                                    writer.flush()?;
                                                 } else {
                                                     consecutive_empty_messages = 0;
                                                 }
                                             }
                                             DataPayload::Buffer { data } => {
                                                 if !data.is_empty() {
-                                                    std::io::stdout().write_all(&data)?;
-                                                    std::io::stdout().flush()?;
+                                                    writer.write_all(&data)?;
+                                                    writer.flush()?;
                                                 } else {
                                                     consecutive_empty_messages = 0;
                                                 }
@@ -261,12 +271,17 @@ impl TerminalClient {
                                         },
                                         "command_exit" => {
                                             if let Some(code) = server_msg.payload.code {
-                                                std::io::stdout().flush()?;
+                                                writer.flush()?;
                                                 // If exit code is non-zero, exit with that code
                                                 if code != 0 {
-                                                    std::process::exit(code);
+                                                    if fail_on_exit_code {
+                                                        std::process::exit(code);
+                                                    } else {
+                                                        bail!("Command exited with code: {}", code);
+                                                    }
                                                 }
-                                                return Ok(());
+
+                                                return Ok(code);
                                             }
                                         },
                                         "error" => {
@@ -280,10 +295,10 @@ impl TerminalClient {
                                             // Ignore welcome messages after initialization
                                         }
                                         "pty_closed" => {
-                                            return Ok(());
+                                            return Ok(0);
                                         }
                                         unknown_type => {
-                                            eprintln!("Warning: Received unknown message type: {}", unknown_type);
+                                            writeln!(writer, "Warning: Received unknown message type: {}", unknown_type)?;
                                         }
                                     }
                                 }
@@ -308,10 +323,10 @@ impl TerminalClient {
                                     // Pong received, connection is still alive
                                 }
                                 Message::Binary(_) => {
-                                    eprintln!("Warning: Unexpected binary message received");
+                                    writeln!(writer, "Warning: Unexpected binary message received")?;
                                 }
                                 Message::Frame(_) => {
-                                    eprintln!("Warning: Unexpected raw frame received");
+                                    writeln!(writer, "Warning: Unexpected raw frame received")?;
                                 }
                             }
                         },
@@ -326,6 +341,14 @@ impl TerminalClient {
                 }
             }
         }
+    }
+
+    /// Process incoming messages from the server and write to stdout
+    pub async fn handle_server_messages(&mut self) -> Result<()> {
+        self.handle_server_messages_with_writer(&mut std::io::stdout(), true)
+            .await?;
+
+        Ok(())
     }
 
     /// Directly waits for a ready or stand_by message from the server

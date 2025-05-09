@@ -8,6 +8,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
+use crate::commands::ssh::common::{parse_server_error, reset_terminal, SessionTermination};
 use crate::controllers::terminal::TerminalClient;
 
 // stub function because Windows does not support signals
@@ -17,8 +18,8 @@ pub async fn setup_signal_handlers() -> Result<()> {
 
 // Messages that can be sent to the UI task
 enum UiMessage {
-    // Server message handler has completed with exit code
-    ServerDone(i32),
+    // Server message handler has completed with termination status
+    ServerDone(SessionTermination),
     // Shell is ready for input (combines ready and not in command progress)
     ReadyForInput(bool),
     // Shell is ready (needed for signals and window resizing)
@@ -36,7 +37,7 @@ enum ServerMessage {
 }
 
 /// Windows-specific event handling for the SSH session
-pub async fn run_interactive_session(client: TerminalClient) -> Result<()> {
+pub async fn run_interactive_session(client: TerminalClient) -> Result<SessionTermination> {
     #[cfg(feature = "event-stream")]
     let result = run_with_event_stream(client).await;
 
@@ -44,20 +45,16 @@ pub async fn run_interactive_session(client: TerminalClient) -> Result<()> {
     let result = run_with_polling(client).await;
 
     // Clean up terminal
-    let _ = terminal::disable_raw_mode();
-
-    // Ensure cursor is visible with ANSI escape sequence
-    print!("\x1b[?25h");
-    std::io::stdout().flush()?;
+    reset_terminal(false)?;
 
     result
 }
 
 #[cfg(feature = "event-stream")]
-async fn run_with_event_stream(mut client: TerminalClient) -> Result<()> {
+async fn run_with_event_stream(mut client: TerminalClient) -> Result<SessionTermination> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 1024];
-    let mut exit_code = None;
+    let mut termination = None;
     let mut event_stream = crossterm::event::EventStream::new();
 
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiMessage>(100);
@@ -75,7 +72,9 @@ async fn run_with_event_stream(mut client: TerminalClient) -> Result<()> {
                         ServerMessage::SendData(data) => {
                             if let Err(e) = client.send_data(&data).await {
                                 eprintln!("Error sending data: {}", e);
-                                let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+                                let _ = ui_tx.send(UiMessage::ServerDone(
+                                    SessionTermination::ServerError(e.to_string())
+                                )).await;
                                 break;
                             }
                         },
@@ -90,17 +89,21 @@ async fn run_with_event_stream(mut client: TerminalClient) -> Result<()> {
                             }
                         }
                     }
-                },
+                }
 
                 // Process messages from the server
                 result = client.handle_server_messages() => {
                     match result {
                         Ok(()) => {
-                            let _ = ui_tx.send(UiMessage::ServerDone(0)).await;
+                            let _ = ui_tx.send(UiMessage::ServerDone(
+                                SessionTermination::Complete
+                            )).await;
                         },
                         Err(e) => {
                             eprintln!("Error in server messages: {}", e);
-                            let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+                            let _ = ui_tx.send(UiMessage::ServerDone(
+                                SessionTermination::ServerError(e.to_string())
+                            )).await;
                         }
                     }
                     break;
@@ -149,7 +152,7 @@ async fn run_with_event_stream(mut client: TerminalClient) -> Result<()> {
                         _ => {}
                     }
                 }
-            },
+            }
 
             // Handle input from stdin (if using both stdin and events)
             result = stdin.read(&mut stdin_buf) => {
@@ -162,6 +165,7 @@ async fn run_with_event_stream(mut client: TerminalClient) -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!("Error reading from stdin: {}", e);
+                            termination = Some(SessionTermination::StdinError(e.to_string()));
                             break;
                         }
                     }
@@ -171,8 +175,8 @@ async fn run_with_event_stream(mut client: TerminalClient) -> Result<()> {
             // Process messages from server task
             Some(msg) = ui_rx.recv() => {
                 match msg {
-                    UiMessage::ServerDone(code) => {
-                        exit_code = Some(code);
+                    UiMessage::ServerDone(term) => {
+                        termination = Some(term);
                         break;
                     },
                     UiMessage::ShellReady(ready) => {
@@ -186,18 +190,14 @@ async fn run_with_event_stream(mut client: TerminalClient) -> Result<()> {
         }
     }
 
-    if let Some(code) = exit_code {
-        std::process::exit(code);
-    }
-
-    Ok(())
+    Ok(termination.unwrap_or(SessionTermination::Complete))
 }
 
 #[cfg(not(feature = "event-stream"))]
-async fn run_with_polling(mut client: TerminalClient) -> Result<()> {
+async fn run_with_polling(mut client: TerminalClient) -> Result<SessionTermination> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 1024];
-    let mut exit_code = None;
+    let mut termination = None;
     let event_poll_timeout = Duration::from_millis(100);
 
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiMessage>(100);
@@ -215,7 +215,9 @@ async fn run_with_polling(mut client: TerminalClient) -> Result<()> {
                         ServerMessage::SendData(data) => {
                             if let Err(e) = client.send_data(&data).await {
                                 eprintln!("Error sending data: {}", e);
-                                let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+                                let _ = ui_tx.send(UiMessage::ServerDone(
+                                    SessionTermination::ServerError(e.to_string())
+                                )).await;
                                 break;
                             }
                         },
@@ -230,17 +232,21 @@ async fn run_with_polling(mut client: TerminalClient) -> Result<()> {
                             }
                         }
                     }
-                },
+                }
 
                 // Process messages from the server
                 result = client.handle_server_messages() => {
                     match result {
                         Ok(()) => {
-                            let _ = ui_tx.send(UiMessage::ServerDone(0)).await;
+                            let _ = ui_tx.send(UiMessage::ServerDone(
+                                SessionTermination::Complete
+                            )).await;
                         },
                         Err(e) => {
                             eprintln!("Error in server messages: {}", e);
-                            let _ = ui_tx.send(UiMessage::ServerDone(1)).await;
+                            let _ = ui_tx.send(UiMessage::ServerDone(
+                                SessionTermination::ServerError(e.to_string())
+                            )).await;
                         }
                     }
                     break;
@@ -273,6 +279,7 @@ async fn run_with_polling(mut client: TerminalClient) -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!("Error reading from stdin: {}", e);
+                            termination = Some(SessionTermination::StdinError(e.to_string()));
                             break;
                         }
                     }
@@ -282,8 +289,8 @@ async fn run_with_polling(mut client: TerminalClient) -> Result<()> {
             // Process messages from server task
             Some(msg) = ui_rx.recv() => {
                 match msg {
-                    UiMessage::ServerDone(code) => {
-                        exit_code = Some(code);
+                    UiMessage::ServerDone(term) => {
+                        termination = Some(term);
                         break;
                     },
                     UiMessage::ShellReady(ready) => {
@@ -326,11 +333,7 @@ async fn run_with_polling(mut client: TerminalClient) -> Result<()> {
         }
     }
 
-    if let Some(code) = exit_code {
-        std::process::exit(code);
-    }
-
-    Ok(())
+    Ok(termination.unwrap_or(SessionTermination::Complete))
 }
 
 // Helper function to convert key events to strings

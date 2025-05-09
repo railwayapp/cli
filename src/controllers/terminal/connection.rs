@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use async_tungstenite::tungstenite::handshake::client::generate_key;
 use async_tungstenite::tungstenite::http::Request;
 use async_tungstenite::WebSocketStream;
+use indicatif::ProgressBar;
 use tokio::time::{sleep, timeout, Duration};
 use url::Url;
 
@@ -23,6 +24,7 @@ pub async fn establish_connection(
     url: &str,
     token: &str,
     params: &SSHConnectParams,
+    spinner: &mut ProgressBar,
 ) -> Result<WebSocketStream<async_tungstenite::tokio::ConnectStream>> {
     let url = Url::parse(url)?;
 
@@ -39,10 +41,12 @@ pub async fn establish_connection(
                         e
                     );
                 }
-                eprintln!(
+
+                spinner.set_message(format!(
                     "Connection attempt {} failed: {}. Retrying in {} seconds...",
                     attempt, e, SSH_CONNECT_DELAY_SECS
-                );
+                ));
+
                 sleep(Duration::from_secs(SSH_CONNECT_DELAY_SECS)).await;
             }
         }

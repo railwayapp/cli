@@ -181,7 +181,7 @@ fn select_workspace(
         (None, Some(team_arg)) | (Some(_), Some(team_arg)) => {
             if let Some(workspace) = workspaces.iter().find(|w| {
                 w.team_id()
-                    .map_or(false, |id| id.to_lowercase() == team_arg.to_lowercase())
+                    .is_some_and(|id| id.to_lowercase() == team_arg.to_lowercase())
                     || w.name().to_lowercase() == team_arg.to_lowercase()
             }) {
                 fake_select("Select a workspace", workspace.name());
@@ -202,7 +202,7 @@ fn prompt_workspaces(workspaces: Vec<Workspace>) -> Result<Workspace> {
         return Err(RailwayError::NoProjects.into());
     }
     if workspaces.len() == 1 {
-        fake_select("Select a workspace", &workspaces[0].name());
+        fake_select("Select a workspace", workspaces[0].name());
         return Ok(workspaces[0].clone());
     }
     prompt_options("Select a workspace", workspaces)
