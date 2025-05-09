@@ -1,14 +1,11 @@
 use std::io::Cursor;
 
 use anyhow::{anyhow, Result};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;
-use tokio::io::AsyncReadExt;
-use tokio::time::Duration;
 
 use crate::config::Configs;
-use crate::consts::TICK_STRING;
 use crate::controllers::{
     environment::get_matched_environment,
     project::get_project,
@@ -23,9 +20,6 @@ use super::Args;
 pub enum SessionTermination {
     /// Session has been successfully closed
     Complete,
-
-    /// Shell initialization failed
-    InitShellError(String),
 
     /// Error reading from stdin
     StdinError(String),
@@ -44,7 +38,6 @@ impl SessionTermination {
     pub fn exit_code(&self) -> i32 {
         match self {
             SessionTermination::Complete => 0,
-            SessionTermination::InitShellError(_) => 1,
             SessionTermination::StdinError(_) => 2,
             SessionTermination::SendError(_) => 3,
             SessionTermination::ServerError(_) => 4,
@@ -55,20 +48,12 @@ impl SessionTermination {
     pub fn message(&self) -> &str {
         match self {
             SessionTermination::Complete => "",
-            SessionTermination::InitShellError(msg) => msg,
             SessionTermination::StdinError(msg) => msg,
             SessionTermination::SendError(msg) => msg,
             SessionTermination::ServerError(msg) => msg,
             SessionTermination::ConnectionReset => {
                 "Connection to the server was closed unexpectedly"
             }
-        }
-    }
-
-    pub fn is_error(&self) -> bool {
-        match self {
-            SessionTermination::Complete => false,
-            _ => true,
         }
     }
 }
@@ -150,26 +135,6 @@ pub async fn get_ssh_connect_params(
         deployment_instance_id: args.deployment_instance,
     })
 }
-
-// pub fn create_spinner(running_command: bool) -> ProgressBar {
-//     let message = if running_command {
-//         "Connecting to execute command..."
-//     } else {
-//         "Connecting to service..."
-//     };
-
-//     let spinner = ProgressBar::new_spinner()
-//         .with_style(
-//             ProgressStyle::default_spinner()
-//                 .tick_chars(TICK_STRING)
-//                 .template("{spinner:.green} {msg}")
-//                 .expect("Failed to create spinner template"),
-//         )
-//         .with_message(message);
-
-//     spinner.enable_steady_tick(Duration::from_millis(100));
-//     spinner
-// }
 
 pub async fn create_terminal_client(
     ws_url: &str,

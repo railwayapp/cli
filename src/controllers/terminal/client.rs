@@ -51,7 +51,7 @@ impl TerminalClient {
                     bail!("Expected welcome message, received: {:?}", server_msg);
                 }
 
-                return Ok(client);
+                Ok(client)
             } else {
                 bail!("Expected text message for welcome, received different message type");
             }

@@ -73,7 +73,7 @@ pub async fn command(args: Args, _json: bool) -> Result<()> {
 
 fn prompt_workspace(workspaces: Vec<Workspace>) -> Result<Workspace> {
     if workspaces.len() == 1 {
-        fake_select("Select a workspace", &workspaces[0].name());
+        fake_select("Select a workspace", workspaces[0].name());
         return Ok(workspaces[0].clone());
     }
     let workspace = prompt_select("Select a workspace", workspaces)?;

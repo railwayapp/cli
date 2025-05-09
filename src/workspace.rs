@@ -21,15 +21,15 @@ pub async fn workspaces() -> Result<Vec<Workspace>> {
         .me
         .workspaces
         .into_iter()
-        .map(|w| Workspace::Member(w))
+        .map(Workspace::Member)
         .collect();
     workspaces.extend(
         response
             .external_workspaces
             .into_iter()
-            .map(|w| Workspace::External(w)),
+            .map(Workspace::External),
     );
-    workspaces.sort_by(|a, b| b.id().cmp(&a.id()));
+    workspaces.sort_by(|a, b| b.id().cmp(a.id()));
     Ok(workspaces)
 }
 
@@ -63,12 +63,7 @@ impl Workspace {
 
     pub fn projects(&self) -> Vec<Project> {
         let mut projects = match self {
-            Self::External(w) => w
-                .projects
-                .iter()
-                .cloned()
-                .map(|p| Project::External(p))
-                .collect(),
+            Self::External(w) => w.projects.iter().cloned().map(Project::External).collect(),
             Self::Member(w) => w.team.as_ref().map_or_else(Vec::new, |t| {
                 t.projects
                     .edges
@@ -78,7 +73,7 @@ impl Workspace {
                     .collect()
             }),
         };
-        projects.sort_by(|a, b| b.updated_at().cmp(&a.updated_at()));
+        projects.sort_by_key(|b| std::cmp::Reverse(b.updated_at()));
         projects
     }
 }

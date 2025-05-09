@@ -3,7 +3,6 @@ use async_tungstenite::tungstenite::handshake::client::generate_key;
 use async_tungstenite::tungstenite::http::Request;
 use async_tungstenite::WebSocketStream;
 use indicatif::ProgressBar;
-use serde_with::formats::SpaceSeparator;
 use tokio::time::{sleep, timeout, Duration};
 use url::Url;
 
@@ -11,7 +10,6 @@ use crate::commands::ssh::{
     SSH_CONNECTION_TIMEOUT_SECS, SSH_CONNECT_DELAY_SECS, SSH_MAX_CONNECT_ATTEMPTS,
 };
 use crate::consts::get_user_agent;
-use crate::util::progress::fail_spinner;
 
 #[derive(Clone, Debug)]
 pub struct SSHConnectParams {

@@ -1,7 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::time::Duration;
+use indicatif::ProgressBar;
 
 use crate::{
     client::GQLClient,
@@ -169,7 +168,7 @@ async fn create_client(
         .context("No authentication token found. Please login first with 'railway login'")?;
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
-    let terminal_client = create_terminal_client(&ws_url, &token, &params, spinner).await?;
+    let terminal_client = create_terminal_client(&ws_url, &token, params, spinner).await?;
 
     Ok(terminal_client)
 }
