@@ -45,7 +45,7 @@ pub async fn run_interactive_session(client: TerminalClient) -> Result<SessionTe
     let result = run_with_polling(client).await;
 
     // Clean up terminal
-    reset_terminal()?;
+    reset_terminal(false)?;
 
     result
 }
