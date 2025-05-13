@@ -36,7 +36,6 @@ pub struct Args {
 }
 
 pub async fn command(args: Args, json: bool) -> Result<()> {
-    dbg!(json);
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
