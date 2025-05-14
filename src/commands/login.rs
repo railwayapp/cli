@@ -24,7 +24,7 @@ pub struct Args {
     browserless: bool,
 }
 
-pub async fn command(args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     interact_or!("Cannot login in non-interactive mode");
 
     let mut configs = Configs::new()?;

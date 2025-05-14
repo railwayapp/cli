@@ -31,7 +31,7 @@ pub struct Args {
     team: Option<String>,
 }
 
-pub async fn command(args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
 
     let workspaces = workspaces().await?;

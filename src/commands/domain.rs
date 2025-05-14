@@ -32,13 +32,17 @@ pub struct Args {
     /// Specifying a custom domain will also return the required DNS records
     /// to add to your DNS settings
     domain: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
-pub async fn command(args: Args, json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     if let Some(domain) = args.domain {
-        create_custom_domain(domain, args.port, args.service, json).await?;
+        create_custom_domain(domain, args.port, args.service, args.json).await?;
     } else {
-        create_service_domain(args.service, json).await?;
+        create_service_domain(args.service, args.json).await?;
     }
     Ok(())
 }

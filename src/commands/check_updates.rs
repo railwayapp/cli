@@ -5,12 +5,16 @@ use serde_json::json;
 
 /// Test the update check
 #[derive(Parser)]
-pub struct Args {}
+pub struct Args {
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
 
-pub async fn command(_args: Args, json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
 
-    if json {
+    if args.json {
         let result = configs.check_update(true).await;
 
         let json = json!({

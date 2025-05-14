@@ -72,7 +72,7 @@ async fn get_service(
     Ok(service)
 }
 
-pub async fn command(args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     // only needs to be mutable for the update check
     let configs = Configs::new()?;
 
