@@ -33,9 +33,13 @@ pub struct Args {
     /// railway variables --set "MY_SPECIAL_ENV_VAR=1" --set "BACKEND_PORT=3000"
     #[clap(long)]
     set: Vec<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
-pub async fn command(args: Args, json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -100,7 +104,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    if json {
+    if args.json {
         println!("{}", serde_json::to_string_pretty(&variables)?);
         return Ok(());
     }

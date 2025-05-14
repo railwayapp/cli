@@ -4,9 +4,13 @@ use super::*;
 
 /// Show information about the current project
 #[derive(Parser)]
-pub struct Args;
+pub struct Args {
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
 
-pub async fn command(_args: Args, json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -14,7 +18,7 @@ pub async fn command(_args: Args, json: bool) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    if !json {
+    if !args.json {
         println!("Project: {}", project.name.purple().bold());
         println!(
             "Environment: {}",

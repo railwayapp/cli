@@ -79,7 +79,7 @@ pub struct UpErrorResponse {
     pub message: String,
 }
 
-pub async fn command(args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;

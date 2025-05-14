@@ -11,14 +11,7 @@ macro_rules! commands {
                     .propagate_version(true)
                     .about(clap::crate_description!())
                     .long_about(None)
-                    .version(clap::crate_version!())
-                    .arg(
-                        clap::Arg::new("json")
-                            .long("json")
-                            .action(clap::ArgAction::SetTrue)
-                            .global(true)
-                            .help("Output in JSON format")
-                    );
+                    .version(clap::crate_version!());
                 $(
                     {
                         // Get the subcommand as defined by the module.
@@ -51,13 +44,12 @@ macro_rules! commands {
 
             /// Dispatches the selected subcommand (after parsing) to its handler.
             pub async fn exec_cli(matches: clap::ArgMatches) -> anyhow::Result<()> {
-                let json = matches.get_flag("json");
                 match matches.subcommand() {
                     $(
                         Some((stringify!([<$module:snake>]), sub_matches)) => {
                                let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
                                    .map_err(anyhow::Error::from)?;
-                            $module::command(args, json).await?;
+                            $module::command(args).await?;
                         },
                     )*
                     _ => {

@@ -37,9 +37,13 @@ pub struct Args {
 
     /// Deployment ID to pull logs from. Omit to pull from latest deloy
     deployment_id: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
-pub async fn command(args: Args, json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -108,7 +112,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
 
     if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
         stream_build_logs(deployment.id.clone(), |log| {
-            if json {
+            if args.json {
                 println!("{}", serde_json::to_string(&log).unwrap());
             } else {
                 println!("{}", log.message);
@@ -119,7 +123,7 @@ pub async fn command(args: Args, json: bool) -> Result<()> {
         stream_deploy_logs(
             deployment.id.clone(),
             |log: subscriptions::deployment_logs::LogFields| {
-                if json {
+                if args.json {
                     let mut map: HashMap<String, Value> = HashMap::new();
 
                     // Insert fixed attributes

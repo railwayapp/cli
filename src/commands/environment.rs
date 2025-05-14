@@ -66,7 +66,7 @@ pub struct DeleteArgs {
     environment: Option<String>,
 }
 
-pub async fn command(args: Args, _json: bool) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Some(EnvironmentCommand::New(args)) => new_environment(args).await,
         Some(EnvironmentCommand::Delete(args)) => delete_environment(args).await,
