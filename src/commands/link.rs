@@ -1,7 +1,7 @@
 use anyhow::bail;
 use colored::*;
 use is_terminal::IsTerminal;
-use std::{fmt::Display, ops::Deref};
+use std::fmt::Display;
 
 use crate::{
     errors::RailwayError,
