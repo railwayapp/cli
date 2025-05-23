@@ -133,7 +133,11 @@ fn select_project(
     workspace: Workspace,
     project: Option<String>,
 ) -> Result<NormalisedProject, anyhow::Error> {
-    let projects = workspace.projects();
+    let projects = workspace
+        .projects()
+        .into_iter()
+        .filter(|p| p.deleted_at().is_none())
+        .collect::<Vec<_>>();
 
     let project = NormalisedProject::from({
         if let Some(project) = project {

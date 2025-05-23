@@ -8,6 +8,7 @@ query UserProjects {
       name
       createdAt
       updatedAt
+      deletedAt
       team {
         id
         name
@@ -50,6 +51,7 @@ query UserProjects {
               name
               createdAt
               updatedAt
+              deletedAt
               team {
                 id
                 name
