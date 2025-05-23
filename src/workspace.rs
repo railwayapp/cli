@@ -114,6 +114,12 @@ impl Project {
             Self::Team(w) => w.updated_at,
         }
     }
+    pub fn deleted_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::External(w) => w.deleted_at,
+            Self::Team(w) => w.deleted_at,
+        }
+    }
 }
 
 impl Display for Project {
