@@ -111,14 +111,9 @@ async fn run_persistent_session(params: &terminal::SSHConnectParams) -> Result<(
 
         // Start tmux session
         initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
-        terminal_client
-            .send_data("exec tmux new-session -A -s railway\n")
-            .await?;
 
-        // Set tmux mouse mode on to enable proper scrolling
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         terminal_client
-            .send_data("tmux set -g mouse on; clear\n")
+            .send_data("exec tmux new-session -A -s railway \\; set -g mouse on \n")
             .await?;
 
         // Resend the window size after starting a tmux session
