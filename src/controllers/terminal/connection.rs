@@ -25,19 +25,22 @@ pub async fn establish_connection(
     token: &str,
     params: &SSHConnectParams,
     spinner: &mut ProgressBar,
+    max_attempts: Option<u32>,
 ) -> Result<WebSocketStream<async_tungstenite::tokio::ConnectStream>> {
     let url = Url::parse(url)?;
 
-    for attempt in 1..=SSH_MAX_CONNECT_ATTEMPTS {
+    let max_attempts = max_attempts.unwrap_or(SSH_MAX_CONNECT_ATTEMPTS);
+
+    for attempt in 1..=max_attempts {
         match attempt_connection(&url, token, params).await {
             Ok(ws_stream) => {
                 return Ok(ws_stream);
             }
             Err(e) => {
-                if attempt == SSH_MAX_CONNECT_ATTEMPTS {
+                if attempt == max_attempts {
                     bail!(
                         "Failed to establish connection after {} attempts: {}",
-                        SSH_MAX_CONNECT_ATTEMPTS,
+                        max_attempts,
                         e
                     );
                 }

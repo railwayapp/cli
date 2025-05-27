@@ -141,8 +141,9 @@ pub async fn create_terminal_client(
     token: &str,
     params: &SSHConnectParams,
     spinner: &mut ProgressBar,
+    max_attempts: Option<u32>,
 ) -> Result<TerminalClient> {
-    let client = TerminalClient::new(ws_url, token, params, spinner).await?;
+    let client = TerminalClient::new(ws_url, token, params, spinner, max_attempts).await?;
     Ok(client)
 }
 

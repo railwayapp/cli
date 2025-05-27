@@ -27,9 +27,10 @@ impl TerminalClient {
         token: &str,
         params: &SSHConnectParams,
         spinner: &mut ProgressBar,
+        max_attempts: Option<u32>,
     ) -> Result<Self> {
         // Use the correct establish_connection function that handles authentication
-        let ws_stream = establish_connection(url, token, params, spinner).await?;
+        let ws_stream = establish_connection(url, token, params, spinner, max_attempts).await?;
 
         let mut client = Self {
             ws_stream,
