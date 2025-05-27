@@ -11,9 +11,11 @@ use crate::{
 
 pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
 pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 10;
-pub const SSH_MAX_CONNECT_ATTEMPTS: usize = 3;
 pub const SSH_CONNECT_DELAY_SECS: u64 = 5;
 pub const SSH_MAX_EMPTY_MESSAGES: usize = 100;
+
+pub const SSH_MAX_CONNECT_ATTEMPTS: u32 = 3;
+pub const SSH_MAX_CONNECT_ATTEMPTS_PERSISTENT: u32 = 20;
 
 mod common;
 mod platform;
@@ -65,7 +67,7 @@ pub async fn command(args: Args) -> Result<()> {
     let running_command = !args.command.is_empty();
 
     let mut spinner = create_spinner("Connecting to service...".to_string());
-    let mut terminal_client = create_client(&params, &mut spinner).await?;
+    let mut terminal_client = create_client(&params, &mut spinner, None).await?;
 
     if running_command {
         // Run single command
@@ -93,7 +95,13 @@ async fn run_persistent_session(params: &terminal::SSHConnectParams) -> Result<(
     loop {
         let mut spinner = create_spinner("Connecting to service...".to_string());
 
-        let mut terminal_client = match create_client(params, &mut spinner).await {
+        let mut terminal_client = match create_client(
+            params,
+            &mut spinner,
+            Some(SSH_MAX_CONNECT_ATTEMPTS_PERSISTENT),
+        )
+        .await
+        {
             Ok(tc) => tc,
             Err(e) => {
                 fail_spinner(&mut spinner, format!("{}", e));
@@ -103,14 +111,9 @@ async fn run_persistent_session(params: &terminal::SSHConnectParams) -> Result<(
 
         // Start tmux session
         initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
-        terminal_client
-            .send_data("exec tmux new-session -A -s railway\n")
-            .await?;
 
-        // Set tmux mouse mode on to enable proper scrolling
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         terminal_client
-            .send_data("tmux set -g mouse on; clear\n")
+            .send_data("exec tmux new-session -A -s railway \\; set -g mouse on \n")
             .await?;
 
         // Resend the window size after starting a tmux session
@@ -132,9 +135,11 @@ async fn run_persistent_session(params: &terminal::SSHConnectParams) -> Result<(
                 println!("Connection reset. Reconnecting...");
                 continue;
             }
-            term => {
-                eprintln!("{}", term.message());
-                std::process::exit(term.exit_code());
+            SessionTermination::SendError(e)
+            | SessionTermination::StdinError(e)
+            | SessionTermination::ServerError(e) => {
+                println!("Session error: {}. Reconnecting...", e);
+                continue;
             }
         };
     }
@@ -149,7 +154,7 @@ async fn ensure_tmux_is_installed(params: &terminal::SSHConnectParams) -> Result
     let command = "which tmux || (apt-get update && apt-get install -y tmux)";
 
     let mut spinner = create_spinner("Installing tmux...".to_string());
-    let mut terminal_client = create_client(params, &mut spinner).await?;
+    let mut terminal_client = create_client(params, &mut spinner, None).await?;
 
     let result =
         execute_command_with_result(&mut terminal_client, command.to_string(), &mut spinner).await;
@@ -165,6 +170,7 @@ async fn ensure_tmux_is_installed(params: &terminal::SSHConnectParams) -> Result
 async fn create_client(
     params: &terminal::SSHConnectParams,
     spinner: &mut ProgressBar,
+    max_attempts: Option<u32>,
 ) -> Result<TerminalClient> {
     let configs = Configs::new()?;
     let token = configs
@@ -172,7 +178,8 @@ async fn create_client(
         .context("No authentication token found. Please login first with 'railway login'")?;
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
-    let terminal_client = create_terminal_client(&ws_url, &token, params, spinner).await?;
+    let terminal_client =
+        create_terminal_client(&ws_url, &token, params, spinner, max_attempts).await?;
 
     Ok(terminal_client)
 }
