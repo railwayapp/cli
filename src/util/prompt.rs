@@ -1,6 +1,13 @@
 use colored::*;
-use inquire::validator::{Validation, ValueRequiredValidator};
-use std::fmt::Display;
+use inquire::{
+    type_aliases::Suggester,
+    validator::{Validation, ValueRequiredValidator},
+    Autocomplete, CustomType,
+};
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
 use anyhow::{Context, Result};
@@ -145,4 +152,108 @@ impl Display for PromptService<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.name)
     }
+}
+
+#[derive(Clone)]
+pub struct PathAutocompleter;
+impl Autocomplete for PathAutocompleter {
+    fn get_suggestions(&mut self, _input: &str) -> Result<Vec<String>, inquire::CustomUserError> {
+        // Return empty suggestions to hide the suggestion list
+        Ok(vec![])
+    }
+
+    fn get_completion(
+        &mut self,
+        input: &str,
+        _highlighted_suggestion: Option<String>,
+    ) -> Result<inquire::autocompletion::Replacement, inquire::CustomUserError> {
+        let path = Path::new(input);
+        let (dir, prefix) = if input.ends_with('/') || input.ends_with('\\') {
+            (path.to_path_buf(), String::new())
+        } else {
+            let parent = path.parent().unwrap_or(Path::new("."));
+            let dir = if parent.as_os_str().is_empty() {
+                Path::new(".") // Fix: if parent is empty, use current directory
+            } else {
+                parent
+            };
+            
+            (
+                dir.to_path_buf(),
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+
+        let mut matches = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if let Some(name_str) = entry.file_name().to_str() {
+                    if name_str.starts_with(&prefix) {
+                        let suggestion = if input.ends_with('/') || input.ends_with('\\') {
+                            format!("{}{}", input, name_str)
+                        } else {
+                            // Preserve the full path structure
+                            if let Some(parent) = path.parent() {
+                                if parent == Path::new(".") {
+                                    // Current directory - just use the filename
+                                    name_str.to_string()
+                                } else {
+                                    // Other directory (like ../sushibot) - preserve the parent path
+                                    format!("{}/{}", parent.display(), name_str)
+                                }
+                            } else {
+                                name_str.to_string()
+                            }
+                        };
+
+                        if entry.path().is_dir() {
+                            matches.push(format!("{}/", suggestion));
+                        } else {
+                            matches.push(suggestion);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return the first match if any
+        if !matches.is_empty() {
+            Ok(inquire::autocompletion::Replacement::Some(matches[0].clone()))
+        } else {
+            Ok(inquire::autocompletion::Replacement::None)
+        }
+    }
+}
+
+fn find_common_prefix(strings: &[String]) -> String {
+    if strings.is_empty() {
+        return String::new();
+    }
+
+    let first = &strings[0];
+    let mut prefix = String::new();
+
+    for (i, ch) in first.chars().enumerate() {
+        if strings.iter().all(|s| s.chars().nth(i) == Some(ch)) {
+            prefix.push(ch);
+        } else {
+            break;
+        }
+    }
+
+    prefix
+}
+
+pub fn prompt_path(message: &str) -> Result<PathBuf> {
+    let input = inquire::Text::new(message)
+        .with_autocomplete(PathAutocompleter)
+        .with_render_config(Configs::get_render_config())
+        .prompt()
+        .context("Failed to prompt for path")?;
+
+    Ok(PathBuf::from(input))
 }

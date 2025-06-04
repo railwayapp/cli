@@ -92,6 +92,8 @@ regex = "1.11.1"
 struct-field-names-as-array = "0.3.0"
 json_dotpath = "1.1.0"
 country-emoji = "0.2.0"
+chrono-humanize = "0.2.3"
+pathdiff = "0.2.3"
 
 [profile.release]
 lto = "fat"

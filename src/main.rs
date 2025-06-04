@@ -53,7 +53,8 @@ commands!(
     volume,
     redeploy,
     scale,
-    check_updates
+    check_updates,
+    functions(function)
 );
 
 fn spawn_update_task(mut configs: Configs) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {

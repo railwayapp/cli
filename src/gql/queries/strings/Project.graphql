@@ -25,16 +25,21 @@ query Project($id: String!) {
               node {
                 id
                 serviceId
+                serviceName
                 environmentId
                 latestDeployment {
                   canRedeploy
                   id
                   meta
+                  status
                 }
                 source {
                   repo
                   image
                 }
+                cronSchedule
+                nextCronRunAt
+                startCommand
               }
             }
           }

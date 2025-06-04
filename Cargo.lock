@@ -267,6 +267,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-humanize"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799627e6b4d27827a814e837b9d8a504832086081806d45b1afa34dc982b023b"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "clap"
 version = "4.5.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1952,6 +1961,7 @@ dependencies = [
  "base64 0.22.1",
  "box_drawing",
  "chrono",
+ "chrono-humanize",
  "clap",
  "clap_complete",
  "colored",
@@ -1981,6 +1991,7 @@ dependencies = [
  "num_cpus",
  "open",
  "paste",
+ "pathdiff",
  "rand",
  "regex",
  "reqwest 0.12.12",

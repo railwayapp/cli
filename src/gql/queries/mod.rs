@@ -181,3 +181,11 @@ pub struct CustomDomainAvailable;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct Regions;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/LatestFunctionVersion.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct LatestFunctionVersion;
