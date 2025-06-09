@@ -189,3 +189,11 @@ pub struct Regions;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct LatestFunctionVersion;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/LatestDeployment.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct LatestDeployment;

@@ -1,12 +1,12 @@
 use colored::*;
 use inquire::{
-    type_aliases::Suggester,
     validator::{Validation, ValueRequiredValidator},
-    Autocomplete, CustomType,
+    Autocomplete,
 };
 use std::{
+    borrow::Cow,
     fmt::Display,
-    path::{Path, PathBuf},
+    path::{Path, PathBuf, MAIN_SEPARATOR},
 };
 
 use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
@@ -98,6 +98,14 @@ pub fn prompt_text_with_placeholder_disappear_skippable(
         .context("Failed to prompt for options")
 }
 
+pub fn prompt_text_skippable(message: &str) -> Result<Option<String>> {
+    let select = inquire::Text::new(message);
+    select
+        .with_render_config(Configs::get_render_config())
+        .prompt_skippable()
+        .context("Failed to prompt for options")
+}
+
 pub fn prompt_confirm_with_default(message: &str, default: bool) -> Result<bool> {
     let confirm = inquire::Confirm::new(message);
     confirm
@@ -145,6 +153,10 @@ pub fn fake_select(message: &str, selected: &str) {
     println!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
+pub fn fake_select_cancelled(message: &str) {
+    println!("{} {} {}", ">".green(), message, "<cancelled>".red());
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptService<'a>(pub &'a ProjectProjectServicesEdgesNode);
 
@@ -154,12 +166,65 @@ impl Display for PromptService<'_> {
     }
 }
 
+/// Bash style completion of paths
 #[derive(Clone)]
 pub struct PathAutocompleter;
+
+impl PathAutocompleter {
+    /// Parse input path and extract directory and filename prefix
+    fn parse_input(input: &str) -> (Cow<Path>, Cow<str>) {
+        if input.is_empty() {
+            return (Cow::Borrowed(Path::new(".")), Cow::Borrowed(""));
+        }
+
+        let path = Path::new(input);
+
+        // Check if input ends with a path separator
+        if input.ends_with(MAIN_SEPARATOR) {
+            (Cow::Borrowed(path), Cow::Borrowed(""))
+        } else if !input.contains(MAIN_SEPARATOR) {
+            // Input is just a filename with no path separators - search in current directory
+            (Cow::Borrowed(Path::new(".")), Cow::Borrowed(input))
+        } else {
+            let parent = path.parent().unwrap_or(Path::new("."));
+            let prefix = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+            (Cow::Borrowed(parent), Cow::Borrowed(prefix))
+        }
+    }
+
+    /// Build the completion path from components
+    fn build_completion(input: &str, dir: &Path, filename: &str, is_dir: bool) -> String {
+        let mut result = if input.ends_with(MAIN_SEPARATOR) {
+            // Input ends with separator, append filename directly
+            format!("{input}{filename}")
+        } else if dir == Path::new(".") && !input.contains(MAIN_SEPARATOR) {
+            // Current directory and input has no path separators, use filename only
+            filename.to_string()
+        } else if dir == Path::new(".") {
+            // Current directory but input had separators, preserve the ./ format
+            format!(".{}{}", MAIN_SEPARATOR, filename)
+        } else {
+            // Build full path
+            let mut path = dir.to_string_lossy().into_owned();
+            if !path.ends_with(MAIN_SEPARATOR) {
+                path.push(MAIN_SEPARATOR);
+            }
+            path.push_str(filename);
+            path
+        };
+
+        if is_dir {
+            result.push(MAIN_SEPARATOR);
+        }
+
+        result
+    }
+}
+
 impl Autocomplete for PathAutocompleter {
     fn get_suggestions(&mut self, _input: &str) -> Result<Vec<String>, inquire::CustomUserError> {
-        // Return empty suggestions to hide the suggestion list
-        Ok(vec![])
+        Ok(vec![]) // Hide suggestion list for bash-style completion
     }
 
     fn get_completion(
@@ -167,93 +232,61 @@ impl Autocomplete for PathAutocompleter {
         input: &str,
         _highlighted_suggestion: Option<String>,
     ) -> Result<inquire::autocompletion::Replacement, inquire::CustomUserError> {
-        let path = Path::new(input);
-        let (dir, prefix) = if input.ends_with('/') || input.ends_with('\\') {
-            (path.to_path_buf(), String::new())
-        } else {
-            let parent = path.parent().unwrap_or(Path::new("."));
-            let dir = if parent.as_os_str().is_empty() {
-                Path::new(".") // Fix: if parent is empty, use current directory
-            } else {
-                parent
-            };
-            
-            (
-                dir.to_path_buf(),
-                path.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string(),
-            )
+        let (dir, prefix) = Self::parse_input(input);
+
+        // Early return if directory doesn't exist or can't be read
+        if !dir.exists() || !dir.is_dir() {
+            return Ok(inquire::autocompletion::Replacement::None);
+        }
+
+        let entries = match std::fs::read_dir(&*dir) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(inquire::autocompletion::Replacement::None),
         };
 
         let mut matches = Vec::new();
 
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if let Some(name_str) = entry.file_name().to_str() {
-                    if name_str.starts_with(&prefix) {
-                        let suggestion = if input.ends_with('/') || input.ends_with('\\') {
-                            format!("{}{}", input, name_str)
-                        } else {
-                            // Preserve the full path structure
-                            if let Some(parent) = path.parent() {
-                                if parent == Path::new(".") {
-                                    // Current directory - just use the filename
-                                    name_str.to_string()
-                                } else {
-                                    // Other directory (like ../sushibot) - preserve the parent path
-                                    format!("{}/{}", parent.display(), name_str)
-                                }
-                            } else {
-                                name_str.to_string()
-                            }
-                        };
+        // Collect all matching entries
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name_str) = file_name.to_str() else {
+                continue;
+            };
 
-                        if entry.path().is_dir() {
-                            matches.push(format!("{}/", suggestion));
-                        } else {
-                            matches.push(suggestion);
-                        }
-                    }
-                }
+            if !name_str.starts_with(&*prefix) {
+                continue;
             }
+
+            let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
+            let completion = Self::build_completion(input, &dir, name_str, is_dir);
+            matches.push((name_str.to_string(), completion));
         }
 
-        // Return the first match if any
-        if !matches.is_empty() {
-            Ok(inquire::autocompletion::Replacement::Some(matches[0].clone()))
-        } else {
-            Ok(inquire::autocompletion::Replacement::None)
+        if matches.is_empty() {
+            return Ok(inquire::autocompletion::Replacement::None);
         }
-    }
-}
 
-fn find_common_prefix(strings: &[String]) -> String {
-    if strings.is_empty() {
-        return String::new();
-    }
-
-    let first = &strings[0];
-    let mut prefix = String::new();
-
-    for (i, ch) in first.chars().enumerate() {
-        if strings.iter().all(|s| s.chars().nth(i) == Some(ch)) {
-            prefix.push(ch);
-        } else {
-            break;
+        // Check for exact match first (e.g., "test" matches "test" exactly, not "test-two")
+        if let Some((_, completion)) = matches.iter().find(|(name, _)| name == &*prefix) {
+            return Ok(inquire::autocompletion::Replacement::Some(
+                completion.clone(),
+            ));
         }
-    }
 
-    prefix
+        // Find the closest match (shortest name that starts with prefix)
+        let closest_match = matches.iter().min_by_key(|(name, _)| name.len()).unwrap();
+
+        Ok(inquire::autocompletion::Replacement::Some(
+            closest_match.1.clone(),
+        ))
+    }
 }
 
 pub fn prompt_path(message: &str) -> Result<PathBuf> {
-    let input = inquire::Text::new(message)
+    inquire::Text::new(message)
         .with_autocomplete(PathAutocompleter)
         .with_render_config(Configs::get_render_config())
         .prompt()
-        .context("Failed to prompt for path")?;
-
-    Ok(PathBuf::from(input))
+        .map(PathBuf::from)
+        .context("Failed to prompt for path")
 }

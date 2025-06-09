@@ -37,6 +37,16 @@ query Project($id: String!) {
                   repo
                   image
                 }
+                domains {
+                  serviceDomains {
+                    id
+                    domain
+                  }
+                  customDomains {
+                    id
+                    domain
+                  }
+                }
                 cronSchedule
                 nextCronRunAt
                 startCommand
