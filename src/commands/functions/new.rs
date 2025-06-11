@@ -20,6 +20,7 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
 use std::io::Write as _;
+use std::path::Path;
 use std::{fmt::Write as _, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -28,41 +29,101 @@ pub async fn new(
     project: ProjectProject,
     args: New,
 ) -> Result<()> {
-    let Arguments {
-        terminal,
-        name,
-        path,
-        domain,
-        cron,
-        serverless,
-        watch,
-    } = prompt(args)?;
+    let args = prompt(args)?;
+    let (service_id, domain) = create_function_service(&args, environment, &project).await?;
+    let info = format_function_info(&args, &project, environment, &domain);
 
-    let cmd = get_start_cmd(&path)?;
-    if cmd.len() >= 96 * 1024 {
-        bail!("Your function is too large (must be smaller than 96kb base64");
+    if args.watch {
+        watch_for_file_changes(args, service_id, environment, info).await?;
+    } else {
+        println!("{}", info);
     }
+
+    Ok(())
+}
+
+fn get_start_cmd(path: &Path) -> Result<String> {
+    let content = std::fs::read(path)?;
+    let cmd = format!("./run.sh {}", BASE64_STANDARD.encode(content));
+
+    if cmd.len() >= 96 * 1024 {
+        bail!("Your function is too large (must be smaller than 96kb base64)");
+    }
+
+    Ok(cmd)
+}
+
+async fn create_function_service(
+    args: &Arguments,
+    environment: &ProjectProjectEnvironmentsEdges,
+    project: &ProjectProject,
+) -> Result<(String, Option<String>)> {
+    let cmd = get_start_cmd(&args.path)?;
     let mut spinner = create_spinner("Creating function".into());
+
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let latest = post_graphql::<queries::LatestFunctionVersion, _>(
+
+    let latest_version = get_latest_function_version(&client, &configs).await?;
+    let service_id = create_service(
         &client,
+        &configs,
+        args,
+        environment,
+        project,
+        &latest_version,
+    )
+    .await?;
+    update_function_settings(&client, &configs, &service_id, args, environment, &cmd).await?;
+    let domain = create_domain_if_requested(
+        &client,
+        &configs,
+        &service_id,
+        environment,
+        project,
+        args.domain,
+    )
+    .await?;
+    link_function(&args.path, &service_id)?;
+
+    success_spinner(&mut spinner, "Function created".into());
+    Ok((service_id, domain))
+}
+
+async fn get_latest_function_version(
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<String> {
+    let latest = post_graphql::<queries::LatestFunctionVersion, _>(
+        client,
         configs.get_backboard(),
         queries::latest_function_version::Variables {},
     )
     .await?
     .function_runtime
     .latest_version;
+
+    Ok(latest.image)
+}
+
+async fn create_service(
+    client: &reqwest::Client,
+    configs: &Configs,
+    args: &Arguments,
+    environment: &ProjectProjectEnvironmentsEdges,
+    project: &ProjectProject,
+    image: &str,
+) -> Result<String> {
     let service = post_graphql::<mutations::ServiceCreate, _>(
-        &client,
+        client,
         configs.get_backboard(),
         mutations::service_create::Variables {
             branch: None,
-            name: Some(name.clone()),
+            name: Some(args.name.clone()),
             project_id: project.id.clone(),
             environment_id: environment.node.id.clone(),
             source: Some(ServiceSourceInput {
-                image: Some(latest.image),
+                image: Some(image.to_string()),
                 repo: None,
             }),
             variables: None,
@@ -71,44 +132,89 @@ pub async fn new(
     .await?
     .service_create
     .id;
+
+    Ok(service)
+}
+
+fn link_function(path: &Path, id: &str) -> Result<()> {
+    let mut c = Configs::new()?;
+    c.link_function(path.to_path_buf(), id.to_owned())?;
+    c.write()?;
+    Ok(())
+}
+
+async fn update_function_settings(
+    client: &reqwest::Client,
+    configs: &Configs,
+    service_id: &str,
+    args: &Arguments,
+    environment: &ProjectProjectEnvironmentsEdges,
+    cmd: &str,
+) -> Result<()> {
     post_graphql::<mutations::FunctionUpdate, _>(
-        &client,
+        client,
         configs.get_backboard(),
         mutations::function_update::Variables {
-            service_id: service.clone(),
+            service_id: service_id.to_string(),
             environment_id: environment.node.id.clone(),
-            sleep_application: Some(serverless),
-            cron_schedule: cron.clone(),
-            start_command: Some(cmd),
+            sleep_application: Some(args.serverless),
+            cron_schedule: args.cron.clone(),
+            start_command: Some(cmd.to_string()),
         },
     )
     .await?;
-    let domain = if domain {
-        post_graphql::<mutations::ServiceDomainCreate, _>(
-            &client,
-            configs.get_backboard(),
-            mutations::service_domain_create::Variables {
-                service_id: service.clone(),
-                environment_id: environment.node.id.clone(),
-            },
-        )
-        .await?;
-        let r = post_graphql::<queries::Domains, _>(
-            &client,
-            configs.get_backboard(),
-            queries::domains::Variables {
-                environment_id: environment.node.id.clone(),
-                service_id: service.clone(),
-                project_id: project.id.clone(),
-            },
-        )
-        .await?;
-        let domain = r.domains.service_domains.first().unwrap();
-        Some(domain.clone().domain)
-    } else {
-        None
-    };
-    success_spinner(&mut spinner, "Function created".into());
+
+    Ok(())
+}
+
+async fn create_domain_if_requested(
+    client: &reqwest::Client,
+    configs: &Configs,
+    service_id: &str,
+    environment: &ProjectProjectEnvironmentsEdges,
+    project: &ProjectProject,
+    should_create: bool,
+) -> Result<Option<String>> {
+    if !should_create {
+        return Ok(None);
+    }
+
+    post_graphql::<mutations::ServiceDomainCreate, _>(
+        client,
+        configs.get_backboard(),
+        mutations::service_domain_create::Variables {
+            service_id: service_id.to_string(),
+            environment_id: environment.node.id.clone(),
+        },
+    )
+    .await?;
+
+    let domains_response = post_graphql::<queries::Domains, _>(
+        client,
+        configs.get_backboard(),
+        queries::domains::Variables {
+            environment_id: environment.node.id.clone(),
+            service_id: service_id.to_string(),
+            project_id: project.id.clone(),
+        },
+    )
+    .await?;
+
+    let domain = domains_response
+        .domains
+        .service_domains
+        .first()
+        .map(|d| d.domain.clone());
+
+    Ok(domain)
+}
+
+fn format_function_info(
+    args: &Arguments,
+    project: &ProjectProject,
+    environment: &ProjectProjectEnvironmentsEdges,
+    domain: &Option<String>,
+) -> String {
     let mut info = formatdoc!(
         "
         Name: {}
@@ -116,11 +222,19 @@ pub async fn new(
         Environment: {}
         Local file: {}
         ",
-        name.blue(),
+        args.name.blue(),
         project.name.blue(),
         environment.node.name.clone().blue(),
-        &path.display().to_string().blue()
+        args.path.display().to_string().blue()
     );
+
+    append_domain_info(&mut info, domain);
+    append_cron_info(&mut info, &args.cron);
+
+    info
+}
+
+fn append_domain_info(info: &mut String, domain: &Option<String>) {
     if let Some(domain) = domain {
         writedoc!(
             info,
@@ -129,169 +243,298 @@ pub async fn new(
             ",
             "https://".blue(),
             domain.blue()
-        )?
+        )
+        .expect("Failed to write domain info");
     }
-    if let Some(cron) = &cron {
+}
+
+fn append_cron_info(info: &mut String, cron: &Option<String>) {
+    if let Some(cron) = cron {
+        let description =
+            cron_descriptor::cronparser::cron_expression_descriptor::get_description_cron(cron)
+                .expect("cron is not valid");
         writedoc!(
             info,
             "
             Cron: {} ({})
             ",
-            cron_descriptor::cronparser::cron_expression_descriptor::get_description_cron(cron)
-                .expect("cron is not valid")
-                .blue(),
+            description.blue(),
             cron.blue()
-        )?;
+        )
+        .expect("Failed to write cron info");
     }
-    if watch {
-        let (watch_tx, mut file_change) = tokio::sync::mpsc::unbounded_channel();
-        let o = watch_tx.clone();
-        let mut debouncer = new_debouncer(
-            std::time::Duration::from_secs(5),
-            move |res: DebounceEventResult| {
-                match res {
-                    Ok(events) => {
-                        // Only send one signal per batch of events
-                        if !events.is_empty() {
-                            if let Err(e) = watch_tx.send(Ok(())) {
-                                eprintln!("Failed to send debounced file event: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        if let Err(send_err) = watch_tx.send(Err(e)) {
-                            eprintln!("Failed to send debounced error: {}", send_err);
-                        }
-                    }
-                }
-            },
-        )?;
-        debouncer
-            .watcher()
-            .watch(&path, RecursiveMode::NonRecursive)?;
-        o.send(Ok(()))?;
-        let ser = Arc::new(service.clone());
-        let env = Arc::new(environment.node.id.clone());
-        if terminal {
-            clear()?;
-            println!("{}", info);
-        }
+}
 
-        let mut current_cancel_token: Option<CancellationToken> = None;
-        let mut first_run = true;
-        loop {
-            tokio::select! {
-                event = file_change.recv() => {
-                    if first_run {
-                        first_run = false;
-                        continue;
-                    }
-                    match event {
-                        Some(Ok(_e)) => {
-                            // Cancel any existing deployment stream
-                            if let Some(token) = current_cancel_token.take() {
-                                token.cancel();
-                            }
-                            let mut spinner = create_spinner("Updating function".into());
-                            let cmd = get_start_cmd(&path)?;
-                            if cmd.len() > 96 * 1024 {
-                                println!("{}: Your function is too large", "ERROR".red());
-                                continue;
-                            }
+async fn watch_for_file_changes(
+    args: Arguments,
+    service_id: String,
+    environment: &ProjectProjectEnvironmentsEdges,
+    info: String,
+) -> Result<()> {
+    let (watch_tx, file_change) = tokio::sync::mpsc::unbounded_channel();
+    let debounce_tx = watch_tx.clone();
 
-                            let configs = Configs::new()?;
-                            let client = GQLClient::new_authorized(&configs)?;
+    let _debouncer = setup_file_watcher(&args.path, debounce_tx)?;
+    watch_tx.send(Ok(()))?;
 
-                            post_graphql::<mutations::FunctionUpdate, _>(&client, configs.get_backboard(), mutations::function_update::Variables {
-                                service_id: (*ser).clone(),
-                                environment_id: (*env).clone(),
-                                sleep_application: None,
-                                cron_schedule: None,
-                                start_command: Some(cmd),
-                            }).await?;
+    let service_arc = Arc::new(service_id);
+    let env_arc = Arc::new(environment.node.id.clone());
 
-                            let latest = post_graphql::<mutations::ServiceInstanceDeploy, _>(&client, configs.get_backboard(), mutations::service_instance_deploy::Variables {
-                                environment_id: (*env).clone(),
-                                service_id: (*ser).clone()
-                            }).await?.service_instance_deploy_v2;
+    display_initial_info(&args, &info)?;
 
-                            let stream = subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
-                                id: latest
-                            }).await?;
-                            success_spinner(&mut spinner, "Function updated".into());
+    run_watch_loop(args, service_arc, env_arc, info, file_change).await
+}
 
-                            // Create new cancellation token
-                            let cancel_token = CancellationToken::new();
-                            current_cancel_token = Some(cancel_token.clone());
+fn setup_file_watcher(
+    path: &Path,
+    tx: tokio::sync::mpsc::UnboundedSender<Result<(), notify::Error>>,
+) -> Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
+    let mut debouncer = new_debouncer(
+        std::time::Duration::from_secs(5),
+        move |res: DebounceEventResult| {
+            handle_debounced_events(res, &tx);
+        },
+    )?;
 
-                            // Spawn task to handle this stream
-                            let info_clone = info.clone();
-                            tokio::spawn(async move {
-                                tokio::pin!(stream);
-                                loop {
-                                    tokio::select! {
-                                        stream_item = stream.next() => {
-                                            match stream_item {
-                                                Some(Ok(stream_data)) => {
-                                                    if let Some(data) = stream_data.data {
-                                                        let deployment = data.deployment;
-                                                        if terminal {
-                                                            clear().ok();
-                                                            let mut info = info_clone.clone();
-                                                            let status = serde_json::to_string(&deployment.status)
-                                                                .expect("failed to serialize deployment status")
-                                                                .replace('"', "");
-                                                            writedoc!(&mut info, "Latest deployment: {} ({})",
-                                                                match deployment.status {
-                                                                    DeploymentStatus::BUILDING | DeploymentStatus::DEPLOYING |
-                                                                    DeploymentStatus::INITIALIZING | DeploymentStatus::QUEUED => status.blue(),
-                                                                    DeploymentStatus::CRASHED | DeploymentStatus::FAILED => status.red(),
-                                                                    DeploymentStatus::SLEEPING => status.yellow(),
-                                                                    DeploymentStatus::SUCCESS => status.green(),
-                                                                    _ => status.dimmed(),
-                                                                },
-                                                                chrono::Local::now().format("%I:%M:%S %p").to_string().dimmed(),
-                                                            ).expect("failed to write");
-                                                            println!("{}", info);
-                                                        }
-                                                    }
-                                                }
-                                                Some(Err(_)) | None => break,
-                                            }
-                                        }
-                                        _ = cancel_token.cancelled() => {
-                                            // Stream cancelled, exit
+    debouncer
+        .watcher()
+        .watch(path, RecursiveMode::NonRecursive)?;
+    Ok(debouncer)
+}
 
-                                            break;
-                                        }
-                                    }
-                                }
-                            });
-                        },
-                        Some(Err(_e)) => continue,
-                        None => break,
-                    }
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    println!("\nStopping file watcher...");
-                    if let Some(token) = current_cancel_token.take() {
-                        token.cancel();
-                    }
-                    break;
-                }
-            }
-        }
-    } else {
+fn display_initial_info(args: &Arguments, info: &str) -> Result<()> {
+    if args.terminal {
+        clear()?;
         println!("{}", info);
     }
     Ok(())
 }
 
-fn get_start_cmd(path: &PathBuf) -> Result<String> {
-    Ok(format!(
-        "./run.sh {}",
-        BASE64_STANDARD.encode(std::fs::read(path)?)
-    ))
+async fn run_watch_loop(
+    args: Arguments,
+    service_id: Arc<String>,
+    environment_id: Arc<String>,
+    info: String,
+    mut file_change: tokio::sync::mpsc::UnboundedReceiver<Result<(), notify::Error>>,
+) -> Result<()> {
+    let mut current_cancel_token: Option<CancellationToken> = None;
+    let mut first_run = true;
+
+    loop {
+        tokio::select! {
+            event = file_change.recv() => {
+                if first_run {
+                    first_run = false;
+                    continue;
+                }
+
+                if let Some(Ok(_)) = event {
+                    current_cancel_token = handle_file_change_event(
+                        &args,
+                        &service_id,
+                        &environment_id,
+                        &info,
+                        current_cancel_token,
+                    ).await?;
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nStopping file watcher...");
+                if let Some(token) = current_cancel_token.take() {
+                    token.cancel();
+                }
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_debounced_events(
+    res: DebounceEventResult,
+    tx: &tokio::sync::mpsc::UnboundedSender<Result<(), notify::Error>>,
+) {
+    match res {
+        Ok(events) if !events.is_empty() => {
+            if let Err(e) = tx.send(Ok(())) {
+                eprintln!("Failed to send debounced file event: {}", e);
+            }
+        }
+        Err(e) => {
+            if let Err(send_err) = tx.send(Err(e)) {
+                eprintln!("Failed to send debounced error: {}", send_err);
+            }
+        }
+        _ => {} // Empty events, ignore
+    }
+}
+
+async fn handle_file_change_event(
+    args: &Arguments,
+    service_id: &Arc<String>,
+    environment_id: &Arc<String>,
+    info: &str,
+    current_cancel_token: Option<CancellationToken>,
+) -> Result<Option<CancellationToken>> {
+    // Cancel any existing deployment stream
+    if let Some(token) = current_cancel_token {
+        token.cancel();
+    }
+
+    let mut spinner = create_spinner("Updating function".into());
+    let cmd = match get_start_cmd(&args.path) {
+        Ok(cmd) => cmd,
+        Err(_) => {
+            println!("{}: Your function is too large", "ERROR".red());
+            return Ok(None);
+        }
+    };
+
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    // Update function
+    post_graphql::<mutations::FunctionUpdate, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::function_update::Variables {
+            service_id: service_id.as_ref().clone(),
+            environment_id: environment_id.as_ref().clone(),
+            sleep_application: None,
+            cron_schedule: None,
+            start_command: Some(cmd),
+        },
+    )
+    .await?;
+
+    // Deploy function
+    let latest = post_graphql::<mutations::ServiceInstanceDeploy, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::service_instance_deploy::Variables {
+            environment_id: environment_id.as_ref().clone(),
+            service_id: service_id.as_ref().clone(),
+        },
+    )
+    .await?
+    .service_instance_deploy_v2;
+
+    let stream =
+        subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
+            id: latest,
+        })
+        .await?;
+
+    success_spinner(&mut spinner, "Function updated".into());
+
+    // Create new cancellation token and spawn deployment monitoring task
+    let cancel_token = CancellationToken::new();
+    let info_clone = info.to_string();
+    let terminal = args.terminal;
+
+    tokio::spawn(monitor_deployment_status(
+        stream,
+        cancel_token.clone(),
+        info_clone,
+        terminal,
+    ));
+
+    Ok(Some(cancel_token))
+}
+
+async fn monitor_deployment_status(
+    stream: impl futures::Stream<
+            Item = Result<
+                graphql_client::Response<subscriptions::deployment::ResponseData>,
+                graphql_ws_client::Error,
+            >,
+        > + Unpin,
+    cancel_token: CancellationToken,
+    info: String,
+    terminal: bool,
+) {
+    tokio::pin!(stream);
+
+    loop {
+        tokio::select! {
+            stream_item = stream.next() => {
+                match stream_item {
+                    Some(Ok(stream_data)) => {
+                        if let Some(data) = stream_data.data {
+                            let deployment = data.deployment;
+                            // dbg!(&deployment.status);
+                            // if matches!(deployment.status, DeploymentStatus::CRASHED) {
+                            //     show_error_information(&info, &deployment).await.unwrap();
+                            // }
+                            if terminal {
+                                display_deployment_info(&info, &deployment.status);
+                            }
+
+
+                        }
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+            _ = cancel_token.cancelled() => break,
+        }
+    }
+}
+
+// async fn show_error_information(base_info: &str, deployment: &DeploymentDeployment) -> Result<()> {
+//     let configs = Configs::new()?;
+//     let client = GQLClient::new_authorized(&configs)?;
+//     let deploy_logs = post_graphql::<queries::DeploymentLogs, _>(&client, configs.get_backboard(), queries::deployment_logs::Variables {
+//         deployment_id: deployment.id.clone()
+//     }).await?;
+//     dbg!(deploy_logs);
+//     Ok(())
+// }
+
+fn display_deployment_info(base_info: &str, status: &DeploymentStatus) {
+    if clear().is_err() {
+        return;
+    }
+
+    let mut info = base_info.to_string();
+    let status_display = format_deployment_status(status);
+    let timestamp = format_current_timestamp();
+
+    if writedoc!(
+        &mut info,
+        "Latest deployment: {} ({})",
+        status_display,
+        timestamp
+    )
+    .is_ok()
+    {
+        println!("{}", info);
+    }
+}
+
+fn format_deployment_status(status: &DeploymentStatus) -> colored::ColoredString {
+    let status_str = serde_json::to_string(status)
+        .unwrap_or_else(|_| "UNKNOWN".to_string())
+        .replace('"', "");
+
+    match status {
+        DeploymentStatus::BUILDING
+        | DeploymentStatus::DEPLOYING
+        | DeploymentStatus::INITIALIZING
+        | DeploymentStatus::QUEUED => status_str.blue(),
+        DeploymentStatus::CRASHED | DeploymentStatus::FAILED => status_str.red(),
+        DeploymentStatus::SLEEPING => status_str.yellow(),
+        DeploymentStatus::SUCCESS => status_str.green(),
+        _ => status_str.dimmed(),
+    }
+}
+
+fn format_current_timestamp() -> colored::ColoredString {
+    chrono::Local::now()
+        .format("%I:%M:%S %p")
+        .to_string()
+        .dimmed()
 }
 
 fn clear() -> Result<(), anyhow::Error> {

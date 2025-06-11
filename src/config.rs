@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
@@ -47,6 +47,7 @@ pub struct RailwayConfig {
     pub user: RailwayUser,
     pub last_update_check: Option<DateTime<Utc>>,
     pub new_version_available: Option<String>,
+    pub linked_functions: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug)]
@@ -93,6 +94,7 @@ impl Configs {
                         user: RailwayUser { token: None },
                         last_update_check: None,
                         new_version_available: None,
+                        linked_functions: None,
                     }
                 });
 
@@ -111,6 +113,7 @@ impl Configs {
                 user: RailwayUser { token: None },
                 last_update_check: None,
                 new_version_available: None,
+                linked_functions: None,
             },
         })
     }
@@ -121,6 +124,7 @@ impl Configs {
             user: RailwayUser { token: None },
             last_update_check: None,
             new_version_available: None,
+            linked_functions: None,
         };
         Ok(())
     }
@@ -283,6 +287,21 @@ impl Configs {
     pub fn unlink_service(&mut self) -> Result<()> {
         let linked_project = self.get_linked_project_mut()?;
         linked_project.service = None;
+        Ok(())
+    }
+
+    pub fn link_function(&mut self, path: PathBuf, id: String) -> Result<()> {
+        let functions = self
+            .root_config
+            .linked_functions
+            .get_or_insert_with(Vec::new);
+        functions.retain(|(p, i)| (path.to_str().unwrap() != p) && (id != *i));
+        functions.push((
+            path.to_str()
+                .ok_or(anyhow!("couldn't convert string"))?
+                .to_owned(),
+            id,
+        ));
         Ok(())
     }
 
