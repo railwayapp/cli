@@ -16,7 +16,8 @@ use base64::prelude::*;
 use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::RecursiveMode;
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
 use std::io::Write as _;
 use std::{fmt::Write as _, sync::Arc};
@@ -108,55 +109,67 @@ pub async fn new(
         None
     };
     success_spinner(&mut spinner, "Function created".into());
-    if watch {
-        let (watch_tx, mut file_change) = tokio::sync::mpsc::unbounded_channel();
-        let o = watch_tx.clone();
-        let mut watcher = RecommendedWatcher::new(
-            move |res| {
-                if let Err(e) = watch_tx.send(res) {
-                    eprintln!("Failed to send file event: {}", e);
-                }
-            },
-            Config::default(),
-        )?;
-        watcher.watch(&path, RecursiveMode::NonRecursive)?;
-        o.send(Ok(Event {
-            kind: notify::EventKind::Any,
-            paths: vec![path.clone()],
-            attrs: Default::default(),
-        }))?;
-        let mut info = formatdoc!(
-            "
+    let mut info = formatdoc!(
+        "
         Name: {}
         Project: {}
         Environment: {}
         Local file: {}
         ",
-            name.blue(),
-            project.name.blue(),
-            environment.node.name.clone().blue(),
-            &path.display().to_string().blue()
-        );
-        if let Some(domain) = domain {
-            writedoc!(
-                info,
-                "
+        name.blue(),
+        project.name.blue(),
+        environment.node.name.clone().blue(),
+        &path.display().to_string().blue()
+    );
+    if let Some(domain) = domain {
+        writedoc!(
+            info,
+            "
             Domain: {}{}
             ",
-                "https://".blue(),
-                domain.blue()
-            )?
-        }
-        if let Some(cron) = &cron {
-            writedoc!(
-                info,
-                "Cron: {} ({})",
-                cron_descriptor::cronparser::cron_expression_descriptor::get_description_cron(cron)
-                    .expect("cron is not valid")
-                    .blue(),
-                cron.blue()
-            )?;
-        }
+            "https://".blue(),
+            domain.blue()
+        )?
+    }
+    if let Some(cron) = &cron {
+        writedoc!(
+            info,
+            "
+            Cron: {} ({})
+            ",
+            cron_descriptor::cronparser::cron_expression_descriptor::get_description_cron(cron)
+                .expect("cron is not valid")
+                .blue(),
+            cron.blue()
+        )?;
+    }
+    if watch {
+        let (watch_tx, mut file_change) = tokio::sync::mpsc::unbounded_channel();
+        let o = watch_tx.clone();
+        let mut debouncer = new_debouncer(
+            std::time::Duration::from_secs(5),
+            move |res: DebounceEventResult| {
+                match res {
+                    Ok(events) => {
+                        // Only send one signal per batch of events
+                        if !events.is_empty() {
+                            if let Err(e) = watch_tx.send(Ok(())) {
+                                eprintln!("Failed to send debounced file event: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Err(send_err) = watch_tx.send(Err(e)) {
+                            eprintln!("Failed to send debounced error: {}", send_err);
+                        }
+                    }
+                }
+            },
+        )?;
+        debouncer
+            .watcher()
+            .watch(&path, RecursiveMode::NonRecursive)?;
+        o.send(Ok(()))?;
         let ser = Arc::new(service.clone());
         let env = Arc::new(environment.node.id.clone());
         if terminal {
@@ -165,10 +178,14 @@ pub async fn new(
         }
 
         let mut current_cancel_token: Option<CancellationToken> = None;
-
+        let mut first_run = true;
         loop {
             tokio::select! {
                 event = file_change.recv() => {
+                    if first_run {
+                        first_run = false;
+                        continue;
+                    }
                     match event {
                         Some(Ok(_e)) => {
                             // Cancel any existing deployment stream
@@ -264,6 +281,8 @@ pub async fn new(
                 }
             }
         }
+    } else {
+        println!("{}", info);
     }
     Ok(())
 }
@@ -313,7 +332,8 @@ fn prompt(args: New) -> Result<Arguments> {
         bail!("Path must be provided when not running in a terminal");
     };
     if !path.exists() {
-        bail!("Path provided does not exist");
+        println!("Provided path doesn't exist, creating file");
+        std::fs::write(&path, "")?;
     }
     let domain = if args.cron.is_some() {
         fake_select("Generate a domain?", "No");
