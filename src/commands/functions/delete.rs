@@ -1,4 +1,5 @@
 use crate::{
+    commands::functions::common::unlink_function,
     queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges},
     util::{
         progress::{create_spinner, success_spinner},
@@ -134,8 +135,7 @@ async fn delete_function_service(
         },
     )
     .await?;
-    configs.unlink_function(function.node.service_id.clone())?;
-    configs.write()?;
+    unlink_function(&function.node.service_id)?;
     success_spinner(&mut spinner, "Function deleted".into());
     Ok(())
 }

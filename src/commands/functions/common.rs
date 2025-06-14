@@ -33,6 +33,13 @@ pub fn link_function(path: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn unlink_function(id: &str) -> Result<()> {
+    let mut c = Configs::new()?;
+    c.unlink_function(id.to_owned())?;
+    c.write()?;
+    Ok(())
+}
+
 fn is_function_service(
     service_instance: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
 ) -> bool {
