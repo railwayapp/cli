@@ -2,14 +2,17 @@ use crate::queries::project::DeploymentStatus;
 
 use super::*;
 use chrono_humanize::HumanTime;
-use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
+use queries::project::{
+    ProjectProject, ProjectProjectEnvironmentsEdges,
+    ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+};
 use std::fmt::Write as _;
 
 pub async fn list(
     environment: &ProjectProjectEnvironmentsEdges,
     project: ProjectProject,
 ) -> Result<()> {
-    let functions = get_functions_in_environment(&project, environment);
+    let functions = common::get_functions_in_environment(&project, environment);
 
     if functions.is_empty() {
         display_no_functions_message(&project, environment);
@@ -22,39 +25,8 @@ pub async fn list(
     Ok(())
 }
 
-fn get_functions_in_environment<'a>(
-    project: &'a ProjectProject,
-    environment: &ProjectProjectEnvironmentsEdges,
-) -> Vec<&'a queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges> {
-    project
-        .services
-        .edges
-        .iter()
-        .filter_map(|service| {
-            service
-                .node
-                .service_instances
-                .edges
-                .iter()
-                .find(|instance| instance.node.environment_id == environment.node.id)
-        })
-        .filter(|service_instance| is_function_service(service_instance))
-        .collect()
-}
-
-fn is_function_service(
-    service_instance: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
-) -> bool {
-    service_instance.node.source.clone().is_some_and(|source| {
-        source
-            .image
-            .unwrap_or_default()
-            .starts_with("ghcr.io/railwayapp/function")
-    })
-}
-
 fn format_functions_list(
-    functions: &[&queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges],
+    functions: &[&ProjectProjectServicesEdgesNodeServiceInstancesEdges],
 ) -> String {
     functions
         .iter()
@@ -64,7 +36,7 @@ fn format_functions_list(
 }
 
 fn format_function_entry(
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
 ) -> String {
     let mut entry = String::new();
 
@@ -79,7 +51,7 @@ fn format_function_entry(
 }
 
 fn get_colored_function_name(
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
 ) -> colored::ColoredString {
     if let Some(ref deployment) = function.node.latest_deployment {
         match deployment.status {
@@ -101,7 +73,7 @@ fn get_colored_function_name(
 
 fn append_runtime_info(
     entry: &mut String,
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
 ) {
     if let Some(ref source) = function.node.source {
         if let Some(image) = &source.image {
@@ -129,7 +101,7 @@ fn parse_runtime_from_image(image: &str) -> Option<(String, String)> {
 
 fn append_next_cron_run(
     entry: &mut String,
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
 ) {
     if let Some(next_run) = function.node.next_cron_run_at {
         let human_time = HumanTime::from(next_run);
@@ -139,16 +111,14 @@ fn append_next_cron_run(
 
 fn append_domain_info(
     entry: &mut String,
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
 ) {
     if has_domains(function) {
         write!(entry, " ({})", "http".blue()).unwrap();
     }
 }
 
-fn has_domains(
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
-) -> bool {
+fn has_domains(function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges) -> bool {
     !function.node.domains.custom_domains.is_empty()
         || !function.node.domains.service_domains.is_empty()
 }

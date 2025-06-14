@@ -15,6 +15,8 @@ pub struct Args {
     environment: Option<String>,
 }
 
+mod common;
+mod delete;
 mod list;
 mod new;
 
@@ -58,7 +60,11 @@ structstruck::strike! {
         Delete(struct {
             /// The ID/name of the function you wish to delete
             #[clap(long, short)]
-            function: Option<String>
+            function: Option<String>,
+
+            /// Skip confirmation for deleting
+            #[clap(long, short, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+            yes: Option<bool>
         }),
 
         /// Test a function locally (requires Docker)
@@ -115,6 +121,7 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::List => list::list(environment, project.clone()).await,
         Commands::New(args) => new::new(environment, project.clone(), args).await,
+        Commands::Delete(args) => delete::delete(environment, project.clone(), args).await,
         _ => unreachable!(),
     }?;
 

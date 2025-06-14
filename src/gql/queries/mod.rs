@@ -74,6 +74,12 @@ impl std::fmt::Display for project::ProjectProjectServicesEdges {
     }
 }
 
+impl std::fmt::Display for project::ProjectProjectServicesEdgesNodeServiceInstancesEdges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.node.service_name)
+    }
+}
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",

@@ -291,16 +291,17 @@ impl Configs {
     }
 
     pub fn link_function(&mut self, path: PathBuf, id: String) -> Result<()> {
-        let path = path.canonicalize()?.to_str().ok_or(anyhow!("couldn't convert string"))?.to_owned();
+        let path = path
+            .canonicalize()?
+            .to_str()
+            .ok_or(anyhow!("couldn't convert string"))?
+            .to_owned();
         let functions = self
             .root_config
             .linked_functions
             .get_or_insert_with(Vec::new);
         functions.retain(|(p, i)| (path != *p) && (id != *i));
-        functions.push((
-            path,
-            id,
-        ));
+        functions.push((path, id));
         Ok(())
     }
 
