@@ -16,38 +16,38 @@ pub async fn delete(
     args: Delete,
 ) -> Result<()> {
     let terminal = std::io::stdout().is_terminal();
-    let configs = Configs::new()?;
+    let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
     let services = common::get_functions_in_environment(&project, environment);
-    let function = select_function_to_delete(&args, &services, terminal)?;
+    let function = select_function_to_delete(&args, services.as_slice(), terminal)?;
 
     if !confirm_deletion(&args, terminal)? {
         return Ok(());
     }
 
     validate_two_factor_if_enabled(&client, &configs).await?;
-    delete_function_service(&client, &configs, function, environment).await?;
+    delete_function_service(&client, &mut configs, function, environment).await?;
 
     Ok(())
 }
 
 fn select_function_to_delete<'a>(
     args: &Delete,
-    services: &'a Vec<&queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges>,
+    services: &'a [&queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges],
     terminal: bool,
 ) -> Result<&'a queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges> {
     if let Some(fun) = &args.function {
         find_function_by_identifier(services, fun)
     } else if terminal {
-        prompt_select("Select a function to delete", services)
+        prompt_select("Select a function to delete", services.to_vec())
     } else {
         bail!("Function must be provided when not running in terminal")
     }
 }
 
 fn find_function_by_identifier<'a>(
-    services: &'a Vec<&queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges>,
+    services: &'a [&queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges],
     identifier: &str,
 ) -> Result<&'a queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges> {
     let found = services.iter().find(|f| {
@@ -119,7 +119,7 @@ async fn validate_two_factor_code(client: &reqwest::Client, configs: &Configs) -
 
 async fn delete_function_service(
     client: &reqwest::Client,
-    configs: &Configs,
+    configs: &mut Configs,
     function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
     environment: &ProjectProjectEnvironmentsEdges,
 ) -> Result<()> {
@@ -134,7 +134,8 @@ async fn delete_function_service(
         },
     )
     .await?;
-
+    configs.unlink_function(function.node.service_id.clone())?;
+    configs.write()?;
     success_spinner(&mut spinner, "Function deleted".into());
     Ok(())
 }

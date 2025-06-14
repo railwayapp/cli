@@ -305,6 +305,16 @@ impl Configs {
         Ok(())
     }
 
+    pub fn unlink_function(&mut self, id: String) -> Result<()> {
+        let functions = self
+            .root_config
+            .linked_functions
+            .get_or_insert_with(Vec::new);
+        functions.retain(|(_, i)| *i != id);
+
+        Ok(())
+    }
+
     pub fn get_render_config() -> RenderConfig<'static> {
         RenderConfig::default_colored()
             .with_help_message(

@@ -1,3 +1,6 @@
+use super::*;
+use std::path::Path;
+
 use crate::queries::project::{
     ProjectProject, ProjectProjectEnvironmentsEdges,
     ProjectProjectServicesEdgesNodeServiceInstancesEdges,
@@ -21,6 +24,13 @@ pub fn get_functions_in_environment<'a>(
         })
         .filter(|service_instance| is_function_service(service_instance))
         .collect()
+}
+
+pub fn link_function(path: &Path, id: &str) -> Result<()> {
+    let mut c = Configs::new()?;
+    c.link_function(path.to_path_buf(), id.to_owned())?;
+    c.write()?;
+    Ok(())
 }
 
 fn is_function_service(

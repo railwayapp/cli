@@ -84,7 +84,7 @@ async fn create_function_service(
         args.domain,
     )
     .await?;
-    link_function(&args.path, &service_id)?;
+    common::link_function(&args.path, &service_id)?;
 
     success_spinner(&mut spinner, "Function created".into());
     Ok((service_id, domain))
@@ -134,13 +134,6 @@ async fn create_service(
     .id;
 
     Ok(service)
-}
-
-fn link_function(path: &Path, id: &str) -> Result<()> {
-    let mut c = Configs::new()?;
-    c.link_function(path.to_path_buf(), id.to_owned())?;
-    c.write()?;
-    Ok(())
 }
 
 async fn update_function_settings(
