@@ -3,7 +3,7 @@ use crate::{
     queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges},
     util::{
         progress::{create_spinner, success_spinner},
-        prompt::{fake_select, prompt_confirm_with_default, prompt_select, prompt_text},
+        prompt::{fake_select, prompt_select, prompt_text},
     },
 };
 use anyhow::bail;
@@ -23,7 +23,11 @@ pub async fn delete(
     let services = common::get_functions_in_environment(&project, environment);
     let function = select_function_to_delete(&args, services.as_slice(), terminal)?;
 
-    if !confirm_deletion(&args, terminal)? {
+    if !common::confirm(
+        args.yes,
+        terminal,
+        "Are you sure you want to delete this function?",
+    )? {
         return Ok(());
     }
 
@@ -62,24 +66,6 @@ fn find_function_by_identifier<'a>(
             Ok(function)
         }
         None => bail!("Service {} not found", identifier),
-    }
-}
-
-fn confirm_deletion(args: &Delete, terminal: bool) -> Result<bool> {
-    let yes = args.yes.unwrap_or(false);
-
-    if yes {
-        fake_select("Are you sure you want to delete this function?", "Yes");
-        Ok(true)
-    } else if args.yes.is_some() && !yes {
-        fake_select("Are you sure you want to delete this function?", "No");
-        Ok(false)
-    } else if terminal {
-        prompt_confirm_with_default("Are you sure you want to delete this function?", false)
-    } else {
-        bail!(
-            "The skip confirmation flag (-y,--yes) must be provided when not running in a terminal"
-        )
     }
 }
 

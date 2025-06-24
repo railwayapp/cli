@@ -17,6 +17,7 @@ pub struct Args {
 
 mod common;
 mod delete;
+mod link;
 mod list;
 mod new;
 
@@ -84,13 +85,17 @@ structstruck::strike! {
         })
 
         /// Pull changes from the linked function remotely
-        Pull,
+        Pull(struct {
+            /// The path to the function
+            #[clap(long, short)]
+            path: Option<PathBuf>
+        }),
 
         /// Link a function manually
         Link(struct {
             /// The path to the file
             #[clap(long, short)]
-            path: PathBuf,
+            path: Option<PathBuf>,
 
             /// The ID/name of the function you wish to link to
             #[clap(long, short)]
@@ -122,6 +127,7 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::List => list::list(environment, project.clone()).await,
         Commands::New(args) => new::new(environment, project.clone(), args).await,
         Commands::Delete(args) => delete::delete(environment, project.clone(), args).await,
+        Commands::Link(link) => link::link(environment, project.clone(), link).await,
         _ => unreachable!(),
     }?;
 

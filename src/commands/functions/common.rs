@@ -1,9 +1,15 @@
+use anyhow::bail;
+
 use super::*;
+use base64::prelude::*;
 use std::path::Path;
 
-use crate::queries::project::{
-    ProjectProject, ProjectProjectEnvironmentsEdges,
-    ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+use crate::{
+    queries::project::{
+        ProjectProject, ProjectProjectEnvironmentsEdges,
+        ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    },
+    util::prompt::{fake_select, prompt_confirm_with_default},
 };
 
 pub fn get_functions_in_environment<'a>(
@@ -49,4 +55,33 @@ fn is_function_service(
             .unwrap_or_default()
             .starts_with("ghcr.io/railwayapp/function")
     })
+}
+
+pub fn confirm(arg: Option<bool>, terminal: bool, message: &str) -> Result<bool> {
+    let yes = arg.unwrap_or(false);
+
+    if yes {
+        fake_select(message, "Yes");
+        Ok(true)
+    } else if arg.is_some() && !yes {
+        fake_select(message, "No");
+        Ok(false)
+    } else if terminal {
+        prompt_confirm_with_default(message, false)
+    } else {
+        bail!(
+            "The skip confirmation flag (-y,--yes) must be provided when not running in a terminal"
+        )
+    }
+}
+
+pub fn get_start_cmd(path: &Path) -> Result<String> {
+    let content = std::fs::read(path)?;
+    let cmd = format!("./run.sh {}", BASE64_STANDARD.encode(content));
+
+    if cmd.len() >= 96 * 1024 {
+        bail!("Your function is too large (must be smaller than 96kb base64)");
+    }
+
+    Ok(cmd)
 }

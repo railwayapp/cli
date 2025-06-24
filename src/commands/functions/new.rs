@@ -12,7 +12,6 @@ use crate::{
     },
 };
 use anyhow::bail;
-use base64::prelude::*;
 use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
@@ -42,23 +41,12 @@ pub async fn new(
     Ok(())
 }
 
-fn get_start_cmd(path: &Path) -> Result<String> {
-    let content = std::fs::read(path)?;
-    let cmd = format!("./run.sh {}", BASE64_STANDARD.encode(content));
-
-    if cmd.len() >= 96 * 1024 {
-        bail!("Your function is too large (must be smaller than 96kb base64)");
-    }
-
-    Ok(cmd)
-}
-
 async fn create_function_service(
     args: &Arguments,
     environment: &ProjectProjectEnvironmentsEdges,
     project: &ProjectProject,
 ) -> Result<(String, Option<String>)> {
-    let cmd = get_start_cmd(&args.path)?;
+    let cmd = common::get_start_cmd(&args.path)?;
     let mut spinner = create_spinner("Creating function".into());
 
     let configs = Configs::new()?;
@@ -376,7 +364,7 @@ async fn handle_file_change_event(
     }
 
     let mut spinner = create_spinner("Updating function".into());
-    let cmd = match get_start_cmd(&args.path) {
+    let cmd = match common::get_start_cmd(&args.path) {
         Ok(cmd) => cmd,
         Err(_) => {
             println!("{}: Your function is too large", "ERROR".red());
@@ -474,16 +462,6 @@ async fn monitor_deployment_status(
         }
     }
 }
-
-// async fn show_error_information(base_info: &str, deployment: &DeploymentDeployment) -> Result<()> {
-//     let configs = Configs::new()?;
-//     let client = GQLClient::new_authorized(&configs)?;
-//     let deploy_logs = post_graphql::<queries::DeploymentLogs, _>(&client, configs.get_backboard(), queries::deployment_logs::Variables {
-//         deployment_id: deployment.id.clone()
-//     }).await?;
-//     dbg!(deploy_logs);
-//     Ok(())
-// }
 
 fn display_deployment_info(base_info: &str, status: &DeploymentStatus) {
     if clear().is_err() {
