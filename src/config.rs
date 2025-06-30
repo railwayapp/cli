@@ -47,6 +47,7 @@ pub struct RailwayConfig {
     pub user: RailwayUser,
     pub last_update_check: Option<DateTime<Utc>>,
     pub new_version_available: Option<String>,
+    /// (path, id)
     pub linked_functions: Option<Vec<(String, String)>>,
 }
 
@@ -305,13 +306,54 @@ impl Configs {
         Ok(())
     }
 
-    pub fn unlink_function(&mut self, id: String) -> Result<()> {
-        let functions = self
-            .root_config
-            .linked_functions
-            .get_or_insert_with(Vec::new);
-        functions.retain(|(_, i)| *i != id);
+    pub fn get_function(&self, path: PathBuf) -> Result<Option<String>> {
+        let canonical_path = path.canonicalize()?;
+        let path_str = canonical_path
+            .to_str()
+            .ok_or(anyhow!("couldn't convert string"))?;
 
+        if let Some(functions) = &self.root_config.linked_functions {
+            Ok(functions.iter().find_map(|(p, id)| {
+                if p == path_str {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_functions_in_directory(&self, path: PathBuf) -> Result<Vec<(String, String)>> {
+        let canonical_path = path.canonicalize()?;
+        let path_str = canonical_path
+            .to_str()
+            .ok_or(anyhow!("couldn't convert string"))?;
+
+        if let Some(functions) = &self.root_config.linked_functions {
+            Ok(functions
+                .iter()
+                .filter_map(|(p, id)| {
+                    if p.starts_with(path_str) {
+                        Some((p.clone(), id.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn unlink_function(&mut self, id: String) -> Result<()> {
+        if let Some(functions) = &mut self.root_config.linked_functions {
+            if let Some(pos) = functions.iter().position(|(_, i)| *i == id) {
+                functions.swap_remove(pos);
+                functions.retain(|(_, i)| *i != id);
+            }
+        }
         Ok(())
     }
 

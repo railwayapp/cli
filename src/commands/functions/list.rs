@@ -41,7 +41,7 @@ fn format_function_entry(
     let mut entry = String::new();
 
     let colored_name = get_colored_function_name(function);
-    write!(entry, "{}", colored_name).unwrap();
+    write!(entry, "{colored_name}").unwrap();
 
     append_runtime_info(&mut entry, function);
     append_next_cron_run(&mut entry, function);

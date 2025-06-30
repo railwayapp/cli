@@ -222,7 +222,7 @@ impl std::fmt::Display for custom_domain_create::DNSRecordType {
             Self::DNS_RECORD_TYPE_NS => write!(f, "NS"),
             Self::DNS_RECORD_TYPE_UNSPECIFIED => write!(f, "UNSPECIFIED"),
             Self::UNRECOGNIZED => write!(f, "UNRECOGNIZED"),
-            Self::Other(s) => write!(f, "{}", s),
+            Self::Other(s) => write!(f, "{s}"),
         }
     }
 }

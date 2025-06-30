@@ -35,7 +35,7 @@ pub async fn new(
     if args.watch {
         watch_for_file_changes(args, service_id, environment, info).await?;
     } else {
-        println!("{}", info);
+        println!("{info}");
     }
 
     Ok(())
@@ -206,7 +206,7 @@ fn format_function_info(
         args.name.blue(),
         project.name.blue(),
         environment.node.name.clone().blue(),
-        args.path.display().to_string().blue()
+        args.path.to_string_lossy().blue()
     );
 
     append_domain_info(&mut info, domain);
@@ -286,7 +286,7 @@ fn setup_file_watcher(
 fn display_initial_info(args: &Arguments, info: &str) -> Result<()> {
     if args.terminal {
         clear()?;
-        println!("{}", info);
+        println!("{info}");
     }
     Ok(())
 }
@@ -339,12 +339,12 @@ fn handle_debounced_events(
     match res {
         Ok(events) if !events.is_empty() => {
             if let Err(e) = tx.send(Ok(())) {
-                eprintln!("Failed to send debounced file event: {}", e);
+                eprintln!("Failed to send debounced file event: {e}");
             }
         }
         Err(e) => {
             if let Err(send_err) = tx.send(Err(e)) {
-                eprintln!("Failed to send debounced error: {}", send_err);
+                eprintln!("Failed to send debounced error: {send_err}");
             }
         }
         _ => {} // Empty events, ignore
@@ -380,8 +380,8 @@ async fn handle_file_change_event(
         &client,
         configs.get_backboard(),
         mutations::function_update::Variables {
-            service_id: service_id.as_ref().clone(),
-            environment_id: environment_id.as_ref().clone(),
+            service_id: (**service_id).clone(),
+            environment_id: (**environment_id).clone(),
             sleep_application: None,
             cron_schedule: None,
             start_command: Some(cmd),
@@ -394,8 +394,8 @@ async fn handle_file_change_event(
         &client,
         configs.get_backboard(),
         mutations::service_instance_deploy::Variables {
-            environment_id: environment_id.as_ref().clone(),
-            service_id: service_id.as_ref().clone(),
+            environment_id: (**environment_id).clone(),
+            service_id: (**service_id).clone(),
         },
     )
     .await?
@@ -411,14 +411,11 @@ async fn handle_file_change_event(
 
     // Create new cancellation token and spawn deployment monitoring task
     let cancel_token = CancellationToken::new();
-    let info_clone = info.to_string();
-    let terminal = args.terminal;
-
     tokio::spawn(monitor_deployment_status(
         stream,
         cancel_token.clone(),
-        info_clone,
-        terminal,
+        info.to_string(),
+        args.terminal,
     ));
 
     Ok(Some(cancel_token))
@@ -468,9 +465,11 @@ fn display_deployment_info(base_info: &str, status: &DeploymentStatus) {
         return;
     }
 
-    let mut info = base_info.to_string();
     let status_display = format_deployment_status(status);
     let timestamp = format_current_timestamp();
+
+    let mut info = String::with_capacity(base_info.len() + 50);
+    info.push_str(base_info);
 
     if writedoc!(
         &mut info,
@@ -480,7 +479,7 @@ fn display_deployment_info(base_info: &str, status: &DeploymentStatus) {
     )
     .is_ok()
     {
-        println!("{}", info);
+        println!("{info}");
     }
 }
 
@@ -535,10 +534,7 @@ fn prompt(args: New) -> Result<Arguments> {
         bail!("Name must be provided when not running in a terminal");
     };
     let path = if let Some(path) = args.path {
-        fake_select(
-            "Enter the path to your function",
-            &path.display().to_string(),
-        );
+        fake_select("Enter the path to your function", &path.to_string_lossy());
         path
     } else if terminal {
         prompt_path("Enter the path of your function")?
@@ -571,7 +567,7 @@ fn prompt(args: New) -> Result<Arguments> {
     } else {
         None
     }
-    .map(|s| s.trim().to_string());
+    .map(|s| s.trim().to_owned());
     if let Some(cron) = &cron {
         let schedule = croner::Cron::new(cron).parse();
         if let Ok(schedule) = schedule {

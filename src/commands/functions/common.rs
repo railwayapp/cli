@@ -1,4 +1,5 @@
 use anyhow::bail;
+use is_terminal::IsTerminal;
 
 use super::*;
 use base64::prelude::*;
@@ -9,7 +10,7 @@ use crate::{
         ProjectProject, ProjectProjectEnvironmentsEdges,
         ProjectProjectServicesEdgesNodeServiceInstancesEdges,
     },
-    util::prompt::{fake_select, prompt_confirm_with_default},
+    util::prompt::{fake_select, prompt_confirm_with_default, prompt_path},
 };
 
 pub fn get_functions_in_environment<'a>(
@@ -84,4 +85,28 @@ pub fn get_start_cmd(path: &Path) -> Result<String> {
     }
 
     Ok(cmd)
+}
+
+pub fn get_function_from_path(path: Option<PathBuf>) -> Result<(String, PathBuf)> {
+    let configs = Configs::new()?;
+    let terminal = std::io::stdout().is_terminal();
+    let path = if let Some(path) = path {
+        fake_select(
+            "Enter the path to your function",
+            &path.display().to_string(),
+        );
+        path
+    } else if terminal {
+        prompt_path("Enter the path of your function")?
+    } else {
+        bail!("Path must be provided when not running in a terminal");
+    };
+    if !path.exists() {
+        bail!("The path provided must exist");
+    }
+    let id = match configs.get_function(path.clone())? {
+        Some(id) => id,
+        None => bail!("The provided path ({}) hasn't been linked to any functions. Run `railway functions link` to link a function.", path.clone().display())
+    };
+    Ok((id, path.clone()))
 }
