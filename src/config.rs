@@ -325,7 +325,7 @@ impl Configs {
         }
     }
 
-    pub fn get_functions_in_directory(&self, path: PathBuf) -> Result<Vec<(String, String)>> {
+    pub fn get_functions_in_directory(&self, path: PathBuf) -> Result<Vec<(PathBuf, String)>> {
         let canonical_path = path.canonicalize()?;
         let path_str = canonical_path
             .to_str()
@@ -336,7 +336,12 @@ impl Configs {
                 .iter()
                 .filter_map(|(p, id)| {
                     if p.starts_with(path_str) {
-                        Some((p.clone(), id.clone()))
+                        let p = PathBuf::from(p);
+                        if p.exists() {
+                            Some((p, id.clone()))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }

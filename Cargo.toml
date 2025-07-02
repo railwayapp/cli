@@ -98,6 +98,7 @@ croner = "2.1.0"
 tokio-util = "0.7.15"
 notify-debouncer-mini = "0.6.0"
 similar = "2.7.0"
+pathdiff = "0.2.3"
 
 [profile.release]
 lto = "fat"
