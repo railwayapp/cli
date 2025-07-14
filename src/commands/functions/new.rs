@@ -9,20 +9,17 @@ use crate::{
             fake_select, fake_select_cancelled, prompt_confirm_with_default, prompt_path,
             prompt_text, prompt_text_skippable,
         },
+        watcher::FileWatcher,
     },
 };
 use anyhow::bail;
 use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
-use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
 use std::io::Write as _;
-use std::path::Path;
 use std::{fmt::Write as _, sync::Arc};
 use tokio_util::sync::CancellationToken;
-
 pub async fn new(
     environment: &ProjectProjectEnvironmentsEdges,
     project: ProjectProject,
@@ -252,136 +249,76 @@ async fn watch_for_file_changes(
     environment: &ProjectProjectEnvironmentsEdges,
     info: String,
 ) -> Result<()> {
-    let (watch_tx, file_change) = tokio::sync::mpsc::unbounded_channel();
-    let debounce_tx = watch_tx.clone();
-
-    let _debouncer = setup_file_watcher(&args.path, debounce_tx)?;
-    watch_tx.send(Ok(()))?;
-
-    let service_arc = Arc::new(service_id);
-    let env_arc = Arc::new(environment.node.id.clone());
-
-    display_initial_info(&args, &info)?;
-
-    run_watch_loop(args, service_arc, env_arc, info, file_change).await
-}
-
-fn setup_file_watcher(
-    path: &Path,
-    tx: tokio::sync::mpsc::UnboundedSender<Result<(), notify::Error>>,
-) -> Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
-    let mut debouncer = new_debouncer(
-        std::time::Duration::from_secs(5),
-        move |res: DebounceEventResult| {
-            handle_debounced_events(res, &tx);
-        },
-    )?;
-
-    debouncer
-        .watcher()
-        .watch(path, RecursiveMode::NonRecursive)?;
-    Ok(debouncer)
-}
-
-fn display_initial_info(args: &Arguments, info: &str) -> Result<()> {
     if args.terminal {
         clear()?;
         println!("{info}");
     }
-    Ok(())
+    let watcher = FileWatcher::new(args.path.clone());
+    let service_id = Arc::new(service_id);
+    let environment_id = Arc::new(environment.node.id.clone());
+    let path = args.path.clone();
+    let terminal = args.terminal;
+    watcher
+        .watch(move |token, event| {
+            let service_id = service_id.clone();
+            let environment_id = environment_id.clone();
+            let path = path.clone();
+            let info = info.clone();
+            async move {
+                if !matches!(
+                    event.kind,
+                    notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
+                ) {
+                    return Ok(());
+                }
+                // Call handle_function_change
+                match handle_function_change(
+                    service_id,
+                    environment_id,
+                    path,
+                    terminal,
+                    info,
+                    token,
+                )
+                .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        eprintln!("Error handling function change: {e}");
+                        Ok(())
+                    }
+                }
+            }
+        })
+        .await
 }
 
-async fn run_watch_loop(
-    args: Arguments,
+async fn handle_function_change(
     service_id: Arc<String>,
     environment_id: Arc<String>,
+    path: std::path::PathBuf,
+    terminal: bool,
     info: String,
-    mut file_change: tokio::sync::mpsc::UnboundedReceiver<Result<(), notify::Error>>,
+    token: CancellationToken,
 ) -> Result<()> {
-    let mut current_cancel_token: Option<CancellationToken> = None;
-    let mut first_run = true;
-
-    loop {
-        tokio::select! {
-            event = file_change.recv() => {
-                if first_run {
-                    first_run = false;
-                    continue;
-                }
-
-                if let Some(Ok(_)) = event {
-                    current_cancel_token = handle_file_change_event(
-                        &args,
-                        &service_id,
-                        &environment_id,
-                        &info,
-                        current_cancel_token,
-                    ).await?;
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                println!("\nStopping file watcher...");
-                if let Some(token) = current_cancel_token.take() {
-                    token.cancel();
-                }
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn handle_debounced_events(
-    res: DebounceEventResult,
-    tx: &tokio::sync::mpsc::UnboundedSender<Result<(), notify::Error>>,
-) {
-    match res {
-        Ok(events) if !events.is_empty() => {
-            if let Err(e) = tx.send(Ok(())) {
-                eprintln!("Failed to send debounced file event: {e}");
-            }
-        }
-        Err(e) => {
-            if let Err(send_err) = tx.send(Err(e)) {
-                eprintln!("Failed to send debounced error: {send_err}");
-            }
-        }
-        _ => {} // Empty events, ignore
-    }
-}
-
-async fn handle_file_change_event(
-    args: &Arguments,
-    service_id: &Arc<String>,
-    environment_id: &Arc<String>,
-    info: &str,
-    current_cancel_token: Option<CancellationToken>,
-) -> Result<Option<CancellationToken>> {
-    // Cancel any existing deployment stream
-    if let Some(token) = current_cancel_token {
-        token.cancel();
-    }
-
     let mut spinner = create_spinner("Updating function".into());
-    let cmd = match common::get_start_cmd(&args.path) {
+    let cmd = match common::get_start_cmd(&path) {
         Ok(cmd) => cmd,
         Err(_) => {
             println!("{}: Your function is too large", "ERROR".red());
-            return Ok(None);
+            return Err(anyhow::anyhow!("Function too big (max size of 96kb)"));
         }
     };
 
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    // Update function
     post_graphql::<mutations::FunctionUpdate, _>(
         &client,
         configs.get_backboard(),
         mutations::function_update::Variables {
-            service_id: (**service_id).clone(),
-            environment_id: (**environment_id).clone(),
+            service_id: (*service_id).clone(),
+            environment_id: (*environment_id).clone(),
             sleep_application: None,
             cron_schedule: None,
             start_command: Some(cmd),
@@ -389,13 +326,12 @@ async fn handle_file_change_event(
     )
     .await?;
 
-    // Deploy function
     let latest = post_graphql::<mutations::ServiceInstanceDeploy, _>(
         &client,
         configs.get_backboard(),
         mutations::service_instance_deploy::Variables {
-            environment_id: (**environment_id).clone(),
-            service_id: (**service_id).clone(),
+            environment_id: (*environment_id).clone(),
+            service_id: (*service_id).clone(),
         },
     )
     .await?
@@ -409,16 +345,15 @@ async fn handle_file_change_event(
 
     success_spinner(&mut spinner, "Function updated".into());
 
-    // Create new cancellation token and spawn deployment monitoring task
-    let cancel_token = CancellationToken::new();
-    tokio::spawn(monitor_deployment_status(
-        stream,
-        cancel_token.clone(),
-        info.to_string(),
-        args.terminal,
-    ));
+    tokio::spawn(monitor_deployment_status(stream, token, info, terminal));
 
-    Ok(Some(cancel_token))
+    Ok(())
+}
+
+fn clear() -> Result<(), anyhow::Error> {
+    print!("\x1B[2J\x1B[1;1H");
+    std::io::stdout().flush()?;
+    Ok(())
 }
 
 async fn monitor_deployment_status(
@@ -441,15 +376,9 @@ async fn monitor_deployment_status(
                     Some(Ok(stream_data)) => {
                         if let Some(data) = stream_data.data {
                             let deployment = data.deployment;
-                            // dbg!(&deployment.status);
-                            // if matches!(deployment.status, DeploymentStatus::CRASHED) {
-                            //     show_error_information(&info, &deployment).await.unwrap();
-                            // }
                             if terminal {
                                 display_deployment_info(&info, &deployment.status);
                             }
-
-
                         }
                     }
                     Some(Err(_)) | None => break,
@@ -505,12 +434,6 @@ fn format_current_timestamp() -> colored::ColoredString {
         .format("%I:%M:%S %p")
         .to_string()
         .dimmed()
-}
-
-fn clear() -> Result<(), anyhow::Error> {
-    print!("\x1B[2J\x1B[1;1H");
-    std::io::stdout().flush()?;
-    Ok(())
 }
 
 struct Arguments {

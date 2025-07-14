@@ -96,7 +96,6 @@ notify = "8.0.0"
 cron-descriptor = "0.1.1"
 croner = "2.1.0"
 tokio-util = "0.7.15"
-notify-debouncer-mini = "0.6.0"
 similar = "2.7.0"
 pathdiff = "0.2.3"
 
