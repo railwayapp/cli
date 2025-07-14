@@ -17,8 +17,8 @@ use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
+use std::fmt::Write as _;
 use std::io::Write as _;
-use std::{fmt::Write as _, sync::Arc};
 use tokio_util::sync::CancellationToken;
 pub async fn new(
     environment: &ProjectProjectEnvironmentsEdges,
@@ -254,16 +254,18 @@ async fn watch_for_file_changes(
         println!("{info}");
     }
     let watcher = FileWatcher::new(args.path.clone());
-    let service_id = Arc::new(service_id);
-    let environment_id = Arc::new(environment.node.id.clone());
-    let path = args.path.clone();
-    let terminal = args.terminal;
+    let environment_id = environment.node.id.clone();
     watcher
         .watch(move |token, event| {
             let service_id = service_id.clone();
             let environment_id = environment_id.clone();
-            let path = path.clone();
-            let info = info.clone();
+            let path = args.path.clone();
+            // Only clone info if we're in terminal mode
+            let info = if args.terminal {
+                Some(info.clone())
+            } else {
+                None
+            };
             async move {
                 if !matches!(
                     event.kind,
@@ -271,17 +273,8 @@ async fn watch_for_file_changes(
                 ) {
                     return Ok(());
                 }
-                // Call handle_function_change
-                match handle_function_change(
-                    service_id,
-                    environment_id,
-                    path,
-                    terminal,
-                    info,
-                    token,
-                )
-                .await
-                {
+
+                match handle_function_change(service_id, environment_id, path, info, token).await {
                     Ok(_) => Ok(()),
                     Err(e) => {
                         eprintln!("Error handling function change: {e}");
@@ -294,11 +287,10 @@ async fn watch_for_file_changes(
 }
 
 async fn handle_function_change(
-    service_id: Arc<String>,
-    environment_id: Arc<String>,
+    service_id: String,
+    environment_id: String,
     path: std::path::PathBuf,
-    terminal: bool,
-    info: String,
+    info: Option<String>,
     token: CancellationToken,
 ) -> Result<()> {
     let mut spinner = create_spinner("Updating function".into());
@@ -317,8 +309,8 @@ async fn handle_function_change(
         &client,
         configs.get_backboard(),
         mutations::function_update::Variables {
-            service_id: (*service_id).clone(),
-            environment_id: (*environment_id).clone(),
+            service_id: service_id.clone(),
+            environment_id: environment_id.clone(),
             sleep_application: None,
             cron_schedule: None,
             start_command: Some(cmd),
@@ -330,8 +322,8 @@ async fn handle_function_change(
         &client,
         configs.get_backboard(),
         mutations::service_instance_deploy::Variables {
-            environment_id: (*environment_id).clone(),
-            service_id: (*service_id).clone(),
+            environment_id,
+            service_id,
         },
     )
     .await?
@@ -345,7 +337,9 @@ async fn handle_function_change(
 
     success_spinner(&mut spinner, "Function updated".into());
 
-    tokio::spawn(monitor_deployment_status(stream, token, info, terminal));
+    if let Some(info) = info {
+        tokio::spawn(monitor_deployment_status(stream, token, info));
+    }
 
     Ok(())
 }
@@ -365,7 +359,6 @@ async fn monitor_deployment_status(
         > + Unpin,
     cancel_token: CancellationToken,
     info: String,
-    terminal: bool,
 ) {
     tokio::pin!(stream);
 
@@ -376,9 +369,7 @@ async fn monitor_deployment_status(
                     Some(Ok(stream_data)) => {
                         if let Some(data) = stream_data.data {
                             let deployment = data.deployment;
-                            if terminal {
-                                display_deployment_info(&info, &deployment.status);
-                            }
+                            display_deployment_info(&info, &deployment.status);
                         }
                     }
                     Some(Err(_)) | None => break,
