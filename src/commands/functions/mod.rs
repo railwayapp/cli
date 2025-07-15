@@ -21,6 +21,7 @@ mod link;
 mod list;
 mod new;
 mod pull;
+mod push;
 
 structstruck::strike! {
     #[strikethrough[derive(Parser)]]
@@ -69,20 +70,16 @@ structstruck::strike! {
             yes: Option<bool>
         }),
 
-        /// Test a function locally (requires Docker)
-        #[clap(visible_alias = "t")]
-        Test(struct {
-            /// Watch for changes of the file and re-run upon save
-            #[clap(long, short)]
-            watch: bool
-        })
-
         /// Push a new change to the function
         #[clap(visible_alias = "up")]
         Push(struct {
-            /// Watch for changes of the file and automatically push
+            /// The path to the function
             #[clap(long, short)]
-            watch: bool
+            path: Option<PathBuf>,
+
+            /// Watch for changes of the file and deploy upon save
+            #[clap(long, short, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+            watch: Option<bool>,
         })
 
         /// Pull changes from the linked function remotely
@@ -130,7 +127,7 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Delete(args) => delete::delete(environment, project.clone(), args).await,
         Commands::Link(link) => link::link(environment, project.clone(), link).await,
         Commands::Pull(pull) => pull::pull(environment, project.clone(), pull).await,
-        _ => unreachable!(),
+        Commands::Push(push) => push::push(environment, project.clone(), push).await,
     }?;
 
     Ok(())

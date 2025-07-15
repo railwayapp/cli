@@ -124,7 +124,7 @@ fn append_domain_info(
     entry: &mut String,
     function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
 ) -> Result<()> {
-    if has_domains(function) {
+    if common::has_domains(function) {
         write!(entry, " ({})", "http".blue())?;
     }
     Ok(())
@@ -149,11 +149,6 @@ fn append_linked_information(
         }
     }
     Ok(())
-}
-
-fn has_domains(function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges) -> bool {
-    !function.node.domains.custom_domains.is_empty()
-        || !function.node.domains.service_domains.is_empty()
 }
 
 fn display_no_functions_message(

@@ -330,7 +330,6 @@ impl Configs {
         let path_str = canonical_path
             .to_str()
             .ok_or(anyhow!("couldn't convert string"))?;
-
         if let Some(functions) = &self.root_config.linked_functions {
             Ok(functions
                 .iter()

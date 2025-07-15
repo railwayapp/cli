@@ -1,7 +1,4 @@
 use crate::queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
-use anyhow::bail;
-use base64::prelude::*;
-use similar::{ChangeTag, TextDiff};
 
 use super::*;
 
@@ -11,45 +8,20 @@ pub async fn pull(
     args: Pull,
 ) -> Result<()> {
     let (id, path) = common::get_function_from_path(args.path)?;
-    let functions = common::get_functions_in_environment(&project, environment);
-    let function = functions.iter().find(|f| f.node.service_id == id);
-    if let Some(function) = function {
-        if let Some(cmd) = &function.node.start_command {
-            let encoded = cmd.split(' ').next_back();
-            if let Some(encoded) = encoded {
-                let decoded = String::from_utf8(BASE64_STANDARD.decode(encoded)?)?;
-                let current = String::from_utf8(std::fs::read(&path)?)?;
-                let diff = TextDiff::from_lines(&current, &decoded);
-                let mut insertions = 0;
-                let mut deletions = 0;
-                let mut changes = 0;
+    let service = common::find_service(&project, environment, &id)
+        .ok_or_else(|| anyhow::anyhow!("Couldn't find service"))?;
 
-                for group in diff.grouped_ops(0) {
-                    for op in group {
-                        for change in diff.iter_changes(&op) {
-                            match change.tag() {
-                                ChangeTag::Delete => deletions += 1,
-                                ChangeTag::Insert => insertions += 1,
-                                ChangeTag::Equal => {}
-                            }
-                        }
+    println!(
+        "Pulling from function {}",
+        service.service_name.blue().bold()
+    );
 
-                        // Count it as a "change" if it's a Replace (both Delete and Insert)
-                        if op.tag() == similar::DiffTag::Replace {
-                            changes += 1;
-                        }
-                    }
-                }
-                std::fs::write(path, decoded)?;
-                println!("Function updated ({insertions} insertions, {deletions} deletions, {changes} changes)");
-            } else {
-                bail!("Function no longer uses the correct start command format")
-            }
-        }
-    } else {
-        bail!(
-            "The function linked to the path specified no longer exists in the current environment"
-        );
-    }
+    let decoded_content = common::extract_function_content(&service)?;
+    let current_content = std::fs::read_to_string(&path)?;
+    let diff_stats = common::calculate_diff(&current_content, &decoded_content);
+
+    std::fs::write(&path, &decoded_content)?;
+    println!("Function updated {diff_stats}");
+
     Ok(())
 }

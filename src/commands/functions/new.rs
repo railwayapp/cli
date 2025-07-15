@@ -17,8 +17,8 @@ use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
-use std::fmt::Write as _;
 use std::io::Write as _;
+use std::{fmt::Write as _, path::Path};
 use tokio_util::sync::CancellationToken;
 pub async fn new(
     environment: &ProjectProjectEnvironmentsEdges,
@@ -27,10 +27,25 @@ pub async fn new(
 ) -> Result<()> {
     let args = prompt(args)?;
     let (service_id, domain) = create_function_service(&args, environment, &project).await?;
-    let info = format_function_info(&args, &project, environment, &domain);
+    let info = format_function_info(
+        &project,
+        environment,
+        &domain,
+        args.name,
+        &args.path,
+        args.cron,
+    )?;
 
     if args.watch {
-        watch_for_file_changes(args, service_id, environment, info).await?;
+        watch_for_file_changes(
+            project,
+            service_id,
+            environment,
+            info,
+            args.path,
+            args.terminal,
+        )
+        .await?;
     } else {
         println!("{info}");
     }
@@ -187,12 +202,17 @@ async fn create_domain_if_requested(
     Ok(domain)
 }
 
-fn format_function_info(
-    args: &Arguments,
+pub fn format_function_info(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
     domain: &Option<String>,
-) -> String {
+    name: String,
+    path: &Path,
+    cron: Option<String>,
+) -> Result<String> {
+    let path = pathdiff::diff_paths(path.canonicalize()?, std::env::current_dir()?)
+        .map(|f| f.display().to_string())
+        .unwrap_or(path.display().to_string());
     let mut info = formatdoc!(
         "
         Name: {}
@@ -200,16 +220,16 @@ fn format_function_info(
         Environment: {}
         Local file: {}
         ",
-        args.name.blue(),
+        name.blue(),
         project.name.blue(),
         environment.node.name.clone().blue(),
-        args.path.to_string_lossy().blue()
+        path.blue()
     );
 
     append_domain_info(&mut info, domain);
-    append_cron_info(&mut info, &args.cron);
+    append_cron_info(&mut info, &cron);
 
-    info
+    Ok(info)
 }
 
 fn append_domain_info(info: &mut String, domain: &Option<String>) {
@@ -243,29 +263,33 @@ fn append_cron_info(info: &mut String, cron: &Option<String>) {
     }
 }
 
-async fn watch_for_file_changes(
-    args: Arguments,
+pub async fn watch_for_file_changes(
+    project: ProjectProject,
     service_id: String,
     environment: &ProjectProjectEnvironmentsEdges,
     info: String,
+    path: PathBuf,
+    terminal: bool,
 ) -> Result<()> {
-    if args.terminal {
+    if terminal {
         clear()?;
-        println!("{info}");
+        if let Some(f) = common::find_service(&project, environment, &service_id) {
+            if let Some(ld) = f.latest_deployment {
+                display_deployment_info(info.as_str(), &ld.status.into());
+            }
+        } else {
+            println!("{info}");
+        }
     }
-    let watcher = FileWatcher::new(args.path.clone());
+    let watcher = FileWatcher::new(path.clone());
     let environment_id = environment.node.id.clone();
     watcher
         .watch(move |token, event| {
             let service_id = service_id.clone();
             let environment_id = environment_id.clone();
-            let path = args.path.clone();
+            let path = path.clone();
             // Only clone info if we're in terminal mode
-            let info = if args.terminal {
-                Some(info.clone())
-            } else {
-                None
-            };
+            let info = if terminal { Some(info.clone()) } else { None };
             async move {
                 if !matches!(
                     event.kind,

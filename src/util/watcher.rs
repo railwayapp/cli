@@ -47,7 +47,7 @@ impl FileWatcher {
     fn setup_file_watcher(
         &self,
         tx: tokio::sync::mpsc::UnboundedSender<Result<notify::Event, notify::Error>>,
-    ) -> Result<notify::FsEventWatcher> {
+    ) -> Result<notify::RecommendedWatcher> {
         let mut watcher = RecommendedWatcher::new(
             move |res| {
                 if let Err(e) = tx.send(res) {

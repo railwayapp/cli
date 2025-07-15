@@ -41,10 +41,12 @@ query Project($id: String!) {
                   serviceDomains {
                     id
                     domain
+                    targetPort
                   }
                   customDomains {
                     id
                     domain
+                    targetPort
                   }
                 }
                 cronSchedule

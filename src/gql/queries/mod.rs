@@ -1,6 +1,8 @@
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 
+use crate::{queries::project::DeploymentStatus, subscription};
+
 type DateTime = chrono::DateTime<chrono::Utc>;
 type EnvironmentVariables = std::collections::BTreeMap<String, Option<String>>;
 //type DeploymentMeta = std::collections::BTreeMap<String, serde_json::Value>;
@@ -211,3 +213,27 @@ pub struct LatestFunctionVersion;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct LatestDeployment;
+
+type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
+impl From<project::DeploymentStatus> for SubscriptionDeploymentStatus {
+    fn from(value: project::DeploymentStatus) -> Self {
+        match value {
+            project::DeploymentStatus::BUILDING => SubscriptionDeploymentStatus::BUILDING,
+            project::DeploymentStatus::CRASHED => SubscriptionDeploymentStatus::CRASHED,
+            project::DeploymentStatus::DEPLOYING => SubscriptionDeploymentStatus::DEPLOYING,
+            project::DeploymentStatus::FAILED => SubscriptionDeploymentStatus::FAILED,
+            project::DeploymentStatus::INITIALIZING => SubscriptionDeploymentStatus::INITIALIZING,
+            project::DeploymentStatus::NEEDS_APPROVAL => {
+                SubscriptionDeploymentStatus::NEEDS_APPROVAL
+            }
+            project::DeploymentStatus::QUEUED => SubscriptionDeploymentStatus::QUEUED,
+            project::DeploymentStatus::REMOVED => SubscriptionDeploymentStatus::REMOVED,
+            project::DeploymentStatus::REMOVING => SubscriptionDeploymentStatus::REMOVING,
+            project::DeploymentStatus::SKIPPED => SubscriptionDeploymentStatus::SKIPPED,
+            project::DeploymentStatus::SLEEPING => SubscriptionDeploymentStatus::SLEEPING,
+            project::DeploymentStatus::SUCCESS => SubscriptionDeploymentStatus::SUCCESS,
+            project::DeploymentStatus::WAITING => SubscriptionDeploymentStatus::WAITING,
+            project::DeploymentStatus::Other(s) => SubscriptionDeploymentStatus::Other(s),
+        }
+    }
+}
