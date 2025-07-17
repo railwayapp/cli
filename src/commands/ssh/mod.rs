@@ -43,9 +43,9 @@ pub struct Args {
     #[arg(long = "deployment-instance", value_name = "deployment-instance-id")]
     deployment_instance: Option<String>,
 
-    /// SSH into the service inside a tmux session. Installs tmux if it's not installed
-    #[clap(long)]
-    session: bool,
+    /// SSH into the service inside a tmux session. Installs tmux if it's not installed. Optionally, provide a session name (--session name)
+    #[clap(long, value_name = "SESSION_NAME", default_missing_value = "railway", num_args = 0..=1)]
+    session: Option<String>,
 
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
@@ -58,8 +58,8 @@ pub async fn command(args: Args) -> Result<()> {
 
     let params = get_ssh_connect_params(args.clone(), &configs, &client).await?;
 
-    if args.session {
-        run_persistent_session(&params).await?;
+    if let Some(name) = args.session {
+        run_persistent_session(&params, name).await?;
         return Ok(());
     }
 
@@ -89,7 +89,7 @@ pub async fn command(args: Args) -> Result<()> {
     Ok(())
 }
 
-async fn run_persistent_session(params: &terminal::SSHConnectParams) -> Result<()> {
+async fn run_persistent_session(params: &terminal::SSHConnectParams, name: String) -> Result<()> {
     ensure_tmux_is_installed(params).await?;
 
     loop {
@@ -113,7 +113,9 @@ async fn run_persistent_session(params: &terminal::SSHConnectParams) -> Result<(
         initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
 
         terminal_client
-            .send_data("exec tmux new-session -A -s railway \\; set -g mouse on \n")
+            .send_data(
+                format!("exec tmux new-session -A -s {name} \\; set -g mouse on \n").as_str(),
+            )
             .await?;
 
         // Resend the window size after starting a tmux session
