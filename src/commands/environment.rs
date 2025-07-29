@@ -307,6 +307,7 @@ async fn upsert_variables(
                 environment_id: env_id,
                 service_id,
                 variables,
+                skip_deploys: None,
             };
             let _response =
                 post_graphql::<mutations::VariableCollectionUpsert, _>(&client, backboard, vars)
