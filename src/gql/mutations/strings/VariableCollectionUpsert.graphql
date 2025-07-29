@@ -1,5 +1,5 @@
-mutation VariableCollectionUpsert($projectId: String!, $serviceId: String!, $environmentId: String!, $variables: EnvironmentVariables!) {
+mutation VariableCollectionUpsert($projectId: String!, $serviceId: String!, $environmentId: String!, $variables: EnvironmentVariables!, $skipDeploys: Boolean) {
   variableCollectionUpsert(
-    input: {projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, variables: $variables}
+    input: {projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, variables: $variables, skipDeploys: $skipDeploys}
   )
 }

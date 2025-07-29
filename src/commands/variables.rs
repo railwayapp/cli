@@ -37,6 +37,10 @@ pub struct Args {
     /// Output in JSON format
     #[clap(long)]
     json: bool,
+
+    /// Skip triggering deploys when setting variables
+    #[clap(long)]
+    skip_deploys: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -78,6 +82,7 @@ pub async fn command(args: Args) -> Result<()> {
             service_id,
             &client,
             &configs,
+            args.skip_deploys,
         )
         .await?;
         return Ok(());
@@ -131,6 +136,7 @@ async fn set_variables(
     service_id: String,
     client: &reqwest::Client,
     configs: &Configs,
+    skip_deploys: bool,
 ) -> Result<(), anyhow::Error> {
     let variables: BTreeMap<String, String> = set
         .iter()
@@ -164,6 +170,7 @@ async fn set_variables(
         environment_id,
         service_id,
         variables,
+        skip_deploys: if skip_deploys { Some(true) } else { None },
     };
     post_graphql::<mutations::VariableCollectionUpsert, _>(client, configs.get_backboard(), vars)
         .await?;
