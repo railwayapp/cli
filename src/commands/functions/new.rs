@@ -6,8 +6,8 @@ use crate::{
     util::{
         progress::{create_spinner, success_spinner},
         prompt::{
-            fake_select, fake_select_cancelled, prompt_confirm_with_default, prompt_path,
-            prompt_path_with_default, prompt_text_skippable, prompt_text_with_placeholder_if_blank,
+            fake_select, prompt_confirm_with_default, prompt_path_with_default,
+            prompt_text_with_placeholder_if_blank,
         },
         watcher::FileWatcher,
     },
@@ -33,6 +33,7 @@ pub async fn new(
         environment,
         &domain,
         service_name,
+        service_id.clone(),
         &args.path,
         args.cron,
     )?;
@@ -207,6 +208,7 @@ pub fn format_function_info(
     environment: &ProjectProjectEnvironmentsEdges,
     domain: &Option<String>,
     name: String,
+    service_id: String,
     path: &Path,
     cron: Option<String>,
 ) -> Result<String> {
@@ -219,11 +221,17 @@ pub fn format_function_info(
         Project: {}
         Environment: {}
         Local file: {}
+        Link: {}
         ",
         name.blue(),
         project.name.blue(),
         environment.node.name.clone().blue(),
-        path.blue()
+        path.blue(),
+        format!(
+            "https://railway.com/project/{}/service/{}?environmentId={}",
+            project.id, service_id, environment.node.id
+        )
+        .blue()
     );
 
     append_domain_info(&mut info, domain);
@@ -275,7 +283,7 @@ pub async fn watch_for_file_changes(
         clear()?;
         if let Some(f) = common::find_service(&project, environment, &service_id) {
             if let Some(ld) = f.latest_deployment {
-                display_deployment_info(info.as_str(), &ld.status.into());
+                display_deployment_info(info.as_str(), &ld.status.into(), ld.deployment_stopped);
             }
         } else {
             println!("{info}");
@@ -393,7 +401,7 @@ async fn monitor_deployment_status(
                     Some(Ok(stream_data)) => {
                         if let Some(data) = stream_data.data {
                             let deployment = data.deployment;
-                            display_deployment_info(&info, &deployment.status);
+                            display_deployment_info(&info, &deployment.status, deployment.deployment_stopped);
                         }
                     }
                     Some(Err(_)) | None => break,
@@ -404,12 +412,17 @@ async fn monitor_deployment_status(
     }
 }
 
-fn display_deployment_info(base_info: &str, status: &DeploymentStatus) {
+fn display_deployment_info(base_info: &str, status: &DeploymentStatus, stopped: bool) {
     if clear().is_err() {
         return;
     }
 
-    let status_display = format_deployment_status(status);
+    let status_display = if stopped {
+        "COMPLETED".green()
+    } else {
+        format_deployment_status(status)
+    };
+
     let timestamp = format_current_timestamp();
 
     let mut info = String::with_capacity(base_info.len() + 50);
@@ -487,7 +500,7 @@ fn prompt(args: New) -> Result<Arguments> {
     };
     if !path.exists() {
         println!("Provided path doesn't exist, creating file");
-        std::fs::write(&path, "")?;
+        std::fs::write(&path, "console.log(`Hello from Bun v${Bun.version}!`)")?;
     }
     let domain = if args.cron.is_some() {
         fake_select("Generate a domain?", "No");

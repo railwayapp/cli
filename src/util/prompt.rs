@@ -1,6 +1,5 @@
 use colored::*;
 use inquire::{
-    ui::StyleSheet,
     validator::{Validation, ValueRequiredValidator},
     Autocomplete,
 };
@@ -99,14 +98,6 @@ pub fn prompt_text_with_placeholder_disappear_skippable(
         .context("Failed to prompt for options")
 }
 
-pub fn prompt_text_skippable(message: &str) -> Result<Option<String>> {
-    let select = inquire::Text::new(message);
-    select
-        .with_render_config(Configs::get_render_config())
-        .prompt_skippable()
-        .context("Failed to prompt for options")
-}
-
 pub fn prompt_confirm_with_default(message: &str, default: bool) -> Result<bool> {
     let confirm = inquire::Confirm::new(message);
     confirm
@@ -152,10 +143,6 @@ pub fn prompt_select_with_cancel<T: Display>(message: &str, options: Vec<T>) -> 
 
 pub fn fake_select(message: &str, selected: &str) {
     println!("{} {} {}", ">".green(), message, selected.cyan().bold());
-}
-
-pub fn fake_select_cancelled(message: &str) {
-    println!("{} {} {}", ">".green(), message, "<cancelled>".red());
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,7 +191,7 @@ impl PathAutocompleter {
             filename.to_string()
         } else if dir == Path::new(".") {
             // Current directory but input had separators, preserve the ./ format
-            format!(".{}{}", MAIN_SEPARATOR, filename)
+            format!(".{MAIN_SEPARATOR}{filename}")
         } else {
             // Build full path
             let mut path = dir.to_string_lossy().into_owned();

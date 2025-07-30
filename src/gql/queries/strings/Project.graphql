@@ -32,6 +32,7 @@ query Project($id: String!) {
                   id
                   meta
                   status
+                  deploymentStopped
                 }
                 source {
                   repo
