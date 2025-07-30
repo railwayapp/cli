@@ -417,7 +417,7 @@ fn display_deployment_info(base_info: &str, status: &DeploymentStatus, stopped: 
         return;
     }
 
-    let status_display = if stopped {
+    let status_display = if stopped && matches!(status, DeploymentStatus::SUCCESS) {
         "COMPLETED".green()
     } else {
         format_deployment_status(status)
