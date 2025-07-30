@@ -20,7 +20,9 @@ macro_rules! commands {
                         let sub = {
                             let mut s = sub;
                             $(
-                               s = s.visible_alias($( stringify!($alias) ),*);
+                                $(
+                                    s = s.visible_alias(stringify!($alias));
+                                )*
                             )?
                             #[allow(unused_imports)]
                             {

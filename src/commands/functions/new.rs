@@ -7,7 +7,7 @@ use crate::{
         progress::{create_spinner, success_spinner},
         prompt::{
             fake_select, fake_select_cancelled, prompt_confirm_with_default, prompt_path,
-            prompt_text, prompt_text_skippable,
+            prompt_path_with_default, prompt_text_skippable, prompt_text_with_placeholder_if_blank,
         },
         watcher::FileWatcher,
     },
@@ -26,12 +26,13 @@ pub async fn new(
     args: New,
 ) -> Result<()> {
     let args = prompt(args)?;
-    let (service_id, domain) = create_function_service(&args, environment, &project).await?;
+    let ((service_id, service_name), domain) =
+        create_function_service(&args, environment, &project).await?;
     let info = format_function_info(
         &project,
         environment,
         &domain,
-        args.name,
+        service_name,
         &args.path,
         args.cron,
     )?;
@@ -57,7 +58,7 @@ async fn create_function_service(
     args: &Arguments,
     environment: &ProjectProjectEnvironmentsEdges,
     project: &ProjectProject,
-) -> Result<(String, Option<String>)> {
+) -> Result<((String, String), Option<String>)> {
     let cmd = common::get_start_cmd(&args.path)?;
     let mut spinner = create_spinner("Creating function".into());
 
@@ -65,7 +66,7 @@ async fn create_function_service(
     let client = GQLClient::new_authorized(&configs)?;
 
     let latest_version = get_latest_function_version(&client, &configs).await?;
-    let service_id = create_service(
+    let (service_id, service_name) = create_service(
         &client,
         &configs,
         args,
@@ -87,7 +88,7 @@ async fn create_function_service(
     common::link_function(&args.path, &service_id)?;
 
     success_spinner(&mut spinner, "Function created".into());
-    Ok((service_id, domain))
+    Ok(((service_id, service_name), domain))
 }
 
 async fn get_latest_function_version(
@@ -113,13 +114,13 @@ async fn create_service(
     environment: &ProjectProjectEnvironmentsEdges,
     project: &ProjectProject,
     image: &str,
-) -> Result<String> {
+) -> Result<(String, String)> {
     let service = post_graphql::<mutations::ServiceCreate, _>(
         client,
         configs.get_backboard(),
         mutations::service_create::Variables {
             branch: None,
-            name: Some(args.name.clone()),
+            name: args.name.clone(),
             project_id: project.id.clone(),
             environment_id: environment.node.id.clone(),
             source: Some(ServiceSourceInput {
@@ -130,10 +131,9 @@ async fn create_service(
         },
     )
     .await?
-    .service_create
-    .id;
+    .service_create;
 
-    Ok(service)
+    Ok((service.id, service.name))
 }
 
 async fn update_function_settings(
@@ -453,7 +453,7 @@ fn format_current_timestamp() -> colored::ColoredString {
 
 struct Arguments {
     terminal: bool,
-    name: String,
+    name: Option<String>,
     path: PathBuf,
     domain: bool,
     cron: Option<String>,
@@ -465,17 +465,23 @@ fn prompt(args: New) -> Result<Arguments> {
     let terminal = std::io::stdout().is_terminal();
     let name = if let Some(name) = args.name {
         fake_select("Enter a name for your function", &name);
-        name
+        Some(name)
     } else if terminal {
-        prompt_text("Enter a name for your function")?
+        Some(prompt_text_with_placeholder_if_blank(
+            "Enter a name for your function",
+            "<leave blank for randomly generated>",
+            "<randomly generated>",
+        )?)
+        .filter(|s| !s.trim().is_empty())
     } else {
-        bail!("Name must be provided when not running in a terminal");
+        fake_select("Enter a function name", "<randomly generated>");
+        None
     };
     let path = if let Some(path) = args.path {
         fake_select("Enter the path to your function", &path.to_string_lossy());
         path
     } else if terminal {
-        prompt_path("Enter the path of your function")?
+        prompt_path_with_default("Enter the path of your function", "./bun-function.ts")?
     } else {
         bail!("Path must be provided when not running in a terminal");
     };
@@ -495,13 +501,21 @@ fn prompt(args: New) -> Result<Arguments> {
         false
     };
     let cron = if domain {
-        fake_select_cancelled("Enter a cron schedule");
+        fake_select(
+            "Enter a cron schedule",
+            "<domain chosen; skipped cron option>",
+        );
         None
     } else if let Some(cron) = args.cron {
         fake_select("Enter a cron schedule", &cron);
         Some(cron)
     } else if terminal {
-        prompt_text_skippable("Enter a cron schedule <esc to skip>")?
+        Some(prompt_text_with_placeholder_if_blank(
+            "Enter a cron schedule",
+            "<leave blank to skip>",
+            "<no cron>",
+        )?)
+        .filter(|s| !s.trim().is_empty())
     } else {
         None
     }

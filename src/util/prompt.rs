@@ -1,5 +1,6 @@
 use colored::*;
 use inquire::{
+    ui::StyleSheet,
     validator::{Validation, ValueRequiredValidator},
     Autocomplete,
 };
@@ -286,6 +287,16 @@ pub fn prompt_path(message: &str) -> Result<PathBuf> {
     inquire::Text::new(message)
         .with_autocomplete(PathAutocompleter)
         .with_render_config(Configs::get_render_config())
+        .prompt()
+        .map(PathBuf::from)
+        .context("Failed to prompt for path")
+}
+
+pub fn prompt_path_with_default(message: &str, default: &str) -> Result<PathBuf> {
+    inquire::Text::new(message)
+        .with_autocomplete(PathAutocompleter)
+        .with_render_config(Configs::get_render_config())
+        .with_default(default)
         .prompt()
         .map(PathBuf::from)
         .context("Failed to prompt for path")
