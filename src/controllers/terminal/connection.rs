@@ -46,8 +46,7 @@ pub async fn establish_connection(
                 }
 
                 spinner.set_message(format!(
-                    "Connection attempt {} failed: {}. Retrying in {} seconds...",
-                    attempt, e, SSH_CONNECT_DELAY_SECS
+                    "Connection attempt {attempt} failed: {e}. Retrying in {SSH_CONNECT_DELAY_SECS} seconds..."
                 ));
 
                 sleep(Duration::from_secs(SSH_CONNECT_DELAY_SECS)).await;
@@ -68,7 +67,7 @@ pub async fn attempt_connection(
 
     let mut request = Request::builder()
         .uri(url.as_str())
-        .header("Authorization", format!("Bearer {}", token))
+        .header("Authorization", format!("Bearer {token}"))
         .header("Sec-WebSocket-Key", key)
         .header("Upgrade", "websocket")
         .header("Connection", "Upgrade")

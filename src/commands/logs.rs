@@ -150,7 +150,7 @@ pub async fn command(args: Args) -> Result<()> {
 
                     // Convert HashMap to JSON string
                     let json_string = serde_json::to_string(&map).unwrap();
-                    println!("{}", json_string);
+                    println!("{json_string}");
                 } else {
                     format_attr_log(log);
                 }
