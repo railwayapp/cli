@@ -88,10 +88,16 @@ winapi = { version = "0.3.9", features = [
 strum = { version = "0.26.3", features = ["derive"] }
 structstruck = "0.4.1"
 derive-new = "0.7.0"
-regex = "1.11.1"
 struct-field-names-as-array = "0.3.0"
 json_dotpath = "1.1.0"
 country-emoji = "0.2.0"
+chrono-humanize = "0.2.3"
+notify = "8.0.0"
+cron-descriptor = "0.1.1"
+croner = "2.1.0"
+tokio-util = "0.7.15"
+similar = "2.7.0"
+pathdiff = "0.2.3"
 
 [profile.release]
 lto = "fat"

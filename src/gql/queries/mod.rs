@@ -1,6 +1,8 @@
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 
+use crate::{queries::project::DeploymentStatus, subscription};
+
 type DateTime = chrono::DateTime<chrono::Utc>;
 type EnvironmentVariables = std::collections::BTreeMap<String, Option<String>>;
 //type DeploymentMeta = std::collections::BTreeMap<String, serde_json::Value>;
@@ -74,6 +76,12 @@ impl std::fmt::Display for project::ProjectProjectServicesEdges {
     }
 }
 
+impl std::fmt::Display for project::ProjectProjectServicesEdgesNodeServiceInstancesEdges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.node.service_name)
+    }
+}
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -135,6 +143,14 @@ pub struct BuildLogs;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/DeploymentLogs.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DeploymentLogs;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/Domains.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
@@ -181,3 +197,43 @@ pub struct CustomDomainAvailable;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct Regions;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/LatestFunctionVersion.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct LatestFunctionVersion;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/LatestDeployment.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct LatestDeployment;
+
+type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
+impl From<project::DeploymentStatus> for SubscriptionDeploymentStatus {
+    fn from(value: project::DeploymentStatus) -> Self {
+        match value {
+            project::DeploymentStatus::BUILDING => SubscriptionDeploymentStatus::BUILDING,
+            project::DeploymentStatus::CRASHED => SubscriptionDeploymentStatus::CRASHED,
+            project::DeploymentStatus::DEPLOYING => SubscriptionDeploymentStatus::DEPLOYING,
+            project::DeploymentStatus::FAILED => SubscriptionDeploymentStatus::FAILED,
+            project::DeploymentStatus::INITIALIZING => SubscriptionDeploymentStatus::INITIALIZING,
+            project::DeploymentStatus::NEEDS_APPROVAL => {
+                SubscriptionDeploymentStatus::NEEDS_APPROVAL
+            }
+            project::DeploymentStatus::QUEUED => SubscriptionDeploymentStatus::QUEUED,
+            project::DeploymentStatus::REMOVED => SubscriptionDeploymentStatus::REMOVED,
+            project::DeploymentStatus::REMOVING => SubscriptionDeploymentStatus::REMOVING,
+            project::DeploymentStatus::SKIPPED => SubscriptionDeploymentStatus::SKIPPED,
+            project::DeploymentStatus::SLEEPING => SubscriptionDeploymentStatus::SLEEPING,
+            project::DeploymentStatus::SUCCESS => SubscriptionDeploymentStatus::SUCCESS,
+            project::DeploymentStatus::WAITING => SubscriptionDeploymentStatus::WAITING,
+            project::DeploymentStatus::Other(s) => SubscriptionDeploymentStatus::Other(s),
+        }
+    }
+}

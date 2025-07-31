@@ -25,16 +25,34 @@ query Project($id: String!) {
               node {
                 id
                 serviceId
+                serviceName
                 environmentId
                 latestDeployment {
                   canRedeploy
                   id
                   meta
+                  status
+                  deploymentStopped
                 }
                 source {
                   repo
                   image
                 }
+                domains {
+                  serviceDomains {
+                    id
+                    domain
+                    targetPort
+                  }
+                  customDomains {
+                    id
+                    domain
+                    targetPort
+                  }
+                }
+                cronSchedule
+                nextCronRunAt
+                startCommand
               }
             }
           }

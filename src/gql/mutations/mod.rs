@@ -191,11 +191,28 @@ pub struct ServiceInstanceDeploy;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/EnvironmentDelete.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
 pub struct EnvironmentDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/FunctionUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct FunctionUpdate;
 
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -205,7 +222,7 @@ impl std::fmt::Display for custom_domain_create::DNSRecordType {
             Self::DNS_RECORD_TYPE_NS => write!(f, "NS"),
             Self::DNS_RECORD_TYPE_UNSPECIFIED => write!(f, "UNSPECIFIED"),
             Self::UNRECOGNIZED => write!(f, "UNRECOGNIZED"),
-            Self::Other(s) => write!(f, "{}", s),
+            Self::Other(s) => write!(f, "{s}"),
         }
     }
 }

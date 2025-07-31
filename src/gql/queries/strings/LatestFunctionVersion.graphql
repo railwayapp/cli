@@ -1,0 +1,8 @@
+query LatestFunctionVersion {
+  functionRuntime(name: bun) {
+    latestVersion {
+     	image
+        tag
+    }
+  }
+}

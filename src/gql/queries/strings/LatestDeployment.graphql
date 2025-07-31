@@ -1,0 +1,8 @@
+query LatestDeployment($serviceId: String!, $environmentId: String!) {
+  serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+    latestDeployment {
+      id
+      status
+    }
+  }
+}

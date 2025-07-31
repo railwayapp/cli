@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
@@ -47,6 +47,8 @@ pub struct RailwayConfig {
     pub user: RailwayUser,
     pub last_update_check: Option<DateTime<Utc>>,
     pub new_version_available: Option<String>,
+    /// (path, id)
+    pub linked_functions: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug)]
@@ -93,6 +95,7 @@ impl Configs {
                         user: RailwayUser { token: None },
                         last_update_check: None,
                         new_version_available: None,
+                        linked_functions: None,
                     }
                 });
 
@@ -111,6 +114,7 @@ impl Configs {
                 user: RailwayUser { token: None },
                 last_update_check: None,
                 new_version_available: None,
+                linked_functions: None,
             },
         })
     }
@@ -121,6 +125,7 @@ impl Configs {
             user: RailwayUser { token: None },
             last_update_check: None,
             new_version_available: None,
+            linked_functions: None,
         };
         Ok(())
     }
@@ -283,6 +288,76 @@ impl Configs {
     pub fn unlink_service(&mut self) -> Result<()> {
         let linked_project = self.get_linked_project_mut()?;
         linked_project.service = None;
+        Ok(())
+    }
+
+    pub fn link_function(&mut self, path: PathBuf, id: String) -> Result<()> {
+        let path = path
+            .canonicalize()?
+            .to_str()
+            .ok_or(anyhow!("couldn't convert string"))?
+            .to_owned();
+        let functions = self
+            .root_config
+            .linked_functions
+            .get_or_insert_with(Vec::new);
+        functions.retain(|(p, i)| (path != *p) && (id != *i));
+        functions.push((path, id));
+        Ok(())
+    }
+
+    pub fn get_function(&self, path: PathBuf) -> Result<Option<String>> {
+        let canonical_path = path.canonicalize()?;
+        let path_str = canonical_path
+            .to_str()
+            .ok_or(anyhow!("couldn't convert string"))?;
+
+        if let Some(functions) = &self.root_config.linked_functions {
+            Ok(functions.iter().find_map(|(p, id)| {
+                if p == path_str {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_functions_in_directory(&self, path: PathBuf) -> Result<Vec<(PathBuf, String)>> {
+        let canonical_path = path.canonicalize()?;
+        let path_str = canonical_path
+            .to_str()
+            .ok_or(anyhow!("couldn't convert string"))?;
+        if let Some(functions) = &self.root_config.linked_functions {
+            Ok(functions
+                .iter()
+                .filter_map(|(p, id)| {
+                    if p.starts_with(path_str) {
+                        let p = PathBuf::from(p);
+                        if p.exists() {
+                            Some((p, id.clone()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn unlink_function(&mut self, id: String) -> Result<()> {
+        if let Some(functions) = &mut self.root_config.linked_functions {
+            if let Some(pos) = functions.iter().position(|(_, i)| *i == id) {
+                functions.swap_remove(pos);
+                functions.retain(|(_, i)| *i != id);
+            }
+        }
         Ok(())
     }
 

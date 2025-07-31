@@ -1,0 +1,7 @@
+mutation FunctionUpdate($environmentId: String!, $serviceId: String!, $startCommand: String, $cronSchedule: String, $sleepApplication: Boolean) {
+  serviceInstanceUpdate(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    input: {cronSchedule: $cronSchedule, sleepApplication: $sleepApplication, startCommand: $startCommand}
+  )
+}
