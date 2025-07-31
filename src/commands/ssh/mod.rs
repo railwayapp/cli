@@ -104,7 +104,7 @@ async fn run_persistent_session(params: &terminal::SSHConnectParams, name: Strin
         {
             Ok(tc) => tc,
             Err(e) => {
-                fail_spinner(&mut spinner, format!("{}", e));
+                fail_spinner(&mut spinner, format!("{e}"));
                 std::process::exit(1);
             }
         };
@@ -140,7 +140,7 @@ async fn run_persistent_session(params: &terminal::SSHConnectParams, name: Strin
             SessionTermination::SendError(e)
             | SessionTermination::StdinError(e)
             | SessionTermination::ServerError(e) => {
-                println!("Session error: {}. Reconnecting...", e);
+                println!("Session error: {e}. Reconnecting...");
                 continue;
             }
         };
@@ -162,7 +162,7 @@ async fn ensure_tmux_is_installed(params: &terminal::SSHConnectParams) -> Result
         execute_command_with_result(&mut terminal_client, command.to_string(), &mut spinner).await;
 
     if let Err(err) = result {
-        fail_spinner(&mut spinner, format!("Error installing tmux: {}", err));
+        fail_spinner(&mut spinner, format!("Error installing tmux: {err}"));
         std::process::exit(1);
     }
 

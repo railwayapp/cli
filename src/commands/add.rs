@@ -257,7 +257,7 @@ fn prompt_variables(variables: Vec<String>) -> Result<Option<BTreeMap<String, St
             if value.is_empty() {
                 None
             } else {
-                fake_select("Enter a variable", &format!("{}={}", key, value));
+                fake_select("Enter a variable", &format!("{key}={value}"));
                 Some((key, value))
             }
         })

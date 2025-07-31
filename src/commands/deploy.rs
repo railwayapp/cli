@@ -70,7 +70,7 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?;
         } else {
-            println!("Creating {}...", template);
+            println!("Creating {template}...");
             fetch_and_create(&client, &configs, template, &linked_project, &variables).await?;
         }
     }

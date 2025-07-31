@@ -43,7 +43,7 @@ pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
                 "error" | "err" => "[ERRO]".red(),
                 "warn" => "[WARN]".yellow(),
                 "debug" => "[DBUG]".dimmed(),
-                _ => format!("[{}]", level).normal(),
+                _ => format!("[{level}]").normal(),
             }
             .bold()
         })

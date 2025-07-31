@@ -79,12 +79,12 @@ async fn handle_update_task(handle: Option<tokio::task::JoinHandle<Result<(), an
             Ok(Err(e)) => {
                 if !std::io::stdout().is_terminal() {
                     eprintln!("Failed to check for updates (not fatal)");
-                    eprintln!("{}", e);
+                    eprintln!("{e}");
                 }
             }
             Err(e) => {
                 eprintln!("Check Updates: Task panicked or failed to execute.");
-                eprintln!("{}", e);
+                eprintln!("{e}");
             }
         }
     }
@@ -125,12 +125,12 @@ async fn main() -> Result<()> {
         // Clap's source code specifically says that these errors should be
         // printed to stdout and exit with a status of 0.
         Err(e) if e.kind() == ErrorKind::DisplayHelp || e.kind() == ErrorKind::DisplayVersion => {
-            println!("{}", e);
+            println!("{e}");
             handle_update_task(check_updates_handle).await;
             std::process::exit(0);
         }
         Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             handle_update_task(check_updates_handle).await;
             std::process::exit(2); // The default behavior is exit 2
         }
@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
         if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string() {
             return Ok(()); // Exit gracefully if interrupted
         }
-        eprintln!("{:?}", e);
+        eprintln!("{e:?}");
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);
     }

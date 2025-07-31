@@ -379,7 +379,7 @@ fn select_service_variables_new(
                             "Select a service to set variables for",
                             service_meta.1.as_str(),
                         );
-                        fake_select("Enter a variable", format!("{}={}", key, value).as_str());
+                        fake_select("Enter a variable", format!("{key}={value}").as_str());
                         (
                             service_meta.0, // id
                             (key, value),

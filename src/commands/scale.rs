@@ -324,11 +324,11 @@ pub fn get_dynamic_args(cmd: Command) -> Command {
             let region_static: &'static str = Box::leak(region.into_boxed_str());
             new_cmd = new_cmd.arg(
                 Arg::new(region_static) // unique identifier
-                    .long(region_static)        // --my-region
-                    .help(format!("Number of instances to run on {}", region_static))
+                    .long(region_static) // --my-region
+                    .help(format!("Number of instances to run on {region_static}"))
                     .value_name("INSTANCES")
                     .value_parser(clap::value_parser!(u16))
-                    .action(clap::ArgAction::Set)
+                    .action(clap::ArgAction::Set),
             );
         }
         new_cmd

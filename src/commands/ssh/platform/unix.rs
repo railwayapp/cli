@@ -60,7 +60,7 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<Sessi
                     match msg {
                         ServerMessage::SendData(data) => {
                             if let Err(e) = client.send_data(&data).await {
-                                eprintln!("Error sending data: {}", e);
+                                eprintln!("Error sending data: {e}");
 
                                 let _ = ui_tx.send(UiMessage::ServerDone(
                                     SessionTermination::SendError(e.to_string())
@@ -71,12 +71,12 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<Sessi
                         },
                         ServerMessage::SendSignal(signal) => {
                             if let Err(e) = client.send_signal(signal).await {
-                                eprintln!("Error sending signal: {}", e);
+                                eprintln!("Error sending signal: {e}");
                             }
                         },
                         ServerMessage::WindowResize(cols, rows) => {
                             if let Err(e) = client.send_window_size(cols, rows).await {
-                                eprintln!("Error resizing window: {}", e);
+                                eprintln!("Error resizing window: {e}");
                             }
                         }
                     }
@@ -152,7 +152,7 @@ pub async fn run_interactive_session(mut client: TerminalClient) -> Result<Sessi
                             let _ = server_tx.send(ServerMessage::SendData(data)).await;
                         }
                         Err(e) => {
-                            eprintln!("Error reading from stdin: {}", e);
+                            eprintln!("Error reading from stdin: {e}");
                             termination = Some(SessionTermination::StdinError(e.to_string()));
                             break;
                         }

@@ -203,7 +203,7 @@ fn get_mysql_command(variables: &BTreeMap<String, String>) -> Result<(String, Ve
     let port = parsed_url.port().unwrap_or(3306);
     let database = parsed_url.path().trim_start_matches('/');
 
-    let pass_arg = format!("-p{}", password);
+    let pass_arg = format!("-p{password}");
 
     Ok((
         "mysql".to_string(),

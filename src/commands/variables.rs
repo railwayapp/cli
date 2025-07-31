@@ -104,7 +104,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     if args.kv {
         for (key, value) in variables {
-            println!("{}={}", key, value);
+            println!("{key}={value}");
         }
         return Ok(());
     }

@@ -92,7 +92,7 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
         spinner.finish_and_clear();
     }
 
-    let formatted_domain = format!("https://{}", domain);
+    let formatted_domain = format!("https://{domain}");
     if json {
         let out = json!({
             "domain": formatted_domain
@@ -126,7 +126,7 @@ fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
                     .unwrap_or_else(|| unreachable!())
             });
 
-        let formatted_domain = format!("https://{}", domain);
+        let formatted_domain = format!("https://{domain}");
         println!("🚀 {}", formatted_domain.magenta().bold());
         return Ok(());
     }
@@ -222,7 +222,7 @@ async fn create_custom_domain(
             creating_domain_spiner(Some(format!(
                 "Creating custom domain for service {}{}...",
                 service.name,
-                port.map(|p| format!(" on port {}", p)).unwrap_or_default()
+                port.map(|p| format!(" on port {p}")).unwrap_or_default()
             )))
         })
         .and_then(|s| s.ok());

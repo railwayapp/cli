@@ -1,8 +1,6 @@
 use graphql_client::GraphQLQuery;
 use serde::{Deserialize, Serialize};
 
-use crate::{queries::project::DeploymentStatus, subscription};
-
 type DateTime = chrono::DateTime<chrono::Utc>;
 type EnvironmentVariables = std::collections::BTreeMap<String, Option<String>>;
 //type DeploymentMeta = std::collections::BTreeMap<String, serde_json::Value>;
