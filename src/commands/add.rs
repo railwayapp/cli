@@ -168,7 +168,8 @@ fn prompt_database() -> Result<Vec<DatabaseType>, anyhow::Error> {
         bail!("No database specified");
     }
 
-    let databases = prompt_multi_options("Select databases to add", DatabaseType::iter().collect())?;
+    let databases =
+        prompt_multi_options("Select databases to add", DatabaseType::iter().collect())?;
     if databases.is_empty() {
         bail!("Please select at least one database to add");
     }
