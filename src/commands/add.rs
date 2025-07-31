@@ -167,7 +167,14 @@ fn prompt_database() -> Result<Vec<DatabaseType>, anyhow::Error> {
     if !std::io::stdout().is_terminal() {
         bail!("No database specified");
     }
-    prompt_multi_options("Select databases to add", DatabaseType::iter().collect())
+
+    let databases =
+        prompt_multi_options("Select databases to add", DatabaseType::iter().collect())?;
+    if databases.is_empty() {
+        bail!("Please select at least one database to add");
+    }
+
+    Ok(databases)
 }
 
 fn prompt_repo(repo: Option<String>) -> Result<String> {
