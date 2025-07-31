@@ -61,9 +61,11 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     variables: Q::Variables,
 ) -> Result<Q::ResponseData, RailwayError> {
     let body = Q::build_query(variables);
-    let res: GraphQLResponse<Q::ResponseData> =
-        client.post(url).json(&body).send().await?.json().await?;
-
+    let response = client.post(url).json(&body).send().await?;
+    if response.status() == 429 {
+        return Err(RailwayError::Ratelimited);
+    }
+    let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
     if let Some(errors) = res.errors {
         if errors[0].message.to_lowercase().contains("not authorized") {
             // Handle unauthorized errors in a custom way

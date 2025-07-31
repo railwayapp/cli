@@ -81,4 +81,7 @@ pub enum RailwayError {
 
     #[error("Connection URL should point to the Railway TCP proxy")]
     InvalidConnectionVariable,
+
+    #[error("You are being ratelimited. Please try again later")]
+    Ratelimited,
 }
