@@ -12,13 +12,20 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let mut configs = Configs::new()?;
+    let latest_version = match check_update(true).await? {
+        Some(latest_version) => latest_version,
+        None => {
+            println!(
+                "You are on the latest version of the CLI, v{}",
+                env!("CARGO_PKG_VERSION")
+            );
+            return Ok(());
+        }
+    };
 
     if args.json {
-        let result = configs.check_update(true).await;
-
         let json = json!({
-            "latest_version": result.ok().flatten().as_ref(),
+            "latest_version": latest_version,
             "current_version": env!("CARGO_PKG_VERSION"),
         });
 
@@ -27,12 +34,12 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    let is_latest = check_update(&mut configs, true).await?;
-    if is_latest {
-        println!(
-            "You are on the latest version of the CLI, v{}",
-            env!("CARGO_PKG_VERSION")
-        );
-    }
+    println!(
+        "{} v{} visit {} for more info",
+        "New version available:".green().bold(),
+        latest_version.yellow(),
+        "https://docs.railway.com/guides/cli".purple(),
+    );
+
     Ok(())
 }

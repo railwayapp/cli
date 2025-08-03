@@ -6,7 +6,7 @@ use clap::error::ErrorKind;
 mod commands;
 use commands::*;
 use is_terminal::IsTerminal;
-use util::compare_semver::compare_semver;
+use util::{check_update::UpdateCheck, compare_semver::compare_semver};
 
 mod client;
 mod config;
@@ -57,22 +57,21 @@ commands!(
     functions(function, func, fn, funcs, fns)
 );
 
-fn spawn_update_task(mut configs: Configs) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
+fn spawn_update_task() -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
+        // outputtng would break json output on CI
         if !std::io::stdout().is_terminal() {
-            return Ok::<(), anyhow::Error>(());
+            anyhow::bail!("Stdout is not a terminal");
         }
+        let latest_version = util::check_update::check_update(false).await?;
 
-        let result = configs.check_update(false).await;
-        if let Ok(Some(latest_version)) = result {
-            configs.root_config.new_version_available = Some(latest_version);
-        }
-        configs.write()?;
-        Ok::<(), anyhow::Error>(())
+        Ok(latest_version)
     })
 }
 
-async fn handle_update_task(handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>) {
+async fn handle_update_task(
+    handle: Option<tokio::task::JoinHandle<anyhow::Result<Option<String>>>>,
+) {
     if let Some(handle) = handle {
         match handle.await {
             Ok(Ok(_)) => {} // Task completed successfully
@@ -83,7 +82,7 @@ async fn handle_update_task(handle: Option<tokio::task::JoinHandle<Result<(), an
                 }
             }
             Err(e) => {
-                eprintln!("Check Updates: Task panicked or failed to execute.");
+                eprintln!("Check Updates: Task failed to execute.");
                 eprintln!("{}", e);
             }
         }
@@ -93,31 +92,34 @@ async fn handle_update_task(handle: Option<tokio::task::JoinHandle<Result<(), an
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = build_args().try_get_matches();
-    // Avoid grabbing configs multiple times, and avoid grabbing configs if we're not in a terminal
-    let mut check_updates_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>> = None;
-    if std::io::stdout().is_terminal() {
-        let mut configs = Configs::new()?;
-        if let Some(new_version_available) = &configs.root_config.new_version_available {
-            match compare_semver(env!("CARGO_PKG_VERSION"), new_version_available) {
-                Ordering::Less => {
-                    println!(
-                        "{} v{} visit {} for more info",
-                        "New version available:".green().bold(),
-                        new_version_available.yellow(),
-                        "https://docs.railway.com/guides/cli".purple(),
-                    );
-                    // Don't show the message again (for 24 hours)
-                    configs.root_config.new_version_available = None;
-                    configs.write()?;
-                }
-                _ => {
-                    configs.root_config.new_version_available = None;
-                    configs.write()?;
-                }
+    let check_updates_handle = if std::io::stdout().is_terminal() {
+        let update = UpdateCheck::read().unwrap_or_default();
+
+        if let Some(latest_version) = update.latest_version {
+            if matches!(
+                compare_semver(env!("CARGO_PKG_VERSION"), &latest_version),
+                Ordering::Less
+            ) {
+                println!(
+                    "{} v{} visit {} for more info",
+                    "New version available:".green().bold(),
+                    latest_version.yellow(),
+                    "https://docs.railway.com/guides/cli".purple(),
+                );
             }
+            let update = UpdateCheck {
+                last_update_check: Some(chrono::Utc::now()),
+                latest_version: None,
+            };
+            update
+                .write()
+                .context("Failed to save time since last update check")?;
         }
-        check_updates_handle = Some(spawn_update_task(configs));
-    }
+
+        Some(spawn_update_task())
+    } else {
+        None
+    };
 
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215
     let cli = match args {
