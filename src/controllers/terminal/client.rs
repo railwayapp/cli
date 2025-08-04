@@ -299,7 +299,7 @@ impl TerminalClient {
                                             return Ok(0);
                                         }
                                         unknown_type => {
-                                            writeln!(writer, "Warning: Received unknown message type: {}", unknown_type)?;
+                                            writeln!(writer, "Warning: Received unknown message type: {unknown_type}")?;
                                         }
                                     }
                                 }
@@ -379,7 +379,7 @@ impl TerminalClient {
                                         "session_data" => match server_msg.payload.data {
                                             DataPayload::String(text) => {
                                                 if !text.trim().is_empty() {
-                                                    print!("{}", text);
+                                                    print!("{text}");
                                                     std::io::stdout().flush()?;
                                                 }
                                             }
