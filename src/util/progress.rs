@@ -23,9 +23,9 @@ pub fn fail_spinner(spinner: &mut ProgressBar, message: String) {
             .template("{msg:.red}")
             .expect("Failed to create error spinner template"),
     );
-    spinner.finish_with_message(format!("✗ {}", message));
+    spinner.finish_with_message(format!("✗ {message}"));
 }
 
 pub fn success_spinner(spinner: &mut ProgressBar, message: String) {
-    spinner.finish_with_message(format!("✓ {}", message));
+    spinner.finish_with_message(format!("✓ {message}"));
 }

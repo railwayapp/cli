@@ -206,9 +206,9 @@ pub async fn command(args: Args) -> Result<()> {
         let bytes_len = arc.lock().unwrap().len();
         println!("railway up");
         println!("service: {}", service.clone().unwrap_or_default());
-        println!("environment: {}", environment_id);
-        println!("bytes: {}", bytes_len);
-        println!("url: {}", url);
+        println!("environment: {environment_id}");
+        println!("bytes: {bytes_len}");
+        println!("url: {url}");
     }
 
     let builder = client.post(url);
@@ -296,7 +296,7 @@ pub async fn command(args: Args) -> Result<()> {
         })
         .await
         {
-            eprintln!("Failed to stream build logs: {}", e);
+            eprintln!("Failed to stream build logs: {e}");
 
             if ci_mode {
                 std::process::exit(1);
@@ -309,7 +309,7 @@ pub async fn command(args: Args) -> Result<()> {
         let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
             if let Err(e) = stream_deploy_logs(deploy_deployment_id, format_attr_log).await {
-                eprintln!("Failed to stream deploy logs: {}", e);
+                eprintln!("Failed to stream deploy logs: {e}");
             }
         }));
     }
