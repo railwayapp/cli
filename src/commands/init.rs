@@ -1,6 +1,6 @@
+use crate::errors::RailwayError;
 use crate::util::prompt::{fake_select, prompt_select, prompt_text_with_placeholder_if_blank};
 use crate::workspace::{workspaces, Workspace};
-use crate::errors::RailwayError;
 
 use super::*;
 
@@ -29,7 +29,11 @@ pub async fn command(args: Args) -> Result<()> {
 
     let vars = mutations::project_create::Variables {
         // Railway's API will automatically generate a name if one is not provided
-        name: if project_name.is_empty() { None } else { Some(project_name) },
+        name: if project_name.is_empty() {
+            None
+        } else {
+            Some(project_name)
+        },
         description: None,
         team_id: workspace.team_id(),
     };
