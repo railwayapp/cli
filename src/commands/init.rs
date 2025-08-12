@@ -83,7 +83,7 @@ fn prompt_workspace(workspaces: Vec<Workspace>, workspace: Option<String>) -> Re
     if let Some(input) = workspace {
         return workspaces
             .iter()
-            .find(|w| w.id() == input || w.name() == input)
+            .find(|w| w.id().eq_ignore_ascii_case(&input) || w.name().eq_ignore_ascii_case(&input))
             .map(select)
             .ok_or_else(|| RailwayError::WorkspaceNotFound(input).into());
     }
