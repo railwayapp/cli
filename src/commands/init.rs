@@ -1,4 +1,4 @@
-use crate::util::prompt::{fake_select, prompt_select};
+use crate::util::prompt::{fake_select, prompt_select, prompt_text_with_placeholder_if_blank};
 use crate::workspace::{workspaces, Workspace};
 use crate::errors::RailwayError;
 
@@ -28,7 +28,8 @@ pub async fn command(args: Args) -> Result<()> {
     let project_name = prompt_project_name(args.name)?;
 
     let vars = mutations::project_create::Variables {
-        name: Some(project_name),
+        // Railway's API will automatically generate a name if one is not provided
+        name: if project_name.is_empty() { None } else { Some(project_name) },
         description: None,
         team_id: workspace.team_id(),
     };
@@ -54,7 +55,7 @@ pub async fn command(args: Args) -> Result<()> {
     configs.write()?;
 
     println!(
-        "{} {} on {}",
+        "\n{} {} on {}",
         "Created project".green().bold(),
         project_create.name.bold(),
         workspace,
@@ -102,29 +103,11 @@ fn prompt_project_name(name: Option<String>) -> Result<String> {
         return Ok(name);
     }
 
-    // Need a custom inquire prompt here, because of the formatter
-    let maybe_name = inquire::Text::new("Project Name")
-        .with_formatter(&|s| {
-            if s.is_empty() {
-                "Will be randomly generated".to_string()
-            } else {
-                s.to_string()
-            }
-        })
-        .with_placeholder("my-first-project")
-        .with_help_message("Leave blank to generate a random name")
-        .with_render_config(Configs::get_render_config())
-        .prompt()?;
+    let maybe_name = prompt_text_with_placeholder_if_blank(
+        "Project Name",
+        "<leave blank for randomly generated>",
+        "<randomly generated>",
+    )?;
 
-    // If name is empty, generate a random name
-    let name = match maybe_name.as_str() {
-        "" => {
-            use names::Generator;
-            let mut generator = Generator::default();
-            generator.next().context("Failed to generate name")?
-        }
-        _ => maybe_name,
-    };
-
-    Ok(name)
+    Ok(maybe_name.trim().to_string())
 }
