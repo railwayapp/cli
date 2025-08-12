@@ -1,5 +1,6 @@
 use crate::util::prompt::{fake_select, prompt_select};
 use crate::workspace::{workspaces, Workspace};
+use crate::errors::RailwayError;
 
 use super::*;
 
@@ -7,9 +8,13 @@ use super::*;
 #[derive(Parser)]
 #[clap(alias = "new")]
 pub struct Args {
-    #[clap(short, long)]
     /// Project name
+    #[clap(short, long)]
     name: Option<String>,
+
+    /// Workspace ID or name
+    #[clap(short, long)]
+    workspace: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -18,12 +23,9 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     let workspaces = workspaces().await?;
-    let workspace = prompt_workspace(workspaces)?;
+    let workspace = prompt_workspace(workspaces, args.workspace)?;
 
-    let project_name = match args.name {
-        Some(name) => name,
-        None => prompt_project_name()?,
-    };
+    let project_name = prompt_project_name(args.name)?;
 
     let vars = mutations::project_create::Variables {
         name: Some(project_name),
@@ -71,16 +73,35 @@ pub async fn command(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn prompt_workspace(workspaces: Vec<Workspace>) -> Result<Workspace> {
-    if workspaces.len() == 1 {
-        fake_select("Select a workspace", workspaces[0].name());
-        return Ok(workspaces[0].clone());
+fn prompt_workspace(workspaces: Vec<Workspace>, workspace: Option<String>) -> Result<Workspace> {
+    let select = |w: &Workspace| {
+        fake_select("Select a workspace", w.name());
+        w.clone()
+    };
+
+    if let Some(input) = workspace {
+        return workspaces
+            .iter()
+            .find(|w| w.id() == input || w.name() == input)
+            .map(select)
+            .ok_or_else(|| RailwayError::WorkspaceNotFound(input).into());
     }
+
+    if workspaces.len() == 1 {
+        return Ok(select(&workspaces[0]));
+    }
+
     let workspace = prompt_select("Select a workspace", workspaces)?;
     Ok(workspace)
 }
 
-fn prompt_project_name() -> Result<String> {
+fn prompt_project_name(name: Option<String>) -> Result<String> {
+    if let Some(name) = name {
+        fake_select("Project Name", &name);
+
+        return Ok(name);
+    }
+
     // Need a custom inquire prompt here, because of the formatter
     let maybe_name = inquire::Text::new("Project Name")
         .with_formatter(&|s| {

@@ -52,6 +52,9 @@ pub enum RailwayError {
     #[error("Project \"{0}\" was not found in the \"{1}\" team.")]
     ProjectNotFoundInTeam(String, String),
 
+    #[error("Workspace \"{0}\" not found.")]
+    WorkspaceNotFound(String),
+
     #[error("Service \"{0}\" not found.")]
     ServiceNotFound(String),
 
