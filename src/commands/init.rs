@@ -1,4 +1,5 @@
-use crate::util::prompt::{fake_select, prompt_select};
+use crate::errors::RailwayError;
+use crate::util::prompt::{fake_select, prompt_select, prompt_text_with_placeholder_if_blank};
 use crate::workspace::{workspaces, Workspace};
 
 use super::*;
@@ -7,9 +8,13 @@ use super::*;
 #[derive(Parser)]
 #[clap(alias = "new")]
 pub struct Args {
-    #[clap(short, long)]
     /// Project name
+    #[clap(short, long)]
     name: Option<String>,
+
+    /// Workspace ID or name
+    #[clap(short, long)]
+    workspace: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -18,15 +23,17 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     let workspaces = workspaces().await?;
-    let workspace = prompt_workspace(workspaces)?;
+    let workspace = prompt_workspace(workspaces, args.workspace)?;
 
-    let project_name = match args.name {
-        Some(name) => name,
-        None => prompt_project_name()?,
-    };
+    let project_name = prompt_project_name(args.name)?;
 
     let vars = mutations::project_create::Variables {
-        name: Some(project_name),
+        // Railway's API will automatically generate a name if one is not provided
+        name: if project_name.is_empty() {
+            None
+        } else {
+            Some(project_name)
+        },
         description: None,
         team_id: workspace.team_id(),
     };
@@ -52,7 +59,7 @@ pub async fn command(args: Args) -> Result<()> {
     configs.write()?;
 
     println!(
-        "{} {} on {}",
+        "\n{} {} on {}",
         "Created project".green().bold(),
         project_create.name.bold(),
         workspace,
@@ -71,39 +78,40 @@ pub async fn command(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn prompt_workspace(workspaces: Vec<Workspace>) -> Result<Workspace> {
-    if workspaces.len() == 1 {
-        fake_select("Select a workspace", workspaces[0].name());
-        return Ok(workspaces[0].clone());
+fn prompt_workspace(workspaces: Vec<Workspace>, workspace: Option<String>) -> Result<Workspace> {
+    let select = |w: &Workspace| {
+        fake_select("Select a workspace", w.name());
+        w.clone()
+    };
+
+    if let Some(input) = workspace {
+        return workspaces
+            .iter()
+            .find(|w| w.id().eq_ignore_ascii_case(&input) || w.name().eq_ignore_ascii_case(&input))
+            .map(select)
+            .ok_or_else(|| RailwayError::WorkspaceNotFound(input).into());
     }
+
+    if workspaces.len() == 1 {
+        return Ok(select(&workspaces[0]));
+    }
+
     let workspace = prompt_select("Select a workspace", workspaces)?;
     Ok(workspace)
 }
 
-fn prompt_project_name() -> Result<String> {
-    // Need a custom inquire prompt here, because of the formatter
-    let maybe_name = inquire::Text::new("Project Name")
-        .with_formatter(&|s| {
-            if s.is_empty() {
-                "Will be randomly generated".to_string()
-            } else {
-                s.to_string()
-            }
-        })
-        .with_placeholder("my-first-project")
-        .with_help_message("Leave blank to generate a random name")
-        .with_render_config(Configs::get_render_config())
-        .prompt()?;
+fn prompt_project_name(name: Option<String>) -> Result<String> {
+    if let Some(name) = name {
+        fake_select("Project Name", &name);
 
-    // If name is empty, generate a random name
-    let name = match maybe_name.as_str() {
-        "" => {
-            use names::Generator;
-            let mut generator = Generator::default();
-            generator.next().context("Failed to generate name")?
-        }
-        _ => maybe_name,
-    };
+        return Ok(name);
+    }
 
-    Ok(name)
+    let maybe_name = prompt_text_with_placeholder_if_blank(
+        "Project Name",
+        "<leave blank for randomly generated>",
+        "<randomly generated>",
+    )?;
+
+    Ok(maybe_name.trim().to_string())
 }
