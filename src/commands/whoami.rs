@@ -29,7 +29,7 @@ pub fn print_user(user: RailwayUser, use_json: bool) {
     }
 
     let email_colored = user.email.bright_magenta().bold();
-    
+
     match user.name {
         Some(name) => println!("Logged in as {} ({}) 👋", name, email_colored),
         None => println!("Logged in as {} 👋", email_colored),
