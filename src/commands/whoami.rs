@@ -5,27 +5,33 @@ use super::*;
 
 /// Get the current logged in user
 #[derive(Parser)]
-pub struct Args {}
+pub struct Args {
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
 
-pub async fn command(_args: Args) -> Result<()> {
+pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
     let user: RailwayUser = get_user(&client, &configs).await?;
 
-    print_user(user);
+    print_user(user, args.json);
 
     Ok(())
 }
 
-pub fn print_user(user: RailwayUser) {
-    if let Some(name) = user.name {
-        println!(
-            "Logged in as {} ({}) 👋",
-            name,
-            user.email.bright_magenta().bold()
-        )
-    } else {
-        println!("Logged in as {} 👋", user.email.bright_magenta().bold())
+pub fn print_user(user: RailwayUser, use_json: bool) {
+    if use_json {
+        println!("{}", serde_json::to_string_pretty(&user).unwrap());
+        return;
+    }
+
+    let email_colored = user.email.bright_magenta().bold();
+
+    match user.name {
+        Some(name) => println!("Logged in as {} ({}) 👋", name, email_colored),
+        None => println!("Logged in as {} 👋", email_colored),
     }
 }
