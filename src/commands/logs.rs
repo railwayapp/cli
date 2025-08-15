@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     controllers::{
-        deployment::{stream_build_logs, stream_deploy_logs},
+        deployment::{stream_build_logs, stream_deploy_logs, get_build_logs, get_deploy_logs},
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
@@ -41,6 +41,10 @@ pub struct Args {
     /// Output in JSON format
     #[clap(long)]
     json: bool,
+
+    /// Number of recent log lines to fetch (instead of streaming)
+    #[clap(long)]
+    lines: Option<usize>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -110,19 +114,26 @@ pub async fn command(args: Args) -> Result<()> {
         deployment = deployments.first().context("No deployments found")?;
     };
 
-    if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
-        stream_build_logs(deployment.id.clone(), |log| {
-            if args.json {
-                println!("{}", serde_json::to_string(&log).unwrap());
-            } else {
-                println!("{}", log.message);
+    // Check if user wants limited lines instead of streaming
+    if let Some(lines) = args.lines {
+        if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
+            // Get limited build logs
+            let logs = get_build_logs(deployment.id.clone(), Some(lines)).await?;
+            for log in logs {
+                if args.json {
+                    let map: HashMap<String, Value> = [
+                        ("message".to_string(), serde_json::to_value(&log.message).unwrap()),
+                        ("timestamp".to_string(), serde_json::to_value(&log.timestamp).unwrap()),
+                    ].into_iter().collect();
+                    println!("{}", serde_json::to_string(&map).unwrap());
+                } else {
+                    println!("{}", log.message);
+                }
             }
-        })
-        .await?;
-    } else {
-        stream_deploy_logs(
-            deployment.id.clone(),
-            |log: subscriptions::deployment_logs::LogFields| {
+        } else {
+            // Get limited deployment logs
+            let logs = get_deploy_logs(deployment.id.clone(), lines).await?;
+            for log in logs {
                 if args.json {
                     let mut map: HashMap<String, Value> = HashMap::new();
 
@@ -154,9 +165,58 @@ pub async fn command(args: Args) -> Result<()> {
                 } else {
                     format_attr_log(log);
                 }
-            },
-        )
-        .await?;
+            }
+        }
+    } else {
+        // Stream logs (existing behavior)
+        if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
+            stream_build_logs(deployment.id.clone(), |log| {
+                if args.json {
+                    println!("{}", serde_json::to_string(&log).unwrap());
+                } else {
+                    println!("{}", log.message);
+                }
+            })
+            .await?;
+        } else {
+            stream_deploy_logs(
+                deployment.id.clone(),
+                |log: subscriptions::deployment_logs::LogFields| {
+                    if args.json {
+                        let mut map: HashMap<String, Value> = HashMap::new();
+
+                        // Insert fixed attributes
+                        map.insert(
+                            "message".to_string(),
+                            serde_json::to_value(log.message.clone()).unwrap(),
+                        );
+                        map.insert(
+                            "timestamp".to_string(),
+                            serde_json::to_value(log.timestamp.clone()).unwrap(),
+                        );
+
+                        // Insert dynamic attributes
+                        for attribute in log.attributes {
+                            // Trim surrounding quotes if present
+                            let value = match attribute.value.trim_matches('"').parse::<Value>() {
+                                Ok(value) => value,
+                                Err(_) => {
+                                    serde_json::to_value(attribute.value.trim_matches('"')).unwrap()
+                                }
+                            };
+                            map.insert(attribute.key, value);
+                        }
+
+                        // Convert HashMap to JSON string
+                        let json_string = serde_json::to_string(&map).unwrap();
+                        println!("{}", json_string);
+                    } else {
+                        format_attr_log(log);
+                    }
+                },
+            )
+            .await?;
+        }
     }
 
     Ok(())
