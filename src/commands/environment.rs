@@ -89,7 +89,6 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
     let service_variables =
         select_service_variables_new(args, &project, is_terminal, &duplicate_id)?;
-    // create the environment!
     // Use background processing when duplicating to avoid timeouts
     let apply_changes_in_background = duplicate_id.is_some();
 
@@ -527,9 +526,10 @@ async fn wait_for_environment_creation(
     configs: &Configs,
     environment_id: String,
 ) -> Result<bool> {
+    let env_id = environment_id;
     let check_status = || async {
         let vars = queries::environment_staged_changes::Variables {
-            environment_id: environment_id.clone(),
+            environment_id: env_id.clone(),
         };
 
         let response = post_graphql::<queries::EnvironmentStagedChanges, _>(
@@ -541,10 +541,10 @@ async fn wait_for_environment_creation(
 
         let status = &response.environment_staged_changes.status;
 
-        // EnvironmentPatchStatus is an enum, so we need to match on it directly
+        // Check if environment duplication has completed
         use queries::environment_staged_changes::EnvironmentPatchStatus;
         match status {
-            EnvironmentPatchStatus::STAGED => Ok(true),
+            EnvironmentPatchStatus::STAGED | EnvironmentPatchStatus::COMMITTED => Ok(true),
             EnvironmentPatchStatus::APPLYING => bail!("Still applying changes"),
             _ => bail!("Unexpected status: {:?}", status),
         }
@@ -555,7 +555,7 @@ async fn wait_for_environment_creation(
         initial_delay_ms: 1000,  // Start at 1 second
         max_delay_ms: 5000,      // Cap at 5 seconds
         backoff_multiplier: 1.5, // Exponential backoff
-        on_retry: None,          // No logging
+        on_retry: None,
     };
 
     retry_with_backoff(config, check_status).await
