@@ -212,6 +212,14 @@ pub struct LatestFunctionVersion;
 )]
 pub struct LatestDeployment;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/EnvironmentStagedChanges.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct EnvironmentStagedChanges;
+
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
 impl From<project::DeploymentStatus> for SubscriptionDeploymentStatus {
     fn from(value: project::DeploymentStatus) -> Self {
