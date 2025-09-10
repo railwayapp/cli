@@ -5,8 +5,7 @@ use dirs::home_dir;
 
 use super::compare_semver::compare_semver;
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct UpdateCheck {
     pub last_update_check: Option<chrono::DateTime<chrono::Utc>>,
     pub latest_version: Option<String>,

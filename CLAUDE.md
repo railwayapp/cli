@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `cargo run -- <args>` - Run CLI during development
 - `cargo test` - Run tests
 - `cargo lint-fix` - Fix linting issues automatically (run after making changes)
+- `cargo fmt` - Format code (run after making changes)
 - `cargo clippy` - Check for linting issues
-- `cargo fmt` - Format code
 - `nix-shell` - Enter dev environment with dependencies
 
 ## Architecture
