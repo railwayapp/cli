@@ -204,12 +204,12 @@ fn prompt_name(service: Option<Option<String>>) -> Result<Option<String>> {
             Ok(None)
         }
     } else if std::io::stdout().is_terminal() {
-        return Ok(Some(prompt_text_with_placeholder_if_blank(
+        Ok(Some(prompt_text_with_placeholder_if_blank(
             "Enter a service name",
             "<leave blank for randomly generated>",
             "<randomly generated>",
         )?)
-        .filter(|s| !s.trim().is_empty()));
+        .filter(|s| !s.trim().is_empty()))
     } else {
         fake_select("Enter a service name", "<randomly generated>");
         Ok(None)
