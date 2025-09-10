@@ -5,9 +5,12 @@ use crate::{
     controllers::project::get_project,
     errors::RailwayError,
     interact_or,
-    util::prompt::{
-        fake_select, prompt_confirm_with_default, prompt_options, prompt_options_skippable,
-        prompt_text, prompt_text_with_placeholder_disappear_skippable, PromptService,
+    util::{
+        prompt::{
+            fake_select, prompt_confirm_with_default, prompt_options, prompt_options_skippable,
+            prompt_text, prompt_text_with_placeholder_disappear_skippable, PromptService,
+        },
+        retry::{retry_with_backoff, RetryConfig},
     },
 };
 use anyhow::bail;
@@ -86,11 +89,14 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
     let service_variables =
         select_service_variables_new(args, &project, is_terminal, &duplicate_id)?;
-    // create the environment!
+    // Use background processing when duplicating to avoid timeouts
+    let apply_changes_in_background = duplicate_id.is_some();
+
     let vars = mutations::environment_create::Variables {
         project_id: project.id.clone(),
         name,
         source_id: duplicate_id,
+        apply_changes_in_background: Some(apply_changes_in_background),
     };
 
     let spinner = indicatif::ProgressBar::new_spinner()
@@ -105,14 +111,21 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     let response =
         post_graphql::<mutations::EnvironmentCreate, _>(&client, &configs.get_backboard(), vars)
             .await?;
+
+    let env_id = response.environment_create.id.clone();
+    let env_name = response.environment_create.name.clone();
+
+    if apply_changes_in_background {
+        // Wait for background duplication to complete
+        let _ = wait_for_environment_creation(&client, &configs, env_id.clone()).await;
+    }
+
     spinner.finish_with_message(format!(
         "{} {} {}",
         "Environment".green(),
-        response.environment_create.name.magenta().bold(),
+        env_name.magenta().bold(),
         "created! 🎉".green()
     ));
-    let env_id = response.environment_create.id.clone();
-    let env_name = response.environment_create.name.clone();
     if !service_variables.is_empty() {
         upsert_variables(&configs, client, project, service_variables, env_id.clone()).await?;
     } else {
@@ -504,6 +517,48 @@ fn select_name_new(args: &NewArgs, is_terminal: bool) -> Result<String, anyhow::
         bail!("Environment name must be specified when not running in a terminal");
     };
     Ok(name)
+}
+
+// Polls for environment creation completion when using background processing.
+// Returns true when the environment patch status reaches "STAGED" state.
+async fn wait_for_environment_creation(
+    client: &reqwest::Client,
+    configs: &Configs,
+    environment_id: String,
+) -> Result<bool> {
+    let env_id = environment_id;
+    let check_status = || async {
+        let vars = queries::environment_staged_changes::Variables {
+            environment_id: env_id.clone(),
+        };
+
+        let response = post_graphql::<queries::EnvironmentStagedChanges, _>(
+            client,
+            configs.get_backboard(),
+            vars,
+        )
+        .await?;
+
+        let status = &response.environment_staged_changes.status;
+
+        // Check if environment duplication has completed
+        use queries::environment_staged_changes::EnvironmentPatchStatus;
+        match status {
+            EnvironmentPatchStatus::STAGED | EnvironmentPatchStatus::COMMITTED => Ok(true),
+            EnvironmentPatchStatus::APPLYING => bail!("Still applying changes"),
+            _ => bail!("Unexpected status: {:?}", status),
+        }
+    };
+
+    let config = RetryConfig {
+        max_attempts: 40,        // ~2 minutes with exponential backoff
+        initial_delay_ms: 1000,  // Start at 1 second
+        max_delay_ms: 5000,      // Cap at 5 seconds
+        backoff_multiplier: 1.5, // Exponential backoff
+        on_retry: None,
+    };
+
+    retry_with_backoff(config, check_status).await
 }
 
 #[derive(Debug, Clone)]
