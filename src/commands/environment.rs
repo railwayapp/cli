@@ -10,7 +10,7 @@ use crate::{
             fake_select, prompt_confirm_with_default, prompt_options, prompt_options_skippable,
             prompt_text, prompt_text_with_placeholder_disappear_skippable, PromptService,
         },
-        retry::{default_retry_logger, retry_with_backoff, RetryConfig},
+        retry::{retry_with_backoff, RetryConfig},
     },
 };
 use anyhow::bail;
@@ -117,33 +117,16 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     let env_name = response.environment_create.name.clone();
 
     if apply_changes_in_background {
-        spinner.set_message("Environment created, waiting for duplication to complete...");
-
-        match wait_for_environment_creation(&client, &configs, env_id.clone()).await {
-            Ok(_) => {
-                spinner.finish_with_message(format!(
-                    "{} {} {}",
-                    "Environment".green(),
-                    env_name.magenta().bold(),
-                    "duplication completed! 🎉".green()
-                ));
-            }
-            Err(e) => {
-                spinner.finish_with_message(format!(
-                    "{} Environment created but duplication may still be in progress: {}",
-                    "Warning".yellow().bold(),
-                    e
-                ));
-            }
-        }
-    } else {
-        spinner.finish_with_message(format!(
-            "{} {} {}",
-            "Environment".green(),
-            env_name.magenta().bold(),
-            "created! 🎉".green()
-        ));
+        // Wait for background duplication to complete
+        let _ = wait_for_environment_creation(&client, &configs, env_id.clone()).await;
     }
+
+    spinner.finish_with_message(format!(
+        "{} {} {}",
+        "Environment".green(),
+        env_name.magenta().bold(),
+        "created! 🎉".green()
+    ));
     if !service_variables.is_empty() {
         upsert_variables(&configs, client, project, service_variables, env_id.clone()).await?;
     } else {
@@ -537,6 +520,8 @@ fn select_name_new(args: &NewArgs, is_terminal: bool) -> Result<String, anyhow::
     Ok(name)
 }
 
+// Polls for environment creation completion when using background processing.
+// Returns true when the environment patch status reaches "STAGED" state.
 async fn wait_for_environment_creation(
     client: &reqwest::Client,
     configs: &Configs,
@@ -555,7 +540,6 @@ async fn wait_for_environment_creation(
         .await?;
 
         let status = &response.environment_staged_changes.status;
-        println!("Environment status: {:?}", status);
 
         // EnvironmentPatchStatus is an enum, so we need to match on it directly
         use queries::environment_staged_changes::EnvironmentPatchStatus;
@@ -567,11 +551,11 @@ async fn wait_for_environment_creation(
     };
 
     let config = RetryConfig {
-        max_attempts: 24,        // 2 minutes with 5s intervals
-        initial_delay_ms: 5000,  // 5 seconds
-        max_delay_ms: 5000,      // Keep constant 5s
-        backoff_multiplier: 1.0, // No backoff, constant delay
-        on_retry: Some(default_retry_logger()),
+        max_attempts: 40,        // ~2 minutes with exponential backoff
+        initial_delay_ms: 1000,  // Start at 1 second
+        max_delay_ms: 5000,      // Cap at 5 seconds
+        backoff_multiplier: 1.5, // Exponential backoff
+        on_retry: None,          // No logging
     };
 
     retry_with_backoff(config, check_status).await
