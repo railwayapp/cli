@@ -10,32 +10,17 @@ pub async fn stream_build_logs(
     deployment_id: String,
     on_log: impl Fn(build_logs::LogFields),
 ) -> Result<()> {
-    // Retry establishing connection and getting first log
+    // Retry establishing connection
     let mut stream = retry_with_backoff(RetryConfig::default(), || async {
         let vars = subscriptions::build_logs::Variables {
             deployment_id: deployment_id.clone(),
             filter: Some(String::new()),
             limit: Some(500),
         };
-
-        let mut stream = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
-
-        // Wait for first log to ensure stream is ready
-        if let Some(Ok(log)) = stream.next().await {
-            if let Some(data) = log.data {
-                // Process first batch of logs
-                for line in data.build_logs {
-                    on_log(line);
-                }
-                return Ok(stream);
-            }
-        }
-
-        anyhow::bail!("Build logs not yet available")
+        subscribe_graphql::<subscriptions::BuildLogs>(vars).await
     })
     .await?;
 
-    // Continue processing remaining logs without retry
     while let Some(Ok(log)) = stream.next().await {
         let log = log.data.context("Failed to retrieve build log")?;
         for line in log.build_logs {
@@ -50,32 +35,17 @@ pub async fn stream_deploy_logs(
     deployment_id: String,
     on_log: impl Fn(deployment_logs::LogFields),
 ) -> Result<()> {
-    // Retry establishing connection and getting first log
+    // Retry establishing connection
     let mut stream = retry_with_backoff(RetryConfig::default(), || async {
         let vars = subscriptions::deployment_logs::Variables {
             deployment_id: deployment_id.clone(),
             filter: Some(String::new()),
             limit: Some(500),
         };
-
-        let mut stream = subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await?;
-
-        // Wait for first log to ensure stream is ready
-        if let Some(Ok(log)) = stream.next().await {
-            if let Some(data) = log.data {
-                // Process first batch of logs
-                for line in data.deployment_logs {
-                    on_log(line);
-                }
-                return Ok(stream);
-            }
-        }
-
-        anyhow::bail!("Deploy logs not yet available")
+        subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await
     })
     .await?;
 
-    // Continue processing remaining logs without retry
     while let Some(Ok(log)) = stream.next().await {
         let log = log.data.context("Failed to retrieve deploy log")?;
         for line in log.deployment_logs {
