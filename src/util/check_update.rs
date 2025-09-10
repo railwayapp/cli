@@ -6,17 +6,10 @@ use dirs::home_dir;
 use super::compare_semver::compare_semver;
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub struct UpdateCheck {
     pub last_update_check: Option<chrono::DateTime<chrono::Utc>>,
     pub latest_version: Option<String>,
-}
-impl Default for UpdateCheck {
-    fn default() -> Self {
-        Self {
-            last_update_check: None,
-            latest_version: None,
-        }
-    }
 }
 impl UpdateCheck {
     pub fn write(&self) -> anyhow::Result<()> {
@@ -64,7 +57,7 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
     let response = response.json::<GithubApiRelease>().await?;
     let latest_version = response.tag_name.trim_start_matches('v');
 
-    match compare_semver(env!("CARGO_PKG_VERSION"), &latest_version) {
+    match compare_semver(env!("CARGO_PKG_VERSION"), latest_version) {
         Ordering::Less => {
             let update = UpdateCheck {
                 last_update_check: Some(chrono::Utc::now()),
