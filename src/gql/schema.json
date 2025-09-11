@@ -146,12 +146,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "CEPH_VOLUMES"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "DEFAULT_TO_RAILPACK"
             },
             {
@@ -177,6 +171,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "REPLICA_METRICS_V2"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "UNIFIED_TEMPLATE_EDITOR"
             }
           ],
           "fields": null,
@@ -217,13 +217,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "IMAGE_UPDATES"
+              "name": "MONOREPO_SUPPORT"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "MONOREPO_SUPPORT"
+              "name": "STRIPE_CONNECT_ONBOARDING"
             },
             {
               "deprecationReason": null,
@@ -2523,6 +2523,30 @@
                     "ofType": {
                       "kind": "OBJECT",
                       "name": "CustomerSubscription",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "supportedWithdrawalPlatforms",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "ENUM",
+                      "name": "WithdrawalPlatformTypes",
                       "ofType": null
                     }
                   }
@@ -14216,37 +14240,6 @@
                     "name": null,
                     "ofType": {
                       "kind": "INPUT_OBJECT",
-                      "name": "TeamPermissionChangeInput",
-                      "ofType": null
-                    }
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": "Changes a user team permissions.",
-              "isDeprecated": false,
-              "name": "teamPermissionChange",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "Boolean",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "input",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "INPUT_OBJECT",
                       "name": "TemplateCloneInput",
                       "ofType": null
                     }
@@ -17491,13 +17484,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "IMAGE_UPDATES"
+              "name": "MONOREPO_SUPPORT"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "MONOREPO_SUPPORT"
+              "name": "STRIPE_CONNECT_ONBOARDING"
             },
             {
               "deprecationReason": null,
@@ -19856,9 +19849,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "team",
               "type": {
                 "kind": "OBJECT",
@@ -20006,6 +19999,18 @@
                   "name": "ProjectWebhooksConnection",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspace",
+              "type": {
+                "kind": "OBJECT",
+                "name": "Workspace",
+                "ofType": null
               }
             },
             {
@@ -32642,9 +32647,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspaceId",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "teamId",
               "type": {
                 "kind": "SCALAR",
@@ -32658,6 +32663,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "userId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -34205,59 +34222,6 @@
         {
           "description": null,
           "enumValues": null,
-          "fields": null,
-          "inputFields": [
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "role",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "ENUM",
-                  "name": "TeamRole",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "teamId",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "userId",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "interfaces": null,
-          "kind": "INPUT_OBJECT",
-          "name": "TeamPermissionChangeInput",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
           "fields": [
             {
               "args": [],
@@ -34829,9 +34793,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspaceId",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "teamId",
               "type": {
                 "kind": "SCALAR",
@@ -34853,6 +34817,18 @@
                   "name": "Float",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
               }
             }
           ],
@@ -35404,16 +35380,6 @@
                   "name": "String",
                   "ofType": null
                 }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "teamId",
-              "type": {
-                "kind": "SCALAR",
-                "name": "String",
-                "ofType": null
               }
             }
           ],

@@ -3,7 +3,7 @@ query Project($id: String!) {
     id
     name
     deletedAt
-    team {
+    workspace {
       name
     }
     environments {

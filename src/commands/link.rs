@@ -26,16 +26,36 @@ pub struct Args {
     #[clap(long, short)]
     service: Option<String>,
 
-    /// The team to link to.
+    /// The team to link to (deprecated: use --workspace instead).
     #[clap(long, short)]
     team: Option<String>,
+
+    /// The workspace to link to.
+    #[clap(long, short)]
+    workspace: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
 
+    // Support both team (deprecated) and workspace arguments
+    let workspace_arg = match (args.team.as_ref(), args.workspace.as_ref()) {
+        (Some(_), None) => {
+            eprintln!(
+                "{}",
+                "Warning: The --team flag is deprecated. Please use --workspace instead.".yellow()
+            );
+            args.team
+        }
+        (None, workspace) => workspace.cloned(),
+        (Some(_), Some(_)) => {
+            eprintln!("{}", "Warning: Both --team and --workspace provided. Using --workspace. The --team flag is deprecated.".yellow());
+            args.workspace
+        }
+    };
+
     let workspaces = workspaces().await?;
-    let workspace = select_workspace(args.project.clone(), args.team, workspaces)?;
+    let workspace = select_workspace(args.project.clone(), workspace_arg, workspaces)?;
 
     let project = select_project(workspace, args.project.clone())?;
 
@@ -149,14 +169,14 @@ fn select_project(
                 fake_select("Select a project", &project.to_string());
                 project
             } else {
-                return Err(RailwayError::ProjectNotFoundInTeam(
+                return Err(RailwayError::ProjectNotFoundInWorkspace(
                     project,
                     workspace.name().to_owned(),
                 )
                 .into());
             }
         } else {
-            prompt_team_projects(projects)?
+            prompt_workspace_projects(projects)?
         }
     });
     Ok(project)
@@ -182,18 +202,18 @@ fn select_workspace(
                 prompt_workspaces(workspaces)?
             }
         }
-        (None, Some(team_arg)) | (Some(_), Some(team_arg)) => {
+        (None, Some(workspace_arg)) | (Some(_), Some(workspace_arg)) => {
             if let Some(workspace) = workspaces.iter().find(|w| {
-                w.team_id()
-                    .is_some_and(|id| id.to_lowercase() == team_arg.to_lowercase())
-                    || w.name().to_lowercase() == team_arg.to_lowercase()
+                w.id().to_lowercase() == workspace_arg.to_lowercase()
+                    || w.team_id().map(str::to_lowercase) == Some(workspace_arg.to_lowercase())
+                    || w.name().to_lowercase() == workspace_arg.to_lowercase()
             }) {
                 fake_select("Select a workspace", workspace.name());
                 workspace.clone()
-            } else if team_arg.to_lowercase() == "personal" {
+            } else if workspace_arg.to_lowercase() == "personal" {
                 bail!(RailwayError::NoPersonalWorkspace);
             } else {
-                return Err(RailwayError::TeamNotFound(team_arg.clone()).into());
+                return Err(RailwayError::WorkspaceNotFound(workspace_arg.clone()).into());
             }
         }
         (None, None) => prompt_workspaces(workspaces)?,
@@ -212,7 +232,7 @@ fn prompt_workspaces(workspaces: Vec<Workspace>) -> Result<Workspace> {
     prompt_options("Select a workspace", workspaces)
 }
 
-fn prompt_team_projects(projects: Vec<Project>) -> Result<Project, anyhow::Error> {
+fn prompt_workspace_projects(projects: Vec<Project>) -> Result<Project, anyhow::Error> {
     prompt_options("Select a project", projects)
 }
 
@@ -277,7 +297,7 @@ impl From<Project> for NormalisedProject {
                     })
                     .collect(),
             ),
-            Project::Team(project) => NormalisedProject::new(
+            Project::Workspace(project) => NormalisedProject::new(
                 project.id,
                 project.name,
                 project

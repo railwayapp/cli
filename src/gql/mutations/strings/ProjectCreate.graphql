@@ -1,6 +1,6 @@
-mutation ProjectCreate($name: String, $description: String, $teamId: String) {
+mutation ProjectCreate($name: String, $description: String, $workspaceId: String) {
 	projectCreate(
-		input: { name: $name, description: $description, teamId: $teamId }
+		input: { name: $name, description: $description, workspaceId: $workspaceId }
 	) {
 		name
 		id
