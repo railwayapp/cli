@@ -23,15 +23,6 @@ impl Default for RetryConfig {
     }
 }
 
-pub fn default_retry_logger() -> Box<dyn Fn(u32, u32, &anyhow::Error, u64) + Send + Sync> {
-    Box::new(|attempt, max_attempts, error, delay_ms| {
-        eprintln!(
-            "Attempt {}/{} failed: {}. Retrying in {}ms...",
-            attempt, max_attempts, error, delay_ms
-        );
-    })
-}
-
 pub async fn retry_with_backoff<F, Fut, T>(config: RetryConfig, mut operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,

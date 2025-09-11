@@ -35,7 +35,7 @@ pub async fn command(args: Args) -> Result<()> {
             Some(project_name)
         },
         description: None,
-        team_id: workspace.team_id(),
+        workspace_id: Some(workspace.id().to_owned()),
     };
     let project_create =
         post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)

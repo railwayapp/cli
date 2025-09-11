@@ -1,11 +1,11 @@
-query Projects($teamId: String) {
-  projects(teamId: $teamId) {
+query Projects($workspaceId: String) {
+  projects(workspaceId: $workspaceId) {
     edges {
       node {
         id
         name
         updatedAt
-        team {
+        workspace {
           id
           name
         }

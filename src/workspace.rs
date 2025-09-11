@@ -5,7 +5,7 @@ use std::fmt::Display;
 use super::{
     queries::user_projects::{
         UserProjectsExternalWorkspaces, UserProjectsExternalWorkspacesProjects,
-        UserProjectsMeWorkspaces, UserProjectsMeWorkspacesTeamProjectsEdgesNode,
+        UserProjectsMeWorkspaces, UserProjectsMeWorkspacesProjectsEdgesNode,
     },
     *,
 };
@@ -54,24 +54,23 @@ impl Workspace {
         }
     }
 
-    pub fn team_id(&self) -> Option<String> {
+    pub fn team_id(&self) -> Option<&str> {
         match self {
-            Self::External(w) => w.team_id.clone(),
-            Self::Member(w) => w.team.as_ref().map(|t| t.id.clone()),
+            Self::External(w) => w.team_id.as_deref(),
+            Self::Member(w) => w.team.as_ref().map(|t| t.id.as_str()),
         }
     }
 
     pub fn projects(&self) -> Vec<Project> {
-        let mut projects = match self {
+        let mut projects: Vec<_> = match self {
             Self::External(w) => w.projects.iter().cloned().map(Project::External).collect(),
-            Self::Member(w) => w.team.as_ref().map_or_else(Vec::new, |t| {
-                t.projects
-                    .edges
-                    .iter()
-                    .cloned()
-                    .map(|e| Project::Team(e.node))
-                    .collect()
-            }),
+            Self::Member(w) => w
+                .projects
+                .edges
+                .iter()
+                .cloned()
+                .map(|e| Project::Workspace(e.node))
+                .collect(),
         };
         projects.sort_by_key(|b| std::cmp::Reverse(b.updated_at()));
         projects
@@ -92,32 +91,32 @@ impl Display for Workspace {
 #[serde(untagged)]
 pub enum Project {
     External(UserProjectsExternalWorkspacesProjects),
-    Team(UserProjectsMeWorkspacesTeamProjectsEdgesNode),
+    Workspace(UserProjectsMeWorkspacesProjectsEdgesNode),
 }
 
 impl Project {
     pub fn id(&self) -> &str {
         match self {
             Self::External(w) => &w.id,
-            Self::Team(w) => &w.id,
+            Self::Workspace(w) => &w.id,
         }
     }
     pub fn name(&self) -> &str {
         match self {
             Self::External(w) => &w.name,
-            Self::Team(w) => &w.name,
+            Self::Workspace(w) => &w.name,
         }
     }
     pub fn updated_at(&self) -> DateTime<Utc> {
         match self {
             Self::External(w) => w.updated_at,
-            Self::Team(w) => w.updated_at,
+            Self::Workspace(w) => w.updated_at,
         }
     }
     pub fn deleted_at(&self) -> Option<DateTime<Utc>> {
         match self {
             Self::External(w) => w.deleted_at,
-            Self::Team(w) => w.deleted_at,
+            Self::Workspace(w) => w.deleted_at,
         }
     }
 }
@@ -125,8 +124,8 @@ impl Project {
 impl Display for Project {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Team(team_project) => write!(f, "{}", team_project.name),
-            Self::External(team_project) => write!(f, "{}", team_project.name),
+            Self::Workspace(project) => write!(f, "{}", project.name),
+            Self::External(project) => write!(f, "{}", project.name),
         }
     }
 }
