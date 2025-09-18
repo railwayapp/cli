@@ -3,7 +3,11 @@ use clap::Parser;
 use indicatif::ProgressBar;
 
 use crate::{
-    client::GQLClient, config::Configs, controllers::terminal::{self, TerminalClient}, errors::RailwayError, util::progress::{create_spinner, fail_spinner}
+    client::GQLClient,
+    config::Configs,
+    controllers::terminal::{self, TerminalClient},
+    errors::RailwayError,
+    util::progress::{create_spinner, fail_spinner},
 };
 
 pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
@@ -169,7 +173,7 @@ async fn ensure_tmux_is_installed(params: &terminal::SSHConnectParams) -> Result
 #[derive(Clone, Debug)]
 pub enum AuthKind {
     Bearer(String),
-    ProjectAccessToken(String)
+    ProjectAccessToken(String),
 }
 
 async fn create_client(
@@ -178,10 +182,13 @@ async fn create_client(
     max_attempts: Option<u32>,
 ) -> Result<TerminalClient> {
     let configs = Configs::new()?;
-    let token = match (configs.get_railway_auth_token(), Configs::get_railway_token()) {
+    let token = match (
+        configs.get_railway_auth_token(),
+        Configs::get_railway_token(),
+    ) {
         (Some(token), _) => AuthKind::Bearer(token),
         (None, Some(token)) => AuthKind::ProjectAccessToken(token),
-        (None, None) => return Err(RailwayError::Unauthorized.into())
+        (None, None) => return Err(RailwayError::Unauthorized.into()),
     };
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());

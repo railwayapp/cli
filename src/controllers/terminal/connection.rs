@@ -6,10 +6,13 @@ use indicatif::ProgressBar;
 use tokio::time::{sleep, timeout, Duration};
 use url::Url;
 
-use crate::{commands::ssh::{
-    AuthKind, SSH_CONNECTION_TIMEOUT_SECS, SSH_CONNECT_DELAY_SECS, SSH_MAX_CONNECT_ATTEMPTS
-}, errors::RailwayError};
 use crate::consts::get_user_agent;
+use crate::{
+    commands::ssh::{
+        AuthKind, SSH_CONNECTION_TIMEOUT_SECS, SSH_CONNECT_DELAY_SECS, SSH_MAX_CONNECT_ATTEMPTS,
+    },
+    errors::RailwayError,
+};
 
 #[derive(Clone, Debug)]
 pub struct SSHConnectParams {
@@ -80,10 +83,13 @@ pub async fn attempt_connection(
     if let Some(instance_id) = params.deployment_instance_id.as_ref() {
         request = request.header("X-Railway-Deployment-Instance-Id", instance_id);
     }
-    dbg!(token.clone());
     match token {
-        AuthKind::Bearer(token) => request = request.header("Authorization", format!("Bearer {token}")),
-        AuthKind::ProjectAccessToken(token) => request = request.header("project-access-token", token),
+        AuthKind::Bearer(token) => {
+            request = request.header("Authorization", format!("Bearer {token}"))
+        }
+        AuthKind::ProjectAccessToken(token) => {
+            request = request.header("project-access-token", token)
+        }
     }
 
     let request = request.body(())?;

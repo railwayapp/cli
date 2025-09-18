@@ -5,7 +5,6 @@ use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;
 
-use crate::{commands::ssh::AuthKind, config::Configs};
 use crate::controllers::{
     environment::get_matched_environment,
     project::get_project,
@@ -13,6 +12,7 @@ use crate::controllers::{
     terminal::{SSHConnectParams, TerminalClient},
 };
 use crate::util::progress::success_spinner;
+use crate::{commands::ssh::AuthKind, config::Configs};
 
 use super::Args;
 
