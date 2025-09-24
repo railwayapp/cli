@@ -309,7 +309,7 @@ pub async fn command(args: Args) -> Result<()> {
         let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
             if let Err(e) = stream_deploy_logs(deploy_deployment_id, None, |log| {
-                print_log(log, false, true) // No JSON, use formatted output
+                print_log(log, false, true)
             })
             .await
             {
