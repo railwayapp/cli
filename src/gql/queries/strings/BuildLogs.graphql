@@ -1,5 +1,5 @@
-query BuildLogs($deploymentId: String!, $limit: Int, $startDate: DateTime) {
-	buildLogs(deploymentId: $deploymentId, limit: $limit, startDate: $startDate) {
+query BuildLogs($deploymentId: String!, $limit: Int, $startDate: DateTime, $filter: String) {
+	buildLogs(deploymentId: $deploymentId, limit: $limit, startDate: $startDate, filter: $filter) {
 		...LogFields
 	}
 }

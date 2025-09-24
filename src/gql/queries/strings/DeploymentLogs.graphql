@@ -1,5 +1,5 @@
-query DeploymentLogs($deploymentId: String!, $limit: Int) {
-	deploymentLogs(deploymentId: $deploymentId, limit: $limit) {
+query DeploymentLogs($deploymentId: String!, $limit: Int, $filter: String) {
+	deploymentLogs(deploymentId: $deploymentId, limit: $limit, filter: $filter) {
 		...LogFields
 	}
 }

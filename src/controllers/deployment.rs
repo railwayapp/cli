@@ -24,12 +24,14 @@ pub async fn fetch_build_logs(
     backboard: &str,
     deployment_id: String,
     limit: Option<i64>,
+    filter: Option<String>,
     on_log: impl Fn(queries::build_logs::BuildLogsBuildLogs),
 ) -> Result<()> {
     let vars = queries::build_logs::Variables {
         deployment_id,
         limit,
         start_date: None,
+        filter,
     };
 
     let response = post_graphql::<queries::BuildLogs, _>(client, backboard, vars).await?;
@@ -59,11 +61,13 @@ pub async fn fetch_deploy_logs(
     backboard: &str,
     deployment_id: String,
     limit: Option<i64>,
+    filter: Option<String>,
     on_log: impl Fn(queries::deployment_logs::LogFields),
 ) -> Result<()> {
     let vars = queries::deployment_logs::Variables {
         deployment_id,
         limit,
+        filter,
     };
 
     let response = post_graphql::<queries::DeploymentLogs, _>(client, backboard, vars).await?;
@@ -90,13 +94,14 @@ pub async fn fetch_deploy_logs(
 
 pub async fn stream_build_logs(
     deployment_id: String,
+    filter: Option<String>,
     on_log: impl Fn(build_logs::LogFields),
 ) -> Result<()> {
     // Retry establishing connection for up to 60 seconds
     let mut stream = retry_with_backoff(LOGS_RETRY_CONFIG, || async {
         let vars = subscriptions::build_logs::Variables {
             deployment_id: deployment_id.clone(),
-            filter: Some(String::new()),
+            filter: filter.clone().or_else(|| Some(String::new())),
             limit: Some(500),
         };
         subscribe_graphql::<subscriptions::BuildLogs>(vars).await
@@ -115,13 +120,14 @@ pub async fn stream_build_logs(
 
 pub async fn stream_deploy_logs(
     deployment_id: String,
+    filter: Option<String>,
     on_log: impl Fn(deployment_logs::LogFields),
 ) -> Result<()> {
     // Retry establishing connection for up to 60 seconds
     let mut stream = retry_with_backoff(LOGS_RETRY_CONFIG, || async {
         let vars = subscriptions::deployment_logs::Variables {
             deployment_id: deployment_id.clone(),
-            filter: Some(String::new()),
+            filter: filter.clone().or_else(|| Some(String::new())),
             limit: Some(500),
         };
         subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await

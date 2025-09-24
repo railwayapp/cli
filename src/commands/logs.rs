@@ -1,15 +1,12 @@
-use std::collections::HashMap;
-
 use crate::{
     controllers::{
         deployment::{fetch_build_logs, fetch_deploy_logs, stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::logs::{format_attr_log, LogLike},
+    util::logs::print_log,
 };
 use anyhow::bail;
-use serde_json::Value;
 
 use super::{
     queries::deployments::{DeploymentListInput, DeploymentStatus},
@@ -49,44 +46,10 @@ pub struct Args {
     /// Stream logs continuously
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     stream: bool,
-}
 
-// Helper function to print any log type
-fn print_log<T>(log: T, json: bool, use_formatted: bool)
-where
-    T: LogLike + serde::Serialize,
-{
-    if json {
-        // For JSON output, handle attributes specially
-        let mut map: HashMap<String, Value> = HashMap::new();
-
-        map.insert(
-            "message".to_string(),
-            serde_json::to_value(log.message()).unwrap(),
-        );
-        map.insert(
-            "timestamp".to_string(),
-            serde_json::to_value(log.timestamp()).unwrap(),
-        );
-
-        // Insert dynamic attributes
-        for (key, value) in log.attributes() {
-            let parsed_value = match value.trim_matches('"').parse::<Value>() {
-                Ok(v) => v,
-                Err(_) => serde_json::to_value(value.trim_matches('"')).unwrap(),
-            };
-            map.insert(key.to_string(), parsed_value);
-        }
-
-        let json_string = serde_json::to_string(&map).unwrap();
-        println!("{json_string}");
-    } else if use_formatted {
-        // For formatted non-JSON output
-        format_attr_log(&log);
-    } else {
-        // Simple output (just the message)
-        println!("{}", log.message());
-    }
+    /// Filter logs using Railway's filter syntax (@key:value)
+    #[clap(long)]
+    filter: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -158,7 +121,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
         if args.stream {
-            stream_build_logs(deployment.id.clone(), |log| {
+            stream_build_logs(deployment.id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, false) // Build logs use simple output
             })
             .await?;
@@ -168,13 +131,14 @@ pub async fn command(args: Args) -> Result<()> {
                 &configs.get_backboard(),
                 deployment.id.clone(),
                 args.limit.or(Some(500)),
+                args.filter.clone(),
                 |log| print_log(log, args.json, false), // Build logs use simple output
             )
             .await?;
         }
     } else {
         if args.stream {
-            stream_deploy_logs(deployment.id.clone(), |log| {
+            stream_deploy_logs(deployment.id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, true) // Deploy logs use formatted output
             })
             .await?;
@@ -184,6 +148,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &configs.get_backboard(),
                 deployment.id.clone(),
                 args.limit.or(Some(500)),
+                args.filter.clone(),
                 |log| print_log(log, args.json, true), // Deploy logs use formatted output
             )
             .await?;

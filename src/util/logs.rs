@@ -1,7 +1,9 @@
 use crate::{queries, subscriptions};
 use colored::Colorize;
+use serde_json::Value;
+use std::collections::HashMap;
 
-// Trait for log types that have common fields (matches the one in commands/logs.rs)
+// Trait for common fields on log types
 pub trait LogLike {
     fn message(&self) -> &str;
     fn timestamp(&self) -> &str;
@@ -58,6 +60,44 @@ pub fn format_attr_log<T: LogLike>(log: &T) {
         message,
         others.join(" ")
     );
+}
+
+// Helper function to print any log type
+pub fn print_log<T>(log: T, json: bool, use_formatted: bool)
+where
+    T: LogLike + serde::Serialize,
+{
+    if json {
+        // For JSON output, handle attributes specially
+        let mut map: HashMap<String, Value> = HashMap::new();
+
+        map.insert(
+            "message".to_string(),
+            serde_json::to_value(log.message()).unwrap(),
+        );
+        map.insert(
+            "timestamp".to_string(),
+            serde_json::to_value(log.timestamp()).unwrap(),
+        );
+
+        // Insert dynamic attributes
+        for (key, value) in log.attributes() {
+            let parsed_value = match value.trim_matches('"').parse::<Value>() {
+                Ok(v) => v,
+                Err(_) => serde_json::to_value(value.trim_matches('"')).unwrap(),
+            };
+            map.insert(key.to_string(), parsed_value);
+        }
+
+        let json_string = serde_json::to_string(&map).unwrap();
+        println!("{json_string}");
+    } else if use_formatted {
+        // For formatted non-JSON output
+        format_attr_log(&log);
+    } else {
+        // Simple output (just the message)
+        println!("{}", log.message());
+    }
 }
 
 // Implementations for all the generated GraphQL log types

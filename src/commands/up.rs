@@ -288,7 +288,7 @@ pub async fn command(args: Args) -> Result<()> {
     //	Always stream build logs
     let build_deployment_id = deployment_id.clone();
     let mut tasks = vec![tokio::task::spawn(async move {
-        if let Err(e) = stream_build_logs(build_deployment_id, |log| {
+        if let Err(e) = stream_build_logs(build_deployment_id, None, |log| {
             println!("{}", log.message);
             if args.ci && log.message.starts_with("No changed files matched patterns") {
                 std::process::exit(0);
@@ -309,7 +309,7 @@ pub async fn command(args: Args) -> Result<()> {
         let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
             if let Err(e) =
-                stream_deploy_logs(deploy_deployment_id, |log| format_attr_log(&log)).await
+                stream_deploy_logs(deploy_deployment_id, None, |log| format_attr_log(&log)).await
             {
                 eprintln!("Failed to stream deploy logs: {e}");
             }
