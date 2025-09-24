@@ -26,25 +26,28 @@ pub async fn fetch_build_logs(
     limit: Option<i64>,
     on_log: impl Fn(queries::build_logs::BuildLogsBuildLogs),
 ) -> Result<()> {
-    // Adjust for API returning limit + 1 logs
-    let api_limit = limit.map(|n| if n > 0 { n - 1 } else { 0 });
-
     let vars = queries::build_logs::Variables {
         deployment_id,
-        limit: api_limit,
+        limit,
         start_date: None,
     };
 
     let response = post_graphql::<queries::BuildLogs, _>(client, backboard, vars).await?;
 
-    // Take only the requested number of logs
-    let logs_to_show = if let Some(l) = limit {
-        response.build_logs.into_iter().take(l as usize)
+    // Take only the requested number of logs from the end (handles API returning limit+1)
+    let logs = response.build_logs;
+    let logs_to_process = if let Some(l) = limit {
+        let l = l as usize;
+        if logs.len() > l {
+            logs[logs.len() - l..].to_vec()
+        } else {
+            logs
+        }
     } else {
-        response.build_logs.into_iter().take(usize::MAX)
+        logs
     };
 
-    for log in logs_to_show {
+    for log in logs_to_process {
         on_log(log);
     }
 
@@ -58,24 +61,27 @@ pub async fn fetch_deploy_logs(
     limit: Option<i64>,
     on_log: impl Fn(queries::deployment_logs::LogFields),
 ) -> Result<()> {
-    // Adjust for API returning limit + 1 logs
-    let api_limit = limit.map(|n| if n > 0 { n - 1 } else { 0 });
-
     let vars = queries::deployment_logs::Variables {
         deployment_id,
-        limit: api_limit,
+        limit,
     };
 
     let response = post_graphql::<queries::DeploymentLogs, _>(client, backboard, vars).await?;
 
-    // Take only the requested number of logs
-    let logs_to_show = if let Some(l) = limit {
-        response.deployment_logs.into_iter().take(l as usize)
+    // Take only the requested number of logs from the end (handles API returning limit+1)
+    let logs = response.deployment_logs;
+    let logs_to_process = if let Some(l) = limit {
+        let l = l as usize;
+        if logs.len() > l {
+            logs[logs.len() - l..].to_vec()
+        } else {
+            logs
+        }
     } else {
-        response.deployment_logs.into_iter().take(usize::MAX)
+        logs
     };
 
-    for log in logs_to_show {
+    for log in logs_to_process {
         on_log(log);
     }
 
