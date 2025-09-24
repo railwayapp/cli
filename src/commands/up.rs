@@ -26,7 +26,7 @@ use crate::{
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::logs::format_attr_log,
+    util::logs::print_log,
 };
 
 use super::*;
@@ -288,7 +288,7 @@ pub async fn command(args: Args) -> Result<()> {
     //	Always stream build logs
     let build_deployment_id = deployment_id.clone();
     let mut tasks = vec![tokio::task::spawn(async move {
-        if let Err(e) = stream_build_logs(build_deployment_id, |log| {
+        if let Err(e) = stream_build_logs(build_deployment_id, None, |log| {
             println!("{}", log.message);
             if args.ci && log.message.starts_with("No changed files matched patterns") {
                 std::process::exit(0);
@@ -308,7 +308,11 @@ pub async fn command(args: Args) -> Result<()> {
     if !ci_mode {
         let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
-            if let Err(e) = stream_deploy_logs(deploy_deployment_id, format_attr_log).await {
+            if let Err(e) = stream_deploy_logs(deploy_deployment_id, None, |log| {
+                print_log(log, false, true)
+            })
+            .await
+            {
                 eprintln!("Failed to stream deploy logs: {e}");
             }
         }));

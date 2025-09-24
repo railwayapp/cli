@@ -1,7 +1,14 @@
-query DeploymentLogs($deploymentId: String!) {
-	deploymentLogs(deploymentId: $deploymentId, limit: 500) {
-		message
-		timestamp
-        severity
+query DeploymentLogs($deploymentId: String!, $limit: Int, $filter: String) {
+	deploymentLogs(deploymentId: $deploymentId, limit: $limit, filter: $filter) {
+		...LogFields
+	}
+}
+
+fragment LogFields on Log {
+	timestamp
+	message
+	attributes {
+		key
+		value
 	}
 }

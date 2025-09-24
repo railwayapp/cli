@@ -1,6 +1,14 @@
-query BuildLogs($deploymentId: String!, $startDate: DateTime) {
-	buildLogs(deploymentId: $deploymentId, startDate: $startDate) {
-		message
-		timestamp
+query BuildLogs($deploymentId: String!, $limit: Int, $startDate: DateTime, $filter: String) {
+	buildLogs(deploymentId: $deploymentId, limit: $limit, startDate: $startDate, filter: $filter) {
+		...LogFields
+	}
+}
+
+fragment LogFields on Log {
+	timestamp
+	message
+	attributes {
+		key
+		value
 	}
 }

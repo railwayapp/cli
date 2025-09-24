@@ -1,15 +1,12 @@
-use std::collections::HashMap;
-
 use crate::{
     controllers::{
-        deployment::{stream_build_logs, stream_deploy_logs},
+        deployment::{fetch_build_logs, fetch_deploy_logs, stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::logs::format_attr_log,
+    util::logs::print_log,
 };
 use anyhow::bail;
-use serde_json::Value;
 
 use super::{
     queries::deployments::{DeploymentListInput, DeploymentStatus},
@@ -41,6 +38,14 @@ pub struct Args {
     /// Output in JSON format
     #[clap(long)]
     json: bool,
+
+    /// Number of log lines to return (disables streaming)
+    #[clap(short = 'n', long = "lines")]
+    lines: Option<i64>,
+
+    /// Filter logs using Railway's filter syntax (@key:value), e.g. @level:error to filter to errors
+    #[clap(long, short = 'f')]
+    filter: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -49,6 +54,9 @@ pub async fn command(args: Args) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    // Stream only if no line limit is specified
+    let should_stream = args.lines.is_none();
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
@@ -111,52 +119,39 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
-        stream_build_logs(deployment.id.clone(), |log| {
-            if args.json {
-                println!("{}", serde_json::to_string(&log).unwrap());
-            } else {
-                println!("{}", log.message);
-            }
-        })
-        .await?;
+        if should_stream {
+            stream_build_logs(deployment.id.clone(), args.filter.clone(), |log| {
+                print_log(log, args.json, false) // Build logs use simple output
+            })
+            .await?;
+        } else {
+            fetch_build_logs(
+                &client,
+                &configs.get_backboard(),
+                deployment.id.clone(),
+                args.lines.or(Some(500)),
+                args.filter.clone(),
+                |log| print_log(log, args.json, false), // Build logs use simple output
+            )
+            .await?;
+        }
     } else {
-        stream_deploy_logs(
-            deployment.id.clone(),
-            |log: subscriptions::deployment_logs::LogFields| {
-                if args.json {
-                    let mut map: HashMap<String, Value> = HashMap::new();
-
-                    // Insert fixed attributes
-                    map.insert(
-                        "message".to_string(),
-                        serde_json::to_value(log.message.clone()).unwrap(),
-                    );
-                    map.insert(
-                        "timestamp".to_string(),
-                        serde_json::to_value(log.timestamp.clone()).unwrap(),
-                    );
-
-                    // Insert dynamic attributes
-                    for attribute in log.attributes {
-                        // Trim surrounding quotes if present
-                        let value = match attribute.value.trim_matches('"').parse::<Value>() {
-                            Ok(value) => value,
-                            Err(_) => {
-                                serde_json::to_value(attribute.value.trim_matches('"')).unwrap()
-                            }
-                        };
-                        map.insert(attribute.key, value);
-                    }
-
-                    // Convert HashMap to JSON string
-                    let json_string = serde_json::to_string(&map).unwrap();
-                    println!("{json_string}");
-                } else {
-                    format_attr_log(log);
-                }
-            },
-        )
-        .await?;
+        if should_stream {
+            stream_deploy_logs(deployment.id.clone(), args.filter.clone(), |log| {
+                print_log(log, args.json, true) // Deploy logs use formatted output
+            })
+            .await?;
+        } else {
+            fetch_deploy_logs(
+                &client,
+                &configs.get_backboard(),
+                deployment.id.clone(),
+                args.lines.or(Some(500)),
+                args.filter.clone(),
+                |log| print_log(log, args.json, true), // Deploy logs use formatted output
+            )
+            .await?;
+        }
     }
 
     Ok(())
