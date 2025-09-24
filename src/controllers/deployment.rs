@@ -36,7 +36,7 @@ pub async fn fetch_build_logs(
 
     let response = post_graphql::<queries::BuildLogs, _>(client, backboard, vars).await?;
 
-    // Take only the requested number of logs from the end (handles API returning limit+1)
+    // Take only the requested number of logs from the end (the API has a bug and returns limit+1)
     let logs = response.build_logs;
     let logs_to_process = if let Some(l) = limit {
         let l = l as usize;
@@ -72,7 +72,7 @@ pub async fn fetch_deploy_logs(
 
     let response = post_graphql::<queries::DeploymentLogs, _>(client, backboard, vars).await?;
 
-    // Take only the requested number of logs from the end (handles API returning limit+1)
+    // Take only the requested number of logs from the end (the API has a bug and returns limit+1)
     let logs = response.deployment_logs;
     let logs_to_process = if let Some(l) = limit {
         let l = l as usize;
