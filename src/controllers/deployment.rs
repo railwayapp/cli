@@ -56,7 +56,7 @@ pub async fn fetch_deploy_logs(
     backboard: &str,
     deployment_id: String,
     limit: Option<i64>,
-    on_log: impl Fn(queries::deployment_logs::DeploymentLogsDeploymentLogs),
+    on_log: impl Fn(queries::deployment_logs::LogFields),
 ) -> Result<()> {
     // Adjust for API returning limit + 1 logs
     let api_limit = limit.map(|n| if n > 0 { n - 1 } else { 0 });

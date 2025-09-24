@@ -1,32 +1,27 @@
-use crate::subscriptions;
+use crate::{queries, subscriptions};
 use colored::Colorize;
 
-pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
+// Generic function to format logs from both queries and subscriptions
+pub fn format_attr_log_impl(timestamp: &str, message: &str, attributes: &[(String, String)]) {
     // we love inconsistencies!
-    if log.attributes.is_empty()
-        || (log.attributes.len() == 1
-            && log
-                .attributes
-                .first()
-                .is_some_and(|attr| attr.key == "level"))
+    if attributes.is_empty()
+        || (attributes.len() == 1 && attributes[0].0 == "level")
     {
-        println!("{}", log.message);
+        println!("{}", message);
         return;
     }
 
     let mut level: Option<String> = None;
-    let message = log.message;
     let mut others = Vec::new();
     // get attributes using a match
-    for attr in &log.attributes {
-        match attr.key.to_lowercase().as_str() {
-            "level" | "lvl" | "severity" => level = Some(attr.value.clone()),
+    for (key, value) in attributes {
+        match key.to_lowercase().as_str() {
+            "level" | "lvl" | "severity" => level = Some(value.clone()),
             _ => others.push(format!(
                 "{}{}{}",
-                attr.key.clone().magenta(),
+                key.magenta(),
                 "=",
-                attr.value
-                    .clone()
+                value
                     .normal()
                     .replace('"', "\"".dimmed().to_string().as_str())
             )),
@@ -50,9 +45,25 @@ pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
         .unwrap();
     println!(
         "{} {} {} {}",
-        log.timestamp.replace('"', "").normal(),
+        timestamp.replace('"', "").normal(),
         level,
         message,
         others.join(" ")
     );
+}
+
+// Wrapper for subscription logs
+pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
+    let attributes: Vec<(String, String)> = log.attributes.iter()
+        .map(|a| (a.key.clone(), a.value.clone()))
+        .collect();
+    format_attr_log_impl(&log.timestamp, &log.message, &attributes);
+}
+
+// Wrapper for query logs
+pub fn format_query_log(log: queries::deployment_logs::LogFields) {
+    let attributes: Vec<(String, String)> = log.attributes.iter()
+        .map(|a| (a.key.clone(), a.value.clone()))
+        .collect();
+    format_attr_log_impl(&log.timestamp, &log.message, &attributes);
 }

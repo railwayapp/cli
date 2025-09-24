@@ -7,7 +7,7 @@ use crate::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::logs::format_attr_log,
+    util::logs::{format_attr_log, format_query_log},
 };
 use anyhow::bail;
 use serde_json::Value;
@@ -149,7 +149,7 @@ pub async fn command(args: Args) -> Result<()> {
         if args.stream {
             stream_deploy_logs(
                 deployment.id.clone(),
-                |log: subscriptions::deployment_logs::LogFields| {
+                |log| {
                     if args.json {
                         let mut map: HashMap<String, Value> = HashMap::new();
 
@@ -194,12 +194,7 @@ pub async fn command(args: Args) -> Result<()> {
                     if args.json {
                         println!("{}", serde_json::to_string(&log).unwrap());
                     } else {
-                        // For non-JSON output, we need to format it properly
-                        if let Some(severity) = &log.severity {
-                            print!("[{}] ", severity);
-                        }
-                        print!("{} ", log.timestamp);
-                        println!("{}", log.message);
+                        format_query_log(log);
                     }
                 },
             )
