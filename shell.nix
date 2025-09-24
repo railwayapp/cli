@@ -23,6 +23,7 @@ let
       (with darwin.apple_sdk.frameworks; [
         Security
         SystemConfiguration
+        CoreServices
       ]);
 in
 pkgs.mkShell

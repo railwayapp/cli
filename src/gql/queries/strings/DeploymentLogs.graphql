@@ -1,5 +1,5 @@
-query DeploymentLogs($deploymentId: String!) {
-	deploymentLogs(deploymentId: $deploymentId, limit: 500) {
+query DeploymentLogs($deploymentId: String!, $limit: Int) {
+	deploymentLogs(deploymentId: $deploymentId, limit: $limit) {
 		message
 		timestamp
         severity

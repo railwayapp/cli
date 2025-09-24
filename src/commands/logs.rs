@@ -1,8 +1,9 @@
+
 use std::collections::HashMap;
 
 use crate::{
     controllers::{
-        deployment::{stream_build_logs, stream_deploy_logs},
+        deployment::{fetch_build_logs, fetch_deploy_logs, stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
@@ -41,6 +42,14 @@ pub struct Args {
     /// Output in JSON format
     #[clap(long)]
     json: bool,
+
+    /// Limit the number of log lines returned
+    #[clap(long, short = 'n')]
+    limit: Option<i64>,
+
+    /// Stream logs continuously
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
+    stream: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -111,52 +120,91 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
-        stream_build_logs(deployment.id.clone(), |log| {
-            if args.json {
-                println!("{}", serde_json::to_string(&log).unwrap());
-            } else {
-                println!("{}", log.message);
-            }
-        })
-        .await?;
-    } else {
-        stream_deploy_logs(
-            deployment.id.clone(),
-            |log: subscriptions::deployment_logs::LogFields| {
+        if args.stream {
+            stream_build_logs(deployment.id.clone(), |log| {
                 if args.json {
-                    let mut map: HashMap<String, Value> = HashMap::new();
-
-                    // Insert fixed attributes
-                    map.insert(
-                        "message".to_string(),
-                        serde_json::to_value(log.message.clone()).unwrap(),
-                    );
-                    map.insert(
-                        "timestamp".to_string(),
-                        serde_json::to_value(log.timestamp.clone()).unwrap(),
-                    );
-
-                    // Insert dynamic attributes
-                    for attribute in log.attributes {
-                        // Trim surrounding quotes if present
-                        let value = match attribute.value.trim_matches('"').parse::<Value>() {
-                            Ok(value) => value,
-                            Err(_) => {
-                                serde_json::to_value(attribute.value.trim_matches('"')).unwrap()
-                            }
-                        };
-                        map.insert(attribute.key, value);
-                    }
-
-                    // Convert HashMap to JSON string
-                    let json_string = serde_json::to_string(&map).unwrap();
-                    println!("{json_string}");
+                    println!("{}", serde_json::to_string(&log).unwrap());
                 } else {
-                    format_attr_log(log);
+                    println!("{}", log.message);
                 }
-            },
-        )
-        .await?;
+            })
+            .await?;
+        } else {
+            fetch_build_logs(
+                &client,
+                &configs.get_backboard(),
+                deployment.id.clone(),
+                args.limit.or(Some(500)),
+                |log| {
+                    if args.json {
+                        println!("{}", serde_json::to_string(&log).unwrap());
+                    } else {
+                        println!("{}", log.message);
+                    }
+                },
+            )
+            .await?;
+        }
+    } else {
+        if args.stream {
+            stream_deploy_logs(
+                deployment.id.clone(),
+                |log: subscriptions::deployment_logs::LogFields| {
+                    if args.json {
+                        let mut map: HashMap<String, Value> = HashMap::new();
+
+                        // Insert fixed attributes
+                        map.insert(
+                            "message".to_string(),
+                            serde_json::to_value(log.message.clone()).unwrap(),
+                        );
+                        map.insert(
+                            "timestamp".to_string(),
+                            serde_json::to_value(log.timestamp.clone()).unwrap(),
+                        );
+
+                        // Insert dynamic attributes
+                        for attribute in log.attributes {
+                            // Trim surrounding quotes if present
+                            let value = match attribute.value.trim_matches('"').parse::<Value>() {
+                                Ok(value) => value,
+                                Err(_) => {
+                                    serde_json::to_value(attribute.value.trim_matches('"')).unwrap()
+                                }
+                            };
+                            map.insert(attribute.key, value);
+                        }
+
+                        // Convert HashMap to JSON string
+                        let json_string = serde_json::to_string(&map).unwrap();
+                        println!("{json_string}");
+                    } else {
+                        format_attr_log(log);
+                    }
+                },
+            )
+            .await?;
+        } else {
+            fetch_deploy_logs(
+                &client,
+                &configs.get_backboard(),
+                deployment.id.clone(),
+                args.limit.or(Some(500)),
+                |log| {
+                    if args.json {
+                        println!("{}", serde_json::to_string(&log).unwrap());
+                    } else {
+                        // For non-JSON output, we need to format it properly
+                        if let Some(severity) = &log.severity {
+                            print!("[{}] ", severity);
+                        }
+                        print!("{} ", log.timestamp);
+                        println!("{}", log.message);
+                    }
+                },
+            )
+            .await?;
+        }
     }
 
     Ok(())

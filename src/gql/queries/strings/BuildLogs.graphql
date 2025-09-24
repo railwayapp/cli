@@ -1,5 +1,5 @@
-query BuildLogs($deploymentId: String!, $startDate: DateTime) {
-	buildLogs(deploymentId: $deploymentId, startDate: $startDate) {
+query BuildLogs($deploymentId: String!, $limit: Int, $startDate: DateTime) {
+	buildLogs(deploymentId: $deploymentId, limit: $limit, startDate: $startDate) {
 		message
 		timestamp
 	}
