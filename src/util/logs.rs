@@ -1,4 +1,4 @@
-use crate::{queries, subscriptions};
+use crate::subscriptions;
 use colored::Colorize;
 
 // Generic function to format logs from both queries and subscriptions
@@ -52,16 +52,8 @@ pub fn format_attr_log_impl(timestamp: &str, message: &str, attributes: &[(Strin
     );
 }
 
-// Wrapper for subscription logs
+// Wrapper for subscription logs (still used by up.rs)
 pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
-    let attributes: Vec<(String, String)> = log.attributes.iter()
-        .map(|a| (a.key.clone(), a.value.clone()))
-        .collect();
-    format_attr_log_impl(&log.timestamp, &log.message, &attributes);
-}
-
-// Wrapper for query logs
-pub fn format_query_log(log: queries::deployment_logs::LogFields) {
     let attributes: Vec<(String, String)> = log.attributes.iter()
         .map(|a| (a.key.clone(), a.value.clone()))
         .collect();

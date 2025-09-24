@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use crate::{
@@ -7,7 +6,7 @@ use crate::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::logs::{format_attr_log, format_query_log},
+    util::logs,
 };
 use anyhow::bail;
 use serde_json::Value;
@@ -43,7 +42,7 @@ pub struct Args {
     #[clap(long)]
     json: bool,
 
-    /// Limit the number of log lines returned
+    /// Limit the number of log lines returned (only applies when --stream is false)
     #[clap(long, short = 'n')]
     limit: Option<i64>,
 
@@ -51,6 +50,96 @@ pub struct Args {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     stream: bool,
 }
+
+// Trait for log types that have common fields
+trait LogLike {
+    fn message(&self) -> &str;
+    fn timestamp(&self) -> &str;
+    fn attributes(&self) -> Vec<(&str, &str)>;
+}
+
+impl LogLike for subscriptions::deployment_logs::LogFields {
+    fn message(&self) -> &str { &self.message }
+    fn timestamp(&self) -> &str { &self.timestamp }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes.iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
+}
+
+impl LogLike for queries::deployment_logs::LogFields {
+    fn message(&self) -> &str { &self.message }
+    fn timestamp(&self) -> &str { &self.timestamp }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes.iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
+}
+
+impl LogLike for subscriptions::build_logs::LogFields {
+    fn message(&self) -> &str { &self.message }
+    fn timestamp(&self) -> &str { &self.timestamp }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes.iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
+}
+
+impl LogLike for queries::build_logs::LogFields {
+    fn message(&self) -> &str { &self.message }
+    fn timestamp(&self) -> &str { &self.timestamp }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes.iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
+}
+
+// Helper function to print any log type
+fn print_log<T>(log: T, json: bool, use_formatted: bool)
+where
+    T: LogLike + serde::Serialize,
+{
+    if json {
+        // For JSON output, handle attributes specially
+        let mut map: HashMap<String, Value> = HashMap::new();
+
+        map.insert(
+            "message".to_string(),
+            serde_json::to_value(log.message()).unwrap(),
+        );
+        map.insert(
+            "timestamp".to_string(),
+            serde_json::to_value(log.timestamp()).unwrap(),
+        );
+
+        // Insert dynamic attributes
+        for (key, value) in log.attributes() {
+            let parsed_value = match value.trim_matches('"').parse::<Value>() {
+                Ok(v) => v,
+                Err(_) => serde_json::to_value(value.trim_matches('"')).unwrap()
+            };
+            map.insert(key.to_string(), parsed_value);
+        }
+
+        let json_string = serde_json::to_string(&map).unwrap();
+        println!("{json_string}");
+    } else if use_formatted {
+        // For formatted non-JSON output
+        let attributes: Vec<(String, String)> = log.attributes()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        logs::format_attr_log_impl(log.timestamp(), log.message(), &attributes);
+    } else {
+        // Simple output (just the message)
+        println!("{}", log.message());
+    }
+}
+
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
@@ -122,11 +211,7 @@ pub async fn command(args: Args) -> Result<()> {
     if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
         if args.stream {
             stream_build_logs(deployment.id.clone(), |log| {
-                if args.json {
-                    println!("{}", serde_json::to_string(&log).unwrap());
-                } else {
-                    println!("{}", log.message);
-                }
+                print_log(log, args.json, false)  // Build logs use simple output
             })
             .await?;
         } else {
@@ -135,54 +220,15 @@ pub async fn command(args: Args) -> Result<()> {
                 &configs.get_backboard(),
                 deployment.id.clone(),
                 args.limit.or(Some(500)),
-                |log| {
-                    if args.json {
-                        println!("{}", serde_json::to_string(&log).unwrap());
-                    } else {
-                        println!("{}", log.message);
-                    }
-                },
+                |log| print_log(log, args.json, false),  // Build logs use simple output
             )
             .await?;
         }
     } else {
         if args.stream {
-            stream_deploy_logs(
-                deployment.id.clone(),
-                |log| {
-                    if args.json {
-                        let mut map: HashMap<String, Value> = HashMap::new();
-
-                        // Insert fixed attributes
-                        map.insert(
-                            "message".to_string(),
-                            serde_json::to_value(log.message.clone()).unwrap(),
-                        );
-                        map.insert(
-                            "timestamp".to_string(),
-                            serde_json::to_value(log.timestamp.clone()).unwrap(),
-                        );
-
-                        // Insert dynamic attributes
-                        for attribute in log.attributes {
-                            // Trim surrounding quotes if present
-                            let value = match attribute.value.trim_matches('"').parse::<Value>() {
-                                Ok(value) => value,
-                                Err(_) => {
-                                    serde_json::to_value(attribute.value.trim_matches('"')).unwrap()
-                                }
-                            };
-                            map.insert(attribute.key, value);
-                        }
-
-                        // Convert HashMap to JSON string
-                        let json_string = serde_json::to_string(&map).unwrap();
-                        println!("{json_string}");
-                    } else {
-                        format_attr_log(log);
-                    }
-                },
-            )
+            stream_deploy_logs(deployment.id.clone(), |log| {
+                print_log(log, args.json, true)  // Deploy logs use formatted output
+            })
             .await?;
         } else {
             fetch_deploy_logs(
@@ -190,13 +236,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &configs.get_backboard(),
                 deployment.id.clone(),
                 args.limit.or(Some(500)),
-                |log| {
-                    if args.json {
-                        println!("{}", serde_json::to_string(&log).unwrap());
-                    } else {
-                        format_query_log(log);
-                    }
-                },
+                |log| print_log(log, args.json, true),  // Deploy logs use formatted output
             )
             .await?;
         }
