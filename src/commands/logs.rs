@@ -6,7 +6,7 @@ use crate::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::logs,
+    util::logs::{format_attr_log, LogLike},
 };
 use anyhow::bail;
 use serde_json::Value;
@@ -43,7 +43,7 @@ pub struct Args {
     json: bool,
 
     /// Limit the number of log lines returned (only applies when --stream is false)
-    #[clap(long, short = 'n')]
+    #[clap(long)]
     limit: Option<i64>,
 
     /// Stream logs continuously
@@ -51,48 +51,46 @@ pub struct Args {
     stream: bool,
 }
 
-// Trait for log types that have common fields
-trait LogLike {
-    fn message(&self) -> &str;
-    fn timestamp(&self) -> &str;
-    fn attributes(&self) -> Vec<(&str, &str)>;
-}
-
-impl LogLike for subscriptions::deployment_logs::LogFields {
-    fn message(&self) -> &str { &self.message }
-    fn timestamp(&self) -> &str { &self.timestamp }
-    fn attributes(&self) -> Vec<(&str, &str)> {
-        self.attributes.iter()
-            .map(|a| (a.key.as_str(), a.value.as_str()))
-            .collect()
-    }
-}
-
 impl LogLike for queries::deployment_logs::LogFields {
-    fn message(&self) -> &str { &self.message }
-    fn timestamp(&self) -> &str { &self.timestamp }
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
     fn attributes(&self) -> Vec<(&str, &str)> {
-        self.attributes.iter()
+        self.attributes
+            .iter()
             .map(|a| (a.key.as_str(), a.value.as_str()))
             .collect()
     }
 }
 
 impl LogLike for subscriptions::build_logs::LogFields {
-    fn message(&self) -> &str { &self.message }
-    fn timestamp(&self) -> &str { &self.timestamp }
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
     fn attributes(&self) -> Vec<(&str, &str)> {
-        self.attributes.iter()
+        self.attributes
+            .iter()
             .map(|a| (a.key.as_str(), a.value.as_str()))
             .collect()
     }
 }
 
 impl LogLike for queries::build_logs::LogFields {
-    fn message(&self) -> &str { &self.message }
-    fn timestamp(&self) -> &str { &self.timestamp }
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
     fn attributes(&self) -> Vec<(&str, &str)> {
-        self.attributes.iter()
+        self.attributes
+            .iter()
             .map(|a| (a.key.as_str(), a.value.as_str()))
             .collect()
     }
@@ -120,7 +118,7 @@ where
         for (key, value) in log.attributes() {
             let parsed_value = match value.trim_matches('"').parse::<Value>() {
                 Ok(v) => v,
-                Err(_) => serde_json::to_value(value.trim_matches('"')).unwrap()
+                Err(_) => serde_json::to_value(value.trim_matches('"')).unwrap(),
             };
             map.insert(key.to_string(), parsed_value);
         }
@@ -129,17 +127,12 @@ where
         println!("{json_string}");
     } else if use_formatted {
         // For formatted non-JSON output
-        let attributes: Vec<(String, String)> = log.attributes()
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        logs::format_attr_log_impl(log.timestamp(), log.message(), &attributes);
+        format_attr_log(&log);
     } else {
         // Simple output (just the message)
         println!("{}", log.message());
     }
 }
-
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
@@ -211,7 +204,7 @@ pub async fn command(args: Args) -> Result<()> {
     if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
         if args.stream {
             stream_build_logs(deployment.id.clone(), |log| {
-                print_log(log, args.json, false)  // Build logs use simple output
+                print_log(log, args.json, false) // Build logs use simple output
             })
             .await?;
         } else {
@@ -220,14 +213,14 @@ pub async fn command(args: Args) -> Result<()> {
                 &configs.get_backboard(),
                 deployment.id.clone(),
                 args.limit.or(Some(500)),
-                |log| print_log(log, args.json, false),  // Build logs use simple output
+                |log| print_log(log, args.json, false), // Build logs use simple output
             )
             .await?;
         }
     } else {
         if args.stream {
             stream_deploy_logs(deployment.id.clone(), |log| {
-                print_log(log, args.json, true)  // Deploy logs use formatted output
+                print_log(log, args.json, true) // Deploy logs use formatted output
             })
             .await?;
         } else {
@@ -236,7 +229,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &configs.get_backboard(),
                 deployment.id.clone(),
                 args.limit.or(Some(500)),
-                |log| print_log(log, args.json, true),  // Deploy logs use formatted output
+                |log| print_log(log, args.json, true), // Deploy logs use formatted output
             )
             .await?;
         }

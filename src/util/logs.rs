@@ -1,12 +1,20 @@
 use crate::subscriptions;
 use colored::Colorize;
 
-// Generic function to format logs from both queries and subscriptions
-pub fn format_attr_log_impl(timestamp: &str, message: &str, attributes: &[(String, String)]) {
+// Trait for log types that have common fields (matches the one in commands/logs.rs)
+pub trait LogLike {
+    fn message(&self) -> &str;
+    fn timestamp(&self) -> &str;
+    fn attributes(&self) -> Vec<(&str, &str)>;
+}
+
+// Generic function to format logs from any type implementing LogLike
+pub fn format_attr_log<T: LogLike>(log: &T) {
+    let timestamp = log.timestamp();
+    let message = log.message();
+    let attributes = log.attributes();
     // we love inconsistencies!
-    if attributes.is_empty()
-        || (attributes.len() == 1 && attributes[0].0 == "level")
-    {
+    if attributes.is_empty() || (attributes.len() == 1 && attributes[0].0 == "level") {
         println!("{}", message);
         return;
     }
@@ -16,7 +24,7 @@ pub fn format_attr_log_impl(timestamp: &str, message: &str, attributes: &[(Strin
     // get attributes using a match
     for (key, value) in attributes {
         match key.to_lowercase().as_str() {
-            "level" | "lvl" | "severity" => level = Some(value.clone()),
+            "level" | "lvl" | "severity" => level = Some(value.to_string()),
             _ => others.push(format!(
                 "{}{}{}",
                 key.magenta(),
@@ -52,10 +60,17 @@ pub fn format_attr_log_impl(timestamp: &str, message: &str, attributes: &[(Strin
     );
 }
 
-// Wrapper for subscription logs (still used by up.rs)
-pub fn format_attr_log(log: subscriptions::deployment_logs::LogFields) {
-    let attributes: Vec<(String, String)> = log.attributes.iter()
-        .map(|a| (a.key.clone(), a.value.clone()))
-        .collect();
-    format_attr_log_impl(&log.timestamp, &log.message, &attributes);
+impl LogLike for subscriptions::deployment_logs::LogFields {
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes
+            .iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
 }
