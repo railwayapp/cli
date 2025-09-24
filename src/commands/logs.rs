@@ -39,16 +39,12 @@ pub struct Args {
     #[clap(long)]
     json: bool,
 
-    /// Limit the number of log lines returned (only applies when --stream is false)
-    #[clap(long)]
-    limit: Option<i64>,
+    /// Number of log lines to return (disables streaming)
+    #[clap(short = 'n', long = "lines")]
+    lines: Option<i64>,
 
-    /// Stream logs continuously
-    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
-    stream: bool,
-
-    /// Filter logs using Railway's filter syntax (@key:value)
-    #[clap(long)]
+    /// Filter logs using Railway's filter syntax (@key:value), e.g. @level:error to filter to errors
+    #[clap(long, short = 'f')]
     filter: Option<String>,
 }
 
@@ -58,6 +54,9 @@ pub async fn command(args: Args) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    // Stream only if no line limit is specified
+    let should_stream = args.lines.is_none();
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
@@ -120,7 +119,7 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
-        if args.stream {
+        if should_stream {
             stream_build_logs(deployment.id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, false) // Build logs use simple output
             })
@@ -130,14 +129,14 @@ pub async fn command(args: Args) -> Result<()> {
                 &client,
                 &configs.get_backboard(),
                 deployment.id.clone(),
-                args.limit.or(Some(500)),
+                args.lines.or(Some(500)),
                 args.filter.clone(),
                 |log| print_log(log, args.json, false), // Build logs use simple output
             )
             .await?;
         }
     } else {
-        if args.stream {
+        if should_stream {
             stream_deploy_logs(deployment.id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, true) // Deploy logs use formatted output
             })
@@ -147,7 +146,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &client,
                 &configs.get_backboard(),
                 deployment.id.clone(),
-                args.limit.or(Some(500)),
+                args.lines.or(Some(500)),
                 args.filter.clone(),
                 |log| print_log(log, args.json, true), // Deploy logs use formatted output
             )
