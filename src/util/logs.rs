@@ -1,4 +1,4 @@
-use crate::subscriptions;
+use crate::{queries, subscriptions};
 use colored::Colorize;
 
 // Trait for log types that have common fields (matches the one in commands/logs.rs)
@@ -60,7 +60,53 @@ pub fn format_attr_log<T: LogLike>(log: &T) {
     );
 }
 
+// Implementations for all the generated GraphQL log types
 impl LogLike for subscriptions::deployment_logs::LogFields {
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes
+            .iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
+}
+
+impl LogLike for queries::deployment_logs::LogFields {
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes
+            .iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
+}
+
+impl LogLike for subscriptions::build_logs::LogFields {
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn attributes(&self) -> Vec<(&str, &str)> {
+        self.attributes
+            .iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect()
+    }
+}
+
+impl LogLike for queries::build_logs::LogFields {
     fn message(&self) -> &str {
         &self.message
     }

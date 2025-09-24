@@ -51,51 +51,6 @@ pub struct Args {
     stream: bool,
 }
 
-impl LogLike for queries::deployment_logs::LogFields {
-    fn message(&self) -> &str {
-        &self.message
-    }
-    fn timestamp(&self) -> &str {
-        &self.timestamp
-    }
-    fn attributes(&self) -> Vec<(&str, &str)> {
-        self.attributes
-            .iter()
-            .map(|a| (a.key.as_str(), a.value.as_str()))
-            .collect()
-    }
-}
-
-impl LogLike for subscriptions::build_logs::LogFields {
-    fn message(&self) -> &str {
-        &self.message
-    }
-    fn timestamp(&self) -> &str {
-        &self.timestamp
-    }
-    fn attributes(&self) -> Vec<(&str, &str)> {
-        self.attributes
-            .iter()
-            .map(|a| (a.key.as_str(), a.value.as_str()))
-            .collect()
-    }
-}
-
-impl LogLike for queries::build_logs::LogFields {
-    fn message(&self) -> &str {
-        &self.message
-    }
-    fn timestamp(&self) -> &str {
-        &self.timestamp
-    }
-    fn attributes(&self) -> Vec<(&str, &str)> {
-        self.attributes
-            .iter()
-            .map(|a| (a.key.as_str(), a.value.as_str()))
-            .collect()
-    }
-}
-
 // Helper function to print any log type
 fn print_log<T>(log: T, json: bool, use_formatted: bool)
 where
