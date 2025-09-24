@@ -26,7 +26,7 @@ use crate::{
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::logs::format_attr_log,
+    util::logs::print_log,
 };
 
 use super::*;
@@ -308,8 +308,10 @@ pub async fn command(args: Args) -> Result<()> {
     if !ci_mode {
         let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
-            if let Err(e) =
-                stream_deploy_logs(deploy_deployment_id, None, |log| format_attr_log(&log)).await
+            if let Err(e) = stream_deploy_logs(deploy_deployment_id, None, |log| {
+                print_log(log, false, true) // No JSON, use formatted output
+            })
+            .await
             {
                 eprintln!("Failed to stream deploy logs: {e}");
             }

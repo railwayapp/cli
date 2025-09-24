@@ -10,19 +10,23 @@ pub trait LogLike {
     fn attributes(&self) -> Vec<(&str, &str)>;
 }
 
-// Format log attributes into a colored string for display
+/// Format log line with attributes into a colored string for display to a string
 pub fn format_attr_log_string<T: LogLike>(log: &T) -> String {
     let timestamp = log.timestamp();
     let message = log.message();
     let attributes = log.attributes();
-    // we love inconsistencies!
+
+    // For some reason, we choose to only format the log if there are attributes
+    // other than level (which is always present). This is likely because we
+    // don't want to complicate the log for users who are just console logging
+    // in their app without taking advantage of our structured logging.
     if attributes.is_empty() || (attributes.len() == 1 && attributes[0].0 == "level") {
         return message.to_string();
     }
 
     let mut level: Option<String> = None;
     let mut others = Vec::new();
-    // get attributes using a match
+    // format attributes other than level
     for (key, value) in attributes {
         match key.to_lowercase().as_str() {
             "level" | "lvl" | "severity" => level = Some(value.to_string()),
@@ -36,7 +40,7 @@ pub fn format_attr_log_string<T: LogLike>(log: &T) -> String {
             )),
         }
     }
-    // get the level and colour it
+    // format the level as a color
     let level = level
         .map(|level| {
             // make it uppercase so we dont have to make another variable
@@ -61,12 +65,7 @@ pub fn format_attr_log_string<T: LogLike>(log: &T) -> String {
     )
 }
 
-// Generic function to format logs from any type implementing LogLike
-pub fn format_attr_log<T: LogLike>(log: &T) {
-    println!("{}", format_attr_log_string(log));
-}
-
-// Format a log entry as a string based on output mode
+/// Format a log entry as a string based
 pub fn format_log_string<T>(log: T, json: bool, use_formatted: bool) -> String
 where
     T: LogLike + serde::Serialize,
@@ -103,7 +102,7 @@ where
     }
 }
 
-// Helper function to print any log type
+/// Format a log entry as a string based and print it
 pub fn print_log<T>(log: T, json: bool, use_formatted: bool)
 where
     T: LogLike + serde::Serialize,
@@ -274,9 +273,7 @@ mod tests {
         let log = TestLog {
             message: "Test message".to_string(),
             timestamp: "2025-01-01T00:00:00Z".to_string(),
-            attributes: vec![
-                ("level".to_string(), "info".to_string()),
-            ],
+            attributes: vec![("level".to_string(), "info".to_string())],
         };
 
         // Test simple output mode (json=false, use_formatted=false)
