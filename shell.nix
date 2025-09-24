@@ -24,8 +24,6 @@ let
         Security
         SystemConfiguration
         CoreServices
-        CoreFoundation
-        IOKit
       ]);
 in
 pkgs.mkShell
