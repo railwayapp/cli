@@ -40,7 +40,7 @@ pub struct Args {
     json: bool,
 
     /// Number of log lines to return (disables streaming)
-    #[clap(short = 'n', long = "lines")]
+    #[clap(short = 'n', long = "lines", visible_alias = "tail")]
     lines: Option<i64>,
 
     /// Filter logs using Railway's filter syntax (@key:value), e.g. @level:error to filter to errors
