@@ -16,10 +16,12 @@ use super::{
 /// View a deploy's logs
 #[derive(Parser)]
 #[clap(after_help = "Examples:
-  railway logs                                          # Stream logs from linked service
-  railway logs --lines 100                              # Show last 100 lines
-  railway logs --lines 500 --filter \"@level:error\"      # Check recent errors
-  railway logs --build                                  # View build logs")]
+  railway logs                                                      # Stream logs from linked service
+  railway logs --lines 100                                          # Show last 100 lines
+  railway logs --lines 500 --filter \"user\"                          # Check for recent logs with the text \"user\"
+  railway logs --lines 500 --filter \"@level:error\"                  # Check recent errors
+  railway logs --lines 500 --filter \"@level:warn AND rate limit\"    # Check recent warnings with the text \"rate limit\"
+  railway logs --build                                              # View build logs")]
 pub struct Args {
     /// Service to view logs from (defaults to linked service)
     #[clap(short, long)]
@@ -48,9 +50,10 @@ pub struct Args {
     #[clap(short = 'n', long = "lines", visible_alias = "tail")]
     lines: Option<i64>,
 
-    /// Filter logs by attributes. These include common attributes like
-    /// @level:error, but also user-defined attributes. See
-    /// https://docs.railway.com/guides/logs for more info on filtering.
+    /// Filter logs by search terms or attributes. Searchable attributes include
+    /// common attributes like @level:error, but also user-defined attributes.
+    /// See https://docs.railway.com/guides/logs for more info on search filters
+    /// and attributes.
     #[clap(long, short = 'f')]
     filter: Option<String>,
 }
