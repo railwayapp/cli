@@ -13,8 +13,13 @@ use super::{
     *,
 };
 
-/// View a deploy's logs
+/// View deployment logs from Railway services
 #[derive(Parser)]
+#[clap(after_help = "Examples:
+  railway logs                                          # Stream logs from linked service
+  railway logs --lines 100                              # Show last 100 lines
+  railway logs --lines 500 --filter \"@level:error\"      # Check recent errors
+  railway logs --build                                  # View build logs")]
 pub struct Args {
     /// Service to view logs from (defaults to linked service)
     #[clap(short, long)]
@@ -43,7 +48,9 @@ pub struct Args {
     #[clap(short = 'n', long = "lines", visible_alias = "tail")]
     lines: Option<i64>,
 
-    /// Filter logs using Railway's filter syntax (@key:value), e.g. @level:error to filter to errors
+    /// Filter logs by attributes. These include common attributes like
+    /// @level:error, but also user-defined attributes. See
+    /// https://docs.railway.com/guides/logs for more info on filtering.
     #[clap(long, short = 'f')]
     filter: Option<String>,
 }
