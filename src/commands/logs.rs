@@ -13,7 +13,7 @@ use super::{
     *,
 };
 
-/// View deployment logs from Railway services
+/// View a deploy's logs
 #[derive(Parser)]
 #[clap(after_help = "Examples:
   railway logs                                                      # Stream logs from linked service
