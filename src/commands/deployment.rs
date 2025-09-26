@@ -3,7 +3,7 @@ use crate::client::post_graphql;
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::{ensure_project_and_environment_exist, get_project};
 use crate::gql::queries::deployments::{DeploymentStatus, ResponseData, Variables};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::Serialize;
 
 /// Manage deployments
@@ -18,11 +18,11 @@ pub struct Args {
 // breaking existing workflows.
 #[derive(Parser)]
 enum Commands {
-    /// List deployments for a service
+    /// List deployments for a service with IDs, statuses and other metadata
     #[clap(alias = "ls")]
     List(ListArgs),
 
-    /// Deploy project from the current directory
+    /// Upload and deploy project from the current directory
     Up(crate::commands::up::Args),
 
     /// Redeploy the latest deployment of a service
@@ -122,7 +122,6 @@ async fn list_deployments(
         bail!("No service specified and no service linked. Use 'railway link' to link a service or specify one with the service argument.");
     };
 
-    // Prepare GraphQL variables
     let variables = Variables {
         input: crate::gql::queries::deployments::DeploymentListInput {
             service_id: Some(service_id.clone()),
@@ -134,7 +133,6 @@ async fn list_deployments(
         first: Some(limit),
     };
 
-    // Query deployments
     let response: ResponseData = post_graphql::<crate::gql::queries::Deployments, _>(
         &client,
         configs.get_backboard(),
@@ -146,7 +144,6 @@ async fn list_deployments(
         .deployments
         .edges
         .into_iter()
-        .take(limit as usize)
         .map(|edge| edge.node)
         .collect::<Vec<_>>();
 
@@ -186,7 +183,9 @@ async fn list_deployments(
                 _ => format!("{:?}", deployment.status).white(),
             };
 
-            let created_at = deployment.created_at.format("%Y-%m-%d %H:%M:%S UTC");
+            // Convert UTC time to local timezone
+            let local_time: DateTime<Local> = DateTime::from(deployment.created_at);
+            let created_at = local_time.format("%Y-%m-%d %H:%M:%S %Z");
             println!(
                 "  {} | {} | {}",
                 deployment.id,
