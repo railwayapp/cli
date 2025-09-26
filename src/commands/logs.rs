@@ -57,16 +57,11 @@ pub struct Args {
 
     /// Filter logs using Railway's query syntax
     ///
-    /// Syntax:
-    ///   Text search: "error message" or "user signup"
-    ///   Attributes: @level:error, @level:warn
-    ///   Operators: AND, OR, - (not)
+    /// Text search: "error message" or "user signup"
     ///
-    /// Examples:
-    ///   "@level:error" - Only error logs
-    ///   "database AND timeout" - Logs containing both words
-    ///   "@level:warn OR @level:error" - Warnings and errors
-    ///   "-@level:info" - Exclude info logs
+    /// Attributes: @level:error, @level:warn
+    ///
+    /// Operators: AND, OR, - (not)
     ///
     /// See https://docs.railway.com/guides/logs for full syntax.
     #[clap(long, short = 'f')]
