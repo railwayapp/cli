@@ -1,11 +1,9 @@
 use super::*;
 use crate::client::post_graphql;
 use crate::controllers::project::{ensure_project_and_environment_exist, get_project};
-use crate::gql::queries::deployments::{
-    DeploymentStatus, DeploymentStatusInput, ResponseData, Variables,
-};
+use crate::gql::queries::deployments::{DeploymentStatus, ResponseData, Variables};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Manage deployments
 #[derive(Parser)]
@@ -35,10 +33,6 @@ struct ListArgs {
     /// Service name or ID to list deployments for (defaults to linked service)
     service: Option<String>,
 
-    /// Filter by deployment status
-    #[clap(long)]
-    status: Option<DeploymentStatusFilter>,
-
     /// Maximum number of deployments to show (default: 20, max: 1000)
     #[clap(long, default_value = "20")]
     limit: i64,
@@ -46,44 +40,6 @@ struct ListArgs {
     /// Output in JSON format
     #[clap(long)]
     json: bool,
-}
-
-#[derive(Clone, Debug, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum DeploymentStatusFilter {
-    Building,
-    Crashed,
-    Deploying,
-    Failed,
-    Initializing,
-    NeedsApproval,
-    Queued,
-    Removed,
-    Removing,
-    Skipped,
-    Sleeping,
-    Success,
-    Waiting,
-}
-
-impl DeploymentStatusFilter {
-    fn to_deployment_status(&self) -> DeploymentStatus {
-        match self {
-            DeploymentStatusFilter::Building => DeploymentStatus::BUILDING,
-            DeploymentStatusFilter::Crashed => DeploymentStatus::CRASHED,
-            DeploymentStatusFilter::Deploying => DeploymentStatus::DEPLOYING,
-            DeploymentStatusFilter::Failed => DeploymentStatus::FAILED,
-            DeploymentStatusFilter::Initializing => DeploymentStatus::INITIALIZING,
-            DeploymentStatusFilter::NeedsApproval => DeploymentStatus::NEEDS_APPROVAL,
-            DeploymentStatusFilter::Queued => DeploymentStatus::QUEUED,
-            DeploymentStatusFilter::Removed => DeploymentStatus::REMOVED,
-            DeploymentStatusFilter::Removing => DeploymentStatus::REMOVING,
-            DeploymentStatusFilter::Skipped => DeploymentStatus::SKIPPED,
-            DeploymentStatusFilter::Sleeping => DeploymentStatus::SLEEPING,
-            DeploymentStatusFilter::Success => DeploymentStatus::SUCCESS,
-            DeploymentStatusFilter::Waiting => DeploymentStatus::WAITING,
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -98,13 +54,7 @@ struct DeploymentOutput {
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::List(list_args) => {
-            list_deployments(
-                list_args.service,
-                list_args.status,
-                list_args.limit,
-                list_args.json,
-            )
-            .await
+            list_deployments(list_args.service, list_args.limit, list_args.json).await
         }
         Commands::Up(deploy_args) => {
             // Call the existing up command implementation
@@ -117,12 +67,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 }
 
-async fn list_deployments(
-    service: Option<String>,
-    status: Option<DeploymentStatusFilter>,
-    limit: i64,
-    json: bool,
-) -> Result<()> {
+async fn list_deployments(service: Option<String>, limit: i64, json: bool) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -166,10 +111,7 @@ async fn list_deployments(
             service_id: Some(service_id.clone()),
             environment_id: Some(linked_project.environment.clone()),
             project_id: None,
-            status: status.as_ref().map(|s| DeploymentStatusInput {
-                in_: Some(vec![s.to_deployment_status()]),
-                not_in: None,
-            }),
+            status: None,
             include_deleted: None,
         },
         first: Some(limit),
@@ -209,7 +151,6 @@ async fn list_deployments(
         }
 
         println!("{}", "Recent Deployments".bold());
-        println!();
 
         for deployment in deployments {
             let status_colored = match deployment.status {
@@ -219,9 +160,11 @@ async fn list_deployments(
                 }
                 DeploymentStatus::BUILDING
                 | DeploymentStatus::DEPLOYING
-                | DeploymentStatus::INITIALIZING => format!("{:?}", deployment.status).yellow(),
-                DeploymentStatus::WAITING | DeploymentStatus::QUEUED => {
-                    format!("{:?}", deployment.status).blue()
+                | DeploymentStatus::INITIALIZING
+                | DeploymentStatus::WAITING
+                | DeploymentStatus::QUEUED => format!("{:?}", deployment.status).blue(),
+                DeploymentStatus::REMOVED | DeploymentStatus::REMOVING => {
+                    format!("{:?}", deployment.status).dimmed()
                 }
                 _ => format!("{:?}", deployment.status).white(),
             };
@@ -229,7 +172,7 @@ async fn list_deployments(
             let created_at = deployment.created_at.format("%Y-%m-%d %H:%M:%S UTC");
             println!(
                 "  {} | {} | {}",
-                deployment.id.purple(),
+                deployment.id,
                 status_colored,
                 created_at.to_string().dimmed()
             );
