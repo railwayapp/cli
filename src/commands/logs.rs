@@ -51,7 +51,7 @@ pub struct Args {
     #[clap(long)]
     json: bool,
 
-    /// Number of log lines to fetch (disables streaming). Default when specified without value: 500 lines
+    /// Number of log lines to fetch (disables streaming)
     #[clap(short = 'n', long = "lines", visible_alias = "tail")]
     lines: Option<i64>,
 
