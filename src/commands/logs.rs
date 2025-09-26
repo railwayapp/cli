@@ -93,6 +93,8 @@ pub async fn command(args: Args) -> Result<()> {
         _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
     };
 
+    // Fetch all deployments so we can find a sensible default deployment id if
+    // none is provided
     let vars = queries::deployments::Variables {
         input: DeploymentListInput {
             project_id: Some(linked_project.project.clone()),
@@ -102,35 +104,36 @@ pub async fn command(args: Args) -> Result<()> {
             status: None,
         },
     };
-
     let deployments =
         post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
             .await?
             .deployments;
-
-    let mut deployments: Vec<_> = deployments
+    let mut all_deployments: Vec<_> = deployments
         .edges
         .into_iter()
-        .filter_map(|deployment| {
-            (deployment.node.status == DeploymentStatus::SUCCESS).then_some(deployment.node)
-        })
+        .map(|deployment| deployment.node)
         .collect();
+    all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let default_deployment = all_deployments
+        .iter()
+        .find(|d| d.status == DeploymentStatus::SUCCESS)
+        .or_else(|| all_deployments.first())
+        .context("No deployments found")?;
 
-    let deployment;
-    if let Some(deployment_id) = args.deployment_id {
-        deployment = deployments
-            .iter()
-            .find(|deployment| deployment.id == deployment_id)
-            .context("Deployment id does not exist")?;
+    let deployment_id = if let Some(deployment_id) = args.deployment_id {
+        // Use the provided deployment ID directly
+        deployment_id
     } else {
-        // get the latest deloyment
-        deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        deployment = deployments.first().context("No deployments found")?;
+        default_deployment.id.clone()
     };
 
-    if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
+    let show_build_logs = args.build
+        || (default_deployment.status == DeploymentStatus::FAILED
+            && deployment_id == default_deployment.id);
+
+    if show_build_logs {
         if should_stream {
-            stream_build_logs(deployment.id.clone(), args.filter.clone(), |log| {
+            stream_build_logs(deployment_id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, false) // Build logs use simple output
             })
             .await?;
@@ -138,7 +141,7 @@ pub async fn command(args: Args) -> Result<()> {
             fetch_build_logs(
                 &client,
                 &configs.get_backboard(),
-                deployment.id.clone(),
+                deployment_id.clone(),
                 args.lines.or(Some(500)),
                 args.filter.clone(),
                 |log| print_log(log, args.json, false), // Build logs use simple output
@@ -147,7 +150,7 @@ pub async fn command(args: Args) -> Result<()> {
         }
     } else {
         if should_stream {
-            stream_deploy_logs(deployment.id.clone(), args.filter.clone(), |log| {
+            stream_deploy_logs(deployment_id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, true) // Deploy logs use formatted output
             })
             .await?;
@@ -155,7 +158,7 @@ pub async fn command(args: Args) -> Result<()> {
             fetch_deploy_logs(
                 &client,
                 &configs.get_backboard(),
-                deployment.id.clone(),
+                deployment_id.clone(),
                 args.lines.or(Some(500)),
                 args.filter.clone(),
                 |log| print_log(log, args.json, true), // Deploy logs use formatted output
