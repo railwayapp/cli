@@ -1,5 +1,6 @@
 use super::*;
 use crate::client::post_graphql;
+use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::{ensure_project_and_environment_exist, get_project};
 use crate::gql::queries::deployments::{DeploymentStatus, ResponseData, Variables};
 use chrono::{DateTime, Utc};
@@ -31,7 +32,12 @@ enum Commands {
 #[derive(Parser)]
 struct ListArgs {
     /// Service name or ID to list deployments for (defaults to linked service)
+    #[clap(short, long)]
     service: Option<String>,
+
+    /// Environment to list deployments from (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
 
     /// Maximum number of deployments to show (default: 20, max: 1000)
     #[clap(long, default_value = "20")]
@@ -54,7 +60,13 @@ struct DeploymentOutput {
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::List(list_args) => {
-            list_deployments(list_args.service, list_args.limit, list_args.json).await
+            list_deployments(
+                list_args.service,
+                list_args.environment,
+                list_args.limit,
+                list_args.json,
+            )
+            .await
         }
         Commands::Up(deploy_args) => {
             // Call the existing up command implementation
@@ -67,14 +79,18 @@ pub async fn command(args: Args) -> Result<()> {
     }
 }
 
-async fn list_deployments(service: Option<String>, limit: i64, json: bool) -> Result<()> {
+async fn list_deployments(
+    service: Option<String>,
+    environment: Option<String>,
+    limit: i64,
+    json: bool,
+) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    // Validate limit
     let limit = if limit > 1000 {
         eprintln!("Warning: limit cannot exceed 1000, using 1000 instead");
         1000
@@ -85,10 +101,11 @@ async fn list_deployments(service: Option<String>, limit: i64, json: bool) -> Re
         limit
     };
 
-    // Determine service ID
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let environment = environment.unwrap_or(linked_project.environment.clone());
+    let environment_id = get_matched_environment(&project, environment)?.id;
+
     let service_id = if let Some(service_name_or_id) = service {
-        // Look up service by name or ID
-        let project = get_project(&client, &configs, linked_project.project.clone()).await?;
         let service = project
             .services
             .edges
@@ -109,7 +126,7 @@ async fn list_deployments(service: Option<String>, limit: i64, json: bool) -> Re
     let variables = Variables {
         input: crate::gql::queries::deployments::DeploymentListInput {
             service_id: Some(service_id.clone()),
-            environment_id: Some(linked_project.environment.clone()),
+            environment_id: Some(environment_id),
             project_id: None,
             status: None,
             include_deleted: None,
