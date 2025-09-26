@@ -93,8 +93,8 @@ pub async fn command(args: Args) -> Result<()> {
         _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
     };
 
-    // Fetch all deployments so we can default to the latest successful
-    // deployment id
+    // Fetch all deployments so we can find a sensible default deployment id if
+    // none is provided
     let vars = queries::deployments::Variables {
         input: DeploymentListInput {
             project_id: Some(linked_project.project.clone()),
@@ -104,22 +104,16 @@ pub async fn command(args: Args) -> Result<()> {
             status: None,
         },
     };
-
     let deployments =
         post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
             .await?
             .deployments;
-
     let mut all_deployments: Vec<_> = deployments
         .edges
         .into_iter()
         .map(|deployment| deployment.node)
         .collect();
-
-    // Sort by creation date (newest first)
     all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-    // Try to find the latest successful deployment first
     let latest_deployment = all_deployments
         .iter()
         .find(|d| d.status == DeploymentStatus::SUCCESS)
