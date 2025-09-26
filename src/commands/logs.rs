@@ -93,6 +93,7 @@ pub async fn command(args: Args) -> Result<()> {
         _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
     };
 
+    // Fetch the latest successful deployment
     let vars = queries::deployments::Variables {
         input: DeploymentListInput {
             project_id: Some(linked_project.project.clone()),
@@ -116,21 +117,26 @@ pub async fn command(args: Args) -> Result<()> {
         })
         .collect();
 
-    let deployment;
-    if let Some(deployment_id) = args.deployment_id {
-        deployment = deployments
-            .iter()
-            .find(|deployment| deployment.id == deployment_id)
-            .context("Deployment id does not exist")?;
+    // Sort by creation date and get the latest
+    deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let latest_deployment = deployments
+        .first()
+        .context("No successful deployments found")?;
+
+    let deployment_id = if let Some(deployment_id) = args.deployment_id {
+        // Use the provided deployment ID directly
+        deployment_id
     } else {
-        // get the latest deloyment
-        deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        deployment = deployments.first().context("No deployments found")?;
+        latest_deployment.id.clone()
     };
 
-    if (args.build || deployment.status == DeploymentStatus::FAILED) && !args.deployment {
+    let show_build_logs = args.build
+        || (latest_deployment.status == DeploymentStatus::FAILED
+            && deployment_id == latest_deployment.id);
+
+    if show_build_logs {
         if should_stream {
-            stream_build_logs(deployment.id.clone(), args.filter.clone(), |log| {
+            stream_build_logs(deployment_id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, false) // Build logs use simple output
             })
             .await?;
@@ -138,7 +144,7 @@ pub async fn command(args: Args) -> Result<()> {
             fetch_build_logs(
                 &client,
                 &configs.get_backboard(),
-                deployment.id.clone(),
+                deployment_id.clone(),
                 args.lines.or(Some(500)),
                 args.filter.clone(),
                 |log| print_log(log, args.json, false), // Build logs use simple output
@@ -147,7 +153,7 @@ pub async fn command(args: Args) -> Result<()> {
         }
     } else {
         if should_stream {
-            stream_deploy_logs(deployment.id.clone(), args.filter.clone(), |log| {
+            stream_deploy_logs(deployment_id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, true) // Deploy logs use formatted output
             })
             .await?;
@@ -155,7 +161,7 @@ pub async fn command(args: Args) -> Result<()> {
             fetch_deploy_logs(
                 &client,
                 &configs.get_backboard(),
-                deployment.id.clone(),
+                deployment_id.clone(),
                 args.lines.or(Some(500)),
                 args.filter.clone(),
                 |log| print_log(log, args.json, true), // Deploy logs use formatted output
