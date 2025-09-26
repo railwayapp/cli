@@ -57,13 +57,7 @@ pub struct Args {
 
     /// Filter logs using Railway's query syntax
     ///
-    /// Text search: "error message" or "user signup"
-    ///
-    /// Attributes: @level:error, @level:warn
-    ///
-    /// Operators: AND, OR, - (not)
-    ///
-    /// See https://docs.railway.com/guides/logs for full syntax.
+    /// Can be a text search ("error message" or "user signup"), attribute filters (@level:error, @level:warn), or a combination with the operators AND, OR, - (not). See https://docs.railway.com/guides/logs for full syntax.
     #[clap(long, short = 'f')]
     filter: Option<String>,
 }
