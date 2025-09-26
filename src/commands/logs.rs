@@ -114,7 +114,7 @@ pub async fn command(args: Args) -> Result<()> {
         .map(|deployment| deployment.node)
         .collect();
     all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let latest_deployment = all_deployments
+    let default_deployment = all_deployments
         .iter()
         .find(|d| d.status == DeploymentStatus::SUCCESS)
         .or_else(|| all_deployments.first())
@@ -124,12 +124,12 @@ pub async fn command(args: Args) -> Result<()> {
         // Use the provided deployment ID directly
         deployment_id
     } else {
-        latest_deployment.id.clone()
+        default_deployment.id.clone()
     };
 
     let show_build_logs = args.build
-        || (latest_deployment.status == DeploymentStatus::FAILED
-            && deployment_id == latest_deployment.id);
+        || (default_deployment.status == DeploymentStatus::FAILED
+            && deployment_id == default_deployment.id);
 
     if show_build_logs {
         if should_stream {
