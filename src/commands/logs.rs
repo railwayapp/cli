@@ -93,7 +93,8 @@ pub async fn command(args: Args) -> Result<()> {
         _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
     };
 
-    // Fetch the latest successful deployment
+    // Fetch all deployments so we can default to the latest successful
+    // deployment id
     let vars = queries::deployments::Variables {
         input: DeploymentListInput {
             project_id: Some(linked_project.project.clone()),
@@ -109,19 +110,21 @@ pub async fn command(args: Args) -> Result<()> {
             .await?
             .deployments;
 
-    let mut deployments: Vec<_> = deployments
+    let mut all_deployments: Vec<_> = deployments
         .edges
         .into_iter()
-        .filter_map(|deployment| {
-            (deployment.node.status == DeploymentStatus::SUCCESS).then_some(deployment.node)
-        })
+        .map(|deployment| deployment.node)
         .collect();
 
-    // Sort by creation date and get the latest
-    deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let latest_deployment = deployments
-        .first()
-        .context("No successful deployments found")?;
+    // Sort by creation date (newest first)
+    all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    // Try to find the latest successful deployment first
+    let latest_deployment = all_deployments
+        .iter()
+        .find(|d| d.status == DeploymentStatus::SUCCESS)
+        .or_else(|| all_deployments.first())
+        .context("No deployments found")?;
 
     let deployment_id = if let Some(deployment_id) = args.deployment_id {
         // Use the provided deployment ID directly
