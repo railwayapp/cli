@@ -101,6 +101,7 @@ pub async fn command(args: Args) -> Result<()> {
             include_deleted: None,
             status: None,
         },
+        first: None,
     };
 
     let deployments =
