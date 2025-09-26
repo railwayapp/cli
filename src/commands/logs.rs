@@ -13,21 +13,26 @@ use super::{
     *,
 };
 
-/// View a deploy's logs
 #[derive(Parser)]
-#[clap(after_help = "Examples:
-  railway logs                                                      # Stream logs from linked service
-  railway logs --lines 100                                          # Show last 100 lines
-  railway logs --lines 500 --filter \"user\"                          # Check for recent logs with the text \"user\"
-  railway logs --lines 500 --filter \"@level:error\"                  # Check recent errors
-  railway logs --lines 500 --filter \"@level:warn AND rate limit\"    # Check recent warnings with the text \"rate limit\"
-  railway logs --build                                              # View build logs")]
+#[clap(
+    about = "View build or deploy logs from a Railway deployment",
+    long_about = "View build or deploy logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines flag is provided.",
+    after_help = "Examples:
+
+  railway logs                                                       # Stream live logs from latest deployment
+  railway logs --build 7422c95b-c604-46bc-9de4-b7a43e1fd53d          # Stream build logs from a specific deployment
+  railway logs --lines 100                                           # Pull last 100 logs without streaming
+  railway logs --service backend --environment production            # Stream latest deployment logs from a specific service in a specific environment
+  railway logs --lines 10 --filter \"@level:error\"                    # View 10 latest error logs
+  railway logs --lines 10 --filter \"@level:warn AND rate limit\"      # View 10 latest warning logs related to rate limiting
+  railway logs --json                                                # Get logs in JSON format"
+)]
 pub struct Args {
-    /// Service to view logs from (defaults to linked service)
+    /// Service to view logs from (defaults to linked service). Can be service name or service ID
     #[clap(short, long)]
     service: Option<String>,
 
-    /// Environment to view logs from (defaults to linked environment)
+    /// Environment to view logs from (defaults to linked environment). Can be environment name or environment ID
     #[clap(short, long)]
     environment: Option<String>,
 
@@ -39,21 +44,31 @@ pub struct Args {
     #[clap(short, long, group = "log_type")]
     build: bool,
 
-    /// Deployment ID to pull logs from. Omit to pull from latest deloy
+    /// Deployment ID to view logs from. Defaults to most recent successful deployment, or latest deployment if none succeeded
     deployment_id: Option<String>,
 
-    /// Output in JSON format
+    /// Output logs in JSON format. Each log line becomes a JSON object with timestamp, message, and any other attributes
     #[clap(long)]
     json: bool,
 
-    /// Number of log lines to return (disables streaming)
+    /// Number of log lines to fetch (disables streaming). Default when specified without value: 500 lines
     #[clap(short = 'n', long = "lines", visible_alias = "tail")]
     lines: Option<i64>,
 
-    /// Filter logs by search terms or attributes. Searchable attributes include
-    /// common attributes like @level:error, but also user-defined attributes.
-    /// See https://docs.railway.com/guides/logs for more info on search filters
-    /// and attributes.
+    /// Filter logs using Railway's query syntax
+    ///
+    /// Syntax:
+    ///   Text search: "error message" or "user signup"
+    ///   Attributes: @level:error, @level:warn
+    ///   Operators: AND, OR, - (not)
+    ///
+    /// Examples:
+    ///   "@level:error" - Only error logs
+    ///   "database AND timeout" - Logs containing both words
+    ///   "@level:warn OR @level:error" - Warnings and errors
+    ///   "-@level:info" - Exclude info logs
+    ///
+    /// See https://docs.railway.com/guides/logs for full syntax.
     #[clap(long, short = 'f')]
     filter: Option<String>,
 }
