@@ -1,11 +1,12 @@
-query Deployments($input: DeploymentListInput!) {
-    deployments(input: $input) {
-      edges {
-        node {
-          id
-          createdAt
-          status
-        }
+query Deployments($input: DeploymentListInput!, $first: Int) {
+  deployments(input: $input, first: $first) {
+    edges {
+      node {
+        id
+        createdAt
+        status
+        meta
       }
     }
+  }
 }

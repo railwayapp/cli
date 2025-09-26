@@ -107,6 +107,7 @@ pub async fn command(args: Args) -> Result<()> {
             include_deleted: None,
             status: None,
         },
+        first: None,
     };
     let deployments =
         post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)

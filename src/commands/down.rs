@@ -67,6 +67,7 @@ pub async fn command(args: Args) -> Result<()> {
             include_deleted: None,
             status: None,
         },
+        first: None,
     };
 
     let linked_project_name = linked_project

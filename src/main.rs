@@ -29,6 +29,7 @@ commands!(
     completion,
     connect,
     deploy,
+    deployment,
     domain,
     docs,
     down,
