@@ -10,7 +10,11 @@ use crate::{
     table::Table,
 };
 use anyhow::bail;
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io::{stdin, BufRead},
+    time::Duration,
+};
 
 /// Show variables for active environment
 #[derive(Parser)]
@@ -34,6 +38,28 @@ pub struct Args {
     #[clap(long)]
     set: Vec<String>,
 
+    /// Read environment variable pairs from stdin.
+    ///
+    /// Each line should contain exactly one "{KEY}={VALUE}"" pair.
+    /// Leading and trailing whitespace is trimmed. Empty lines are ignored.
+    /// If combined with --set, values from both sources are applied.
+    ///
+    /// Examples:
+    ///
+    /// # Read a single variable from stdin
+    ///
+    /// echo "FOO=bar" | railway variables --set-from-stdin
+    ///
+    /// # Read multiple variables, one per line
+    ///
+    /// printf "FOO=bar\nBAZ=qux\n" | railway variables --set-from-stdin
+    ///
+    /// # Load variables from a .env file
+    ///
+    /// cat .env | railway variables --set-from-stdin
+    #[clap(long)]
+    set_from_stdin: bool,
+
     /// Output in JSON format
     #[clap(long)]
     json: bool,
@@ -43,7 +69,7 @@ pub struct Args {
     skip_deploys: bool,
 }
 
-pub async fn command(args: Args) -> Result<()> {
+pub async fn command(mut args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -73,6 +99,18 @@ pub async fn command(args: Args) -> Result<()> {
         // Otherwise it's a user error
         _ => bail!(RailwayError::NoServiceLinked),
     };
+
+    if args.set_from_stdin {
+        let stdin = stdin();
+
+        for line in stdin.lock().lines() {
+            let line = line?;
+
+            if !line.trim().is_empty() {
+                args.set.push(line);
+            }
+        }
+    }
 
     if !args.set.is_empty() {
         set_variables(
