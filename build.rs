@@ -10,7 +10,8 @@ fn main() {
         use winres::WindowsResource;
 
         let mut res = WindowsResource::new();
-        res.set_manifest_file("railway.exe.manifest").set_icon("wix/logo.ico");
+        res.set_manifest_file("railway.exe.manifest")
+            .set_icon("wix/logo.ico");
         res.compile().unwrap();
     }
 }
