@@ -7,7 +7,7 @@ use std::io::Write;
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout, Duration};
 
-use crate::commands::ssh::{SSH_MAX_EMPTY_MESSAGES, SSH_MESSAGE_TIMEOUT_SECS};
+use crate::commands::ssh::{AuthKind, SSH_MAX_EMPTY_MESSAGES, SSH_MESSAGE_TIMEOUT_SECS};
 
 use super::connection::{establish_connection, SSHConnectParams};
 use super::messages::{ClientMessage, ClientPayload, DataPayload, ServerMessage};
@@ -24,7 +24,7 @@ pub struct TerminalClient {
 impl TerminalClient {
     pub async fn new(
         url: &str,
-        token: &str,
+        token: AuthKind,
         params: &SSHConnectParams,
         spinner: &mut ProgressBar,
         max_attempts: Option<u32>,
