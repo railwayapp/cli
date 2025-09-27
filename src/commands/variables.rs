@@ -40,24 +40,23 @@ pub struct Args {
 
     /// Read environment variable pairs from stdin.
     ///
-    /// Each line should contain exactly one "{KEY}={VALUE}"" pair.
-    /// Leading and trailing whitespace is trimmed. Empty lines are ignored.
-    /// If combined with --set, values from both sources are applied.
+    /// Each line should contain exactly one "{KEY}={VALUE}"" pair. Leading and trailing whitespace is trimmed. 
+    /// Empty lines are ignored. If combined with --set, values from both sources are applied.
     ///
     /// Examples:
     ///
-    /// # Read a single variable from stdin
+    ///     # Read a single variable from stdin
     ///
-    /// echo "FOO=bar" | railway variables --set-from-stdin
+    ///     echo "FOO=bar" | railway variables --set-from-stdin
     ///
-    /// # Read multiple variables, one per line
+    ///     # Read multiple variables, one per line
     ///
-    /// printf "FOO=bar\nBAZ=qux\n" | railway variables --set-from-stdin
+    ///     printf "FOO=bar\nBAZ=qux\n" | railway variables --set-from-stdin
     ///
-    /// # Load variables from a .env file
+    ///     # Load variables from a .env file
     ///
-    /// cat .env | railway variables --set-from-stdin
-    #[clap(long)]
+    ///     cat .env | railway variables --set-from-stdin
+    #[clap(long, verbatim_doc_comment)]
     set_from_stdin: bool,
 
     /// Output in JSON format
