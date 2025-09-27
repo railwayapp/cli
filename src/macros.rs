@@ -1,7 +1,7 @@
 #[macro_export]
 macro_rules! commands {
     ($($module:ident $(($($alias:ident),*))?),*) => {
-        paste::paste! {
+        pastey::paste! {
             /// Build the global CLI (root command) and attach module subcommands.
             pub fn build_args() -> clap::Command {
                 // Use your desired root name here (for example, "railway" rather than a derived name).
