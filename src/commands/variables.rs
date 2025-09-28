@@ -40,7 +40,7 @@ pub struct Args {
 
     /// Read environment variable pairs from stdin.
     ///
-    /// Each line should contain exactly one "{KEY}={VALUE}"" pair. Leading and trailing whitespace is trimmed. 
+    /// Each line should contain exactly one "{KEY}={VALUE}"" pair. Leading and trailing whitespace is trimmed.
     /// Empty lines are ignored. If combined with --set, values from both sources are applied.
     ///
     /// Examples:
