@@ -6,6 +6,7 @@ use crate::{
     client::GQLClient,
     config::Configs,
     controllers::terminal::{self, TerminalClient},
+    errors::RailwayError,
     util::progress::{create_spinner, fail_spinner},
 };
 
@@ -169,19 +170,30 @@ async fn ensure_tmux_is_installed(params: &terminal::SSHConnectParams) -> Result
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+pub enum AuthKind {
+    Bearer(String),
+    ProjectAccessToken(String),
+}
+
 async fn create_client(
     params: &terminal::SSHConnectParams,
     spinner: &mut ProgressBar,
     max_attempts: Option<u32>,
 ) -> Result<TerminalClient> {
     let configs = Configs::new()?;
-    let token = configs
-        .get_railway_auth_token()
-        .context("No authentication token found. Please login first with 'railway login'")?;
+    let token = match (
+        configs.get_railway_auth_token(),
+        Configs::get_railway_token(),
+    ) {
+        (Some(token), _) => AuthKind::Bearer(token),
+        (None, Some(token)) => AuthKind::ProjectAccessToken(token),
+        (None, None) => return Err(RailwayError::Unauthorized.into()),
+    };
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());
     let terminal_client =
-        create_terminal_client(&ws_url, &token, params, spinner, max_attempts).await?;
+        create_terminal_client(&ws_url, token, params, spinner, max_attempts).await?;
 
     Ok(terminal_client)
 }
