@@ -28,6 +28,7 @@ commands!(
     add,
     completion,
     connect,
+    backup,
     deploy,
     deployment,
     domain,

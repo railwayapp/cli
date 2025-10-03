@@ -11,6 +11,7 @@ pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
 pub mod add;
 pub mod completion;
 pub mod connect;
+pub mod backup;
 pub mod deploy;
 pub mod deployment;
 pub mod docs;
