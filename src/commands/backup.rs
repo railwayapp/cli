@@ -2,7 +2,6 @@ use anyhow::bail;
 use std::{collections::BTreeMap, fmt::Display};
 use std::fs::File;
 use std::process::Stdio;
-use clap::builder::Str;
 use tokio::process::Command;
 use url::Url;
 use which::which;
