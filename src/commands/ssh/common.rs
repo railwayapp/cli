@@ -1,10 +1,12 @@
 use std::io::Cursor;
 
-use anyhow::{anyhow, Result};
+use anyhow::bail;
+use anyhow::{anyhow, Context, Result};
 use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;
 
+use crate::commands::queries::RailwayProject;
 use crate::controllers::{
     environment::get_matched_environment,
     project::get_project,
@@ -68,6 +70,31 @@ pub fn parse_server_error(error: String) -> SessionTermination {
     }
 }
 
+pub async fn find_service_by_name(
+    client: &Client,
+    configs: &Configs,
+    project: &RailwayProject,
+    service_id_or_name: &str,
+) -> Result<String> {
+    let project = get_project(&client, &configs, project.id.clone()).await?;
+
+    let services = project.services.edges.iter().collect::<Vec<_>>();
+
+    let service = services
+        .iter()
+        // Match service on lowercase name or id
+        .find(|service| {
+            service.node.name.to_lowercase() == service_id_or_name.to_lowercase()
+                || service.node.id == service_id_or_name
+        })
+        .with_context(|| format!("Service '{service_id_or_name}' not found"))?
+        .node
+        .id
+        .to_owned();
+
+    return Ok(service);
+}
+
 pub async fn get_ssh_connect_params(
     args: Args,
     configs: &Configs,
@@ -96,7 +123,8 @@ pub async fn get_ssh_connect_params(
 
     let service_id;
     if has_service {
-        service_id = args.service.unwrap();
+        let service_id_or_name = args.service.unwrap();
+        service_id = find_service_by_name(&client, &configs, &project, &service_id_or_name).await?
     } else {
         service_id = get_or_prompt_service(linked_project.clone(), project, None)
             .await?
