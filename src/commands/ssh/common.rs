@@ -1,10 +1,12 @@
 use std::io::Cursor;
 
-use anyhow::{anyhow, Result};
+use anyhow::bail;
+use anyhow::{anyhow, Context, Result};
 use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;
 
+use crate::commands::queries::RailwayProject;
 use crate::controllers::{
     environment::get_matched_environment,
     project::get_project,
@@ -68,6 +70,31 @@ pub fn parse_server_error(error: String) -> SessionTermination {
     }
 }
 
+pub async fn find_service_by_name(
+    client: &Client,
+    configs: &Configs,
+    project: &RailwayProject,
+    service_id_or_name: &str,
+) -> Result<String> {
+    let project = get_project(&client, &configs, project.id.clone()).await?;
+
+    let services = project.services.edges.iter().collect::<Vec<_>>();
+
+    let service = services
+        .iter()
+        // Match service on lowercase name or id
+        .find(|service| {
+            service.node.name.to_lowercase() == service_id_or_name.to_lowercase()
+                || service.node.id == service_id_or_name
+        })
+        .with_context(|| format!("Service '{service_id_or_name}' not found"))?
+        .node
+        .id
+        .to_owned();
+
+    return Ok(service);
+}
+
 pub async fn get_ssh_connect_params(
     args: Args,
     configs: &Configs,
@@ -77,56 +104,32 @@ pub async fn get_ssh_connect_params(
     let has_service = args.service.is_some();
     let has_environment = args.environment.is_some();
 
-    let provided_args_count = [has_project, has_service, has_environment]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
-    if provided_args_count > 0 && provided_args_count < 3 {
-        if !has_project {
-            return Err(anyhow!(
-                "Must provide project when setting service or environment"
-            ));
-        }
-        if !has_environment {
-            return Err(anyhow!(
-                "Must provide environment when setting project or service"
-            ));
-        }
-        if !has_service {
-            return Err(anyhow!(
-                "Must provide service when setting project or environment"
-            ));
-        }
-    }
-
-    if provided_args_count == 3 {
-        let project_id = args.project.unwrap();
-        let project = get_project(client, configs, project_id.clone()).await?;
-
-        let environment = args.environment.unwrap();
-        let environment_id = get_matched_environment(&project, environment)?.id;
-
-        let service_id = args.service.unwrap();
-
-        return Ok(SSHConnectParams {
-            project_id,
-            environment_id,
-            service_id,
-            deployment_instance_id: args.deployment_instance,
-        });
-    }
-
     let linked_project = configs.get_linked_project().await?;
-    let project_id = linked_project.project.clone();
+    let project_id;
+    if has_project {
+        project_id = args.project.unwrap();
+    } else {
+        project_id = linked_project.project.clone();
+    }
     let project = get_project(client, configs, project_id.clone()).await?;
 
-    let environment = linked_project.environment.clone();
+    let environment;
+    if has_environment {
+        environment = args.environment.unwrap();
+    } else {
+        environment = linked_project.environment.clone();
+    }
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service_id = get_or_prompt_service(linked_project.clone(), project, None)
-        .await?
-        .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
+    let service_id;
+    if has_service {
+        let service_id_or_name = args.service.unwrap();
+        service_id = find_service_by_name(&client, &configs, &project, &service_id_or_name).await?
+    } else {
+        service_id = get_or_prompt_service(linked_project.clone(), project, None)
+            .await?
+            .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
+    }
 
     Ok(SSHConnectParams {
         project_id,
