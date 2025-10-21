@@ -337,7 +337,7 @@ async fn handle_function_change(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    post_graphql::<mutations::FunctionUpdate, _>(
+    post_graphql_skip_none::<mutations::FunctionUpdate, _>(
         &client,
         configs.get_backboard(),
         mutations::function_update::Variables {
