@@ -376,7 +376,11 @@ fn select_service_variables_new(
                                 || (s.node.name.to_lowercase() == service.to_lowercase())
                         })
                         .map(|s| (s.node.id.clone(), s.node.name.clone()));
-                    let variable = chunk.last().unwrap().split('=').collect::<Vec<&str>>();
+                    let variable = chunk.last().unwrap().splitn(2, '=').collect::<Vec<&str>>();
+                    if variable.len() != 2 || variable[1].is_empty() {
+                        println!("{}: Invalid variable format", "Error".red().bold());
+                        std::process::exit(1);
+                    }
                     if service_meta.is_none() {
                         println!(
                             "{}: Service {} not found",
@@ -428,7 +432,7 @@ fn select_service_variables_new(
                             "<KEY=VALUE, press esc to skip>",
                         )?;
                         if let Some(variable) = variable {
-                            let variable = variable.split('=').collect::<Vec<&str>>();
+                            let variable = variable.splitn(2, '=').collect::<Vec<&str>>();
                             if variable.len() != 2 || variable[1].is_empty() {
                                 println!("{}: Invalid variable format", "Warn".yellow().bold());
                                 continue;
