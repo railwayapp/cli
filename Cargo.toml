@@ -98,6 +98,9 @@ similar = "2.7.0"
 pathdiff = "0.2.3"
 pastey = "0.1.1"
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
+
 [profile.release]
 lto = "fat"
 opt-level = "z"
