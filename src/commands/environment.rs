@@ -294,7 +294,7 @@ async fn upsert_variables(
     configs: &Configs,
     client: reqwest::Client,
     project: queries::project::ProjectProject,
-    service_variables: Vec<(String, (String, String))>,
+    service_variables: Vec<(String, Variable)>,
     env_id: String,
 ) -> Result<(), anyhow::Error> {
     let good_vars: Vec<(String, BTreeMap<String, String>)> = service_variables
@@ -349,7 +349,7 @@ fn select_service_variables_new(
     project: &queries::project::ProjectProject,
     is_terminal: bool,
     duplicate_id: &Option<String>,
-) -> Result<Vec<(String, (String, String))>> {
+) -> Result<Vec<(String, Variable)>> {
     let service_variables = if let Some(ref duplicate_id) = *duplicate_id {
         let services = project
             .services
@@ -376,11 +376,14 @@ fn select_service_variables_new(
                                 || (s.node.name.to_lowercase() == service.to_lowercase())
                         })
                         .map(|s| (s.node.id.clone(), s.node.name.clone()));
-                    let variable = chunk.last().unwrap().splitn(2, '=').collect::<Vec<&str>>();
-                    if variable.len() != 2 || variable[1].is_empty() {
-                        println!("{}: Invalid variable format", "Error".red().bold());
-                        std::process::exit(1);
-                    }
+
+                    let variable = match chunk.last().unwrap().parse::<Variable>() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!("{:?}", e);
+                            return None;
+                        }
+                    };
                     if service_meta.is_none() {
                         println!(
                             "{}: Service {} not found",
@@ -390,22 +393,26 @@ fn select_service_variables_new(
                         std::process::exit(1); // returning errors in closures... oh my god...
                     }
                     service_meta.map(|service_meta| {
-                        let key = variable.first().unwrap().to_string();
-                        let value = variable.last().unwrap().to_string();
                         fake_select(
                             "Select a service to set variables for",
                             service_meta.1.as_str(),
                         );
-                        fake_select("Enter a variable", format!("{key}={value}").as_str());
+                        fake_select(
+                            "Enter a variable",
+                            format!("{}={}", variable.key, variable.value).as_str(),
+                        );
                         (
                             service_meta.0, // id
-                            (key, value),
+                            Variable {
+                                key: variable.key,
+                                value: variable.value,
+                            },
                         )
                     })
                 })
-                .collect::<Vec<(String, (String, String))>>()
+                .collect::<Vec<(String, Variable)>>()
         } else if is_terminal {
-            let mut variables: Vec<(String, (String, String))> = Vec::new();
+            let mut variables: Vec<(String, Variable)> = Vec::new();
             let p_services = services
                 .iter()
                 .map(|s| PromptService(&s.node))
@@ -425,29 +432,12 @@ fn select_service_variables_new(
                     prompt_services,
                 )?;
                 if let Some(service) = service {
-                    loop {
-                        // prompt for value now
-                        let variable = prompt_text_with_placeholder_disappear_skippable(
-                            "Enter a variable",
-                            "<KEY=VALUE, press esc to skip>",
-                        )?;
-                        if let Some(variable) = variable {
-                            let variable = variable.splitn(2, '=').collect::<Vec<&str>>();
-                            if variable.len() != 2 || variable[1].is_empty() {
-                                println!("{}: Invalid variable format", "Warn".yellow().bold());
-                                continue;
-                            }
-                            variables.push((
-                                service.0.id.clone(),
-                                (
-                                    variable.first().unwrap().to_string(),
-                                    variable.last().unwrap().to_string(),
-                                ),
-                            ));
-                        } else {
-                            break;
-                        }
-                    }
+                    variables.extend(
+                        prompt_variables()?
+                            .into_iter()
+                            .map(|f| (service.0.id.to_owned(), f))
+                            .collect::<Vec<(String, Variable)>>(),
+                    );
                     used_services.push(service)
                 } else {
                     break;

@@ -145,6 +145,26 @@ pub fn fake_select(message: &str, selected: &str) {
     println!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
+pub fn prompt_variables() -> Result<Vec<Variable>> {
+    let mut variables: Vec<Variable> = Vec::new();
+    loop {
+        if let Some(variable) = prompt_text_with_placeholder_disappear_skippable(
+            "Enter a variable",
+            "<KEY=VALUE, press esc to finish>",
+        )? {
+            if variable.is_empty() {
+                break Ok(variables);
+            }
+            match variable.parse::<Variable>() {
+                Ok(v) => variables.push(v),
+                Err(err) => println!("{} {:?}", "Warn".yellow(), err),
+            }
+        } else {
+            break Ok(variables);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptService<'a>(pub &'a ProjectProjectServicesEdgesNode);
 
