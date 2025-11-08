@@ -12,12 +12,7 @@ pub struct Args {
 pub async fn command(args: Args) -> Result<()> {
     let mut railway = crate::build_args();
 
-    generate(
-        args.shell,
-        &mut railway,
-        "railway",
-        &mut io::stdout(),
-    );
+    generate(args.shell, &mut railway, "railway", &mut io::stdout());
 
     Ok(())
 }
