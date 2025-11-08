@@ -1,6 +1,5 @@
 use super::*;
 
-use clap::CommandFactory;
 use clap_complete::{generate, Shell};
 use std::io;
 
@@ -11,11 +10,14 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    let mut railway = crate::build_args();
+
     generate(
         args.shell,
-        &mut self::Args::command(),
+        &mut railway,
         "railway",
         &mut io::stdout(),
     );
+
     Ok(())
 }
