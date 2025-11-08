@@ -12,7 +12,7 @@ use crate::{
 use anyhow::bail;
 use std::{
     collections::BTreeMap,
-    io::{stdin, BufRead},
+    io::{stdin, BufRead, IsTerminal},
     time::Duration,
 };
 
@@ -102,11 +102,15 @@ pub async fn command(mut args: Args) -> Result<()> {
     if args.set_from_stdin {
         let stdin = stdin();
 
+        if stdin.is_terminal() {
+            bail!("--set-from-stdin requires input from stdin (e.g., via pipe or redirect)");
+        }
+
         for line in stdin.lock().lines() {
             let line = line?;
 
             if !line.trim().is_empty() {
-                args.set.push(line);
+                args.set.push(line.trim().to_string());
             }
         }
     }
