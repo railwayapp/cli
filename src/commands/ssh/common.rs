@@ -1,6 +1,5 @@
 use std::io::Cursor;
 
-use anyhow::bail;
 use anyhow::{anyhow, Context, Result};
 use indicatif::ProgressBar;
 use reqwest::Client;
@@ -76,7 +75,7 @@ pub async fn find_service_by_name(
     project: &RailwayProject,
     service_id_or_name: &str,
 ) -> Result<String> {
-    let project = get_project(&client, &configs, project.id.clone()).await?;
+    let project = get_project(client, configs, project.id.clone()).await?;
 
     let services = project.services.edges.iter().collect::<Vec<_>>();
 
@@ -92,7 +91,7 @@ pub async fn find_service_by_name(
         .id
         .to_owned();
 
-    return Ok(service);
+    Ok(service)
 }
 
 pub async fn get_ssh_connect_params(
@@ -105,31 +104,28 @@ pub async fn get_ssh_connect_params(
     let has_environment = args.environment.is_some();
 
     let linked_project = configs.get_linked_project().await?;
-    let project_id;
-    if has_project {
-        project_id = args.project.unwrap();
+    let project_id = if has_project {
+        args.project.unwrap()
     } else {
-        project_id = linked_project.project.clone();
-    }
+        linked_project.project.clone()
+    };
+
     let project = get_project(client, configs, project_id.clone()).await?;
-
-    let environment;
-    if has_environment {
-        environment = args.environment.unwrap();
+    let environment = if has_environment {
+        args.environment.unwrap()
     } else {
-        environment = linked_project.environment.clone();
-    }
+        linked_project.environment.clone()
+    };
+
     let environment_id = get_matched_environment(&project, environment)?.id;
-
-    let service_id;
-    if has_service {
+    let service_id = if has_service {
         let service_id_or_name = args.service.unwrap();
-        service_id = find_service_by_name(&client, &configs, &project, &service_id_or_name).await?
+        find_service_by_name(client, configs, &project, &service_id_or_name).await?
     } else {
-        service_id = get_or_prompt_service(linked_project.clone(), project, None)
+        get_or_prompt_service(linked_project.clone(), project, None)
             .await?
-            .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
-    }
+            .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?
+    };
 
     Ok(SSHConnectParams {
         project_id,

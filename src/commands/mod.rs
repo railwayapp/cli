@@ -26,6 +26,7 @@ pub mod logout;
 pub mod logs;
 pub mod open;
 pub mod redeploy;
+pub mod restart;
 pub mod run;
 pub mod scale;
 pub mod service;

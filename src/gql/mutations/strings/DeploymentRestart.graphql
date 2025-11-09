@@ -1,0 +1,3 @@
+mutation DeploymentRestart($id: String!) {
+  deploymentRestart(id: $id)
+}

@@ -6,13 +6,10 @@ use indicatif::ProgressBar;
 use tokio::time::{sleep, timeout, Duration};
 use url::Url;
 
-use crate::consts::get_user_agent;
-use crate::{
-    commands::ssh::{
-        AuthKind, SSH_CONNECTION_TIMEOUT_SECS, SSH_CONNECT_DELAY_SECS, SSH_MAX_CONNECT_ATTEMPTS,
-    },
-    errors::RailwayError,
+use crate::commands::ssh::{
+    AuthKind, SSH_CONNECTION_TIMEOUT_SECS, SSH_CONNECT_DELAY_SECS, SSH_MAX_CONNECT_ATTEMPTS,
 };
+use crate::consts::get_user_agent;
 
 #[derive(Clone, Debug)]
 pub struct SSHConnectParams {
