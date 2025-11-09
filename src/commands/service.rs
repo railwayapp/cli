@@ -1,5 +1,4 @@
 use anyhow::bail;
-use chrono::{DateTime, Local, Utc};
 use serde::Serialize;
 
 use crate::{
@@ -64,13 +63,15 @@ struct ServiceStatusOutput {
     name: String,
     deployment_id: Option<String>,
     status: Option<String>,
-    created_at: Option<DateTime<Utc>>,
     stopped: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    // Handle legacy direct service link (when no subcommand is provided but service arg is)
-    if args.command.is_none() && args.service.is_some() {
+    // Handle legacy direct service link (when no subcommand is provided)
+    // This maintains backward compatibility:
+    // - `railway service` -> prompts to link
+    // - `railway service <name>` -> links that service
+    if args.command.is_none() {
         return link_command(LinkArgs {
             service: args.service,
         })
@@ -80,10 +81,7 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Some(Commands::Link(link_args)) => link_command(link_args).await,
         Some(Commands::Status(status_args)) => status_command(status_args).await,
-        None => {
-            // If no subcommand and no service arg, show help
-            bail!("Please specify a subcommand. Use 'railway service --help' for more information.");
-        }
+        None => unreachable!(),
     }
 }
 
@@ -200,7 +198,6 @@ async fn status_command(args: StatusArgs) -> Result<()> {
                 status: deployment
                     .as_ref()
                     .map(|d| format!("{:?}", d.status)),
-                created_at: deployment.as_ref().map(|d| d.created_at),
                 stopped: deployment
                     .as_ref()
                     .map(|d| d.deployment_stopped)
@@ -226,18 +223,16 @@ async fn status_command(args: StatusArgs) -> Result<()> {
 
             for status in service_statuses {
                 let status_display = format_status_display(&status);
-                let time_display = format_time_display(&status);
 
                 println!(
-                    "{:<20} | {:<14} | {:<15} | {}",
+                    "{:<20} | {:<14} | {}",
                     status.name.bold(),
                     status
                         .deployment_id
                         .as_deref()
                         .unwrap_or("N/A")
                         .dimmed(),
-                    status_display,
-                    time_display
+                    status_display
                 );
             }
         }
@@ -274,16 +269,6 @@ async fn status_command(args: StatusArgs) -> Result<()> {
                     .dimmed()
             );
             println!("Status: {}", format_status_display(target_service));
-            if let Some(created_at) = target_service.created_at {
-                let local_time: DateTime<Local> = DateTime::from(created_at);
-                println!(
-                    "Created: {}",
-                    local_time
-                        .format("%Y-%m-%d %H:%M:%S %Z")
-                        .to_string()
-                        .dimmed()
-                );
-            }
         }
     }
 
@@ -316,14 +301,3 @@ fn format_status_display(status: &ServiceStatusOutput) -> colored::ColoredString
     }
 }
 
-fn format_time_display(status: &ServiceStatusOutput) -> colored::ColoredString {
-    if let Some(created_at) = status.created_at {
-        let local_time: DateTime<Local> = DateTime::from(created_at);
-        local_time
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string()
-            .dimmed()
-    } else {
-        "N/A".dimmed()
-    }
-}
