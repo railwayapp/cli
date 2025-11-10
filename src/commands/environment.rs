@@ -403,10 +403,7 @@ fn select_service_variables_new(
                         );
                         (
                             service_meta.0, // id
-                            Variable {
-                                key: variable.key,
-                                value: variable.value,
-                            },
+                            variable,
                         )
                     })
                 })
