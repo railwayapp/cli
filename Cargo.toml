@@ -1,14 +1,14 @@
 [package]
 name = "railwayapp"
 version = "4.11.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 authors = ["Railway <contact@railway.com>"]
 description = "Interact with Railway via CLI"
 readme = "README.md"
 homepage = "https://github.com/railwayapp/cli"
 repository = "https://github.com/railwayapp/cli"
-rust-version = "1.77.0"
+rust-version = "1.85.0"
 default-run = "railway"
 include = ["src/**/*", "LICENSE", "README.md"]
 

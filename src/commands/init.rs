@@ -1,6 +1,6 @@
 use crate::errors::RailwayError;
 use crate::util::prompt::{fake_select, prompt_select, prompt_text_with_placeholder_if_blank};
-use crate::workspace::{workspaces, Workspace};
+use crate::workspace::{Workspace, workspaces};
 
 use super::*;
 

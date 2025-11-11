@@ -18,7 +18,7 @@ use winapi::shared::minwindef::DWORD;
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 #[cfg(target_os = "windows")]
 use winapi::um::tlhelp32::{
-    CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
 };
 
 /// memory management helpers are also only used on windows

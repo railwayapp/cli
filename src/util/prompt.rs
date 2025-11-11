@@ -1,15 +1,18 @@
 use colored::*;
 use inquire::{
-    validator::{Validation, ValueRequiredValidator},
     Autocomplete,
+    validator::{Validation, ValueRequiredValidator},
 };
 use std::{
     borrow::Cow,
     fmt::Display,
-    path::{Path, PathBuf, MAIN_SEPARATOR},
+    path::{MAIN_SEPARATOR, Path, PathBuf},
 };
 
-use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
+use crate::{
+    commands::{Configs, queries::project::ProjectProjectServicesEdgesNode},
+    controllers::variables::Variable,
+};
 use anyhow::{Context, Result};
 
 pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {

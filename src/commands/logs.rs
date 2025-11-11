@@ -94,7 +94,9 @@ pub async fn command(args: Args) -> Result<()> {
         // Otherwise if we have a linked service, use that
         (_, Some(linked_service)) => linked_service,
         // Otherwise it's a user error
-        _ => bail!("No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."),
+        _ => bail!(
+            "No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."
+        ),
     };
 
     // Fetch all deployments so we can find a sensible default deployment id if

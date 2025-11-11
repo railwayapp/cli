@@ -109,7 +109,11 @@ pub async fn fetch_and_create(
                 prompt_text(&format!(
                     "Environment Variable {key} for service {} is required, please set a value:\n{}",
                     s.name,
-                    variable.description.as_deref().map(|d| format!("   *{d}*\n")).unwrap_or_default(),
+                    variable
+                        .description
+                        .as_deref()
+                        .map(|d| format!("   *{d}*\n"))
+                        .unwrap_or_default(),
                 ))?
             } else {
                 continue;

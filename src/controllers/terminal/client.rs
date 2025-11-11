@@ -1,17 +1,17 @@
-use anyhow::{bail, Result};
-use async_tungstenite::tungstenite::Message;
+use anyhow::{Result, bail};
 use async_tungstenite::WebSocketStream;
+use async_tungstenite::tungstenite::Message;
 use futures_util::stream::StreamExt;
 use indicatif::ProgressBar;
 use std::io::Write;
 use tokio::sync::mpsc;
-use tokio::time::{interval, timeout, Duration};
+use tokio::time::{Duration, interval, timeout};
 
 use crate::commands::ssh::{AuthKind, SSH_MAX_EMPTY_MESSAGES, SSH_MESSAGE_TIMEOUT_SECS};
 
-use super::connection::{establish_connection, SSHConnectParams};
-use super::messages::{ClientMessage, ClientPayload, DataPayload, ServerMessage};
 use super::SSH_PING_INTERVAL_SECS;
+use super::connection::{SSHConnectParams, establish_connection};
+use super::messages::{ClientMessage, ClientPayload, DataPayload, ServerMessage};
 
 pub struct TerminalClient {
     ws_stream: WebSocketStream<async_tungstenite::tokio::ConnectStream>,

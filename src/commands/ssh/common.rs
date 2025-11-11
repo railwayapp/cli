@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use anyhow::bail;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;

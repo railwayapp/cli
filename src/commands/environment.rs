@@ -2,15 +2,15 @@ use std::{collections::BTreeMap, fmt::Display, time::Duration};
 
 use crate::{
     consts::TICK_STRING,
-    controllers::project::get_project,
+    controllers::{project::get_project, variables::Variable},
     errors::RailwayError,
     interact_or,
     util::{
         prompt::{
-            fake_select, prompt_confirm_with_default, prompt_options, prompt_options_skippable,
-            prompt_text, prompt_text_with_placeholder_disappear_skippable, PromptService,
+            PromptService, fake_select, prompt_confirm_with_default, prompt_options,
+            prompt_options_skippable, prompt_text, prompt_variables,
         },
-        retry::{retry_with_backoff, RetryConfig},
+        retry::{RetryConfig, retry_with_backoff},
     },
 };
 use anyhow::bail;
@@ -303,7 +303,7 @@ async fn upsert_variables(
             let service = vars.first().unwrap().0.clone();
             let variables = vars
                 .iter()
-                .map(|v| (v.1 .0.clone(), v.1 .1.clone()))
+                .map(|v| (v.1.key.clone(), v.1.value.clone()))
                 .collect::<BTreeMap<_, _>>();
             (service, variables)
         })
