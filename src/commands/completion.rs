@@ -1,7 +1,7 @@
 use super::*;
 
 use clap::CommandFactory;
-use clap_complete::{Shell, generate};
+use clap_complete::{generate, Shell}
 use std::io;
 
 /// Generate completion script
@@ -11,11 +11,9 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    generate(
-        args.shell,
-        &mut self::Args::command(),
-        "railway",
-        &mut io::stdout(),
-    );
+    let mut railway = crate::build_args();
+
+    generate(args.shell, &mut railway, "railway", &mut io::stdout());
+
     Ok(())
 }
