@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::{
-    consts::TICK_STRING, controllers::project::ensure_project_and_environment_exist,
+    consts::TICK_STRING,
+    controllers::{project::ensure_project_and_environment_exist, variables::Variable},
     util::prompt::prompt_text,
 };
 
@@ -25,7 +26,7 @@ pub struct Args {
     ///
     /// railway deploy -t postgres -v "MY_SPECIAL_ENV_VAR=1" -v "Backend.Port=3000"
     #[arg(short, long)]
-    variable: Vec<String>,
+    variable: Vec<Variable>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -49,14 +50,8 @@ pub async fn command(args: Args) -> Result<()> {
 
     let variables: HashMap<String, String> = args
         .variable
-        .iter()
-        .map(|v| {
-            let mut split = v.split('=');
-            let key = split.next().unwrap_or_default().trim().to_owned();
-            let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
-            (key, value)
-        })
-        .filter(|(_, value)| !value.is_empty())
+        .into_iter()
+        .map(|v| (v.key, v.value))
         .collect();
 
     for template in templates {
@@ -114,7 +109,11 @@ pub async fn fetch_and_create(
                 prompt_text(&format!(
                     "Environment Variable {key} for service {} is required, please set a value:\n{}",
                     s.name,
-                    variable.description.as_deref().map(|d| format!("   *{d}*\n")).unwrap_or_default(),
+                    variable
+                        .description
+                        .as_deref()
+                        .map(|d| format!("   *{d}*\n"))
+                        .unwrap_or_default(),
                 ))?
             } else {
                 continue;

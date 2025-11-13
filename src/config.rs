@@ -1,17 +1,17 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, create_dir_all, File},
+    fs::{self, File, create_dir_all},
     io::Read,
     path::PathBuf,
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{post_graphql, GQLClient},
+    client::{GQLClient, post_graphql},
     commands::queries,
     errors::RailwayError,
 };

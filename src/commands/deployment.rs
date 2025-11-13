@@ -119,7 +119,9 @@ async fn list_deployments(
     } else if let Some(linked_service_id) = linked_project.service {
         linked_service_id
     } else {
-        bail!("No service specified and no service linked. Use 'railway link' to link a service or specify one with the service argument.");
+        bail!(
+            "No service specified and no service linked. Use 'railway link' to link a service or specify one with the service argument."
+        );
     };
 
     let variables = Variables {

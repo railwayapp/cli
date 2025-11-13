@@ -129,14 +129,20 @@ async fn attach(
         .node
         .name;
     if volume.service_id.is_some() {
-        bail!("Volume {} is already mounted to service {}. Please detach it via `railway volume detach` first.", volume.volume.name, project
-        .services
-        .edges
-        .iter()
-        .find(|a| a.node.id == volume.service_id.clone().unwrap_or_default())
-        .ok_or(anyhow!(
-            "The service the volume is attcahed to doesn't exist"
-        ))?.node.name)
+        bail!(
+            "Volume {} is already mounted to service {}. Please detach it via `railway volume detach` first.",
+            volume.volume.name,
+            project
+                .services
+                .edges
+                .iter()
+                .find(|a| a.node.id == volume.service_id.clone().unwrap_or_default())
+                .ok_or(anyhow!(
+                    "The service the volume is attcahed to doesn't exist"
+                ))?
+                .node
+                .name
+        )
     }
     let confirm = prompt_confirm_with_default(
         format!(
@@ -240,7 +246,9 @@ async fn update(
     let volume = select_volume(project, environment.as_str(), volume)?;
 
     if mount_path.is_none() && name.is_none() {
-        bail!("In order to use the update command, please provide a new mount path or a new name via the flags");
+        bail!(
+            "In order to use the update command, please provide a new mount path or a new name via the flags"
+        );
     }
 
     if let Some(mount_path) = mount_path {

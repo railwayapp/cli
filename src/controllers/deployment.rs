@@ -5,7 +5,7 @@ use crate::{
     },
     post_graphql,
     subscription::subscribe_graphql,
-    util::retry::{retry_with_backoff, RetryConfig},
+    util::retry::{RetryConfig, retry_with_backoff},
 };
 use anyhow::{Context, Result};
 use futures::StreamExt;

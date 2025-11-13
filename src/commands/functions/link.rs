@@ -62,7 +62,10 @@ pub async fn link(
         path.display().to_string().blue()
     );
     if local != remote {
-        println!("The local function differs from the linked function. Run `railway functions pull -p {}` to update your local copy.", path.display())
+        println!(
+            "The local function differs from the linked function. Run `railway functions pull -p {}` to update your local copy.",
+            path.display()
+        )
     }
     Ok(())
 }

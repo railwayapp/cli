@@ -384,11 +384,11 @@ fn clear() -> Result<(), anyhow::Error> {
 
 async fn monitor_deployment_status(
     stream: impl futures::Stream<
-            Item = Result<
-                graphql_client::Response<subscriptions::deployment::ResponseData>,
-                graphql_ws_client::Error,
-            >,
-        > + Unpin,
+        Item = Result<
+            graphql_client::Response<subscriptions::deployment::ResponseData>,
+            graphql_ws_client::Error,
+        >,
+    > + Unpin,
     cancel_token: CancellationToken,
     info: String,
 ) {
@@ -543,7 +543,10 @@ fn prompt(args: New) -> Result<Arguments> {
             let second = schedule.find_next_occurrence(&first, false)?;
             let interval = second.signed_duration_since(first);
             if interval < chrono::Duration::minutes(5) {
-                bail!("Cron schedule runs too frequently (every {} minutes). Minimum interval is 5 minutes.", interval.num_minutes())
+                bail!(
+                    "Cron schedule runs too frequently (every {} minutes). Minimum interval is 5 minutes.",
+                    interval.num_minutes()
+                )
             }
         } else {
             bail!("Invalid cron schedule")

@@ -11,7 +11,7 @@ use country_emoji::flag;
 use futures::executor::block_on;
 use is_terminal::IsTerminal;
 use json_dotpath::DotPaths as _;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{cmp::Ordering, collections::HashMap, fmt::Display, time::Duration};
 use struct_field_names_as_array::FieldNamesAsArray;
 

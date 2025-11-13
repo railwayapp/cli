@@ -4,7 +4,7 @@ use tokio::io::AsyncReadExt;
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::commands::ssh::common::{parse_server_error, reset_terminal, SessionTermination};
+use crate::commands::ssh::common::{SessionTermination, parse_server_error, reset_terminal};
 use crate::controllers::terminal::TerminalClient;
 
 /// Set up Unix-specific signal handlers

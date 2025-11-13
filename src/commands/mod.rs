@@ -1,5 +1,5 @@
 pub(super) use crate::{client::*, config::*, gql::*};
-pub(super) use anyhow::{bail, Context, Result};
+pub(super) use anyhow::{Context, Result, bail};
 pub(super) use clap::{Parser, Subcommand};
 pub(super) use colored::Colorize;
 

@@ -8,9 +8,11 @@ use strum::{Display, EnumIs, EnumIter, IntoEnumIterator};
 
 use crate::{
     consts::TICK_STRING,
-    controllers::{database::DatabaseType, project::ensure_project_and_environment_exist},
+    controllers::{
+        database::DatabaseType, project::ensure_project_and_environment_exist, variables::Variable,
+    },
     util::prompt::{
-        fake_select, prompt_multi_options, prompt_options, prompt_text,
+        self, fake_select, prompt_multi_options, prompt_options, prompt_text,
         prompt_text_with_placeholder_disappear, prompt_text_with_placeholder_if_blank,
     },
 };
@@ -41,7 +43,7 @@ pub struct Args {
     ///
     /// railway add --service --variables "MY_SPECIAL_ENV_VAR=1" --variables "BACKEND_PORT=3000"
     #[clap(short, long)]
-    variables: Vec<String>,
+    variables: Vec<Variable>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -216,53 +218,28 @@ fn prompt_name(service: Option<Option<String>>) -> Result<Option<String>> {
     }
 }
 
-fn prompt_variables(variables: Vec<String>) -> Result<Option<BTreeMap<String, String>>> {
+fn prompt_variables(variables: Vec<Variable>) -> Result<Option<BTreeMap<String, String>>> {
     if !std::io::stdout().is_terminal() && variables.is_empty() {
         fake_select("Enter a variable", "");
         return Ok(None);
     }
     if variables.is_empty() {
-        let mut variables = BTreeMap::<String, String>::new();
-        loop {
-            let v = prompt_text_with_placeholder_disappear(
-                "Enter a variable",
-                "<KEY=VALUE, press enter to skip>",
-            )?;
-            if v.trim().is_empty() {
-                break;
-            }
-            let mut split = v.split('=').peekable();
-            if split.peek().is_none() {
-                continue;
-            }
-            let key = split.next().unwrap().trim().to_owned();
-            if split.peek().is_none() {
-                continue;
-            }
-            let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
-            variables.insert(key, value);
-        }
-        return Ok(if variables.is_empty() {
-            None
-        } else {
-            Some(variables)
-        });
+        return Ok(Some(
+            prompt::prompt_variables()?
+                .into_iter()
+                .map(|v| (v.key, v.value))
+                .collect(),
+        ));
     }
-    let variables: BTreeMap<String, String> = variables
-        .iter()
-        .filter_map(|v| {
-            let mut split = v.split('=');
-            let key = split.next()?.trim().to_owned();
-            let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
-            if value.is_empty() {
-                None
-            } else {
-                fake_select("Enter a variable", &format!("{key}={value}"));
-                Some((key, value))
-            }
-        })
-        .collect();
-    Ok(Some(variables))
+    Ok(Some(
+        variables
+            .into_iter()
+            .map(|v| {
+                fake_select("Enter a variable", &format!("{}={}", v.key, v.value));
+                (v.key, v.value)
+            })
+            .collect(),
+    ))
 }
 
 type Variables = Option<BTreeMap<String, String>>;

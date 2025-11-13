@@ -4,10 +4,10 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use futures::StreamExt;
-use gzp::{deflate::Gzip, ZBuilder};
+use gzp::{ZBuilder, deflate::Gzip};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
 use is_terminal::IsTerminal;

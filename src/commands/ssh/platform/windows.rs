@@ -8,7 +8,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
-use crate::commands::ssh::common::{parse_server_error, reset_terminal, SessionTermination};
+use crate::commands::ssh::common::{SessionTermination, parse_server_error, reset_terminal};
 use crate::controllers::terminal::TerminalClient;
 
 // stub function because Windows does not support signals

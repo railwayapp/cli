@@ -282,7 +282,9 @@ async fn create_custom_domain(
 
     print_dns(response.custom_domain_create.status.dns_records);
 
-    println!("\nNote: if the Name is \"@\", the DNS record should be created for the root of the domain.");
+    println!(
+        "\nNote: if the Name is \"@\", the DNS record should be created for the root of the domain."
+    );
     println!("*DNS changes can take up to 72 hours to propagate worldwide.");
 
     Ok(())

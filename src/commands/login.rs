@@ -9,7 +9,7 @@ use super::*;
 
 use colored::Colorize;
 use http_body_util::Full;
-use hyper::{body::Bytes, server::conn::http1, service::service_fn, Request, Response};
+use hyper::{Request, Response, body::Bytes, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -187,9 +187,9 @@ fn generate_login_payload(port: u16) -> Result<String> {
 
 fn generate_cli_login_url(port: u16) -> Result<String> {
     use base64::{
+        Engine,
         alphabet::URL_SAFE,
         engine::{GeneralPurpose, GeneralPurposeConfig},
-        Engine,
     };
     let payload = generate_login_payload(port)?;
     let configs = Configs::new()?;
@@ -216,9 +216,9 @@ async fn browserless_login() -> Result<()> {
             .login_session_create;
 
     use base64::{
+        Engine,
         alphabet::URL_SAFE,
         engine::{GeneralPurpose, GeneralPurposeConfig},
-        Engine,
     };
     let payload = format!("wordCode={word_code}&hostname={hostname}");
 

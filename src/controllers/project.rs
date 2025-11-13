@@ -1,18 +1,18 @@
 use reqwest::Client;
 
 use crate::{
+    LinkedProject,
     client::post_graphql,
     commands::{
+        Configs,
         queries::{
             self,
             project::{ProjectProject, ProjectProjectServicesEdgesNode},
         },
-        Configs,
     },
     errors::RailwayError,
-    LinkedProject,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use super::environment::get_matched_environment;
 

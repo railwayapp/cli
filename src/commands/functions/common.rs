@@ -121,7 +121,10 @@ pub fn get_function_from_path(path: Option<PathBuf>) -> Result<(String, PathBuf)
     }
     let id = match configs.get_function(path.clone())? {
         Some(id) => id,
-        None => bail!("The provided path ({}) hasn't been linked to any functions. Run `railway functions link` to link a function.", path.clone().display())
+        None => bail!(
+            "The provided path ({}) hasn't been linked to any functions. Run `railway functions link` to link a function.",
+            path.clone().display()
+        ),
     };
     Ok((id, path.clone()))
 }
