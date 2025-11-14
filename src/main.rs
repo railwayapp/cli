@@ -145,7 +145,14 @@ async fn main() -> Result<()> {
         if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string() {
             return Ok(()); // Exit gracefully if interrupted
         }
+
         eprintln!("{e:?}");
+
+        // Warn if using RAILWAY_TOKEN environment variable
+        if std::env::var("RAILWAY_TOKEN").is_ok() {
+            eprintln!("Note: Using RAILWAY_TOKEN environment variable");
+        }
+
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);
     }
