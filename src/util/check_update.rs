@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use dirs::home_dir;
 
 use super::compare_semver::compare_semver;

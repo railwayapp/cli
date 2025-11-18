@@ -1,16 +1,16 @@
 use colored::*;
 use inquire::{
-    Autocomplete,
     validator::{Validation, ValueRequiredValidator},
+    Autocomplete,
 };
 use std::{
     borrow::Cow,
     fmt::Display,
-    path::{MAIN_SEPARATOR, Path, PathBuf},
+    path::{Path, PathBuf, MAIN_SEPARATOR},
 };
 
 use crate::{
-    commands::{Configs, queries::project::ProjectProjectServicesEdgesNode},
+    commands::{queries::project::ProjectProjectServicesEdgesNode, Configs},
     controllers::variables::Variable,
 };
 use anyhow::{Context, Result};

@@ -3,7 +3,7 @@ use anyhow::bail;
 use crate::{
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
-    util::prompt::{PromptService, fake_select, prompt_options},
+    util::prompt::{fake_select, prompt_options, PromptService},
 };
 
 use super::*;

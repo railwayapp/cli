@@ -6,7 +6,7 @@ use std::fmt::Display;
 use crate::{
     errors::RailwayError,
     util::prompt::{fake_select, prompt_options, prompt_options_skippable},
-    workspace::{Project, Workspace, workspaces},
+    workspace::{workspaces, Project, Workspace},
 };
 
 use super::*;

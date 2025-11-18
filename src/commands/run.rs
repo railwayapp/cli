@@ -8,7 +8,7 @@ use crate::{
         variables::get_service_variables,
     },
     errors::RailwayError,
-    util::prompt::{PromptService, prompt_select},
+    util::prompt::{prompt_select, PromptService},
 };
 
 use super::{queries::project::ProjectProject, *};

@@ -384,11 +384,11 @@ fn clear() -> Result<(), anyhow::Error> {
 
 async fn monitor_deployment_status(
     stream: impl futures::Stream<
-        Item = Result<
-            graphql_client::Response<subscriptions::deployment::ResponseData>,
-            graphql_ws_client::Error,
-        >,
-    > + Unpin,
+            Item = Result<
+                graphql_client::Response<subscriptions::deployment::ResponseData>,
+                graphql_ws_client::Error,
+            >,
+        > + Unpin,
     cancel_token: CancellationToken,
     info: String,
 ) {

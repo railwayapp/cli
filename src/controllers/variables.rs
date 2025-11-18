@@ -1,6 +1,6 @@
 use crate::{
     client::post_graphql,
-    commands::{Configs, queries},
+    commands::{queries, Configs},
 };
 use anyhow::Result;
 use reqwest::Client;

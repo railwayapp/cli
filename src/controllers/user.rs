@@ -3,8 +3,8 @@ use reqwest::Client;
 use crate::{
     client::post_graphql,
     commands::{
-        Configs,
         queries::{self},
+        Configs,
     },
     errors::RailwayError,
 };

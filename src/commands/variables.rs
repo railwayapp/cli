@@ -4,7 +4,7 @@ use crate::{
     controllers::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
-        variables::{Variable, get_service_variables},
+        variables::{get_service_variables, Variable},
     },
     errors::RailwayError,
     table::Table,

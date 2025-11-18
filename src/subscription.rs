@@ -1,8 +1,8 @@
 use crate::commands::Configs;
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use async_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
 use graphql_client::GraphQLQuery;
-use graphql_ws_client::{Client, Subscription, graphql::StreamingOperation};
+use graphql_ws_client::{graphql::StreamingOperation, Client, Subscription};
 
 pub async fn subscribe_graphql<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
     variables: T::Variables,

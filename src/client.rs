@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use graphql_client::GraphQLQuery;
 use reqwest::{
-    Client,
     header::{HeaderMap, HeaderValue},
+    Client,
 };
 
 use crate::{commands::Environment, config::Configs, consts, errors::RailwayError};
