@@ -7,10 +7,10 @@ use crate::{
     interact_or,
     util::{
         prompt::{
-            fake_select, prompt_confirm_with_default, prompt_options, prompt_options_skippable,
-            prompt_text, prompt_variables, PromptService,
+            PromptService, fake_select, prompt_confirm_with_default, prompt_options,
+            prompt_options_skippable, prompt_text, prompt_variables,
         },
-        retry::{retry_with_backoff, RetryConfig},
+        retry::{RetryConfig, retry_with_backoff},
     },
 };
 use anyhow::bail;
