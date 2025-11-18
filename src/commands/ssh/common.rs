@@ -1,6 +1,5 @@
 use std::io::Cursor;
 
-use anyhow::bail;
 use anyhow::{anyhow, Context, Result};
 use indicatif::ProgressBar;
 use reqwest::Client;

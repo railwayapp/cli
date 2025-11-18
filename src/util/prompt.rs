@@ -183,7 +183,7 @@ pub struct PathAutocompleter;
 
 impl PathAutocompleter {
     /// Parse input path and extract directory and filename prefix
-    fn parse_input(input: &str) -> (Cow<Path>, Cow<str>) {
+    fn parse_input(input: &str) -> (Cow<'_, Path>, Cow<'_, str>) {
         if input.is_empty() {
             return (Cow::Borrowed(Path::new(".")), Cow::Borrowed(""));
         }
