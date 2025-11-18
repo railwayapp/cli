@@ -138,7 +138,7 @@ async fn attach(
                 .iter()
                 .find(|a| a.node.id == volume.service_id.clone().unwrap_or_default())
                 .ok_or(anyhow!(
-                    "The service the volume is attcahed to doesn't exist"
+                    "The service the volume is attached to doesn't exist"
                 ))?
                 .node
                 .name
@@ -200,7 +200,7 @@ async fn detach(
         .iter()
         .find(|a| a.node.id == volume.service_id.clone().unwrap_or_default())
         .ok_or(anyhow!(
-            "The service the volume is attcahed to doesn't exist"
+            "The service the volume is attached to doesn't exist"
         ))?;
     let confirm = prompt_confirm_with_default(
         format!(
@@ -268,7 +268,7 @@ async fn update(
         .await?;
 
         println!(
-            "Succesfully updated the mount path of volume \"{}\" to \"{}\"",
+            "Successfully updated the mount path of volume \"{}\" to \"{}\"",
             volume.0.volume.name.blue(),
             mount_path.purple()
         );
@@ -286,7 +286,7 @@ async fn update(
         .await?;
 
         println!(
-            "Succesfully updated the name of volume \"{}\" to \"{}\"",
+            "Successfully updated the name of volume \"{}\" to \"{}\"",
             volume.0.volume.name.blue(),
             name.purple()
         );

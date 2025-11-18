@@ -291,7 +291,7 @@ async fn create_service(
     configs.link_service(s.service_create.id)?;
     configs.write()?;
     spinner.finish_with_message(format!(
-        "Succesfully created the service \"{}\" and linked to it",
+        "Successfully created the service \"{}\" and linked to it",
         s.service_create.name.blue()
     ));
     Ok(())
