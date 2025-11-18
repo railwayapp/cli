@@ -1,10 +1,10 @@
 use crate::{
     client::post_graphql,
-    commands::{queries, Configs},
+    commands::{Configs, queries},
 };
 use anyhow::Result;
 use reqwest::Client;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
 pub async fn get_service_variables(
     client: &Client,
@@ -38,4 +38,24 @@ pub async fn get_service_variables(
         .collect();
 
     Ok(variables)
+}
+
+#[derive(Clone)]
+pub struct Variable {
+    pub key: String,
+    pub value: String,
+}
+
+impl FromStr for Variable {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let s = s.splitn(2, '=').collect::<Vec<&str>>();
+        if s.len() != 2 || s.iter().any(|v| v.is_empty()) {
+            anyhow::bail!("Invalid variable format: {}", s.join("="))
+        }
+        Ok(Self {
+            key: s[0].to_string(),
+            value: s[1].to_string(),
+        })
+    }
 }

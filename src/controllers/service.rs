@@ -1,10 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 
 use crate::{
     config::LinkedProject,
     queries::project::ProjectProject,
-    util::prompt::{prompt_select, PromptService},
+    util::prompt::{PromptService, prompt_select},
 };
 
 pub async fn get_or_prompt_service(
