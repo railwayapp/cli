@@ -13,13 +13,16 @@ use crate::{
     },
 };
 use anyhow::bail;
+use croner::Cron;
 use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
 use std::io::Write as _;
+use std::str::FromStr;
 use std::{fmt::Write as _, path::Path};
 use tokio_util::sync::CancellationToken;
+
 pub async fn new(
     environment: &ProjectProjectEnvironmentsEdges,
     project: ProjectProject,
@@ -256,9 +259,10 @@ fn append_domain_info(info: &mut String, domain: &Option<String>) {
 
 fn append_cron_info(info: &mut String, cron: &Option<String>) {
     if let Some(cron) = cron {
-        let description =
-            cron_descriptor::cronparser::cron_expression_descriptor::get_description_cron(cron)
-                .expect("cron is not valid");
+        let description = Cron::from_str(cron)
+            .expect("Failed to parse cron expression")
+            .describe();
+
         writedoc!(
             info,
             "
@@ -534,7 +538,7 @@ fn prompt(args: New) -> Result<Arguments> {
     }
     .map(|s| s.trim().to_owned());
     if let Some(cron) = &cron {
-        let schedule = croner::Cron::new(cron).parse();
+        let schedule = Cron::from_str(cron);
         if let Ok(schedule) = schedule {
             let now = chrono::Utc::now();
 
@@ -577,6 +581,7 @@ fn prompt(args: New) -> Result<Arguments> {
     } else {
         false
     };
+
     Ok(Arguments {
         terminal,
         name,
