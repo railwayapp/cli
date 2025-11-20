@@ -17,7 +17,7 @@ impl UpdateCheck {
         let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap();
         let pid = std::process::id();
         // almost guaranteed no collision- can be upgraded to uuid if necessary.
-        let tmp_path = path.with_extension(format!("tmp.{}-{}.json", pid, nanos));
+        let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
         let contents = serde_json::to_string_pretty(&self)?;
         std::fs::write(&tmp_path, contents)?;
         std::fs::rename(&tmp_path, &path)?;
