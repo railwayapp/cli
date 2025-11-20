@@ -227,7 +227,6 @@ fn merge_config(existing: Value, new_config: Map<String, Value>) -> Value {
 }
 
 fn convert_hashmap_into_map(map: HashMap<String, u64>) -> Map<String, Value> {
-    
     map.iter().fold(Map::new(), |mut map, (key, val)| {
         map.insert(
             key.clone(),

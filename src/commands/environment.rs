@@ -262,7 +262,7 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         // If the environment is not specified, prompt the user to select one
         None => {
             interact_or!("Environment must be specified when not running in a terminal");
-            
+
             if environments.len() == 1 {
                 match environments.first() {
                     // Project has only one environment, so use that one
