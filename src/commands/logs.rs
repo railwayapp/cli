@@ -155,23 +155,21 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?;
         }
+    } else if should_stream {
+        stream_deploy_logs(deployment_id.clone(), args.filter.clone(), |log| {
+            print_log(log, args.json, true) // Deploy logs use formatted output
+        })
+        .await?;
     } else {
-        if should_stream {
-            stream_deploy_logs(deployment_id.clone(), args.filter.clone(), |log| {
-                print_log(log, args.json, true) // Deploy logs use formatted output
-            })
-            .await?;
-        } else {
-            fetch_deploy_logs(
-                &client,
-                &configs.get_backboard(),
-                deployment_id.clone(),
-                args.lines.or(Some(500)),
-                args.filter.clone(),
-                |log| print_log(log, args.json, true), // Deploy logs use formatted output
-            )
-            .await?;
-        }
+        fetch_deploy_logs(
+            &client,
+            &configs.get_backboard(),
+            deployment_id.clone(),
+            args.lines.or(Some(500)),
+            args.filter.clone(),
+            |log| print_log(log, args.json, true), // Deploy logs use formatted output
+        )
+        .await?;
     }
 
     Ok(())

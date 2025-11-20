@@ -262,7 +262,8 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         // If the environment is not specified, prompt the user to select one
         None => {
             interact_or!("Environment must be specified when not running in a terminal");
-            let environment = if environments.len() == 1 {
+            
+            if environments.len() == 1 {
                 match environments.first() {
                     // Project has only one environment, so use that one
                     Some(environment) => environment.clone(),
@@ -272,8 +273,7 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
             } else {
                 // Project has multiple environments, so prompt the user to select one
                 prompt_options("Select an environment", environments)?
-            };
-            environment
+            }
         }
     };
 
@@ -380,7 +380,7 @@ fn select_service_variables_new(
                     let variable = match chunk.last().unwrap().parse::<Variable>() {
                         Ok(v) => v,
                         Err(e) => {
-                            println!("{:?}", e);
+                            println!("{e:?}");
                             return None;
                         }
                     };
