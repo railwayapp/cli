@@ -115,6 +115,7 @@ async fn link_command(args: LinkArgs) -> Result<()> {
 
         configs.link_service(service.0.id.clone())?;
         configs.write()?;
+        println!("Linked service {}", service.0.name.green());
         return Ok(());
     }
 
@@ -195,9 +196,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
                 id: service.id.clone(),
                 name: service.name.clone(),
                 deployment_id: deployment.as_ref().map(|d| d.id.clone()),
-                status: deployment
-                    .as_ref()
-                    .map(|d| format!("{:?}", d.status)),
+                status: deployment.as_ref().map(|d| format!("{:?}", d.status)),
                 stopped: deployment
                     .as_ref()
                     .map(|d| d.deployment_stopped)
@@ -216,10 +215,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
                 return Ok(());
             }
 
-            println!(
-                "Services in {}:\n",
-                environment_name.blue().bold()
-            );
+            println!("Services in {}:\n", environment_name.blue().bold());
 
             for status in service_statuses {
                 let status_display = format_status_display(&status);
@@ -227,11 +223,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
                 println!(
                     "{:<20} | {:<14} | {}",
                     status.name.bold(),
-                    status
-                        .deployment_id
-                        .as_deref()
-                        .unwrap_or("N/A")
-                        .dimmed(),
+                    status.deployment_id.as_deref().unwrap_or("N/A").dimmed(),
                     status_display
                 );
             }
@@ -282,22 +274,15 @@ fn format_status_display(status: &ServiceStatusOutput) -> colored::ColoredString
 
     match status.status.as_deref() {
         Some("SUCCESS") => "SUCCESS".green(),
-        Some("FAILED") | Some("CRASHED") => status
-            .status
-            .as_deref()
-            .unwrap_or("UNKNOWN")
-            .red(),
+        Some("FAILED") | Some("CRASHED") => status.status.as_deref().unwrap_or("UNKNOWN").red(),
         Some("BUILDING") | Some("DEPLOYING") | Some("INITIALIZING") | Some("QUEUED") => {
             status.status.as_deref().unwrap_or("UNKNOWN").blue()
         }
         Some("SLEEPING") => "SLEEPING".yellow(),
-        Some("REMOVED") | Some("REMOVING") => status
-            .status
-            .as_deref()
-            .unwrap_or("UNKNOWN")
-            .dimmed(),
+        Some("REMOVED") | Some("REMOVING") => {
+            status.status.as_deref().unwrap_or("UNKNOWN").dimmed()
+        }
         Some(s) => s.white(),
         None => "NO DEPLOYMENT".dimmed(),
     }
 }
-
