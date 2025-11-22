@@ -1,21 +1,91 @@
 use anyhow::bail;
+use serde::Serialize;
 
 use crate::{
-    controllers::project::{ensure_project_and_environment_exist, get_project},
+    controllers::{
+        environment::get_matched_environment,
+        project::{ensure_project_and_environment_exist, get_project},
+    },
     errors::RailwayError,
     util::prompt::{PromptService, fake_select, prompt_options},
 };
 
 use super::*;
 
-/// Link a service to the current project
+/// Manage services
 #[derive(Parser)]
 pub struct Args {
+    #[clap(subcommand)]
+    command: Option<Commands>,
+
+    /// The service ID/name to link (deprecated: use 'service link' instead)
+    service: Option<String>,
+}
+
+#[derive(Parser)]
+enum Commands {
+    /// Link a service to the current project
+    Link(LinkArgs),
+
+    /// Show deployment status for services
+    Status(StatusArgs),
+}
+
+#[derive(Parser)]
+struct LinkArgs {
     /// The service ID/name to link
     service: Option<String>,
 }
 
+#[derive(Parser)]
+struct StatusArgs {
+    /// Service name or ID to show status for (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Show status for all services in the environment
+    #[clap(short, long)]
+    all: bool,
+
+    /// Environment to check status in (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceStatusOutput {
+    id: String,
+    name: String,
+    deployment_id: Option<String>,
+    status: Option<String>,
+    stopped: bool,
+}
+
 pub async fn command(args: Args) -> Result<()> {
+    // Handle legacy direct service link (when no subcommand is provided)
+    // This maintains backward compatibility:
+    // - `railway service` -> prompts to link
+    // - `railway service <name>` -> links that service
+    if args.command.is_none() {
+        return link_command(LinkArgs {
+            service: args.service,
+        })
+        .await;
+    }
+
+    match args.command {
+        Some(Commands::Link(link_args)) => link_command(link_args).await,
+        Some(Commands::Status(status_args)) => status_command(status_args).await,
+        None => unreachable!(),
+    }
+}
+
+async fn link_command(args: LinkArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -45,6 +115,7 @@ pub async fn command(args: Args) -> Result<()> {
 
         configs.link_service(service.0.id.clone())?;
         configs.write()?;
+        println!("Linked service {}", service.0.name.green());
         return Ok(());
     }
 
@@ -79,4 +150,139 @@ pub async fn command(args: Args) -> Result<()> {
         bail!("No service found");
     }
     Ok(())
+}
+
+async fn status_command(args: StatusArgs) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let linked_project = configs.get_linked_project().await?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    // Determine which environment to use
+    let environment_id = if let Some(env_name) = args.environment {
+        let env = get_matched_environment(&project, env_name)?;
+        env.id
+    } else {
+        linked_project.environment.clone()
+    };
+
+    let environment_name = project
+        .environments
+        .edges
+        .iter()
+        .find(|env| env.node.id == environment_id)
+        .map(|env| env.node.name.clone())
+        .context("Environment not found")?;
+
+    // Collect service instances for the environment
+    let mut service_statuses: Vec<ServiceStatusOutput> = Vec::new();
+
+    for service_edge in &project.services.edges {
+        let service = &service_edge.node;
+
+        // Find the service instance for this environment
+        if let Some(instance_edge) = service
+            .service_instances
+            .edges
+            .iter()
+            .find(|inst| inst.node.environment_id == environment_id)
+        {
+            let instance = &instance_edge.node;
+            let deployment = &instance.latest_deployment;
+
+            service_statuses.push(ServiceStatusOutput {
+                id: service.id.clone(),
+                name: service.name.clone(),
+                deployment_id: deployment.as_ref().map(|d| d.id.clone()),
+                status: deployment.as_ref().map(|d| format!("{:?}", d.status)),
+                stopped: deployment
+                    .as_ref()
+                    .map(|d| d.deployment_stopped)
+                    .unwrap_or(false),
+            });
+        }
+    }
+
+    if args.all {
+        // Show all services
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&service_statuses)?);
+        } else {
+            if service_statuses.is_empty() {
+                println!("No services found in environment '{}'", environment_name);
+                return Ok(());
+            }
+
+            println!("Services in {}:\n", environment_name.blue().bold());
+
+            for status in service_statuses {
+                let status_display = format_status_display(&status);
+
+                println!(
+                    "{:<20} | {:<14} | {}",
+                    status.name.bold(),
+                    status.deployment_id.as_deref().unwrap_or("N/A").dimmed(),
+                    status_display
+                );
+            }
+        }
+    } else {
+        // Show single service (specified or linked)
+        let target_service = if let Some(service_name) = args.service {
+            service_statuses
+                .iter()
+                .find(|s| s.id == service_name || s.name == service_name)
+                .ok_or_else(|| RailwayError::ServiceNotFound(service_name.clone()))?
+        } else {
+            // Use linked service
+            let linked_service_id = linked_project
+                .service
+                .as_ref()
+                .context("No service linked. Use --service flag or --all to see all services")?;
+
+            service_statuses
+                .iter()
+                .find(|s| &s.id == linked_service_id)
+                .context("Linked service not found in this environment")?
+        };
+
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&target_service)?);
+        } else {
+            println!("Service: {}", target_service.name.green().bold());
+            println!(
+                "Deployment: {}",
+                target_service
+                    .deployment_id
+                    .as_deref()
+                    .unwrap_or("No deployment")
+                    .dimmed()
+            );
+            println!("Status: {}", format_status_display(target_service));
+        }
+    }
+
+    Ok(())
+}
+
+fn format_status_display(status: &ServiceStatusOutput) -> colored::ColoredString {
+    if status.stopped && status.status.as_deref() == Some("SUCCESS") {
+        return "STOPPED".yellow();
+    }
+
+    match status.status.as_deref() {
+        Some("SUCCESS") => "SUCCESS".green(),
+        Some("FAILED") | Some("CRASHED") => status.status.as_deref().unwrap_or("UNKNOWN").red(),
+        Some("BUILDING") | Some("DEPLOYING") | Some("INITIALIZING") | Some("QUEUED") => {
+            status.status.as_deref().unwrap_or("UNKNOWN").blue()
+        }
+        Some("SLEEPING") => "SLEEPING".yellow(),
+        Some("REMOVED") | Some("REMOVING") => {
+            status.status.as_deref().unwrap_or("UNKNOWN").dimmed()
+        }
+        Some(s) => s.white(),
+        None => "NO DEPLOYMENT".dimmed(),
+    }
 }
