@@ -44,14 +44,22 @@ pub struct Args {
     /// railway add --service --variables "MY_SPECIAL_ENV_VAR=1" --variables "BACKEND_PORT=3000"
     #[clap(short, long)]
     variables: Vec<Variable>,
+
+    /// Verbose logging
+    #[clap(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    verbose: Option<bool>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+    let verbose = args.verbose.unwrap_or(false);
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    if verbose {
+        println!("project and environment exist")
+    }
     let type_of_create = if !args.database.is_empty() {
         fake_select("What do you need?", "Database");
         CreateKind::Database(args.database)
@@ -103,18 +111,27 @@ pub async fn command(args: Args) -> Result<()> {
             }
         }
     };
-
+    if verbose {
+        println!("{:?}", type_of_create);
+    }
     match type_of_create {
         CreateKind::Database(databases) => {
             for db in databases {
+                if verbose {
+                    println!("iterating through databases: {:?}", db)
+                }
                 deploy::fetch_and_create(
                     &client,
                     &configs,
                     db.to_slug().to_string(),
                     &linked_project,
                     &HashMap::new(),
+                    verbose,
                 )
                 .await?;
+                if verbose {
+                    println!("succesfully created {:?}", db)
+                }
             }
         }
         CreateKind::DockerImage {

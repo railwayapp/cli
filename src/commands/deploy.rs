@@ -62,11 +62,20 @@ pub async fn command(args: Args) -> Result<()> {
                 template.clone(),
                 &linked_project,
                 &variables,
+                false,
             )
             .await?;
         } else {
             println!("Creating {template}...");
-            fetch_and_create(&client, &configs, template, &linked_project, &variables).await?;
+            fetch_and_create(
+                &client,
+                &configs,
+                template,
+                &linked_project,
+                &variables,
+                false,
+            )
+            .await?;
         }
     }
 
@@ -81,7 +90,11 @@ pub async fn fetch_and_create(
     template: String,
     linked_project: &LinkedProject,
     vars: &HashMap<String, String>,
+    verbose: bool,
 ) -> Result<(), anyhow::Error> {
+    if verbose {
+        println!("fetching details for template")
+    }
     let details = post_graphql::<queries::TemplateDetail, _>(
         client,
         configs.get_backboard(),
@@ -96,7 +109,9 @@ pub async fn fetch_and_create(
     )?;
 
     ensure_project_and_environment_exist(client, configs, linked_project).await?;
-
+    if verbose {
+        println!("project & env exist");
+    }
     for s in &mut config.services.values_mut() {
         for (key, variable) in &mut s.variables {
             let value = if let Some(value) = vars.get(&format!("{}.{key}", s.name)) {
@@ -139,13 +154,18 @@ pub async fn fetch_and_create(
         template_id: details.template.id,
         serialized_config: serde_json::to_value(&config).context("Failed to serialize config")?,
     };
-
+    if verbose {
+        println!("deploying template");
+    }
     post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), vars).await?;
 
     spinner.finish_with_message(format!(
         "🎉 Added {} to project",
         details.template.name.green().bold(),
     ));
+    if verbose {
+        println!("template deployed");
+    }
 
     Ok(())
 }
