@@ -110,7 +110,7 @@ pub async fn fetch_and_create(
 
     ensure_project_and_environment_exist(client, configs, linked_project).await?;
     if verbose {
-        println!("project & env exist");
+        println!("Project and environment in config exist");
     }
     for s in &mut config.services.values_mut() {
         for (key, variable) in &mut s.variables {
