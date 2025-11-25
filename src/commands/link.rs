@@ -265,7 +265,7 @@ structstruck::strike! {
 }
 
 // unfortunately, due to the graphql client returning 3 different types for some reason (despite them all being identical)
-// we need to write 3 match arms to convert it to our normaliesd project type
+// we need to write 3 match arms to convert it to our normalised project type
 impl From<Project> for NormalisedProject {
     fn from(value: Project) -> Self {
         match value {

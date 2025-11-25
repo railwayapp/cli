@@ -229,7 +229,7 @@ mod test {
     fn test_is_tcp_proxy() {
         assert!(host_is_tcp_proxy("roundhouse.proxy.rlwy.net".to_string()));
         assert!(!host_is_tcp_proxy("localhost".to_string()));
-        assert!(!host_is_tcp_proxy("postgres.railway.interal".to_string()));
+        assert!(!host_is_tcp_proxy("postgres.railway.internal".to_string()));
     }
 
     #[test]

@@ -110,7 +110,7 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
 }
 
 fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
-    println!("Domains already exists on the service:");
+    println!("Domains already exist on the service:");
     let domain_count = domains.service_domains.len() + domains.custom_domains.len();
 
     if domain_count == 1 {
