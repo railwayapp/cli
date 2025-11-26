@@ -1,6 +1,6 @@
 use super::*;
 
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use std::io;
 
 /// Generate completion script

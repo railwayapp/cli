@@ -110,7 +110,7 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
 }
 
 fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
-    println!("Domains already exists on the service:");
+    println!("Domains already exist on the service:");
     let domain_count = domains.service_domains.len() + domains.custom_domains.len();
 
     if domain_count == 1 {
@@ -282,7 +282,9 @@ async fn create_custom_domain(
 
     print_dns(response.custom_domain_create.status.dns_records);
 
-    println!("\nNote: if the Name is \"@\", the DNS record should be created for the root of the domain.");
+    println!(
+        "\nNote: if the Name is \"@\", the DNS record should be created for the root of the domain."
+    );
     println!("*DNS changes can take up to 72 hours to propagate worldwide.");
 
     Ok(())

@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;
@@ -99,30 +99,34 @@ pub async fn get_ssh_connect_params(
     configs: &Configs,
     client: &Client,
 ) -> Result<SSHConnectParams> {
-    let has_project = args.project.is_some();
-    let has_service = args.service.is_some();
-    let has_environment = args.environment.is_some();
+    // Only fetch linked project if we need it (i.e., some args are missing)
+    let needs_linked_project =
+        args.project.is_none() || args.environment.is_none() || args.service.is_none();
 
-    let linked_project = configs.get_linked_project().await?;
-    let project_id = if has_project {
-        args.project.unwrap()
+    let linked_project = if needs_linked_project {
+        Some(configs.get_linked_project().await?)
     } else {
-        linked_project.project.clone()
+        None
     };
 
+    let project_id = if let Some(id) = args.project {
+        id
+    } else {
+        linked_project.as_ref().unwrap().project.clone()
+    };
     let project = get_project(client, configs, project_id.clone()).await?;
-    let environment = if has_environment {
-        args.environment.unwrap()
-    } else {
-        linked_project.environment.clone()
-    };
 
+    let environment = if let Some(env) = args.environment {
+        env
+    } else {
+        linked_project.as_ref().unwrap().environment.clone()
+    };
     let environment_id = get_matched_environment(&project, environment)?.id;
-    let service_id = if has_service {
-        let service_id_or_name = args.service.unwrap();
+
+    let service_id = if let Some(service_id_or_name) = args.service {
         find_service_by_name(client, configs, &project, &service_id_or_name).await?
     } else {
-        get_or_prompt_service(linked_project.clone(), project, None)
+        get_or_prompt_service(linked_project.clone().unwrap(), project, None)
             .await?
             .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?
     };

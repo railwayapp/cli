@@ -1,18 +1,10 @@
 use graphql_client::GraphQLQuery;
-use serde::{Deserialize, Serialize};
 type EnvironmentVariables = std::collections::BTreeMap<String, String>;
 #[allow(clippy::upper_case_acronyms)] // graphql client expects a type called JSON
 type JSON = serde_json::Value;
 use chrono::{DateTime as DateTimeType, Utc};
 
 pub type DateTime = DateTimeType<Utc>;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TemplateVolume {
-    pub mount_path: String,
-    pub name: Option<String>,
-}
 
 #[derive(GraphQLQuery)]
 #[graphql(

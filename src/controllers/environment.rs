@@ -1,5 +1,5 @@
 use crate::{
-    commands::queries::{project::ProjectProjectEnvironmentsEdgesNode, RailwayProject},
+    commands::queries::{RailwayProject, project::ProjectProjectEnvironmentsEdgesNode},
     errors::RailwayError,
 };
 use anyhow::Result;
