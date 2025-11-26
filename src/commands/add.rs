@@ -58,7 +58,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
     if verbose {
-        println!("project and environment exist")
+        println!("project and environment exist in linked project exist")
     }
     let type_of_create = if !args.database.is_empty() {
         fake_select("What do you need?", "Database");
@@ -118,7 +118,7 @@ pub async fn command(args: Args) -> Result<()> {
         CreateKind::Database(databases) => {
             for db in databases {
                 if verbose {
-                    println!("iterating through databases: {:?}", db)
+                    println!("iterating through databases to add: {:?}", db)
                 }
                 deploy::fetch_and_create(
                     &client,
@@ -147,6 +147,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 Some(image),
                 variables,
+                verbose,
             )
             .await?;
         }
@@ -163,6 +164,7 @@ pub async fn command(args: Args) -> Result<()> {
                 Some(repo),
                 None,
                 variables,
+                verbose,
             )
             .await?;
         }
@@ -175,6 +177,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 None,
                 variables,
+                verbose,
             )
             .await?;
         }
@@ -261,6 +264,7 @@ fn prompt_variables(variables: Vec<Variable>) -> Result<Option<BTreeMap<String, 
 
 type Variables = Option<BTreeMap<String, String>>;
 
+#[allow(clippy::too_many_arguments)]
 async fn create_service(
     service: Option<String>,
     linked_project: &LinkedProject,
@@ -269,6 +273,7 @@ async fn create_service(
     repo: Option<String>,
     image: Option<String>,
     variables: Variables,
+    verbose: bool,
 ) -> Result<(), anyhow::Error> {
     let spinner = indicatif::ProgressBar::new_spinner()
         .with_style(
@@ -280,6 +285,9 @@ async fn create_service(
     spinner.enable_steady_tick(Duration::from_millis(100));
     let source = mutations::service_create::ServiceSourceInput { repo, image };
     let branch = if let Some(repo) = &source.repo {
+        if verbose {
+            println!("fetching branch for github repo {repo}")
+        }
         let repos = post_graphql::<queries::GitHubRepos, _>(
             client,
             &configs.get_backboard(),
@@ -303,6 +311,9 @@ async fn create_service(
         variables,
         branch,
     };
+    if verbose {
+        println!("creating service");
+    }
     let s =
         post_graphql::<mutations::ServiceCreate, _>(client, &configs.get_backboard(), vars).await?;
     configs.link_service(s.service_create.id)?;
