@@ -12,6 +12,16 @@ query Project($id: String!) {
           id
           name
           deletedAt
+          deploymentTriggers {
+            edges {
+              node {
+                branch
+                id
+                repository
+                serviceId
+              }
+            }
+          }
         }
       }
     }

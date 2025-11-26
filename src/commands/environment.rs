@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Display, time::Duration};
+use std::{collections::BTreeMap, fmt::Display, str::FromStr, time::Duration};
 
 use crate::{
     consts::TICK_STRING,
@@ -8,13 +8,15 @@ use crate::{
     util::{
         prompt::{
             PromptService, fake_select, prompt_confirm_with_default, prompt_options,
-            prompt_options_skippable, prompt_text, prompt_variables,
+            prompt_options_skippable, prompt_text, prompt_text_with_placeholder_disappear,
+            prompt_variables,
         },
         retry::{RetryConfig, retry_with_backoff},
     },
 };
 use anyhow::bail;
 use is_terminal::IsTerminal;
+use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
 use tokio::task::JoinHandle;
 
 use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
@@ -57,6 +59,20 @@ pub struct NewArgs {
     /// railway environment new foo --duplicate bar --service-variable <service name/service uuid> BACKEND_PORT=3000
     #[clap(long = "service-variable", short = 'v', number_of_values = 2, value_names = &["SERVICE", "VARIABLE"])]
     pub service_variables: Vec<String>,
+
+    /// Assign services new sources in the new environment
+    ///
+    /// GitHub repo format: <owner>/<repo>/<branch>
+    ///
+    /// Docker image format: [optional registry url]/<owner>[/repo][:tag]
+    ///
+    /// Examples:
+    ///
+    /// railway environment new foo --duplicate bar --service-source <service name/service uuid> docker ubuntu:latest
+    ///
+    /// railway environment new foo --duplicate bar --service-source <service name/service uuid> github nodejs/node/branch
+    #[clap(long = "service-source", short = 's', number_of_values = 3, value_names = &["SERVICE", "PLATFORM", "SOURCE"])]
+    pub service_sources: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -88,7 +104,9 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     let name = select_name_new(&args, is_terminal)?;
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
     let service_variables =
-        select_service_variables_new(args, &project, is_terminal, &duplicate_id)?;
+        select_service_variables_new(&args, &project, is_terminal, &duplicate_id)?;
+    let service_sources = select_service_sources_new(&args, &project, is_terminal, &duplicate_id)?;
+
     // Use background processing when duplicating to avoid timeouts
     let apply_changes_in_background = duplicate_id.is_some();
 
@@ -126,11 +144,26 @@ async fn new_environment(args: NewArgs) -> Result<()> {
         env_name.magenta().bold(),
         "created! 🎉".green()
     ));
-    if !service_variables.is_empty() {
-        upsert_variables(&configs, client, project, service_variables, env_id.clone()).await?;
-    } else {
-        println!();
-    }
+
+    let (variables, sources) = tokio::join!(
+        upsert_variables(
+            &configs,
+            client.clone(),
+            project.clone(),
+            service_variables,
+            env_id.clone()
+        ),
+        upsert_sources(
+            &configs,
+            client,
+            project.id.clone(),
+            service_sources,
+            env_id.clone()
+        )
+    );
+
+    variables?;
+    sources?;
 
     configs.link_project(
         project_id,
@@ -262,7 +295,8 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         // If the environment is not specified, prompt the user to select one
         None => {
             interact_or!("Environment must be specified when not running in a terminal");
-            let environment = if environments.len() == 1 {
+
+            if environments.len() == 1 {
                 match environments.first() {
                     // Project has only one environment, so use that one
                     Some(environment) => environment.clone(),
@@ -272,8 +306,7 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
             } else {
                 // Project has multiple environments, so prompt the user to select one
                 prompt_options("Select an environment", environments)?
-            };
-            environment
+            }
         }
     };
 
@@ -297,6 +330,9 @@ async fn upsert_variables(
     service_variables: Vec<(String, Variable)>,
     env_id: String,
 ) -> Result<(), anyhow::Error> {
+    if service_variables.is_empty() {
+        return Ok(());
+    }
     let good_vars: Vec<(String, BTreeMap<String, String>)> = service_variables
         .chunk_by(|a, b| a.0 == b.0) // group by service id
         .map(|vars| {
@@ -344,8 +380,142 @@ async fn upsert_variables(
     Ok(())
 }
 
+async fn upsert_sources(
+    configs: &Configs,
+    client: reqwest::Client,
+    project: String,
+    service_sources: Vec<(String, Source)>,
+    env_id: String,
+) -> Result<(), anyhow::Error> {
+    if service_sources.is_empty() {
+        return Ok(());
+    }
+    let project = get_project(&client, configs, project).await?;
+    let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
+    for (service_id, source) in service_sources {
+        let client = client.clone();
+        let project = project.clone();
+        let env_id = env_id.clone();
+        let backboard = configs.get_backboard();
+        tasks.push(tokio::spawn(async move {
+            /*
+            first check if there is a deployment trigger for the service in the environment
+            if there is, and the change is a github repository (match by enum type), then update the deployment trigger along with the
+            source (via service source and serviceinstanceupdate)
+            if the change is docker and the trigger, delete it
+             */
+            let Some(environment) = project
+                .environments
+                .edges
+                .iter()
+                .find(|a| a.node.id == env_id)
+            else {
+                bail!("Environment couldn't be found, matched {env_id}");
+            };
+            let trigger = environment
+                .node
+                .deployment_triggers
+                .edges
+                .iter()
+                .find(|t| t.node.service_id == Some(service_id.clone()))
+                .map(|t| t.node.id.clone());
+
+            match source {
+                Source::GitHub {
+                    owner,
+                    repo,
+                    branch,
+                } => {
+                    let repository = format!("{owner}/{repo}");
+                    if let Some(id) = trigger {
+                        // trigger already exists, update
+                        post_graphql::<mutations::DeploymentTriggerUpdate, _>(
+                            &client,
+                            backboard.clone(),
+                            mutations::deployment_trigger_update::Variables {
+                                id,
+                                repository: repository.clone(),
+                                branch,
+                            },
+                        )
+                        .await?;
+                    } else {
+                        // trigger does not exist, so we need to make one
+                        post_graphql::<mutations::DeploymentTriggerCreate, _>(
+                            &client,
+                            backboard.clone(),
+                            mutations::deployment_trigger_create::Variables {
+                                service_id: service_id.clone(),
+                                environment_id: env_id.clone(),
+                                project_id: project.id.clone(),
+                                repository: repository.clone(),
+                                branch,
+                                provider: String::from("github"),
+                            },
+                        )
+                        .await?;
+                    }
+                    post_graphql::<mutations::ServiceInstanceUpdate, _>(
+                        &client,
+                        backboard.clone(),
+                        mutations::service_instance_update::Variables {
+                            service_id,
+                            environment_id: env_id,
+                            source: mutations::service_instance_update::ServiceSourceInput {
+                                image: None,
+                                repo: Some(repository),
+                            },
+                        },
+                    )
+                    .await?;
+                }
+                Source::Docker(image) => {
+                    if let Some(id) = trigger {
+                        // delete old trigger
+                        post_graphql::<mutations::DeploymentTriggerDelete, _>(
+                            &client,
+                            backboard.clone(),
+                            mutations::deployment_trigger_delete::Variables { id },
+                        )
+                        .await?;
+                    }
+                    // update service information to use new source
+                    post_graphql::<mutations::ServiceInstanceUpdate, _>(
+                        &client,
+                        backboard.clone(),
+                        mutations::service_instance_update::Variables {
+                            service_id,
+                            environment_id: env_id,
+                            source: mutations::service_instance_update::ServiceSourceInput {
+                                image: Some(image),
+                                repo: None,
+                            },
+                        },
+                    )
+                    .await?;
+                }
+            }
+            Ok(())
+        }));
+    }
+    let spinner = indicatif::ProgressBar::new_spinner()
+        .with_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars(TICK_STRING)
+                .template("{spinner:.green} {msg}")?,
+        )
+        .with_message("Updating sources...");
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    let r = futures::future::join_all(tasks).await;
+    for r in r {
+        r??;
+    }
+    spinner.finish_and_clear();
+    Ok(())
+}
+
 fn select_service_variables_new(
-    args: NewArgs,
+    args: &NewArgs,
     project: &queries::project::ProjectProject,
     is_terminal: bool,
     duplicate_id: &Option<String>,
@@ -386,11 +556,11 @@ fn select_service_variables_new(
                     };
                     if service_meta.is_none() {
                         println!(
-                            "{}: Service {} not found",
+                            "{}: Service {} not found (skipping setting variables)",
                             "Error".red().bold(),
                             service.blue()
                         );
-                        std::process::exit(1); // returning errors in closures... oh my god...
+                        return None;
                     }
                     service_meta.map(|service_meta| {
                         fake_select(
@@ -451,6 +621,198 @@ fn select_service_variables_new(
         vec![]
     };
     Ok(service_variables)
+}
+
+#[derive(Clone, EnumIter, Display, EnumString)]
+pub enum SourceTypes {
+    #[strum(to_string = "Docker image", serialize = "docker", serialize = "image")]
+    Docker,
+    #[strum(
+        to_string = "GitHub repo",
+        serialize = "github",
+        serialize = "git",
+        serialize = "gh"
+    )]
+    GitHub,
+}
+
+#[derive(Clone, Debug)]
+enum Source {
+    Docker(String),
+    GitHub {
+        owner: String,
+        repo: String,
+        branch: String,
+    },
+}
+
+fn select_service_sources_new(
+    args: &NewArgs,
+    project: &queries::project::ProjectProject,
+    is_terminal: bool,
+    duplicate_id: &Option<String>,
+) -> Result<Vec<(String, Source)>> {
+    let Some(duplicate_id) = duplicate_id else {
+        // no duplicate id, nothing to change
+        return Ok(vec![]);
+    };
+    let services = project
+        .services
+        .edges
+        .iter()
+        .filter(|s| {
+            s.node
+                .service_instances
+                .edges
+                .iter()
+                .any(|i| i.node.environment_id == *duplicate_id)
+        })
+        .collect::<Vec<_>>();
+    if !args.service_sources.is_empty() {
+        Ok(args
+            .service_sources
+            .chunks(3)
+            .filter_map(|chunk| {
+                // clap ensures that there will always be 3 values whenever the flag is provided
+                let service = chunk.first().unwrap();
+                let service_meta = services
+                    .iter()
+                    .find(|s| {
+                        (s.node.id.to_lowercase() == service.to_lowercase())
+                            || (s.node.name.to_lowercase() == service.to_lowercase())
+                    })
+                    .map(|s| (s.node.id.clone(), s.node.name.clone()));
+                if service_meta.is_none() {
+                    println!(
+                        "{}: Service {} not found (skipping updating source)",
+                        "Error".red().bold(),
+                        service.blue()
+                    );
+                    return None;
+                }
+                let source_type =
+                    match SourceTypes::from_str(chunk.get(1).unwrap().to_lowercase().as_str()) {
+                        Ok(f) => {
+                            fake_select(
+                                "What do you want to change the source to?",
+                                &f.to_string(),
+                            );
+                            f
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "Invalid platform. Valid platforms are: {}",
+                                SourceTypes::iter()
+                                    .map(|f| f.to_string())
+                                    .collect::<Vec<String>>()
+                                    .join(", ")
+                            );
+                            return None;
+                        }
+                    };
+                let source = match source_type {
+                    SourceTypes::Docker => {
+                        fake_select("Enter a docker image", chunk.last().unwrap());
+                        Some(Source::Docker(chunk.last().unwrap().to_string()))
+                    }
+                    SourceTypes::GitHub => match parse_repo(chunk.last().unwrap().to_string()) {
+                        Ok(source) => Some(source),
+                        Err(e) => {
+                            eprintln!("{:?}", e);
+                            return None;
+                        }
+                    },
+                };
+                source.as_ref()?;
+                service_meta.map(|service_meta| {
+                    fake_select(
+                        "Select a service to change the source for",
+                        service_meta.1.as_str(),
+                    );
+                    (
+                        service_meta.0, // id
+                        source.unwrap(),
+                    )
+                })
+            })
+            .collect::<Vec<(String, Source)>>())
+    } else if is_terminal {
+        let mut sources: Vec<(String, Source)> = Vec::new();
+        let p_services = services
+            .iter()
+            .map(|s| PromptService(&s.node))
+            .collect::<Vec<_>>();
+        let mut used_services: Vec<&PromptService> = Vec::new();
+        loop {
+            let prompt_services: Vec<&PromptService<'_>> = p_services
+                .iter()
+                .filter(|p| !used_services.contains(p))
+                .clone()
+                .collect();
+            if prompt_services.is_empty() {
+                break;
+            }
+            let service = prompt_options_skippable(
+                "Select a service to change the source for <esc to skip>",
+                prompt_services,
+            )?;
+            if let Some(service) = service {
+                let Some(kind) = prompt_options_skippable(
+                    "What do you want to change the source to?",
+                    SourceTypes::iter().collect(),
+                )?
+                else {
+                    continue;
+                };
+                sources.push((
+                    service.0.id.clone(),
+                    match kind {
+                        SourceTypes::GitHub => {
+                            // let repo_pre = ;
+                            match parse_repo(prompt_text_with_placeholder_disappear(
+                                "Enter a repo",
+                                "<owner>/<repo>/<branch>",
+                            )?) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    eprintln!("{:?}", e);
+                                    continue;
+                                }
+                            }
+                        }
+                        SourceTypes::Docker => {
+                            Source::Docker(prompt_text_with_placeholder_disappear(
+                                "Enter a docker image",
+                                "[optional registry]/<owner>/[repo][:tag]",
+                            )?)
+                        }
+                    },
+                ));
+                used_services.push(service)
+            } else {
+                break;
+            }
+        }
+        Ok(sources)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn parse_repo(repo: String) -> Result<Source> {
+    let s = repo
+        .splitn(3, '/')
+        .filter(|&s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<String>>();
+    match s.len() {
+        3 => Ok(Source::GitHub {
+            owner: s.first().unwrap().to_string(),
+            repo: s.get(1).unwrap().to_string(),
+            branch: s.get(2).unwrap().to_string(),
+        }),
+        _ => anyhow::bail!("malformed repo: <owner>/<repo>/<branch>"),
+    }
 }
 
 fn select_duplicate_id_new(
