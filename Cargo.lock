@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "railwayapp"
-version = "4.11.1"
+version = "4.11.2"
 dependencies = [
  "anyhow",
  "async-tungstenite",
