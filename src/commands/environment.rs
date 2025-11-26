@@ -768,7 +768,6 @@ fn select_service_sources_new(
                     service.0.id.clone(),
                     match kind {
                         SourceTypes::GitHub => {
-                            // let repo_pre = ;
                             match parse_repo(prompt_text_with_placeholder_disappear(
                                 "Enter a repo",
                                 "<owner>/<repo>/<branch>",
