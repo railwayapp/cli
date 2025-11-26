@@ -11,6 +11,7 @@ query Project($id: String!) {
         node {
           id
           name
+          canAccess
           deletedAt
         }
       }

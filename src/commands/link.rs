@@ -128,6 +128,14 @@ fn select_environment(
     environment: Option<String>,
     project: &NormalisedProject,
 ) -> Result<NormalisedEnvironment, anyhow::Error> {
+    if project.environments.is_empty() {
+        if project.has_restricted_environments {
+            bail!("All environments in this project are restricted");
+        } else {
+            bail!("Project has no environments");
+        }
+    }
+
     let environment = if let Some(environment) = environment {
         let env = project.environments.iter().find(|e| {
             (e.name.to_lowercase() == environment.to_lowercase())
@@ -260,7 +268,9 @@ structstruck::strike! {
             ///
             /// _**note**_: this isn't what the API returns, we are just extracting what we need
             service_instances: Vec<String>,
-        }>
+        }>,
+        /// Whether the project has restricted environments
+        has_restricted_environments: bool,
     }
 }
 
@@ -269,62 +279,76 @@ structstruck::strike! {
 impl From<Project> for NormalisedProject {
     fn from(value: Project) -> Self {
         match value {
-            Project::External(project) => NormalisedProject::new(
-                project.id,
-                project.name,
-                project
+            Project::External(project) => {
+                let total_envs = project.environments.edges.len();
+                let accessible_envs: Vec<_> = project
                     .environments
                     .edges
                     .into_iter()
+                    .filter(|env| env.node.can_access)
                     .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
-                    .collect(),
-                project
-                    .services
-                    .edges
-                    .into_iter()
-                    .map(|service| {
-                        NormalisedService::new(
-                            service.node.id,
-                            service.node.name,
-                            service
-                                .node
-                                .service_instances
-                                .edges
-                                .into_iter()
-                                .map(|instance| instance.node.environment_id)
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            ),
-            Project::Workspace(project) => NormalisedProject::new(
-                project.id,
-                project.name,
-                project
+                    .collect();
+                let has_restricted = total_envs > accessible_envs.len();
+                NormalisedProject::new(
+                    project.id,
+                    project.name,
+                    accessible_envs,
+                    project
+                        .services
+                        .edges
+                        .into_iter()
+                        .map(|service| {
+                            NormalisedService::new(
+                                service.node.id,
+                                service.node.name,
+                                service
+                                    .node
+                                    .service_instances
+                                    .edges
+                                    .into_iter()
+                                    .map(|instance| instance.node.environment_id)
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                    has_restricted,
+                )
+            }
+            Project::Workspace(project) => {
+                let total_envs = project.environments.edges.len();
+                let accessible_envs: Vec<_> = project
                     .environments
                     .edges
                     .into_iter()
+                    .filter(|env| env.node.can_access)
                     .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
-                    .collect(),
-                project
-                    .services
-                    .edges
-                    .into_iter()
-                    .map(|service| {
-                        NormalisedService::new(
-                            service.node.id,
-                            service.node.name,
-                            service
-                                .node
-                                .service_instances
-                                .edges
-                                .into_iter()
-                                .map(|instance| instance.node.environment_id)
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            ),
+                    .collect();
+                let has_restricted = total_envs > accessible_envs.len();
+                NormalisedProject::new(
+                    project.id,
+                    project.name,
+                    accessible_envs,
+                    project
+                        .services
+                        .edges
+                        .into_iter()
+                        .map(|service| {
+                            NormalisedService::new(
+                                service.node.id,
+                                service.node.name,
+                                service
+                                    .node
+                                    .service_instances
+                                    .edges
+                                    .into_iter()
+                                    .map(|instance| instance.node.environment_id)
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                    has_restricted,
+                )
+            }
         }
     }
 }

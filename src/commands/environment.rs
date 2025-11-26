@@ -161,12 +161,19 @@ async fn delete_environment(args: DeleteArgs) -> Result<()> {
             bail!(RailwayError::EnvironmentNotFound(environment))
         }
     } else if is_terminal {
-        let environments = project
-            .environments
-            .edges
+        let all_environments = &project.environments.edges;
+        let environments = all_environments
             .iter()
+            .filter(|env| env.node.can_access)
             .map(|env| Environment(&env.node))
             .collect::<Vec<_>>();
+        if environments.is_empty() {
+            if all_environments.is_empty() {
+                bail!("Project has no environments");
+            } else {
+                bail!("All environments in this project are restricted");
+            }
+        }
         let r = prompt_options("Select the environment to delete", environments)?;
         (r.0.id.clone(), r.0.name.clone())
     } else {
@@ -240,12 +247,20 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         bail!(RailwayError::ProjectDeleted);
     }
 
-    let environments = project
-        .environments
-        .edges
+    let all_environments = &project.environments.edges;
+    let environments = all_environments
         .iter()
+        .filter(|env| env.node.can_access)
         .map(|env| Environment(&env.node))
         .collect::<Vec<_>>();
+
+    if environments.is_empty() {
+        if all_environments.is_empty() {
+            bail!("Project has no environments");
+        } else {
+            bail!("All environments in this project are restricted");
+        }
+    }
 
     let environment = match args.environment {
         // If the environment is specified, find it in the list of environments
@@ -474,6 +489,7 @@ fn select_duplicate_id_new(
             .environments
             .edges
             .iter()
+            .filter(|env| env.node.can_access)
             .map(|env| Environment(&env.node))
             .collect::<Vec<_>>();
         prompt_options_skippable(
