@@ -120,7 +120,8 @@ async fn link_command(args: LinkArgs) -> Result<()> {
     }
 
     if services.is_empty() {
-        bail!("No services found");
+        println!("No services found");
+        return Ok(());
     }
 
     let service = if !services.is_empty() {
