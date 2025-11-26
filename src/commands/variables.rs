@@ -4,17 +4,13 @@ use crate::{
     controllers::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
-        variables::get_service_variables,
+        variables::{Variable, get_service_variables},
     },
     errors::RailwayError,
     table::Table,
 };
 use anyhow::bail;
-use std::{
-    collections::BTreeMap,
-    io::{stdin, BufRead, IsTerminal},
-    time::Duration,
-};
+use std::time::Duration;
 
 /// Show variables for active environment
 #[derive(Parser)]
@@ -36,7 +32,7 @@ pub struct Args {
     ///
     /// railway variables --set "MY_SPECIAL_ENV_VAR=1" --set "BACKEND_PORT=3000"
     #[clap(long)]
-    set: Vec<String>,
+    set: Vec<Variable>,
 
     /// Read environment variable pairs from stdin.
     ///
@@ -171,7 +167,7 @@ pub async fn command(mut args: Args) -> Result<()> {
 }
 
 async fn set_variables(
-    set: Vec<String>,
+    variables: Vec<Variable>,
     project: String,
     environment_id: String,
     service_id: String,
@@ -179,22 +175,9 @@ async fn set_variables(
     configs: &Configs,
     skip_deploys: bool,
 ) -> Result<(), anyhow::Error> {
-    let variables: BTreeMap<String, String> = set
-        .iter()
-        .filter_map(|v| {
-            let mut split = v.split('=');
-            let key = split.next()?.trim().to_owned();
-            let value = split.collect::<Vec<&str>>().join("=").trim().to_owned();
-            if value.is_empty() {
-                None
-            } else {
-                Some((key, value))
-            }
-        })
-        .collect();
     let fmt_variables = variables
-        .keys()
-        .map(|k| k.bold().to_string())
+        .iter()
+        .map(|k| k.key.bold().to_string())
         .collect::<Vec<String>>()
         .join(", ");
     let spinner = indicatif::ProgressBar::new_spinner()
@@ -210,8 +193,8 @@ async fn set_variables(
         project_id: project,
         environment_id,
         service_id,
-        variables,
-        skip_deploys: if skip_deploys { Some(true) } else { None },
+        variables: variables.into_iter().map(|v| (v.key, v.value)).collect(),
+        skip_deploys: skip_deploys.then_some(true),
     };
     post_graphql::<mutations::VariableCollectionUpsert, _>(client, configs.get_backboard(), vars)
         .await?;

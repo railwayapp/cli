@@ -5,11 +5,13 @@ use crate::{
     },
     post_graphql,
     subscription::subscribe_graphql,
-    util::retry::{retry_with_backoff, RetryConfig},
+    util::retry::RetryConfig,
 };
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use reqwest::Client;
+use std::time::Duration;
+use tokio::time::sleep;
 
 const LOGS_RETRY_CONFIG: RetryConfig = RetryConfig {
     max_attempts: 12,
@@ -91,25 +93,52 @@ pub async fn stream_build_logs(
     filter: Option<String>,
     on_log: impl Fn(build_logs::LogFields),
 ) -> Result<()> {
-    // Retry establishing connection for up to 60 seconds
-    let mut stream = retry_with_backoff(LOGS_RETRY_CONFIG, || async {
+    let mut last_timestamp: Option<String> = None;
+    let mut attempt = 0;
+    let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+
+    loop {
+        attempt += 1;
+
         let vars = subscriptions::build_logs::Variables {
             deployment_id: deployment_id.clone(),
             filter: filter.clone().or_else(|| Some(String::new())),
             limit: Some(500),
         };
-        subscribe_graphql::<subscriptions::BuildLogs>(vars).await
-    })
-    .await?;
 
-    while let Some(Ok(log)) = stream.next().await {
-        let log = log.data.context("Failed to retrieve build log")?;
-        for line in log.build_logs {
-            on_log(line);
+        let result = async {
+            let mut stream = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
+
+            while let Some(response) = stream.next().await {
+                let log = response
+                    .context("Build log stream error")?
+                    .data
+                    .context("Failed to retrieve build log")?;
+
+                for line in log.build_logs {
+                    if let Some(ref ts) = last_timestamp {
+                        if line.timestamp <= *ts {
+                            continue;
+                        }
+                    }
+                    last_timestamp = Some(line.timestamp.clone());
+                    on_log(line);
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => return Err(e),
+            Err(_) => {
+                sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
+                    .min(LOGS_RETRY_CONFIG.max_delay_ms);
+            }
         }
     }
-
-    Ok(())
 }
 
 pub async fn stream_deploy_logs(
@@ -117,25 +146,52 @@ pub async fn stream_deploy_logs(
     filter: Option<String>,
     on_log: impl Fn(deployment_logs::LogFields),
 ) -> Result<()> {
-    // Retry establishing connection for up to 60 seconds
-    let mut stream = retry_with_backoff(LOGS_RETRY_CONFIG, || async {
+    let mut last_timestamp: Option<String> = None;
+    let mut attempt = 0;
+    let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+
+    loop {
+        attempt += 1;
+
         let vars = subscriptions::deployment_logs::Variables {
             deployment_id: deployment_id.clone(),
             filter: filter.clone().or_else(|| Some(String::new())),
             limit: Some(500),
         };
-        subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await
-    })
-    .await?;
 
-    while let Some(Ok(log)) = stream.next().await {
-        let log = log.data.context("Failed to retrieve deploy log")?;
-        for line in log.deployment_logs {
-            on_log(line);
+        let result = async {
+            let mut stream = subscribe_graphql::<subscriptions::DeploymentLogs>(vars).await?;
+
+            while let Some(response) = stream.next().await {
+                let log = response
+                    .context("Deploy log stream error")?
+                    .data
+                    .context("Failed to retrieve deploy log")?;
+
+                for line in log.deployment_logs {
+                    if let Some(ref ts) = last_timestamp {
+                        if line.timestamp <= *ts {
+                            continue;
+                        }
+                    }
+                    last_timestamp = Some(line.timestamp.clone());
+                    on_log(line);
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => return Err(e),
+            Err(_) => {
+                sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
+                    .min(LOGS_RETRY_CONFIG.max_delay_ms);
+            }
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

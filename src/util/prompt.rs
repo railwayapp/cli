@@ -1,15 +1,18 @@
 use colored::*;
 use inquire::{
-    validator::{Validation, ValueRequiredValidator},
     Autocomplete,
+    validator::{Validation, ValueRequiredValidator},
 };
 use std::{
     borrow::Cow,
     fmt::Display,
-    path::{Path, PathBuf, MAIN_SEPARATOR},
+    path::{MAIN_SEPARATOR, Path, PathBuf},
 };
 
-use crate::commands::{queries::project::ProjectProjectServicesEdgesNode, Configs};
+use crate::{
+    commands::{Configs, queries::project::ProjectProjectServicesEdgesNode},
+    controllers::variables::Variable,
+};
 use anyhow::{Context, Result};
 
 pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
@@ -145,6 +148,26 @@ pub fn fake_select(message: &str, selected: &str) {
     println!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
+pub fn prompt_variables() -> Result<Vec<Variable>> {
+    let mut variables: Vec<Variable> = Vec::new();
+    loop {
+        if let Some(variable) = prompt_text_with_placeholder_disappear_skippable(
+            "Enter a variable",
+            "<KEY=VALUE, press esc to finish>",
+        )? {
+            if variable.is_empty() {
+                break Ok(variables);
+            }
+            match variable.parse::<Variable>() {
+                Ok(v) => variables.push(v),
+                Err(err) => println!("{} {:?}", "Warn".yellow(), err),
+            }
+        } else {
+            break Ok(variables);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptService<'a>(pub &'a ProjectProjectServicesEdgesNode);
 
@@ -160,7 +183,7 @@ pub struct PathAutocompleter;
 
 impl PathAutocompleter {
     /// Parse input path and extract directory and filename prefix
-    fn parse_input(input: &str) -> (Cow<Path>, Cow<str>) {
+    fn parse_input(input: &str) -> (Cow<'_, Path>, Cow<'_, str>) {
         if input.is_empty() {
             return (Cow::Borrowed(Path::new(".")), Cow::Borrowed(""));
         }

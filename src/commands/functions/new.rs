@@ -13,13 +13,16 @@ use crate::{
     },
 };
 use anyhow::bail;
+use croner::Cron;
 use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
 use std::io::Write as _;
+use std::str::FromStr;
 use std::{fmt::Write as _, path::Path};
 use tokio_util::sync::CancellationToken;
+
 pub async fn new(
     environment: &ProjectProjectEnvironmentsEdges,
     project: ProjectProject,
@@ -256,9 +259,10 @@ fn append_domain_info(info: &mut String, domain: &Option<String>) {
 
 fn append_cron_info(info: &mut String, cron: &Option<String>) {
     if let Some(cron) = cron {
-        let description =
-            cron_descriptor::cronparser::cron_expression_descriptor::get_description_cron(cron)
-                .expect("cron is not valid");
+        let description = Cron::from_str(cron)
+            .expect("Failed to parse cron expression")
+            .describe();
+
         writedoc!(
             info,
             "
@@ -337,7 +341,7 @@ async fn handle_function_change(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    post_graphql::<mutations::FunctionUpdate, _>(
+    post_graphql_skip_none::<mutations::FunctionUpdate, _>(
         &client,
         configs.get_backboard(),
         mutations::function_update::Variables {
@@ -384,11 +388,11 @@ fn clear() -> Result<(), anyhow::Error> {
 
 async fn monitor_deployment_status(
     stream: impl futures::Stream<
-            Item = Result<
-                graphql_client::Response<subscriptions::deployment::ResponseData>,
-                graphql_ws_client::Error,
-            >,
-        > + Unpin,
+        Item = Result<
+            graphql_client::Response<subscriptions::deployment::ResponseData>,
+            graphql_ws_client::Error,
+        >,
+    > + Unpin,
     cancel_token: CancellationToken,
     info: String,
 ) {
@@ -534,7 +538,7 @@ fn prompt(args: New) -> Result<Arguments> {
     }
     .map(|s| s.trim().to_owned());
     if let Some(cron) = &cron {
-        let schedule = croner::Cron::new(cron).parse();
+        let schedule = Cron::from_str(cron);
         if let Ok(schedule) = schedule {
             let now = chrono::Utc::now();
 
@@ -543,7 +547,10 @@ fn prompt(args: New) -> Result<Arguments> {
             let second = schedule.find_next_occurrence(&first, false)?;
             let interval = second.signed_duration_since(first);
             if interval < chrono::Duration::minutes(5) {
-                bail!("Cron schedule runs too frequently (every {} minutes). Minimum interval is 5 minutes.", interval.num_minutes())
+                bail!(
+                    "Cron schedule runs too frequently (every {} minutes). Minimum interval is 5 minutes.",
+                    interval.num_minutes()
+                )
             }
         } else {
             bail!("Invalid cron schedule")
@@ -574,6 +581,7 @@ fn prompt(args: New) -> Result<Arguments> {
     } else {
         false
     };
+
     Ok(Arguments {
         terminal,
         name,

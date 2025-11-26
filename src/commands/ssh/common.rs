@@ -1,11 +1,11 @@
 use std::io::Cursor;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;
 
-use crate::config::Configs;
+use crate::commands::queries::RailwayProject;
 use crate::controllers::{
     environment::get_matched_environment,
     project::get_project,
@@ -13,6 +13,7 @@ use crate::controllers::{
     terminal::{SSHConnectParams, TerminalClient},
 };
 use crate::util::progress::success_spinner;
+use crate::{commands::ssh::AuthKind, config::Configs};
 
 use super::Args;
 
@@ -68,65 +69,67 @@ pub fn parse_server_error(error: String) -> SessionTermination {
     }
 }
 
+pub async fn find_service_by_name(
+    client: &Client,
+    configs: &Configs,
+    project: &RailwayProject,
+    service_id_or_name: &str,
+) -> Result<String> {
+    let project = get_project(client, configs, project.id.clone()).await?;
+
+    let services = project.services.edges.iter().collect::<Vec<_>>();
+
+    let service = services
+        .iter()
+        // Match service on lowercase name or id
+        .find(|service| {
+            service.node.name.to_lowercase() == service_id_or_name.to_lowercase()
+                || service.node.id == service_id_or_name
+        })
+        .with_context(|| format!("Service '{service_id_or_name}' not found"))?
+        .node
+        .id
+        .to_owned();
+
+    Ok(service)
+}
+
 pub async fn get_ssh_connect_params(
     args: Args,
     configs: &Configs,
     client: &Client,
 ) -> Result<SSHConnectParams> {
-    let has_project = args.project.is_some();
-    let has_service = args.service.is_some();
-    let has_environment = args.environment.is_some();
+    // Only fetch linked project if we need it (i.e., some args are missing)
+    let needs_linked_project =
+        args.project.is_none() || args.environment.is_none() || args.service.is_none();
 
-    let provided_args_count = [has_project, has_service, has_environment]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+    let linked_project = if needs_linked_project {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
 
-    if provided_args_count > 0 && provided_args_count < 3 {
-        if !has_project {
-            return Err(anyhow!(
-                "Must provide project when setting service or environment"
-            ));
-        }
-        if !has_environment {
-            return Err(anyhow!(
-                "Must provide environment when setting project or service"
-            ));
-        }
-        if !has_service {
-            return Err(anyhow!(
-                "Must provide service when setting project or environment"
-            ));
-        }
-    }
-
-    if provided_args_count == 3 {
-        let project_id = args.project.unwrap();
-        let project = get_project(client, configs, project_id.clone()).await?;
-
-        let environment = args.environment.unwrap();
-        let environment_id = get_matched_environment(&project, environment)?.id;
-
-        let service_id = args.service.unwrap();
-
-        return Ok(SSHConnectParams {
-            project_id,
-            environment_id,
-            service_id,
-            deployment_instance_id: args.deployment_instance,
-        });
-    }
-
-    let linked_project = configs.get_linked_project().await?;
-    let project_id = linked_project.project.clone();
+    let project_id = if let Some(id) = args.project {
+        id
+    } else {
+        linked_project.as_ref().unwrap().project.clone()
+    };
     let project = get_project(client, configs, project_id.clone()).await?;
 
-    let environment = linked_project.environment.clone();
+    let environment = if let Some(env) = args.environment {
+        env
+    } else {
+        linked_project.as_ref().unwrap().environment.clone()
+    };
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service_id = get_or_prompt_service(linked_project.clone(), project, None)
-        .await?
-        .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
+    let service_id = if let Some(service_id_or_name) = args.service {
+        find_service_by_name(client, configs, &project, &service_id_or_name).await?
+    } else {
+        get_or_prompt_service(linked_project.clone().unwrap(), project, None)
+            .await?
+            .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?
+    };
 
     Ok(SSHConnectParams {
         project_id,
@@ -138,7 +141,7 @@ pub async fn get_ssh_connect_params(
 
 pub async fn create_terminal_client(
     ws_url: &str,
-    token: &str,
+    token: AuthKind,
     params: &SSHConnectParams,
     spinner: &mut ProgressBar,
     max_attempts: Option<u32>,

@@ -1,13 +1,13 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
+use async_tungstenite::WebSocketStream;
 use async_tungstenite::tungstenite::handshake::client::generate_key;
 use async_tungstenite::tungstenite::http::Request;
-use async_tungstenite::WebSocketStream;
 use indicatif::ProgressBar;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 use url::Url;
 
 use crate::commands::ssh::{
-    SSH_CONNECTION_TIMEOUT_SECS, SSH_CONNECT_DELAY_SECS, SSH_MAX_CONNECT_ATTEMPTS,
+    AuthKind, SSH_CONNECT_DELAY_SECS, SSH_CONNECTION_TIMEOUT_SECS, SSH_MAX_CONNECT_ATTEMPTS,
 };
 use crate::consts::get_user_agent;
 
@@ -22,7 +22,7 @@ pub struct SSHConnectParams {
 /// Establishes a WebSocket connection
 pub async fn establish_connection(
     url: &str,
-    token: &str,
+    token: AuthKind,
     params: &SSHConnectParams,
     spinner: &mut ProgressBar,
     max_attempts: Option<u32>,
@@ -32,7 +32,7 @@ pub async fn establish_connection(
     let max_attempts = max_attempts.unwrap_or(SSH_MAX_CONNECT_ATTEMPTS);
 
     for attempt in 1..=max_attempts {
-        match attempt_connection(&url, token, params).await {
+        match attempt_connection(&url, token.clone(), params).await {
             Ok(ws_stream) => {
                 return Ok(ws_stream);
             }
@@ -60,14 +60,13 @@ pub async fn establish_connection(
 /// Attempts to establish a single WebSocket connection
 pub async fn attempt_connection(
     url: &Url,
-    token: &str,
+    token: AuthKind,
     params: &SSHConnectParams,
 ) -> Result<WebSocketStream<async_tungstenite::tokio::ConnectStream>> {
     let key = generate_key();
 
     let mut request = Request::builder()
         .uri(url.as_str())
-        .header("Authorization", format!("Bearer {token}"))
         .header("Sec-WebSocket-Key", key)
         .header("Upgrade", "websocket")
         .header("Connection", "Upgrade")
@@ -80,6 +79,14 @@ pub async fn attempt_connection(
 
     if let Some(instance_id) = params.deployment_instance_id.as_ref() {
         request = request.header("X-Railway-Deployment-Instance-Id", instance_id);
+    }
+    match token {
+        AuthKind::Bearer(token) => {
+            request = request.header("Authorization", format!("Bearer {token}"))
+        }
+        AuthKind::ProjectAccessToken(token) => {
+            request = request.header("project-access-token", token)
+        }
     }
 
     let request = request.body(())?;

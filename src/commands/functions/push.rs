@@ -54,7 +54,7 @@ async fn update_function(
     service_id: &str,
     start_command: String,
 ) -> Result<()> {
-    post_graphql::<mutations::FunctionUpdate, _>(
+    post_graphql_skip_none::<mutations::FunctionUpdate, _>(
         client,
         configs.get_backboard(),
         mutations::function_update::Variables {
