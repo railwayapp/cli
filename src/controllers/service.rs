@@ -26,6 +26,18 @@ fn filter_services_by_environment<'a>(
         .collect()
 }
 
+/// Check if user can access the given environment based on the canAccess field.
+/// Returns true by default to preserve original behavior for non-restricted environments.
+fn can_access_environment(project: &ProjectProject, environment_id: &str) -> bool {
+    project
+        .environments
+        .edges
+        .iter()
+        .find(|env| env.node.id == environment_id)
+        .map(|env| env.node.can_access)
+        .unwrap_or(true)
+}
+
 pub async fn get_or_prompt_service(
     linked_project: LinkedProject,
     project: ProjectProject,
@@ -40,6 +52,9 @@ pub async fn get_or_prompt_service_for_environment(
     service_arg: Option<String>,
     environment_id: &str,
 ) -> Result<Option<String>> {
+    // Check if user can access this environment
+    let env_accessible = can_access_environment(&project, environment_id);
+
     let all_services = project.services.edges.iter().collect::<Vec<_>>();
     // Filter services to only those with instances in the current environment
     let services = filter_services_by_environment(all_services.clone(), environment_id);
@@ -57,9 +72,12 @@ pub async fn get_or_prompt_service_for_environment(
                 .iter()
                 .any(|service| service.node.name == service_arg || service.node.id == service_arg);
             if exists_in_project {
-                bail!("Service '{}' exists but is not accessible in this environment. You may not have permission to access restricted environments.", service_arg);
+                if !env_accessible {
+                    bail!("Service '{}' exists but you don't have access to this restricted environment. Ask an admin to grant you Admin access.", service_arg);
+                }
+                bail!("Service '{}' has no instance in this environment", service_arg);
             }
-            bail!("Service not found");
+            bail!("Service '{}' not found", service_arg);
         }
     } else if let Some(service) = linked_project.service {
         // If the user didn't specify a service, but we have a linked service, use that

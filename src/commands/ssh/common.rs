@@ -78,6 +78,15 @@ pub async fn find_service_by_name(
 ) -> Result<String> {
     let project = get_project(client, configs, project.id.clone()).await?;
 
+    // Check if user can access this environment
+    let env_accessible = project
+        .environments
+        .edges
+        .iter()
+        .find(|env| env.node.id == environment_id)
+        .map(|env| env.node.can_access)
+        .unwrap_or(true);
+
     let all_services = project.services.edges.iter().collect::<Vec<_>>();
 
     // Filter services to only those with instances in the current environment
@@ -114,7 +123,10 @@ pub async fn find_service_by_name(
         });
 
     if exists_in_project {
-        bail!("Service '{}' exists but is not accessible in this environment. You may not have permission to access restricted environments.", service_id_or_name);
+        if !env_accessible {
+            bail!("Service '{}' exists but you don't have access to this restricted environment. Ask an admin to grant you Admin access.", service_id_or_name);
+        }
+        bail!("Service '{}' has no instance in this environment", service_id_or_name);
     }
 
     bail!("Service '{}' not found", service_id_or_name);

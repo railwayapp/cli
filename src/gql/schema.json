@@ -146,7 +146,37 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "DEFAULT_TO_RAILPACK"
+              "name": "BUCKETS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "BUCKET_FILE_BROWSER"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "ENVIRONMENT_RESTRICTIONS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "GLOBAL_BUCKET_REGION"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "HTTP_SERVICE_METRICS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "MAGIC_CONFIG"
             },
             {
               "deprecationReason": null,
@@ -165,12 +195,6 @@
               "description": null,
               "isDeprecated": false,
               "name": "RAW_SQL_QUERIES"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "REPLICA_METRICS_V2"
             },
             {
               "deprecationReason": null,
@@ -199,7 +223,25 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "DEFAULT_NEW_USERS_RAILPACK"
+              "name": "BUCKETS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "BUILDER_V3_ROLLOUT_EXISTING_SERVICES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "BUILDER_V3_ROLLOUT_NEW_SERVICES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "CTRD_IMAGE_STORE_ROLLOUT"
             },
             {
               "deprecationReason": null,
@@ -223,18 +265,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "STRIPE_CONNECT_ONBOARDING"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "STRIPE_CONNECT_WITHDRAWALS"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "UPDATED_VM_QUERIES"
             },
             {
@@ -242,6 +272,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "USE_GH_WEBHOOKS_FOR_CHANGE_DETECTION"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "VM_TIME_RANGE_QUERY"
             }
           ],
           "fields": null,
@@ -270,7 +306,19 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "USE_BUILDER_V3_FOR_CLI_DEPLOYS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "USE_GH_WEBHOOKS_FOR_CHANGE_DETECTION"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "USE_VM_RUNTIME"
             }
           ],
           "fields": null,
@@ -844,18 +892,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "teamId",
-              "type": {
-                "kind": "SCALAR",
-                "name": "String",
-                "ofType": null
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
@@ -898,7 +934,7 @@
             {
               "defaultValue": null,
               "description": null,
-              "name": "teamId",
+              "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -1496,6 +1532,49 @@
           "interfaces": null,
           "kind": "ENUM",
           "name": "CnameCheckStatus",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Whether the workspace has a signed Business Associate Agreement (HIPAA)",
+              "isDeprecated": false,
+              "name": "hasBAA",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Whether the workspace has a Data Processing Agreement (GDPR)",
+              "isDeprecated": false,
+              "name": "hasDPA",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "ComplianceAgreementsInfo",
           "possibleTypes": null
         },
         {
@@ -2916,6 +2995,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "lastPaymentError",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "paymentIntentStatus",
               "type": {
                 "kind": "SCALAR",
@@ -3009,6 +3100,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "subscriptionId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "subscriptionStatus",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -7225,11 +7328,23 @@
               "isDeprecated": false,
               "name": "projectId",
               "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "severity",
+              "type": {
                 "kind": "NON_NULL",
                 "name": null,
                 "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
+                  "kind": "ENUM",
+                  "name": "EventSeverity",
                   "ofType": null
                 }
               }
@@ -7276,6 +7391,41 @@
           "interfaces": null,
           "kind": "INPUT_OBJECT",
           "name": "EventFilterInput",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "CRITICAL"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "INFO"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "NOTICE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "WARNING"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "EventSeverity",
           "possibleTypes": null
         },
         {
@@ -7421,6 +7571,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "currentSessionHasAccess",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Boolean",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "customerId",
               "type": {
                 "kind": "SCALAR",
@@ -7462,6 +7624,38 @@
               "description": null,
               "isDeprecated": false,
               "name": "hasBAA",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "hasRBAC",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "hasSAML",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
@@ -7521,6 +7715,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "plan",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "Plan",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "preferredRegion",
               "type": {
                 "kind": "SCALAR",
@@ -7549,22 +7759,6 @@
                       "ofType": null
                     }
                   }
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "subscriptionModel",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "ENUM",
-                  "name": "SubscriptionModel",
-                  "ofType": null
                 }
               }
             },
@@ -7987,6 +8181,16 @@
               "defaultValue": null,
               "description": null,
               "name": "branch",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "environmentId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -9584,9 +9788,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins have been removed",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginId",
               "type": {
                 "kind": "SCALAR",
@@ -10027,9 +10231,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins have been removed",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginId",
               "type": {
                 "kind": "SCALAR",
@@ -11880,6 +12084,45 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "deliveryIds",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "LIST",
+                      "name": null,
+                      "ofType": {
+                        "kind": "NON_NULL",
+                        "name": null,
+                        "ofType": {
+                          "kind": "SCALAR",
+                          "name": "String",
+                          "ofType": null
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Marks notification deliveries as read",
+              "isDeprecated": false,
+              "name": "notificationDeliveriesMarkAsRead",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "input",
                   "type": {
                     "kind": "NON_NULL",
@@ -12079,9 +12322,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Deletes a plugin.",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginDelete",
               "type": {
                 "kind": "NON_NULL",
@@ -12124,9 +12367,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Reset envs and container for a plugin in an environment",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginReset",
               "type": {
                 "kind": "NON_NULL",
@@ -12169,9 +12412,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Resets the credentials for a plugin in an environment",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginResetCredentials",
               "type": {
                 "kind": "NON_NULL",
@@ -12214,9 +12457,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Restarts a plugin.",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginRestart",
               "type": {
                 "kind": "NON_NULL",
@@ -12259,9 +12502,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Force start a plugin",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginStart",
               "type": {
                 "kind": "NON_NULL",
@@ -12304,9 +12547,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Updates an existing plugin.",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginUpdate",
               "type": {
                 "kind": "NON_NULL",
@@ -12314,68 +12557,6 @@
                 "ofType": {
                   "kind": "OBJECT",
                   "name": "Plugin",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "input",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "INPUT_OBJECT",
-                      "name": "PreferenceOverridesCreateUpdateData",
-                      "ofType": null
-                    }
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": "Create/Updates preferences overrides for a specific resource belonging to a user",
-              "isDeprecated": false,
-              "name": "preferenceOverridesCreateUpdate",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "Boolean",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "input",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "INPUT_OBJECT",
-                      "name": "PreferenceOverridesDestroyData",
-                      "ofType": null
-                    }
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": "Destroy preferences overrides for a specific resource belonging to a user",
-              "isDeprecated": false,
-              "name": "preferenceOverridesDestroyForResource",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "Boolean",
                   "ofType": null
                 }
               }
@@ -15402,113 +15583,6 @@
                 {
                   "defaultValue": null,
                   "description": null,
-                  "name": "input",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "INPUT_OBJECT",
-                      "name": "WebhookCreateInput",
-                      "ofType": null
-                    }
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": "Create a webhook on a project",
-              "isDeprecated": false,
-              "name": "webhookCreate",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "ProjectWebhook",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "id",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "SCALAR",
-                      "name": "String",
-                      "ofType": null
-                    }
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": "Delete a webhook from a project",
-              "isDeprecated": false,
-              "name": "webhookDelete",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "Boolean",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "id",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "SCALAR",
-                      "name": "String",
-                      "ofType": null
-                    }
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "input",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "INPUT_OBJECT",
-                      "name": "WebhookUpdateInput",
-                      "ofType": null
-                    }
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": "Update a webhook on a project",
-              "isDeprecated": false,
-              "name": "webhookUpdate",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "ProjectWebhook",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
                   "name": "id",
                   "type": {
                     "kind": "NON_NULL",
@@ -15959,6 +16033,16 @@
             },
             {
               "kind": "OBJECT",
+              "name": "NotificationDelivery",
+              "ofType": null
+            },
+            {
+              "kind": "OBJECT",
+              "name": "NotificationInstance",
+              "ofType": null
+            },
+            {
+              "kind": "OBJECT",
               "name": "ObservabilityDashboard",
               "ofType": null
             },
@@ -15999,11 +16083,6 @@
             },
             {
               "kind": "OBJECT",
-              "name": "PreferenceOverride",
-              "ofType": null
-            },
-            {
-              "kind": "OBJECT",
               "name": "Preferences",
               "ofType": null
             },
@@ -16020,11 +16099,6 @@
             {
               "kind": "OBJECT",
               "name": "ProjectToken",
-              "ofType": null
-            },
-            {
-              "kind": "OBJECT",
-              "name": "ProjectWebhook",
               "ofType": null
             },
             {
@@ -16136,8 +16210,719 @@
               "kind": "OBJECT",
               "name": "Workspace",
               "ofType": null
+            },
+            {
+              "kind": "OBJECT",
+              "name": "WorkspaceIdentityProvider",
+              "ofType": null
             }
           ]
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "createdAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "id",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "ID",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "notificationInstance",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "NotificationInstance",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "readAt",
+              "type": {
+                "kind": "SCALAR",
+                "name": "DateTime",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "status",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "NotificationDeliveryStatus",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "type",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "NotificationDeliveryType",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "updatedAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "userId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [
+            {
+              "kind": "INTERFACE",
+              "name": "Node",
+              "ofType": null
+            }
+          ],
+          "kind": "OBJECT",
+          "name": "NotificationDelivery",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "delivery",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "NotificationDelivery",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "type",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "NotificationDeliveryCreated",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": null,
+          "inputFields": [
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "environmentId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "onlyUnread",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Boolean",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "projectId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "status",
+              "type": {
+                "kind": "ENUM",
+                "name": "NotificationStatus",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "type",
+              "type": {
+                "kind": "ENUM",
+                "name": "NotificationDeliveryType",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "workspaceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            }
+          ],
+          "interfaces": null,
+          "kind": "INPUT_OBJECT",
+          "name": "NotificationDeliveryFilterInput",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "deliveryIds",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "type",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "NotificationDeliveryResolved",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "FAILED"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "PENDING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "SENT"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "NotificationDeliveryStatus",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "EMAIL"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "INAPP"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "WEBHOOK"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "NotificationDeliveryType",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "UNION",
+          "name": "NotificationDeliveryUpdate",
+          "possibleTypes": [
+            {
+              "kind": "OBJECT",
+              "name": "NotificationDeliveryCreated",
+              "ofType": null
+            },
+            {
+              "kind": "OBJECT",
+              "name": "NotificationDeliveryResolved",
+              "ofType": null
+            }
+          ]
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "createdAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "environmentId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "event",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "Event",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "eventId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "eventType",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "id",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "ID",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "payload",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "NotificationPayload",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "projectId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "resolvedAt",
+              "type": {
+                "kind": "SCALAR",
+                "name": "DateTime",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "resourceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "resourceType",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "serviceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "severity",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "NotificationSeverity",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "status",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "NotificationStatus",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "updatedAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "volumeId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [
+            {
+              "kind": "INTERFACE",
+              "name": "Node",
+              "ofType": null
+            }
+          ],
+          "kind": "OBJECT",
+          "name": "NotificationInstance",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "SCALAR",
+          "name": "NotificationPayload",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "CRITICAL"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "INFO"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "NOTICE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "WARNING"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "NotificationSeverity",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "ACTIVE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "RESOLVED"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "NotificationStatus",
+          "possibleTypes": null
         },
         {
           "description": null,
@@ -16994,73 +17779,6 @@
         {
           "description": null,
           "enumValues": null,
-          "fields": null,
-          "inputFields": [
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "enabled",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "Boolean",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "name",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "resource",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "resourceId",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "interfaces": null,
-          "kind": "INPUT_OBJECT",
-          "name": "OverrideInput",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
           "fields": [
             {
               "args": [],
@@ -17123,6 +17841,126 @@
           "interfaces": [],
           "kind": "OBJECT",
           "name": "PageInfo",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "category",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "description",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "slug",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "type",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "PartnerProfileType",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "website",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "PartnerProfile",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "BASIC_PARTNER"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "LIMITED_PARTNER"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "TEMPLATE_MAINTAINER"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "PartnerProfileType",
           "possibleTypes": null
         },
         {
@@ -17422,6 +18260,35 @@
         },
         {
           "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "FREE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "HOBBY"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "PRO"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "Plan",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
           "enumValues": null,
           "fields": [
             {
@@ -17482,7 +18349,25 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "DEFAULT_NEW_USERS_RAILPACK"
+              "name": "BUCKETS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "BUILDER_V3_ROLLOUT_EXISTING_SERVICES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "BUILDER_V3_ROLLOUT_NEW_SERVICES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "CTRD_IMAGE_STORE_ROLLOUT"
             },
             {
               "deprecationReason": null,
@@ -17506,18 +18391,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "STRIPE_CONNECT_ONBOARDING"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "STRIPE_CONNECT_WITHDRAWALS"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "UPDATED_VM_QUERIES"
             },
             {
@@ -17525,6 +18398,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "USE_GH_WEBHOOKS_FOR_CHANGE_DETECTION"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "VM_TIME_RANGE_QUERY"
             }
           ],
           "fields": null,
@@ -18340,175 +19219,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "enabled",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "Boolean",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "id",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "ID",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "name",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "resource",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "resourceId",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "inputFields": null,
-          "interfaces": [
-            {
-              "kind": "INTERFACE",
-              "name": "Node",
-              "ofType": null
-            }
-          ],
-          "kind": "OBJECT",
-          "name": "PreferenceOverride",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": null,
-          "inputFields": [
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "overrides",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "LIST",
-                  "name": null,
-                  "ofType": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "INPUT_OBJECT",
-                      "name": "OverrideInput",
-                      "ofType": null
-                    }
-                  }
-                }
-              }
-            }
-          ],
-          "interfaces": null,
-          "kind": "INPUT_OBJECT",
-          "name": "PreferenceOverridesCreateUpdateData",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": null,
-          "inputFields": [
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "resource",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "resourceId",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "interfaces": null,
-          "kind": "INPUT_OBJECT",
-          "name": "PreferenceOverridesDestroyData",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": [
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "buildFailedEmail",
               "type": {
                 "kind": "NON_NULL",
@@ -18621,18 +19331,14 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "preferenceOverrides",
+              "name": "subprocessorUpdatesEmail",
               "type": {
-                "kind": "LIST",
+                "kind": "NON_NULL",
                 "name": null,
                 "ofType": {
-                  "kind": "NON_NULL",
-                  "name": null,
-                  "ofType": {
-                    "kind": "OBJECT",
-                    "name": "PreferenceOverride",
-                    "ofType": null
-                  }
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
                 }
               }
             },
@@ -18641,7 +19347,7 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "subprocessorUpdatesEmail",
+              "name": "templateQueueEmail",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
@@ -18750,6 +19456,16 @@
               "defaultValue": null,
               "description": null,
               "name": "subprocessorUpdatesEmail",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Boolean",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "templateQueueEmail",
               "type": {
                 "kind": "SCALAR",
                 "name": "Boolean",
@@ -19347,9 +20063,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Use environment.deploymentTriggers for properly scoped access control",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "deploymentTriggers",
               "type": {
                 "kind": "NON_NULL",
@@ -19404,9 +20120,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Use environment.deployments for properly scoped access control",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "deployments",
               "type": {
                 "kind": "NON_NULL",
@@ -19687,9 +20403,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins have been removed",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "plugins",
               "type": {
                 "kind": "NON_NULL",
@@ -19877,9 +20593,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspaceId",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "teamId",
               "type": {
                 "kind": "SCALAR",
@@ -19961,63 +20677,6 @@
               }
             },
             {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "after",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "before",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "first",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "Int",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "last",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "Int",
-                    "ofType": null
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "webhooks",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "ProjectWebhooksConnection",
-                  "ofType": null
-                }
-              }
-            },
-            {
               "args": [],
               "deprecationReason": null,
               "description": null,
@@ -20052,6 +20711,137 @@
           ],
           "kind": "OBJECT",
           "name": "Project",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Permissions for each project member",
+              "isDeprecated": false,
+              "name": "memberPermissions",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "ProjectMemberPermissionsInfo",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "projectId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "projectName",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Backup schedules for database services",
+              "isDeprecated": false,
+              "name": "serviceBackups",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "ServiceBackupInfo",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "2FA status for each project member",
+              "isDeprecated": false,
+              "name": "twoFactorMembers",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "ProjectMemberTwoFactorInfo",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "ProjectComplianceInfo",
           "possibleTypes": null
         },
         {
@@ -20142,7 +20932,7 @@
             {
               "defaultValue": null,
               "description": null,
-              "name": "teamId",
+              "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -20860,6 +21650,61 @@
         {
           "description": null,
           "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "email",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "name",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "role",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "ProjectRole",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "ProjectMemberPermissionsInfo",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
           "fields": null,
           "inputFields": [
             {
@@ -20894,6 +21739,85 @@
           "interfaces": null,
           "kind": "INPUT_OBJECT",
           "name": "ProjectMemberRemoveInput",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "email",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "List of enabled 2FA methods (AUTHENTICATOR, PASSKEY)",
+              "isDeprecated": false,
+              "name": "enabledMethods",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "ENUM",
+                      "name": "TwoFactorMethodCompliance",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "name",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "twoFactorAuthEnabled",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "ProjectMemberTwoFactorInfo",
           "possibleTypes": null
         },
         {
@@ -21288,9 +22212,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins have been removed",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "plugin",
               "type": {
                 "kind": "NON_NULL",
@@ -21995,17 +22919,37 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "filters",
+              "name": "email",
               "type": {
-                "kind": "LIST",
+                "kind": "NON_NULL",
                 "name": null,
                 "ofType": {
-                  "kind": "NON_NULL",
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "List of enabled 2FA methods (AUTHENTICATOR, PASSKEY)",
+              "isDeprecated": false,
+              "name": "enabledMethods",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
                   "name": null,
                   "ofType": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "ENUM",
+                      "name": "TwoFactorMethodProjectWorkspace",
+                      "ofType": null
+                    }
                   }
                 }
               }
@@ -22015,15 +22959,11 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "id",
+              "name": "name",
               "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "ID",
-                  "ofType": null
-                }
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
               }
             },
             {
@@ -22031,11 +22971,50 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "lastStatus",
+              "name": "twoFactorAuthEnabled",
               "type": {
-                "kind": "SCALAR",
-                "name": "Int",
-                "ofType": null
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "ProjectWorkspaceMember",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "members",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "ProjectWorkspaceMember",
+                      "ofType": null
+                    }
+                  }
+                }
               }
             },
             {
@@ -22059,91 +23038,7 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "url",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "inputFields": null,
-          "interfaces": [
-            {
-              "kind": "INTERFACE",
-              "name": "Node",
-              "ofType": null
-            }
-          ],
-          "kind": "OBJECT",
-          "name": "ProjectWebhook",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": [
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "edges",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "LIST",
-                  "name": null,
-                  "ofType": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "OBJECT",
-                      "name": "ProjectWebhooksConnectionEdge",
-                      "ofType": null
-                    }
-                  }
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "pageInfo",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "PageInfo",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "inputFields": null,
-          "interfaces": [],
-          "kind": "OBJECT",
-          "name": "ProjectWebhooksConnection",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": [
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "cursor",
+              "name": "projectName",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
@@ -22159,13 +23054,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "node",
+              "name": "workspaceId",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
                 "ofType": {
-                  "kind": "OBJECT",
-                  "name": "ProjectWebhook",
+                  "kind": "SCALAR",
+                  "name": "String",
                   "ofType": null
                 }
               }
@@ -22174,7 +23069,7 @@
           "inputFields": null,
           "interfaces": [],
           "kind": "OBJECT",
-          "name": "ProjectWebhooksConnectionEdge",
+          "name": "ProjectWorkspaceMembersResponse",
           "possibleTypes": null
         },
         {
@@ -22720,6 +23615,37 @@
                 "ofType": {
                   "kind": "SCALAR",
                   "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "workspaceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get compliance agreements for a workspace including HIPAA BAA and GDPR DPA status.",
+              "isDeprecated": false,
+              "name": "complianceAgreements",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "ComplianceAgreementsInfo",
                   "ofType": null
                 }
               }
@@ -24670,16 +25596,6 @@
                 {
                   "defaultValue": null,
                   "description": null,
-                  "name": "pluginId",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
                   "name": "projectId",
                   "type": {
                     "kind": "SCALAR",
@@ -24719,16 +25635,6 @@
                       "name": "DateTime",
                       "ofType": null
                     }
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "teamId",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
                   }
                 },
                 {
@@ -24851,6 +25757,73 @@
                     "name": "Node",
                     "ofType": null
                   }
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "after",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "before",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "filter",
+                  "type": {
+                    "kind": "INPUT_OBJECT",
+                    "name": "NotificationDeliveryFilterInput",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "first",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "last",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Gets notification deliveries for the authenticated user",
+              "isDeprecated": false,
+              "name": "notificationDeliveries",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "QueryNotificationDeliveriesConnection",
+                  "ofType": null
                 }
               }
             },
@@ -25015,9 +25988,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Get a plugin by ID.",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "plugin",
               "type": {
                 "kind": "NON_NULL",
@@ -25100,9 +26073,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Fetch logs for a plugin",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginLogs",
               "type": {
                 "kind": "NON_NULL",
@@ -25329,6 +26302,37 @@
                 "ofType": {
                   "kind": "OBJECT",
                   "name": "Project",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "projectId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get comprehensive compliance information for a project including 2FA status, member permissions, backup schedules, and compliance agreements. Requires workspace API token with admin access.",
+              "isDeprecated": false,
+              "name": "projectCompliance",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "ProjectComplianceInfo",
                   "ofType": null
                 }
               }
@@ -25610,6 +26614,37 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "projectId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get workspace members for a project with 2FA details",
+              "isDeprecated": false,
+              "name": "projectWorkspaceMembers",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "ProjectWorkspaceMembersResponse",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "after",
                   "type": {
                     "kind": "SCALAR",
@@ -25792,7 +26827,7 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Get resource access for the current user or team",
+              "description": "Get resource access for the current user or workspace",
               "isDeprecated": false,
               "name": "resourceAccess",
               "type": {
@@ -26170,9 +27205,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Teams are now workspaces. Use the workspace query instead.",
               "description": "Find a team by ID",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "team",
               "type": {
                 "kind": "NON_NULL",
@@ -26270,6 +27305,16 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "id",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "owner",
                   "type": {
                     "kind": "SCALAR",
@@ -26289,7 +27334,7 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Get a template by code or GitHub owner and repo.",
+              "description": "Get a template by code or ID or GitHub owner and repo.",
               "isDeprecated": false,
               "name": "template",
               "type": {
@@ -26603,7 +27648,7 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Get the usage for a single project or all projects for a user/team. If no `projectId` or `teamId` is provided, the usage for the current user is returned. If no `startDate` is provided, the usage for the current billing period of the project owner is returned.",
+              "description": "Get the usage for a single project or all projects for a user/workspace. If no `projectId` or `workspaceId` is provided, the usage for the current user is returned. If no `startDate` is provided, the usage for the current billing period of the project owner is returned.",
               "isDeprecated": false,
               "name": "usage",
               "type": {
@@ -26757,16 +27802,6 @@
                       "name": "String",
                       "ofType": null
                     }
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": "Provide a pluginId to get all variables for a specific plugin.",
-                  "name": "pluginId",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
                   }
                 },
                 {
@@ -27007,77 +28042,6 @@
                 {
                   "defaultValue": null,
                   "description": null,
-                  "name": "after",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "before",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "first",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "Int",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "last",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "Int",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "projectId",
-                  "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "SCALAR",
-                      "name": "String",
-                      "ofType": null
-                    }
-                  }
-                }
-              ],
-              "deprecationReason": null,
-              "description": "Get all webhooks for a project",
-              "isDeprecated": false,
-              "name": "webhooks",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "QueryWebhooksConnection",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
                   "name": "workflowId",
                   "type": {
                     "kind": "NON_NULL",
@@ -27162,6 +28126,77 @@
                 "ofType": {
                   "kind": "OBJECT",
                   "name": "Workspace",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "after",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "before",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "first",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "last",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "workspaceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Gets all identity providers of a workspace",
+              "isDeprecated": false,
+              "name": "workspaceIdentityProviders",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "QueryWorkspaceIdentityProvidersConnection",
                   "ofType": null
                 }
               }
@@ -28205,6 +29240,100 @@
                     "name": null,
                     "ofType": {
                       "kind": "OBJECT",
+                      "name": "QueryNotificationDeliveriesConnectionEdge",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "pageInfo",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "PageInfo",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "QueryNotificationDeliveriesConnection",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "cursor",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "node",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "NotificationDelivery",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "QueryNotificationDeliveriesConnectionEdge",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "edges",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
                       "name": "QueryObservabilityDashboardsConnectionEdge",
                       "ofType": null
                     }
@@ -29051,7 +30180,7 @@
                     "name": null,
                     "ofType": {
                       "kind": "OBJECT",
-                      "name": "QueryWebhooksConnectionEdge",
+                      "name": "QueryWorkspaceIdentityProvidersConnectionEdge",
                       "ofType": null
                     }
                   }
@@ -29078,7 +30207,7 @@
           "inputFields": null,
           "interfaces": [],
           "kind": "OBJECT",
-          "name": "QueryWebhooksConnection",
+          "name": "QueryWorkspaceIdentityProvidersConnection",
           "possibleTypes": null
         },
         {
@@ -29112,7 +30241,7 @@
                 "name": null,
                 "ofType": {
                   "kind": "OBJECT",
-                  "name": "ProjectWebhook",
+                  "name": "WorkspaceIdentityProvider",
                   "ofType": null
                 }
               }
@@ -29121,7 +30250,7 @@
           "inputFields": null,
           "interfaces": [],
           "kind": "OBJECT",
-          "name": "QueryWebhooksConnectionEdge",
+          "name": "QueryWorkspaceIdentityProvidersConnectionEdge",
           "possibleTypes": null
         },
         {
@@ -29804,7 +30933,7 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "teamId",
+              "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -30271,7 +31400,7 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "TEAM"
+              "name": "WORKSPACE"
             }
           ],
           "fields": null,
@@ -30395,9 +31524,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Use environment.deployments for properly scoped access control",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "deployments",
               "type": {
                 "kind": "NON_NULL",
@@ -30609,9 +31738,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Use environment.serviceInstances for properly scoped access control",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "serviceInstances",
               "type": {
                 "kind": "NON_NULL",
@@ -30674,6 +31803,73 @@
           ],
           "kind": "OBJECT",
           "name": "Service",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "List of enabled backup schedule kinds (DAILY, WEEKLY, MONTHLY)",
+              "isDeprecated": false,
+              "name": "schedules",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "ENUM",
+                      "name": "VolumeInstanceBackupScheduleKind",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "serviceId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "serviceName",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "ServiceBackupInfo",
           "possibleTypes": null
         },
         {
@@ -31168,9 +32364,13 @@
               "description": null,
               "name": "serviceDomainId",
               "type": {
-                "kind": "SCALAR",
-                "name": "String",
-                "ofType": null
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
               }
             },
             {
@@ -31311,6 +32511,18 @@
               "type": {
                 "kind": "SCALAR",
                 "name": "DateTime",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "dockerfilePath",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
                 "ofType": null
               }
             },
@@ -31797,6 +33009,16 @@
               "defaultValue": null,
               "description": null,
               "name": "cronSchedule",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "dockerfilePath",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -33159,6 +34381,22 @@
               }
             },
             {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Subscribe to notification delivery updates (created and resolved) for the authenticated user",
+              "isDeprecated": false,
+              "name": "notificationDeliveryUpdated",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "UNION",
+                  "name": "NotificationDeliveryUpdate",
+                  "ofType": null
+                }
+              }
+            },
+            {
               "args": [
                 {
                   "defaultValue": null,
@@ -33209,9 +34447,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins are deprecated",
               "description": "Stream logs for a plugin",
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginLogs",
               "type": {
                 "kind": "NON_NULL",
@@ -33484,6 +34722,16 @@
         },
         {
           "description": null,
+          "enumValues": null,
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "SCALAR",
+          "name": "SupportHealthMetrics",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
           "enumValues": [
             {
               "deprecationReason": null,
@@ -33707,7 +34955,7 @@
           "fields": [
             {
               "args": [],
-              "deprecationReason": "Use adoptionHistory on the workspace instead",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "adoptionHistory",
@@ -33731,7 +34979,7 @@
             },
             {
               "args": [],
-              "deprecationReason": "Use adoptionLevel on the workspace instead",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "adoptionLevel",
@@ -33747,9 +34995,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "apiTokenRateLimit",
               "type": {
                 "kind": "OBJECT",
@@ -33759,7 +35007,7 @@
             },
             {
               "args": [],
-              "deprecationReason": "This property is not part of Teams anymore, go through the Workspace to access it",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "avatar",
@@ -33771,9 +35019,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "createdAt",
               "type": {
                 "kind": "NON_NULL",
@@ -33787,7 +35035,7 @@
             },
             {
               "args": [],
-              "deprecationReason": "Access the customer through the workspace",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "customer",
@@ -33803,9 +35051,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "id",
               "type": {
                 "kind": "NON_NULL",
@@ -33819,9 +35067,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "members",
               "type": {
                 "kind": "NON_NULL",
@@ -33843,7 +35091,7 @@
             },
             {
               "args": [],
-              "deprecationReason": "This property is not part of Teams anymore, go through the Workspace to access it",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "name",
@@ -33859,7 +35107,7 @@
             },
             {
               "args": [],
-              "deprecationReason": "This property is not part of Teams anymore, go through the Workspace to access it",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "preferredRegion",
@@ -33912,9 +35160,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "projects",
               "type": {
                 "kind": "NON_NULL",
@@ -33928,7 +35176,7 @@
             },
             {
               "args": [],
-              "deprecationReason": "This property is not part of Teams anymore, go through the Workspace to access it",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "slackChannelId",
@@ -33940,7 +35188,7 @@
             },
             {
               "args": [],
-              "deprecationReason": "This property is not part of Teams anymore, go through the Workspace to access it",
+              "deprecationReason": "Use workspace object instead",
               "description": null,
               "isDeprecated": true,
               "name": "supportTierOverride",
@@ -33952,9 +35200,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "teamPermissions",
               "type": {
                 "kind": "NON_NULL",
@@ -33976,9 +35224,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "updatedAt",
               "type": {
                 "kind": "NON_NULL",
@@ -33992,9 +35240,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use workspace object instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "workspace",
               "type": {
                 "kind": "NON_NULL",
@@ -34179,22 +35427,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "teamId",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "updatedAt",
               "type": {
                 "kind": "NON_NULL",
@@ -34212,6 +35444,22 @@
               "description": null,
               "isDeprecated": false,
               "name": "userId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
@@ -34432,9 +35680,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use serializedConfig instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "config",
               "type": {
                 "kind": "NON_NULL",
@@ -34683,6 +35931,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "recentProjects",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "serializedConfig",
               "type": {
                 "kind": "SCALAR",
@@ -34792,6 +36056,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "supportHealthMetrics",
+              "type": {
+                "kind": "SCALAR",
+                "name": "SupportHealthMetrics",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "tags",
               "type": {
                 "kind": "LIST",
@@ -34882,7 +36158,7 @@
             {
               "defaultValue": null,
               "description": null,
-              "name": "teamId",
+              "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -34976,7 +36252,7 @@
             {
               "defaultValue": null,
               "description": null,
-              "name": "teamId",
+              "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -35519,7 +36795,7 @@
             {
               "defaultValue": null,
               "description": null,
-              "name": "teamId",
+              "name": "workspaceId",
               "type": {
                 "kind": "SCALAR",
                 "name": "String",
@@ -36150,6 +37426,52 @@
           "possibleTypes": null
         },
         {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "AUTHENTICATOR"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "PASSKEY"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "TwoFactorMethodCompliance",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "AUTHENTICATOR"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "PASSKEY"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "TwoFactorMethodProjectWorkspace",
+          "possibleTypes": null
+        },
+        {
           "description": "The `Upload` scalar type represents a file upload.",
           "enumValues": null,
           "fields": null,
@@ -36626,6 +37948,30 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "githubProviderId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "githubUsername",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "has2FA",
               "type": {
                 "kind": "NON_NULL",
@@ -36905,63 +38251,6 @@
                 "kind": "SCALAR",
                 "name": "Float",
                 "ofType": null
-              }
-            },
-            {
-              "args": [
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "after",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "before",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "first",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "Int",
-                    "ofType": null
-                  }
-                },
-                {
-                  "defaultValue": null,
-                  "description": null,
-                  "name": "last",
-                  "type": {
-                    "kind": "SCALAR",
-                    "name": "Int",
-                    "ofType": null
-                  }
-                }
-              ],
-              "deprecationReason": "Use the workspaces relation to access the teams",
-              "description": null,
-              "isDeprecated": true,
-              "name": "teams",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "UserTeamsConnection",
-                  "ofType": null
-                }
               }
             },
             {
@@ -37967,100 +39256,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "edges",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "LIST",
-                  "name": null,
-                  "ofType": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "OBJECT",
-                      "name": "UserTeamsConnectionEdge",
-                      "ofType": null
-                    }
-                  }
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "pageInfo",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "PageInfo",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "inputFields": null,
-          "interfaces": [],
-          "kind": "OBJECT",
-          "name": "UserTeamsConnection",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": [
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "cursor",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "node",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "OBJECT",
-                  "name": "Team",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "inputFields": null,
-          "interfaces": [],
-          "kind": "OBJECT",
-          "name": "UserTeamsConnectionEdge",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": [
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "createdAt",
               "type": {
                 "kind": "NON_NULL",
@@ -38166,9 +39361,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Plugins have been removed",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "pluginId",
               "type": {
                 "kind": "SCALAR",
@@ -38818,9 +40013,9 @@
                   }
                 }
               ],
-              "deprecationReason": null,
+              "deprecationReason": "Use environment.volumeInstances for properly scoped access control",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "volumeInstances",
               "type": {
                 "kind": "NON_NULL",
@@ -39099,22 +40294,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "type",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "ENUM",
-                  "name": "VolumeInstanceType",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "volume",
               "type": {
                 "kind": "NON_NULL",
@@ -39273,6 +40452,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "usedMB",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Int",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "volumeInstanceSizeMB",
               "type": {
                 "kind": "SCALAR",
                 "name": "Int",
@@ -39497,29 +40688,6 @@
         },
         {
           "description": null,
-          "enumValues": [
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "CLOUD"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "METAL"
-            }
-          ],
-          "fields": null,
-          "inputFields": null,
-          "interfaces": null,
-          "kind": "ENUM",
-          "name": "VolumeInstanceType",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
           "enumValues": null,
           "fields": null,
           "inputFields": [
@@ -39550,16 +40718,6 @@
               "type": {
                 "kind": "ENUM",
                 "name": "VolumeState",
-                "ofType": null
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": "The type of the volume instance. If not provided, the type will not be updated.",
-              "name": "type",
-              "type": {
-                "kind": "ENUM",
-                "name": "VolumeInstanceType",
                 "ofType": null
               }
             }
@@ -40232,106 +41390,6 @@
         {
           "description": null,
           "enumValues": null,
-          "fields": null,
-          "inputFields": [
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "filters",
-              "type": {
-                "kind": "LIST",
-                "name": null,
-                "ofType": {
-                  "kind": "NON_NULL",
-                  "name": null,
-                  "ofType": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "projectId",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "url",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "interfaces": null,
-          "kind": "INPUT_OBJECT",
-          "name": "WebhookCreateInput",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
-          "fields": null,
-          "inputFields": [
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "filters",
-              "type": {
-                "kind": "LIST",
-                "name": null,
-                "ofType": {
-                  "kind": "NON_NULL",
-                  "name": null,
-                  "ofType": {
-                    "kind": "SCALAR",
-                    "name": "String",
-                    "ofType": null
-                  }
-                }
-              }
-            },
-            {
-              "defaultValue": null,
-              "description": null,
-              "name": "url",
-              "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
-              }
-            }
-          ],
-          "interfaces": null,
-          "kind": "INPUT_OBJECT",
-          "name": "WebhookUpdateInput",
-          "possibleTypes": null
-        },
-        {
-          "description": null,
-          "enumValues": null,
           "fields": [
             {
               "args": [],
@@ -40434,6 +41492,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "withdrawalAccount",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "WithdrawalAccount",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "withdrawalAccountId",
               "type": {
                 "kind": "NON_NULL",
@@ -40525,6 +41599,18 @@
                   "ofType": null
                 }
               }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "stripeConnectInfo",
+              "type": {
+                "kind": "OBJECT",
+                "name": "WithdrawalAccountStripeConnectInfo",
+                "ofType": null
+              }
             }
           ],
           "inputFields": null,
@@ -40537,6 +41623,73 @@
           ],
           "kind": "OBJECT",
           "name": "WithdrawalAccount",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "bankLast4",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "cardLast4",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "hasOnboarded",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "needsAttention",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "WithdrawalAccountStripeConnectInfo",
           "possibleTypes": null
         },
         {
@@ -40847,6 +42000,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "hasSAML",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "id",
               "type": {
                 "kind": "NON_NULL",
@@ -40854,6 +42023,63 @@
                 "ofType": {
                   "kind": "SCALAR",
                   "name": "ID",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "after",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "before",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "first",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "last",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "identityProviders",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "WorkspaceIdentityProvidersConnection",
                   "ofType": null
                 }
               }
@@ -40894,6 +42120,34 @@
                 "ofType": {
                   "kind": "SCALAR",
                   "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "partnerProfile",
+              "type": {
+                "kind": "OBJECT",
+                "name": "PartnerProfile",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "plan",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "Plan",
                   "ofType": null
                 }
               }
@@ -41005,9 +42259,9 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Use plan field instead",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "subscriptionModel",
               "type": {
                 "kind": "NON_NULL",
@@ -41033,14 +42287,54 @@
             },
             {
               "args": [],
-              "deprecationReason": null,
+              "deprecationReason": "Teams are being removed from the system, don't use it",
               "description": null,
-              "isDeprecated": false,
+              "isDeprecated": true,
               "name": "team",
               "type": {
                 "kind": "OBJECT",
                 "name": "Team",
                 "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "updatedAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Get a list of user emails in the workspace who do not have verified 2FA enabled. Returns an empty array if all users have 2FA enabled.",
+              "isDeprecated": false,
+              "name": "usersWithout2FA",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
               }
             }
           ],
@@ -41054,6 +42348,329 @@
           ],
           "kind": "OBJECT",
           "name": "Workspace",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "createdAt",
+              "type": {
+                "kind": "SCALAR",
+                "name": "DateTime",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "provider",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "status",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "WorkspaceIdPConnectionStatus",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "updatedAt",
+              "type": {
+                "kind": "SCALAR",
+                "name": "DateTime",
+                "ofType": null
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "WorkspaceIdPConnection",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "ACTIVE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "DRAFT"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "INACTIVE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "PENDING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "VALIDATING"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "WorkspaceIdPConnectionStatus",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "connection",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "WorkspaceIdPConnection",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "createdAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "enforcementEnabledAt",
+              "type": {
+                "kind": "SCALAR",
+                "name": "DateTime",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "id",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "ID",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "updatedAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspace",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "Workspace",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [
+            {
+              "kind": "INTERFACE",
+              "name": "Node",
+              "ofType": null
+            }
+          ],
+          "kind": "OBJECT",
+          "name": "WorkspaceIdentityProvider",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "edges",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "WorkspaceIdentityProvidersConnectionEdge",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "pageInfo",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "PageInfo",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "WorkspaceIdentityProvidersConnection",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "cursor",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "node",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "WorkspaceIdentityProvider",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "WorkspaceIdentityProvidersConnectionEdge",
           "possibleTypes": null
         },
         {
@@ -41175,6 +42792,18 @@
                   "name": "TeamRole",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Only retrieved if requested by an admin",
+              "isDeprecated": false,
+              "name": "twoFactorAuthEnabled",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Boolean",
+                "ofType": null
               }
             }
           ],
