@@ -148,13 +148,6 @@ async fn main() -> Result<()> {
 
         eprintln!("{e:?}");
 
-        // Warn if using RAILWAY_TOKEN environment variable
-        if std::env::var("RAILWAY_TOKEN").is_ok() {
-            eprintln!(
-                "The RAILWAY_TOKEN environment variable is set but may be invalid or expired."
-            );
-        }
-
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);
     }
