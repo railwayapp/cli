@@ -44,14 +44,22 @@ pub struct Args {
     /// railway add --service --variables "MY_SPECIAL_ENV_VAR=1" --variables "BACKEND_PORT=3000"
     #[clap(short, long)]
     variables: Vec<Variable>,
+
+    /// Verbose logging
+    #[clap(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    verbose: Option<bool>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
+    let verbose = args.verbose.unwrap_or(false);
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    if verbose {
+        println!("project and environment exist in linked project exist")
+    }
     let type_of_create = if !args.database.is_empty() {
         fake_select("What do you need?", "Database");
         CreateKind::Database(args.database)
@@ -103,18 +111,27 @@ pub async fn command(args: Args) -> Result<()> {
             }
         }
     };
-
+    if verbose {
+        println!("{:?}", type_of_create);
+    }
     match type_of_create {
         CreateKind::Database(databases) => {
             for db in databases {
+                if verbose {
+                    println!("iterating through databases to add: {:?}", db)
+                }
                 deploy::fetch_and_create(
                     &client,
                     &configs,
                     db.to_slug().to_string(),
                     &linked_project,
                     &HashMap::new(),
+                    verbose,
                 )
                 .await?;
+                if verbose {
+                    println!("succesfully created {:?}", db)
+                }
             }
         }
         CreateKind::DockerImage {
@@ -130,6 +147,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 Some(image),
                 variables,
+                verbose,
             )
             .await?;
         }
@@ -146,6 +164,7 @@ pub async fn command(args: Args) -> Result<()> {
                 Some(repo),
                 None,
                 variables,
+                verbose,
             )
             .await?;
         }
@@ -158,6 +177,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 None,
                 variables,
+                verbose,
             )
             .await?;
         }
@@ -244,6 +264,7 @@ fn prompt_variables(variables: Vec<Variable>) -> Result<Option<BTreeMap<String, 
 
 type Variables = Option<BTreeMap<String, String>>;
 
+#[allow(clippy::too_many_arguments)]
 async fn create_service(
     service: Option<String>,
     linked_project: &LinkedProject,
@@ -252,6 +273,7 @@ async fn create_service(
     repo: Option<String>,
     image: Option<String>,
     variables: Variables,
+    verbose: bool,
 ) -> Result<(), anyhow::Error> {
     let spinner = indicatif::ProgressBar::new_spinner()
         .with_style(
@@ -263,6 +285,9 @@ async fn create_service(
     spinner.enable_steady_tick(Duration::from_millis(100));
     let source = mutations::service_create::ServiceSourceInput { repo, image };
     let branch = if let Some(repo) = &source.repo {
+        if verbose {
+            println!("fetching branch for github repo {repo}")
+        }
         let repos = post_graphql::<queries::GitHubRepos, _>(
             client,
             &configs.get_backboard(),
@@ -286,6 +311,9 @@ async fn create_service(
         variables,
         branch,
     };
+    if verbose {
+        println!("creating service");
+    }
     let s =
         post_graphql::<mutations::ServiceCreate, _>(client, &configs.get_backboard(), vars).await?;
     configs.link_service(s.service_create.id)?;
