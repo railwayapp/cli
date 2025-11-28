@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
 use reqwest::Client;
 use std::io::Write;
@@ -9,7 +9,7 @@ use crate::commands::queries::RailwayProject;
 use crate::controllers::{
     environment::get_matched_environment,
     project::get_project,
-    service::get_or_prompt_service_for_environment,
+    service::get_or_prompt_service,
     terminal::{SSHConnectParams, TerminalClient},
 };
 use crate::util::progress::success_spinner;
@@ -74,62 +74,24 @@ pub async fn find_service_by_name(
     configs: &Configs,
     project: &RailwayProject,
     service_id_or_name: &str,
-    environment_id: &str,
 ) -> Result<String> {
     let project = get_project(client, configs, project.id.clone()).await?;
 
-    // Check if user can access this environment
-    let env_accessible = project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.id == environment_id)
-        .map(|env| env.node.can_access)
-        .unwrap_or(true);
+    let services = project.services.edges.iter().collect::<Vec<_>>();
 
-    let all_services = project.services.edges.iter().collect::<Vec<_>>();
-
-    // Filter services to only those with instances in the current environment
-    let services: Vec<_> = all_services
-        .iter()
-        .filter(|service| {
-            service
-                .node
-                .service_instances
-                .edges
-                .iter()
-                .any(|instance| instance.node.environment_id == environment_id)
-        })
-        .collect();
-
-    // First try to find in accessible services
     let service = services
         .iter()
+        // Match service on lowercase name or id
         .find(|service| {
             service.node.name.to_lowercase() == service_id_or_name.to_lowercase()
                 || service.node.id == service_id_or_name
-        });
+        })
+        .with_context(|| format!("Service '{service_id_or_name}' not found"))?
+        .node
+        .id
+        .to_owned();
 
-    if let Some(service) = service {
-        return Ok(service.node.id.to_owned());
-    }
-
-    // Check if service exists but isn't accessible in this environment
-    let exists_in_project = all_services
-        .iter()
-        .any(|service| {
-            service.node.name.to_lowercase() == service_id_or_name.to_lowercase()
-                || service.node.id == service_id_or_name
-        });
-
-    if exists_in_project {
-        if !env_accessible {
-            bail!("Service '{}' exists but you don't have access to this restricted environment. Ask an admin to grant you Admin access.", service_id_or_name);
-        }
-        bail!("Service '{}' has no instance in this environment", service_id_or_name);
-    }
-
-    bail!("Service '{}' not found", service_id_or_name);
+    Ok(service)
 }
 
 pub async fn get_ssh_connect_params(
@@ -159,12 +121,12 @@ pub async fn get_ssh_connect_params(
     } else {
         linked_project.as_ref().unwrap().environment.clone()
     };
-    let environment_id = get_matched_environment(&project, environment)?.id.clone();
+    let environment_id = get_matched_environment(&project, environment)?.id;
 
     let service_id = if let Some(service_id_or_name) = args.service {
-        find_service_by_name(client, configs, &project, &service_id_or_name, &environment_id).await?
+        find_service_by_name(client, configs, &project, &service_id_or_name).await?
     } else {
-        get_or_prompt_service_for_environment(linked_project.clone().unwrap(), project, None, &environment_id)
+        get_or_prompt_service(linked_project.clone().unwrap(), project, None)
             .await?
             .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?
     };
