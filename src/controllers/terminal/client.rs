@@ -49,6 +49,10 @@ impl TerminalClient {
                     .map_err(|e| anyhow::anyhow!("Failed to parse server message: {}", e))?;
 
                 if server_msg.r#type != "welcome" {
+                    // If it's an error message, extract and display the actual error message
+                    if server_msg.r#type == "error" && !server_msg.payload.message.is_empty() {
+                        bail!("Failed to connect: {}", server_msg.payload.message);
+                    }
                     bail!("Expected welcome message, received: {:?}", server_msg);
                 }
 
