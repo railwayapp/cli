@@ -62,20 +62,28 @@ pub async fn command(args: Args) -> Result<()> {
         })?;
 
     let environment_id = get_matched_environment(&project, environment)?.id;
+    let service_id = service.id.clone();
     let variables = get_service_variables(
         &client,
         &configs,
         linked_project.project,
         environment_id.clone(),
-        service.id,
+        service_id.clone(),
     )
     .await?;
     let database_type = {
-        let service_instance = service
-            .service_instances
+        let env = project
+            .environments
             .edges
             .iter()
-            .find(|si| si.node.environment_id == environment_id);
+            .find(|e| e.node.id == environment_id);
+        let service_instance = env.and_then(|e| {
+            e.node
+                .service_instances
+                .edges
+                .iter()
+                .find(|si| si.node.service_id == service_id)
+        });
 
         service_instance
             .and_then(|si| si.node.source.clone())

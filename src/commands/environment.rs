@@ -366,17 +366,26 @@ fn select_service_variables_new(
     duplicate_id: &Option<String>,
 ) -> Result<Vec<(String, Variable)>> {
     let service_variables = if let Some(ref duplicate_id) = *duplicate_id {
+        let env = project
+            .environments
+            .edges
+            .iter()
+            .find(|e| &e.node.id == duplicate_id);
+        let service_ids_in_env: std::collections::HashSet<_> = env
+            .map(|e| {
+                e.node
+                    .service_instances
+                    .edges
+                    .iter()
+                    .map(|si| si.node.service_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let services = project
             .services
             .edges
             .iter()
-            .filter(|s| {
-                s.node
-                    .service_instances
-                    .edges
-                    .iter()
-                    .any(|i| &i.node.environment_id == duplicate_id)
-            })
+            .filter(|s| service_ids_in_env.contains(&s.node.id))
             .collect::<Vec<_>>();
         if !args.service_variables.is_empty() {
             args.service_variables

@@ -1,14 +1,10 @@
-use crate::queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
+use crate::queries::project::ProjectProjectEnvironmentsEdges;
 
 use super::*;
 
-pub async fn pull(
-    environment: &ProjectProjectEnvironmentsEdges,
-    project: ProjectProject,
-    args: Pull,
-) -> Result<()> {
+pub async fn pull(environment: &ProjectProjectEnvironmentsEdges, args: Pull) -> Result<()> {
     let (id, path) = common::get_function_from_path(args.path)?;
-    let service = common::find_service(&project, environment, &id)
+    let service = common::find_service(environment, &id)
         .ok_or_else(|| anyhow::anyhow!("Couldn't find service"))?;
 
     println!(

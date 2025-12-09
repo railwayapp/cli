@@ -281,6 +281,17 @@ impl From<Project> for NormalisedProject {
         match value {
             Project::External(project) => {
                 let total_envs = project.environments.edges.len();
+                // Build a map of service_id -> environment_ids
+                let mut service_env_map: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for env in &project.environments.edges {
+                    for si in &env.node.service_instances.edges {
+                        service_env_map
+                            .entry(si.node.service_id.clone())
+                            .or_default()
+                            .push(env.node.id.clone());
+                    }
+                }
                 let accessible_envs: Vec<_> = project
                     .environments
                     .edges
@@ -298,17 +309,9 @@ impl From<Project> for NormalisedProject {
                         .edges
                         .into_iter()
                         .map(|service| {
-                            NormalisedService::new(
-                                service.node.id,
-                                service.node.name,
-                                service
-                                    .node
-                                    .service_instances
-                                    .edges
-                                    .into_iter()
-                                    .map(|instance| instance.node.environment_id)
-                                    .collect(),
-                            )
+                            let env_ids =
+                                service_env_map.remove(&service.node.id).unwrap_or_default();
+                            NormalisedService::new(service.node.id, service.node.name, env_ids)
                         })
                         .collect(),
                     has_restricted,
@@ -316,6 +319,17 @@ impl From<Project> for NormalisedProject {
             }
             Project::Workspace(project) => {
                 let total_envs = project.environments.edges.len();
+                // Build a map of service_id -> environment_ids
+                let mut service_env_map: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for env in &project.environments.edges {
+                    for si in &env.node.service_instances.edges {
+                        service_env_map
+                            .entry(si.node.service_id.clone())
+                            .or_default()
+                            .push(env.node.id.clone());
+                    }
+                }
                 let accessible_envs: Vec<_> = project
                     .environments
                     .edges
@@ -333,17 +347,9 @@ impl From<Project> for NormalisedProject {
                         .edges
                         .into_iter()
                         .map(|service| {
-                            NormalisedService::new(
-                                service.node.id,
-                                service.node.name,
-                                service
-                                    .node
-                                    .service_instances
-                                    .edges
-                                    .into_iter()
-                                    .map(|instance| instance.node.environment_id)
-                                    .collect(),
-                            )
+                            let env_ids =
+                                service_env_map.remove(&service.node.id).unwrap_or_default();
+                            NormalisedService::new(service.node.id, service.node.name, env_ids)
                         })
                         .collect(),
                     has_restricted,

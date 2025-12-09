@@ -253,13 +253,19 @@ fn get_existing_config(
             || (p.node.name.to_lowercase() == service_input.to_lowercase())
     }) {
         // check that service exists in that environment
-        if let Some(instance) = service
-            .node
-            .service_instances
+        let env = project
+            .environments
             .edges
             .iter()
-            .find(|p| p.node.environment_id == environment_id)
-        {
+            .find(|e| e.node.id == environment_id);
+        let instance = env.and_then(|e| {
+            e.node
+                .service_instances
+                .edges
+                .iter()
+                .find(|p| p.node.service_id == service.node.id)
+        });
+        if let Some(instance) = instance {
             if let Some(latest) = &instance.node.latest_deployment {
                 if let Some(meta) = &latest.meta {
                     let deploy = meta

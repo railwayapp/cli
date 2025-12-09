@@ -3,12 +3,14 @@ use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
 
+type RetryCallback = Box<dyn Fn(u32, u32, &anyhow::Error, u64) + Send + Sync>;
+
 pub struct RetryConfig {
     pub max_attempts: u32,
     pub initial_delay_ms: u64,
     pub max_delay_ms: u64,
     pub backoff_multiplier: f64,
-    pub on_retry: Option<Box<dyn Fn(u32, u32, &anyhow::Error, u64) + Send + Sync>>,
+    pub on_retry: Option<RetryCallback>,
 }
 
 impl Default for RetryConfig {

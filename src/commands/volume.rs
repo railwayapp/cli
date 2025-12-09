@@ -4,8 +4,7 @@ use crate::{
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
     queries::project::{
-        ProjectProject, ProjectProjectVolumesEdges,
-        ProjectProjectVolumesEdgesNodeVolumeInstancesEdgesNode,
+        ProjectProject, ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode,
     },
     util::prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
 };
@@ -357,25 +356,15 @@ async fn delete(
 }
 
 async fn list(environment: String, project: ProjectProject) -> Result<()> {
-    let volumes: Vec<&ProjectProjectVolumesEdges> = project
-        .volumes
-        .edges
-        .iter()
-        .filter(|v| {
-            v.node
-                .volume_instances
-                .edges
-                .iter()
-                .any(|a| a.node.environment_id == environment.clone())
-        })
-        .collect();
-    let environment_name = project
+    let env = project
         .environments
         .edges
         .iter()
         .find(|e| e.node.id == environment)
-        .map(|e| e.node.name.clone())
-        .unwrap();
+        .ok_or_else(|| anyhow!("Environment not found"))?;
+    let environment_name = env.node.name.clone();
+
+    let volumes = &env.node.volume_instances.edges;
 
     if volumes.is_empty() {
         bail!(
@@ -385,21 +374,15 @@ async fn list(environment: String, project: ProjectProject) -> Result<()> {
     } else {
         println!("Project: {}", project.name.cyan().bold());
         println!("Environment: {}", environment_name.cyan().bold());
-        for volume in volumes {
+        for volume_edge in volumes {
             println!();
-            let volume = volume
-                .node
-                .volume_instances
-                .edges
-                .iter()
-                .find(|a| a.node.environment_id == environment.clone())
-                .unwrap();
-            println!("Volume: {}", volume.node.volume.name.green());
+            let volume = &volume_edge.node;
+            println!("Volume: {}", volume.volume.name.green());
             let service = project
                 .services
                 .edges
                 .iter()
-                .find(|s| s.node.id == volume.node.service_id.clone().unwrap_or_default());
+                .find(|s| s.node.id == volume.service_id.clone().unwrap_or_default());
             println!(
                 "Attached to: {}",
                 if let Some(service) = service {
@@ -408,12 +391,12 @@ async fn list(environment: String, project: ProjectProject) -> Result<()> {
                     "N/A".dimmed()
                 }
             );
-            println!("Mount path: {}", volume.node.mount_path.yellow());
+            println!("Mount path: {}", volume.mount_path.yellow());
             println!(
                 "Storage used: {}{}/{}{}",
-                volume.node.current_size_mb.round().to_string().blue(),
+                volume.current_size_mb.round().to_string().blue(),
                 "MB".blue(),
-                volume.node.size_mb.to_string().red(),
+                volume.size_mb.to_string().red(),
                 "MB".red()
             )
         }
@@ -457,12 +440,19 @@ async fn add(
         .unwrap();
 
     // check if there is a volume already mounted on the service in that environment
-    if project.volumes.edges.iter().any(|v| {
-        v.node.volume_instances.edges.iter().any(|a| {
-            a.node.service_id == Some(service.clone())
-                && a.node.environment_id == environment.clone()
-        })
-    }) {
+    let env = project
+        .environments
+        .edges
+        .iter()
+        .find(|e| e.node.id == environment)
+        .ok_or_else(|| anyhow!("Environment not found"))?;
+    if env
+        .node
+        .volume_instances
+        .edges
+        .iter()
+        .any(|a| a.node.service_id == Some(service.clone()))
+    {
         bail!(
             "A volume is already mounted on service {} in environment {}",
             service_name.blue(),
@@ -519,18 +509,18 @@ fn select_volume(
     environment: &str,
     volume: Option<String>,
 ) -> Result<Volume, anyhow::Error> {
-    let volumes: Vec<Volume> = project
-        .volumes
+    let env = project
+        .environments
         .edges
         .iter()
-        .filter_map(|v| {
-            v.node
-                .volume_instances
-                .edges
-                .iter()
-                .find(|a| a.node.environment_id == environment)
-                .map(|a| Volume(a.node.clone()))
-        })
+        .find(|e| e.node.id == environment)
+        .ok_or_else(|| anyhow!("Environment not found"))?;
+    let volumes: Vec<Volume> = env
+        .node
+        .volume_instances
+        .edges
+        .iter()
+        .map(|a| Volume(a.node.clone()))
         .collect();
     let volume = if let Some(vol) = volume {
         let norm_vol = volumes.iter().find(|v| {
@@ -552,7 +542,7 @@ fn select_volume(
 }
 
 #[derive(Debug, Clone)]
-struct Volume(ProjectProjectVolumesEdgesNodeVolumeInstancesEdgesNode);
+struct Volume(ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode);
 
 impl Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

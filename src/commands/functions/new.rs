@@ -42,15 +42,7 @@ pub async fn new(
     )?;
 
     if args.watch {
-        watch_for_file_changes(
-            project,
-            service_id,
-            environment,
-            info,
-            args.path,
-            args.terminal,
-        )
-        .await?;
+        watch_for_file_changes(service_id, environment, info, args.path, args.terminal).await?;
     } else {
         println!("{info}");
     }
@@ -276,7 +268,6 @@ fn append_cron_info(info: &mut String, cron: &Option<String>) {
 }
 
 pub async fn watch_for_file_changes(
-    project: ProjectProject,
     service_id: String,
     environment: &ProjectProjectEnvironmentsEdges,
     info: String,
@@ -285,7 +276,7 @@ pub async fn watch_for_file_changes(
 ) -> Result<()> {
     if terminal {
         clear()?;
-        if let Some(f) = common::find_service(&project, environment, &service_id) {
+        if let Some(f) = common::find_service(environment, &service_id) {
             if let Some(ld) = f.latest_deployment {
                 display_deployment_info(info.as_str(), &ld.status.into(), ld.deployment_stopped);
             }

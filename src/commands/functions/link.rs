@@ -1,8 +1,6 @@
-use std::fmt::Display;
-
 use crate::{
     commands::functions::common::link_function,
-    queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges},
+    queries::project::ProjectProjectEnvironmentsEdges,
     util::prompt::{fake_select, prompt_path, prompt_select},
 };
 use anyhow::bail;
@@ -10,14 +8,10 @@ use is_terminal::IsTerminal;
 
 use super::*;
 
-pub async fn link(
-    environment: &ProjectProjectEnvironmentsEdges,
-    project: ProjectProject,
-    args: Link,
-) -> Result<()> {
+pub async fn link(environment: &ProjectProjectEnvironmentsEdges, args: Link) -> Result<()> {
     let terminal = std::io::stdout().is_terminal();
 
-    let functions = common::get_functions_in_environment(&project, environment);
+    let functions = common::get_functions_in_environment(environment);
 
     let function = if let Some(function) = args.function {
         let f = functions.iter().find(|f| {
@@ -68,10 +62,4 @@ pub async fn link(
         )
     }
     Ok(())
-}
-
-impl Display for queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdgesNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.service_name)
-    }
 }

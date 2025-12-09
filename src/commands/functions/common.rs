@@ -9,28 +9,19 @@ use std::{path::Path, str::FromStr};
 
 use crate::{
     queries::project::{
-        ProjectProject, ProjectProjectEnvironmentsEdges,
-        ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+        ProjectProjectEnvironmentsEdges, ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
     },
     util::prompt::{fake_select, prompt_confirm_with_default, prompt_path},
 };
 
-pub fn get_functions_in_environment<'a>(
-    project: &'a ProjectProject,
+pub fn get_functions_in_environment(
     environment: &ProjectProjectEnvironmentsEdges,
-) -> Vec<&'a ProjectProjectServicesEdgesNodeServiceInstancesEdges> {
-    project
-        .services
+) -> Vec<&ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges> {
+    environment
+        .node
+        .service_instances
         .edges
         .iter()
-        .filter_map(|service| {
-            service
-                .node
-                .service_instances
-                .edges
-                .iter()
-                .find(|instance| instance.node.environment_id == environment.node.id)
-        })
         .filter(|service_instance| is_function_service(service_instance))
         .collect()
 }
@@ -50,7 +41,7 @@ pub fn unlink_function(id: &str) -> Result<()> {
 }
 
 fn is_function_service(
-    service_instance: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
 ) -> bool {
     service_instance.node.source.clone().is_some_and(|source| {
         source
@@ -129,17 +120,16 @@ pub fn get_function_from_path(path: Option<PathBuf>) -> Result<(String, PathBuf)
     Ok((id, path.clone()))
 }
 
-pub fn has_domains(function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges) -> bool {
+pub fn has_domains(function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges) -> bool {
     !function.node.domains.custom_domains.is_empty()
         || !function.node.domains.service_domains.is_empty()
 }
 
 pub fn find_service(
-    project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
     id: &str,
-) -> Option<queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdgesNode> {
-    let c = common::get_functions_in_environment(project, environment);
+) -> Option<queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode> {
+    let c = common::get_functions_in_environment(environment);
     c.iter()
         .find(|f| f.node.service_id == id)
         .map(|f| f.node.clone())
@@ -192,7 +182,7 @@ pub fn calculate_diff(old_content: &str, new_content: &str) -> DiffStats {
 }
 
 pub fn extract_function_content(
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdgesNode,
+    function: &queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
 ) -> Result<String> {
     let cmd = function
         .start_command

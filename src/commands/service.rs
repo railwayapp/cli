@@ -93,17 +93,26 @@ async fn link_command(args: LinkArgs) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
+    let env = project
+        .environments
+        .edges
+        .iter()
+        .find(|e| e.node.id == linked_project.environment);
+    let service_ids_in_env: std::collections::HashSet<_> = env
+        .map(|e| {
+            e.node
+                .service_instances
+                .edges
+                .iter()
+                .map(|si| si.node.service_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let services: Vec<_> = project
         .services
         .edges
         .iter()
-        .filter(|a| {
-            a.node
-                .service_instances
-                .edges
-                .iter()
-                .any(|b| b.node.environment_id == linked_project.environment)
-        })
+        .filter(|a| service_ids_in_env.contains(&a.node.id))
         .map(|s| PromptService(&s.node))
         .collect();
 
@@ -180,30 +189,27 @@ async fn status_command(args: StatusArgs) -> Result<()> {
     // Collect service instances for the environment
     let mut service_statuses: Vec<ServiceStatusOutput> = Vec::new();
 
-    for service_edge in &project.services.edges {
-        let service = &service_edge.node;
+    let env = project
+        .environments
+        .edges
+        .iter()
+        .find(|e| e.node.id == environment_id)
+        .context("Environment not found")?;
 
-        // Find the service instance for this environment
-        if let Some(instance_edge) = service
-            .service_instances
-            .edges
-            .iter()
-            .find(|inst| inst.node.environment_id == environment_id)
-        {
-            let instance = &instance_edge.node;
-            let deployment = &instance.latest_deployment;
+    for instance_edge in &env.node.service_instances.edges {
+        let instance = &instance_edge.node;
+        let deployment = &instance.latest_deployment;
 
-            service_statuses.push(ServiceStatusOutput {
-                id: service.id.clone(),
-                name: service.name.clone(),
-                deployment_id: deployment.as_ref().map(|d| d.id.clone()),
-                status: deployment.as_ref().map(|d| format!("{:?}", d.status)),
-                stopped: deployment
-                    .as_ref()
-                    .map(|d| d.deployment_stopped)
-                    .unwrap_or(false),
-            });
-        }
+        service_statuses.push(ServiceStatusOutput {
+            id: instance.service_id.clone(),
+            name: instance.service_name.clone(),
+            deployment_id: deployment.as_ref().map(|d| d.id.clone()),
+            status: deployment.as_ref().map(|d| format!("{:?}", d.status)),
+            stopped: deployment
+                .as_ref()
+                .map(|d| d.deployment_stopped)
+                .unwrap_or(false),
+        });
     }
 
     if args.all {

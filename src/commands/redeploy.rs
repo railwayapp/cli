@@ -42,12 +42,18 @@ pub async fn command(args: Args) -> Result<()> {
         })
         .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
 
-    let service_in_env = service
+    let env = project
+        .environments
+        .edges
+        .iter()
+        .find(|e| e.node.id == linked_project.environment)
+        .ok_or_else(|| anyhow!("Environment not found"))?;
+    let service_in_env = env
         .node
         .service_instances
         .edges
         .iter()
-        .find(|a| a.node.environment_id == linked_project.environment)
+        .find(|a| a.node.service_id == service.node.id)
         .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
 
     if let Some(ref latest) = service_in_env.node.latest_deployment {
