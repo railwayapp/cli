@@ -276,22 +276,27 @@ structstruck::strike! {
 
 // unfortunately, due to the graphql client returning 3 different types for some reason (despite them all being identical)
 // we need to write 3 match arms to convert it to our normalised project type
+macro_rules! build_service_env_map {
+    ($environments:expr) => {{
+        let mut map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for env in $environments {
+            for si in &env.node.service_instances.edges {
+                map.entry(si.node.service_id.clone())
+                    .or_default()
+                    .push(env.node.id.clone());
+            }
+        }
+        map
+    }};
+}
+
 impl From<Project> for NormalisedProject {
     fn from(value: Project) -> Self {
         match value {
             Project::External(project) => {
                 let total_envs = project.environments.edges.len();
-                // Build a map of service_id -> environment_ids
-                let mut service_env_map: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
-                for env in &project.environments.edges {
-                    for si in &env.node.service_instances.edges {
-                        service_env_map
-                            .entry(si.node.service_id.clone())
-                            .or_default()
-                            .push(env.node.id.clone());
-                    }
-                }
+                let mut service_env_map = build_service_env_map!(&project.environments.edges);
                 let accessible_envs: Vec<_> = project
                     .environments
                     .edges
@@ -319,17 +324,7 @@ impl From<Project> for NormalisedProject {
             }
             Project::Workspace(project) => {
                 let total_envs = project.environments.edges.len();
-                // Build a map of service_id -> environment_ids
-                let mut service_env_map: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
-                for env in &project.environments.edges {
-                    for si in &env.node.service_instances.edges {
-                        service_env_map
-                            .entry(si.node.service_id.clone())
-                            .or_default()
-                            .push(env.node.id.clone());
-                    }
-                }
+                let mut service_env_map = build_service_env_map!(&project.environments.edges);
                 let accessible_envs: Vec<_> = project
                     .environments
                     .edges

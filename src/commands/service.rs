@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::{
     controllers::{
         environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project},
+        project::{ensure_project_and_environment_exist, get_project, get_service_ids_in_env},
     },
     errors::RailwayError,
     util::prompt::{PromptService, fake_select, prompt_options},
@@ -93,21 +93,7 @@ async fn link_command(args: LinkArgs) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    let env = project
-        .environments
-        .edges
-        .iter()
-        .find(|e| e.node.id == linked_project.environment);
-    let service_ids_in_env: std::collections::HashSet<_> = env
-        .map(|e| {
-            e.node
-                .service_instances
-                .edges
-                .iter()
-                .map(|si| si.node.service_id.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    let service_ids_in_env = get_service_ids_in_env(&project, &linked_project.environment);
     let services: Vec<_> = project
         .services
         .edges

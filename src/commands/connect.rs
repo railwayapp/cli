@@ -5,7 +5,9 @@ use url::Url;
 use which::which;
 
 use crate::controllers::{
-    database::DatabaseType, environment::get_matched_environment, project::get_project,
+    database::DatabaseType,
+    environment::get_matched_environment,
+    project::{find_service_instance, get_project},
     variables::get_service_variables,
 };
 use crate::errors::RailwayError;
@@ -72,21 +74,10 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
     let database_type = {
-        let env = project
-            .environments
-            .edges
-            .iter()
-            .find(|e| e.node.id == environment_id);
-        let service_instance = env.and_then(|e| {
-            e.node
-                .service_instances
-                .edges
-                .iter()
-                .find(|si| si.node.service_id == service_id)
-        });
+        let service_instance = find_service_instance(&project, &environment_id, &service_id);
 
         service_instance
-            .and_then(|si| si.node.source.clone())
+            .and_then(|si| si.source.clone())
             .and_then(|source| source.image)
             .map(|image: String| image.to_lowercase())
             .and_then(|image: String| {

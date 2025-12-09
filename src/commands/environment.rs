@@ -2,7 +2,8 @@ use std::{collections::BTreeMap, fmt::Display, time::Duration};
 
 use crate::{
     consts::TICK_STRING,
-    controllers::{project::get_project, variables::Variable},
+    controllers::project::{get_project, get_service_ids_in_env},
+    controllers::variables::Variable,
     errors::RailwayError,
     interact_or,
     util::{
@@ -366,21 +367,7 @@ fn select_service_variables_new(
     duplicate_id: &Option<String>,
 ) -> Result<Vec<(String, Variable)>> {
     let service_variables = if let Some(ref duplicate_id) = *duplicate_id {
-        let env = project
-            .environments
-            .edges
-            .iter()
-            .find(|e| &e.node.id == duplicate_id);
-        let service_ids_in_env: std::collections::HashSet<_> = env
-            .map(|e| {
-                e.node
-                    .service_instances
-                    .edges
-                    .iter()
-                    .map(|si| si.node.service_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let service_ids_in_env = get_service_ids_in_env(project, duplicate_id);
         let services = project
             .services
             .edges
