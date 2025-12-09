@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use reqwest::Client;
 
 use crate::{
@@ -7,7 +9,10 @@ use crate::{
         Configs,
         queries::{
             self,
-            project::{ProjectProject, ProjectProjectServicesEdgesNode},
+            project::{
+                ProjectProject, ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
+                ProjectProjectServicesEdgesNode,
+            },
         },
     },
     errors::RailwayError,
@@ -85,4 +90,43 @@ pub async fn ensure_project_and_environment_exist(
     };
 
     Ok(())
+}
+
+/// Get all service IDs that have instances in a given environment
+pub fn get_service_ids_in_env(project: &ProjectProject, environment_id: &str) -> HashSet<String> {
+    project
+        .environments
+        .edges
+        .iter()
+        .find(|e| e.node.id == environment_id)
+        .map(|e| {
+            e.node
+                .service_instances
+                .edges
+                .iter()
+                .map(|si| si.node.service_id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Find a service instance within a specific environment
+pub fn find_service_instance<'a>(
+    project: &'a ProjectProject,
+    environment_id: &str,
+    service_id: &str,
+) -> Option<&'a ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode> {
+    project
+        .environments
+        .edges
+        .iter()
+        .find(|e| e.node.id == environment_id)
+        .and_then(|e| {
+            e.node
+                .service_instances
+                .edges
+                .iter()
+                .find(|si| si.node.service_id == service_id)
+                .map(|si| &si.node)
+        })
 }

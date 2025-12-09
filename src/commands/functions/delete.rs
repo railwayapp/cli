@@ -1,6 +1,6 @@
 use crate::{
     commands::functions::common::unlink_function,
-    queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges},
+    queries::project::ProjectProjectEnvironmentsEdges,
     util::{
         progress::{create_spinner, success_spinner},
         prompt::{fake_select, prompt_select, prompt_text},
@@ -11,16 +11,12 @@ use is_terminal::IsTerminal;
 
 use super::*;
 
-pub async fn delete(
-    environment: &ProjectProjectEnvironmentsEdges,
-    project: ProjectProject,
-    args: Delete,
-) -> Result<()> {
+pub async fn delete(environment: &ProjectProjectEnvironmentsEdges, args: Delete) -> Result<()> {
     let terminal = std::io::stdout().is_terminal();
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let services = common::get_functions_in_environment(&project, environment);
+    let services = common::get_functions_in_environment(environment);
     let function = select_function_to_delete(&args, services.as_slice(), terminal)?;
 
     if !common::confirm(
@@ -39,9 +35,9 @@ pub async fn delete(
 
 fn select_function_to_delete<'a>(
     args: &Delete,
-    services: &'a [&queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges],
+    services: &'a [&queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges],
     terminal: bool,
-) -> Result<&'a queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges> {
+) -> Result<&'a queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges> {
     if let Some(fun) = &args.function {
         find_function_by_identifier(services, fun)
     } else if terminal {
@@ -52,9 +48,9 @@ fn select_function_to_delete<'a>(
 }
 
 fn find_function_by_identifier<'a>(
-    services: &'a [&queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges],
+    services: &'a [&queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges],
     identifier: &str,
-) -> Result<&'a queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges> {
+) -> Result<&'a queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges> {
     let found = services.iter().find(|f| {
         (f.node.id.to_lowercase() == identifier.to_lowercase())
             || (f.node.service_name.to_lowercase() == identifier.to_lowercase())
@@ -107,7 +103,7 @@ async fn validate_two_factor_code(client: &reqwest::Client, configs: &Configs) -
 async fn delete_function_service(
     client: &reqwest::Client,
     configs: &mut Configs,
-    function: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
     environment: &ProjectProjectEnvironmentsEdges,
 ) -> Result<()> {
     let mut spinner = create_spinner("Deleting function".into());

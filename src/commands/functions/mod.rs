@@ -124,9 +124,9 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::List => list::list(environment, project.clone()).await,
         Commands::New(args) => new::new(environment, project.clone(), args).await,
-        Commands::Delete(args) => delete::delete(environment, project.clone(), args).await,
-        Commands::Link(link) => link::link(environment, project.clone(), link).await,
-        Commands::Pull(pull) => pull::pull(environment, project.clone(), pull).await,
+        Commands::Delete(args) => delete::delete(environment, args).await,
+        Commands::Link(link) => link::link(environment, link).await,
+        Commands::Pull(pull) => pull::pull(environment, pull).await,
         Commands::Push(push) => push::push(environment, project.clone(), push).await,
     }?;
 

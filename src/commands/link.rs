@@ -276,11 +276,27 @@ structstruck::strike! {
 
 // unfortunately, due to the graphql client returning 3 different types for some reason (despite them all being identical)
 // we need to write 3 match arms to convert it to our normalised project type
+macro_rules! build_service_env_map {
+    ($environments:expr) => {{
+        let mut map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for env in $environments {
+            for si in &env.node.service_instances.edges {
+                map.entry(si.node.service_id.clone())
+                    .or_default()
+                    .push(env.node.id.clone());
+            }
+        }
+        map
+    }};
+}
+
 impl From<Project> for NormalisedProject {
     fn from(value: Project) -> Self {
         match value {
             Project::External(project) => {
                 let total_envs = project.environments.edges.len();
+                let mut service_env_map = build_service_env_map!(&project.environments.edges);
                 let accessible_envs: Vec<_> = project
                     .environments
                     .edges
@@ -298,17 +314,9 @@ impl From<Project> for NormalisedProject {
                         .edges
                         .into_iter()
                         .map(|service| {
-                            NormalisedService::new(
-                                service.node.id,
-                                service.node.name,
-                                service
-                                    .node
-                                    .service_instances
-                                    .edges
-                                    .into_iter()
-                                    .map(|instance| instance.node.environment_id)
-                                    .collect(),
-                            )
+                            let env_ids =
+                                service_env_map.remove(&service.node.id).unwrap_or_default();
+                            NormalisedService::new(service.node.id, service.node.name, env_ids)
                         })
                         .collect(),
                     has_restricted,
@@ -316,6 +324,7 @@ impl From<Project> for NormalisedProject {
             }
             Project::Workspace(project) => {
                 let total_envs = project.environments.edges.len();
+                let mut service_env_map = build_service_env_map!(&project.environments.edges);
                 let accessible_envs: Vec<_> = project
                     .environments
                     .edges
@@ -333,17 +342,9 @@ impl From<Project> for NormalisedProject {
                         .edges
                         .into_iter()
                         .map(|service| {
-                            NormalisedService::new(
-                                service.node.id,
-                                service.node.name,
-                                service
-                                    .node
-                                    .service_instances
-                                    .edges
-                                    .into_iter()
-                                    .map(|instance| instance.node.environment_id)
-                                    .collect(),
-                            )
+                            let env_ids =
+                                service_env_map.remove(&service.node.id).unwrap_or_default();
+                            NormalisedService::new(service.node.id, service.node.name, env_ids)
                         })
                         .collect(),
                     has_restricted,

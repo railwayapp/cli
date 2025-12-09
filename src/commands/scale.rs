@@ -1,6 +1,6 @@
 use crate::{
     consts::TICK_STRING,
-    controllers::environment::get_matched_environment,
+    controllers::{environment::get_matched_environment, project::find_service_instance},
     util::prompt::{
         prompt_select_with_cancel, prompt_u64_with_placeholder_and_validation_and_cancel,
     },
@@ -253,14 +253,9 @@ fn get_existing_config(
             || (p.node.name.to_lowercase() == service_input.to_lowercase())
     }) {
         // check that service exists in that environment
-        if let Some(instance) = service
-            .node
-            .service_instances
-            .edges
-            .iter()
-            .find(|p| p.node.environment_id == environment_id)
-        {
-            if let Some(latest) = &instance.node.latest_deployment {
+        let instance = find_service_instance(&project, &environment_id, &service.node.id);
+        if let Some(instance) = instance {
+            if let Some(latest) = &instance.latest_deployment {
                 if let Some(meta) = &latest.meta {
                     let deploy = meta
                         .dot_get::<Value>("serviceManifest.deploy")?

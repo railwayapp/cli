@@ -13,14 +13,6 @@ query Project($id: String!) {
           name
           canAccess
           deletedAt
-        }
-      }
-    }
-    services {
-      edges {
-        node {
-          id
-          name
           serviceInstances {
             edges {
               node {
@@ -58,12 +50,6 @@ query Project($id: String!) {
               }
             }
           }
-        }
-      }
-    }
-    volumes {
-      edges {
-        node {
           volumeInstances {
             edges {
               node {
@@ -79,6 +65,14 @@ query Project($id: String!) {
               }
             }
           }
+        }
+      }
+    }
+    services {
+      edges {
+        node {
+          id
+          name
         }
       }
     }

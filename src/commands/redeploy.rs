@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use crate::{
     consts::TICK_STRING,
-    controllers::project::{ensure_project_and_environment_exist, get_project},
+    controllers::project::{
+        ensure_project_and_environment_exist, find_service_instance, get_project,
+    },
     errors::RailwayError,
     util::prompt::prompt_confirm_with_default,
 };
@@ -42,15 +44,12 @@ pub async fn command(args: Args) -> Result<()> {
         })
         .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
 
-    let service_in_env = service
-        .node
-        .service_instances
-        .edges
-        .iter()
-        .find(|a| a.node.environment_id == linked_project.environment)
-        .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
+    let service_in_env =
+        find_service_instance(&project, &linked_project.environment, &service.node.id).ok_or_else(
+            || anyhow!("The service specified doesn't exist in the current environment"),
+        )?;
 
-    if let Some(ref latest) = service_in_env.node.latest_deployment {
+    if let Some(ref latest) = service_in_env.latest_deployment {
         if latest.can_redeploy {
             if !args.bypass {
                 let confirmed = prompt_confirm_with_default(
