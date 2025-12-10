@@ -54,6 +54,7 @@ impl Workspace {
         }
     }
 
+    #[allow(deprecated)] // team field deprecated but needed for backwards compat with scripts using team IDs
     pub fn team_id(&self) -> Option<&str> {
         match self {
             Self::External(w) => w.team_id.as_deref(),

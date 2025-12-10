@@ -20,9 +20,15 @@ impl std::fmt::Display for project::ProjectProjectServicesEdges {
     }
 }
 
-impl std::fmt::Display for project::ProjectProjectServicesEdgesNodeServiceInstancesEdges {
+impl std::fmt::Display for project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.node.service_name)
+    }
+}
+
+impl std::fmt::Display for project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.service_name)
     }
 }
 

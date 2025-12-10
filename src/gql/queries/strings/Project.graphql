@@ -11,6 +11,7 @@ query Project($id: String!) {
         node {
           id
           name
+          canAccess
           deletedAt
           deploymentTriggers {
             edges {
@@ -42,6 +43,7 @@ query Project($id: String!) {
                   id
                   meta
                   status
+                  createdAt
                   deploymentStopped
                 }
                 source {
@@ -66,12 +68,6 @@ query Project($id: String!) {
               }
             }
           }
-        }
-      }
-    }
-    volumes {
-      edges {
-        node {
           volumeInstances {
             edges {
               node {
@@ -87,6 +83,14 @@ query Project($id: String!) {
               }
             }
           }
+        }
+      }
+    }
+    services {
+      edges {
+        node {
+          id
+          name
         }
       }
     }

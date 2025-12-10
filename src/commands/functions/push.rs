@@ -12,7 +12,7 @@ pub async fn push(
     args: Push,
 ) -> Result<()> {
     let (id, path) = common::get_function_from_path(args.path.clone())?;
-    let service = common::find_service(&project, environment, &id)
+    let service = common::find_service(environment, &id)
         .ok_or_else(|| anyhow::anyhow!("Couldn't find service"))?;
     let terminal = std::io::stdout().is_terminal();
 
@@ -26,7 +26,7 @@ pub async fn push(
             path.as_path(),
             service.cron_schedule,
         )?;
-        new::watch_for_file_changes(project, id.clone(), environment, info, path, terminal).await?
+        new::watch_for_file_changes(id.clone(), environment, info, path, terminal).await?
     } else {
         println!("Updating function {}", service.service_name.blue().bold());
 
@@ -105,7 +105,7 @@ fn should_watch(args: Push, terminal: bool) -> Result<bool> {
 }
 
 fn domain(
-    service: &queries::project::ProjectProjectServicesEdgesNodeServiceInstancesEdgesNode,
+    service: &queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
 ) -> Option<String> {
     let mut domains = service
         .domains

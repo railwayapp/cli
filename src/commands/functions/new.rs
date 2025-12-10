@@ -13,13 +13,16 @@ use crate::{
     },
 };
 use anyhow::bail;
+use croner::Cron;
 use futures::StreamExt;
 use indoc::{formatdoc, writedoc};
 use is_terminal::IsTerminal;
 use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
 use std::io::Write as _;
+use std::str::FromStr;
 use std::{fmt::Write as _, path::Path};
 use tokio_util::sync::CancellationToken;
+
 pub async fn new(
     environment: &ProjectProjectEnvironmentsEdges,
     project: ProjectProject,
@@ -39,15 +42,7 @@ pub async fn new(
     )?;
 
     if args.watch {
-        watch_for_file_changes(
-            project,
-            service_id,
-            environment,
-            info,
-            args.path,
-            args.terminal,
-        )
-        .await?;
+        watch_for_file_changes(service_id, environment, info, args.path, args.terminal).await?;
     } else {
         println!("{info}");
     }
@@ -256,9 +251,10 @@ fn append_domain_info(info: &mut String, domain: &Option<String>) {
 
 fn append_cron_info(info: &mut String, cron: &Option<String>) {
     if let Some(cron) = cron {
-        let description =
-            cron_descriptor::cronparser::cron_expression_descriptor::get_description_cron(cron)
-                .expect("cron is not valid");
+        let description = Cron::from_str(cron)
+            .expect("Failed to parse cron expression")
+            .describe();
+
         writedoc!(
             info,
             "
@@ -272,7 +268,6 @@ fn append_cron_info(info: &mut String, cron: &Option<String>) {
 }
 
 pub async fn watch_for_file_changes(
-    project: ProjectProject,
     service_id: String,
     environment: &ProjectProjectEnvironmentsEdges,
     info: String,
@@ -281,7 +276,7 @@ pub async fn watch_for_file_changes(
 ) -> Result<()> {
     if terminal {
         clear()?;
-        if let Some(f) = common::find_service(&project, environment, &service_id) {
+        if let Some(f) = common::find_service(environment, &service_id) {
             if let Some(ld) = f.latest_deployment {
                 display_deployment_info(info.as_str(), &ld.status.into(), ld.deployment_stopped);
             }
@@ -534,7 +529,7 @@ fn prompt(args: New) -> Result<Arguments> {
     }
     .map(|s| s.trim().to_owned());
     if let Some(cron) = &cron {
-        let schedule = croner::Cron::new(cron).parse();
+        let schedule = Cron::from_str(cron);
         if let Ok(schedule) = schedule {
             let now = chrono::Utc::now();
 
@@ -577,6 +572,7 @@ fn prompt(args: New) -> Result<Arguments> {
     } else {
         false
     };
+
     Ok(Arguments {
         terminal,
         name,

@@ -5,7 +5,7 @@ use chrono_humanize::HumanTime;
 use pathdiff::diff_paths;
 use queries::project::{
     ProjectProject, ProjectProjectEnvironmentsEdges,
-    ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
 };
 use std::{fmt::Write as _, path::Path};
 
@@ -13,7 +13,7 @@ pub async fn list(
     environment: &ProjectProjectEnvironmentsEdges,
     project: ProjectProject,
 ) -> Result<()> {
-    let functions = common::get_functions_in_environment(&project, environment);
+    let functions = common::get_functions_in_environment(environment);
     if functions.is_empty() {
         display_no_functions_message(&project, environment);
         return Ok(());
@@ -26,7 +26,7 @@ pub async fn list(
 }
 
 fn format_functions_list(
-    functions: &[&ProjectProjectServicesEdgesNodeServiceInstancesEdges],
+    functions: &[&ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges],
 ) -> Result<String> {
     let configs = Configs::new()?;
     let closest = configs.get_functions_in_directory(
@@ -44,7 +44,7 @@ fn format_functions_list(
 }
 
 fn format_function_entry(
-    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
     closest: Vec<(PathBuf, String)>,
 ) -> Result<String> {
     let mut entry = String::new();
@@ -61,7 +61,7 @@ fn format_function_entry(
 }
 
 fn get_colored_function_name(
-    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
 ) -> colored::ColoredString {
     if let Some(ref deployment) = function.node.latest_deployment {
         match deployment.status {
@@ -83,7 +83,7 @@ fn get_colored_function_name(
 
 fn append_runtime_info(
     entry: &mut String,
-    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
 ) -> Result<()> {
     if let Some(ref source) = function.node.source {
         if let Some(image) = &source.image {
@@ -111,7 +111,7 @@ fn parse_runtime_from_image(image: &str) -> Option<(String, String)> {
 
 fn append_next_cron_run(
     entry: &mut String,
-    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
 ) -> Result<()> {
     if let Some(next_run) = function.node.next_cron_run_at {
         let human_time = HumanTime::from(next_run);
@@ -122,7 +122,7 @@ fn append_next_cron_run(
 
 fn append_domain_info(
     entry: &mut String,
-    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
 ) -> Result<()> {
     if common::has_domains(function) {
         write!(entry, " ({})", "http".blue())?;
@@ -132,7 +132,7 @@ fn append_domain_info(
 
 fn append_linked_information(
     entry: &mut String,
-    function: &ProjectProjectServicesEdgesNodeServiceInstancesEdges,
+    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
     closest: Vec<(PathBuf, String)>,
 ) -> Result<()> {
     if !closest.is_empty() {

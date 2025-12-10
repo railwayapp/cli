@@ -10,7 +10,7 @@ use crate::{
     table::Table,
 };
 use anyhow::bail;
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 /// Show variables for active environment
 #[derive(Parser)]

@@ -5,7 +5,9 @@ use url::Url;
 use which::which;
 
 use crate::controllers::{
-    database::DatabaseType, environment::get_matched_environment, project::get_project,
+    database::DatabaseType,
+    environment::get_matched_environment,
+    project::{find_service_instance, get_project},
     variables::get_service_variables,
 };
 use crate::errors::RailwayError;
@@ -62,23 +64,20 @@ pub async fn command(args: Args) -> Result<()> {
         })?;
 
     let environment_id = get_matched_environment(&project, environment)?.id;
+    let service_id = service.id.clone();
     let variables = get_service_variables(
         &client,
         &configs,
         linked_project.project,
         environment_id.clone(),
-        service.id,
+        service_id.clone(),
     )
     .await?;
     let database_type = {
-        let service_instance = service
-            .service_instances
-            .edges
-            .iter()
-            .find(|si| si.node.environment_id == environment_id);
+        let service_instance = find_service_instance(&project, &environment_id, &service_id);
 
         service_instance
-            .and_then(|si| si.node.source.clone())
+            .and_then(|si| si.source.clone())
             .and_then(|source| source.image)
             .map(|image: String| image.to_lowercase())
             .and_then(|image: String| {
@@ -229,7 +228,7 @@ mod test {
     fn test_is_tcp_proxy() {
         assert!(host_is_tcp_proxy("roundhouse.proxy.rlwy.net".to_string()));
         assert!(!host_is_tcp_proxy("localhost".to_string()));
-        assert!(!host_is_tcp_proxy("postgres.railway.interal".to_string()));
+        assert!(!host_is_tcp_proxy("postgres.railway.internal".to_string()));
     }
 
     #[test]

@@ -60,7 +60,7 @@ commands!(
 
 fn spawn_update_task() -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // outputtng would break json output on CI
+        // outputting would break json output on CI
         if !std::io::stdout().is_terminal() {
             anyhow::bail!("Stdout is not a terminal");
         }
@@ -147,11 +147,6 @@ async fn main() -> Result<()> {
         }
 
         eprintln!("{e:?}");
-
-        // Warn if using RAILWAY_TOKEN environment variable
-        if std::env::var("RAILWAY_TOKEN").is_ok() {
-            eprintln!("Note: Using RAILWAY_TOKEN environment variable");
-        }
 
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);
