@@ -10,6 +10,7 @@ use crate::{
     controllers::{
         environment_config::EnvironmentConfig,
         project::{self, ensure_project_and_environment_exist},
+        variables::get_service_variables,
     },
 };
 
@@ -34,6 +35,18 @@ pub struct Args {
 #[derive(Debug, Serialize)]
 struct DockerComposeFile {
     services: BTreeMap<String, DockerComposeService>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    networks: Option<DockerComposeNetworks>,
+}
+
+#[derive(Debug, Serialize)]
+struct DockerComposeNetworks {
+    railway: DockerComposeNetwork,
+}
+
+#[derive(Debug, Serialize)]
+struct DockerComposeNetwork {
+    driver: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +58,8 @@ struct DockerComposeService {
     environment: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ports: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    networks: Vec<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -62,6 +77,11 @@ pub async fn command(args: Args) -> Result<()> {
         .edges
         .iter()
         .map(|e| (e.node.id.clone(), e.node.name.clone()))
+        .collect();
+
+    let service_slugs: HashMap<String, String> = service_names
+        .iter()
+        .map(|(id, name)| (id.clone(), slugify(name)))
         .collect();
 
     let environment_id = args
@@ -98,6 +118,30 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
 
+    // Fetch resolved variables for each service in parallel
+    let variable_futures: Vec<_> = image_services
+        .iter()
+        .map(|(service_id, _)| {
+            get_service_variables(
+                &client,
+                &configs,
+                linked_project.project.clone(),
+                environment_id.clone(),
+                (*service_id).clone(),
+            )
+        })
+        .collect();
+
+    let variable_results = futures::future::join_all(variable_futures).await;
+
+    let resolved_vars: HashMap<String, BTreeMap<String, String>> = image_services
+        .iter()
+        .zip(variable_results.into_iter())
+        .filter_map(|((service_id, _), result)| {
+            result.ok().map(|vars| ((*service_id).clone(), vars))
+        })
+        .collect();
+
     println!(
         "\n{} image-based service(s) in '{}':",
         image_services.len(),
@@ -114,21 +158,29 @@ pub async fn command(args: Args) -> Result<()> {
         let slug = slugify(&service_name);
 
         let image = svc.source.as_ref().unwrap().image.clone().unwrap();
-        let environment = svc.get_env_vars();
-        let external_ports: Vec<u16> = svc
+
+        // Build port mapping: internal_port -> external_port
+        let port_mapping: HashMap<i64, u16> = svc
             .get_ports()
             .into_iter()
-            .map(|internal_port| generate_port(service_id, internal_port))
+            .map(|internal_port| (internal_port, generate_port(service_id, internal_port)))
             .collect();
-        let ports: Vec<String> = svc
-            .get_ports()
-            .into_iter()
-            .map(|internal_port| {
-                let external_port = generate_port(service_id, internal_port);
-                format!("{}:{}", external_port, internal_port)
-            })
+
+        // Get resolved variables and override Railway-specific vars
+        let raw_vars = resolved_vars.get(service_id).cloned().unwrap_or_default();
+        let environment = override_railway_vars(raw_vars, &slug, &port_mapping, &service_slugs);
+
+        let external_ports: Vec<u16> = port_mapping.values().copied().collect();
+        let ports: Vec<String> = port_mapping
+            .iter()
+            .map(|(internal, external)| format!("{}:{}", external, internal))
             .collect();
-        let start_command = svc.deploy.as_ref().and_then(|d| d.start_command.clone());
+        // Escape $ as $$ so docker-compose passes them to the container shell
+        let start_command = svc
+            .deploy
+            .as_ref()
+            .and_then(|d| d.start_command.clone())
+            .map(|cmd| cmd.replace('$', "$$"));
 
         println!("  {} {}", "•".green(), service_name);
         if !external_ports.is_empty() {
@@ -144,6 +196,7 @@ pub async fn command(args: Args) -> Result<()> {
                 command: start_command,
                 environment,
                 ports,
+                networks: vec!["railway".to_string()],
             },
         );
     }
@@ -152,6 +205,11 @@ pub async fn command(args: Args) -> Result<()> {
 
     let compose = DockerComposeFile {
         services: compose_services,
+        networks: Some(DockerComposeNetworks {
+            railway: DockerComposeNetwork {
+                driver: "bridge".to_string(),
+            },
+        }),
     };
 
     let output_path = args.output.unwrap_or_else(|| {
@@ -231,4 +289,50 @@ fn generate_port(service_id: &str, internal_port: i64) -> u16 {
     hash = hash.wrapping_add(internal_port as u32);
     // range 10000-60000
     10000 + (hash % 50000) as u16
+}
+
+fn is_deprecated_railway_var(key: &str) -> bool {
+    if key == "RAILWAY_STATIC_URL" {
+        return true;
+    }
+    // RAILWAY_SERVICE_{name}_URL is deprecated, but RAILWAY_SERVICE_ID and RAILWAY_SERVICE_NAME are not
+    if key.starts_with("RAILWAY_SERVICE_") && key.ends_with("_URL") {
+        return true;
+    }
+    false
+}
+
+fn override_railway_vars(
+    vars: BTreeMap<String, String>,
+    service_slug: &str,
+    port_mapping: &HashMap<i64, u16>,
+    service_slugs: &HashMap<String, String>,
+) -> BTreeMap<String, String> {
+    vars.into_iter()
+        .filter(|(key, _)| !is_deprecated_railway_var(key))
+        .map(|(key, value)| {
+            let new_value = match key.as_str() {
+                "RAILWAY_PRIVATE_DOMAIN" => service_slug.to_string(),
+                "RAILWAY_PUBLIC_DOMAIN" | "RAILWAY_TCP_PROXY_DOMAIN" => "localhost".to_string(),
+                "RAILWAY_TCP_PROXY_PORT" => port_mapping
+                    .values()
+                    .next()
+                    .map(|p| p.to_string())
+                    .unwrap_or(value),
+                _ => replace_private_domain_refs(&value, service_slugs),
+            };
+            (key, new_value)
+        })
+        .collect()
+}
+
+fn replace_private_domain_refs(value: &str, service_slugs: &HashMap<String, String>) -> String {
+    let mut result = value.to_string();
+    for slug in service_slugs.values() {
+        let railway_domain = format!("{}.railway.internal", slug);
+        if result.contains(&railway_domain) {
+            result = result.replace(&railway_domain, slug);
+        }
+    }
+    result
 }
