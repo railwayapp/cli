@@ -107,6 +107,7 @@ pub struct Domains;
 pub struct ProjectToken;
 
 pub type SerializedTemplateConfig = serde_json::Value;
+pub type EnvironmentConfig = serde_json::Value;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -155,6 +156,14 @@ pub struct LatestFunctionVersion;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct EnvironmentStagedChanges;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/EnvironmentConfig.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct GetEnvironmentConfig;
 
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
 impl From<project::DeploymentStatus> for SubscriptionDeploymentStatus {
