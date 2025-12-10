@@ -1,8 +1,17 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::{client::post_graphql, controllers::project::ensure_project_and_environment_exist};
+use crate::{
+    client::post_graphql,
+    controllers::{
+        environment_config::EnvironmentConfig,
+        project::{self, ensure_project_and_environment_exist},
+    },
+};
 
 use super::*;
 
@@ -13,87 +22,13 @@ pub struct Args {
     #[clap(short, long)]
     environment: Option<String>,
 
-    /// Output path for docker-compose.yml (defaults to ~/.railway/docker-compose.yml)
+    /// Output path for docker-compose.yml (defaults to ~/.railway/develop/<project_id>/docker-compose.yml)
     #[clap(short, long)]
     output: Option<PathBuf>,
 
     /// Only generate docker-compose.yml, don't run docker compose up
     #[clap(long)]
     dry_run: bool,
-
-    /// Run in detached mode (-d)
-    #[clap(short, long)]
-    detach: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EnvironmentConfigData {
-    #[serde(default)]
-    services: BTreeMap<String, ServiceConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ServiceConfig {
-    #[serde(default)]
-    source: Option<ServiceSource>,
-    #[serde(default)]
-    deploy: Option<ServiceDeploy>,
-    #[serde(default)]
-    variables: BTreeMap<String, VariableValue>,
-    #[serde(default)]
-    networking: Option<ServiceNetworking>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ServiceSource {
-    image: Option<String>,
-    repo: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ServiceDeploy {
-    start_command: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ServiceNetworking {
-    #[serde(default)]
-    service_domains: Vec<ServiceDomain>,
-    #[serde(default)]
-    tcp_proxies: Vec<TcpProxy>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum VariableValue {
-    Simple(String),
-    Complex { default: Option<String> },
-}
-
-impl VariableValue {
-    fn as_string(&self) -> Option<String> {
-        match self {
-            VariableValue::Simple(s) => Some(s.clone()),
-            VariableValue::Complex { default } => default.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ServiceDomain {
-    target_port: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TcpProxy {
-    application_port: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +54,16 @@ pub async fn command(args: Args) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
+    let project_data =
+        project::get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    let service_names: HashMap<String, String> = project_data
+        .services
+        .edges
+        .iter()
+        .map(|e| (e.node.id.clone(), e.node.name.clone()))
+        .collect();
+
     let environment_id = args
         .environment
         .clone()
@@ -135,25 +80,16 @@ pub async fn command(args: Args) -> Result<()> {
         post_graphql::<queries::GetEnvironmentConfig, _>(&client, configs.get_backboard(), vars)
             .await?;
 
-    println!("Data: {:?}", data);
-
     let env_name = data.environment.name;
     let config_json = data.environment.config;
 
-    let config: EnvironmentConfigData =
+    let config: EnvironmentConfig =
         serde_json::from_value(config_json).context("Failed to parse environment config")?;
-
-    println!("Config: {:?}", config);
 
     let image_services: Vec<_> = config
         .services
         .iter()
-        .filter(|(_, svc)| {
-            svc.source
-                .as_ref()
-                .map(|s| s.image.is_some() && s.repo.is_none())
-                .unwrap_or(false)
-        })
+        .filter(|(_, svc)| svc.is_image_based())
         .collect();
 
     if image_services.is_empty() {
@@ -180,41 +116,27 @@ pub async fn command(args: Args) -> Result<()> {
 
     let mut compose_services = BTreeMap::new();
 
-    for (name, svc) in image_services {
+    for (service_id, svc) in image_services {
+        let service_name = service_names
+            .get(service_id)
+            .cloned()
+            .unwrap_or_else(|| service_id.clone());
+        let slug = slugify(&service_name);
+
         let image = svc.source.as_ref().unwrap().image.clone().unwrap();
-
-        let environment: BTreeMap<String, String> = svc
-            .variables
-            .iter()
-            .filter_map(|(k, v)| v.as_string().map(|val| (k.clone(), val)))
+        let environment = svc.get_env_vars();
+        let ports: Vec<String> = svc
+            .get_ports()
+            .into_iter()
+            .map(|internal_port| {
+                let external_port = generate_port(service_id, internal_port);
+                format!("{}:{}", external_port, internal_port)
+            })
             .collect();
-
-        let mut ports: Vec<String> = Vec::new();
-
-        if let Some(networking) = &svc.networking {
-            for domain in &networking.service_domains {
-                if let Some(port) = domain.target_port {
-                    let port_str = format!("{}:{}", port, port);
-                    if !ports.contains(&port_str) {
-                        ports.push(port_str);
-                    }
-                }
-            }
-
-            for proxy in &networking.tcp_proxies {
-                if let Some(port) = proxy.application_port {
-                    let port_str = format!("{}:{}", port, port);
-                    if !ports.contains(&port_str) {
-                        ports.push(port_str);
-                    }
-                }
-            }
-        }
-
         let start_command = svc.deploy.as_ref().and_then(|d| d.start_command.clone());
 
         compose_services.insert(
-            name.clone(),
+            slug,
             DockerComposeService {
                 image,
                 command: start_command,
@@ -230,7 +152,10 @@ pub async fn command(args: Args) -> Result<()> {
 
     let output_path = args.output.unwrap_or_else(|| {
         let home = dirs::home_dir().expect("Unable to get home directory");
-        home.join(".railway").join("docker-compose.yml")
+        home.join(".railway")
+            .join("develop")
+            .join(&linked_project.project)
+            .join("docker-compose.yml")
     });
 
     if let Some(parent) = output_path.parent() {
@@ -252,13 +177,12 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    println!("\n{}", "Starting containers with docker compose...".cyan());
+    println!(
+        "\n{}",
+        "Starting containers in background with docker compose...".cyan()
+    );
 
-    let mut cmd_args = vec!["compose", "-f", output_path.to_str().unwrap(), "up"];
-
-    if args.detach {
-        cmd_args.push("-d");
-    }
+    let cmd_args = vec!["compose", "-f", output_path.to_str().unwrap(), "up", "-d"];
 
     let exit_status = tokio::process::Command::new("docker")
         .args(&cmd_args)
@@ -271,5 +195,33 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
+    println!("{}", "Containers started in background".green());
+
     Ok(())
+}
+
+fn slugify(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .filter_map(|c| {
+            if c.is_ascii_alphanumeric() {
+                Some(c.to_ascii_lowercase())
+            } else if c == ' ' || c == '-' || c == '_' {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect();
+    s.trim_matches('-').to_string()
+}
+
+fn generate_port(service_id: &str, internal_port: i64) -> u16 {
+    let mut hash: u32 = 5381;
+    for b in service_id.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    hash = hash.wrapping_add(internal_port as u32);
+    // range 10000-60000
+    10000 + (hash % 50000) as u16
 }

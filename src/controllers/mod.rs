@@ -1,6 +1,7 @@
 pub mod database;
 pub mod deployment;
 pub mod environment;
+pub mod environment_config;
 pub mod project;
 pub mod service;
 pub mod terminal;
