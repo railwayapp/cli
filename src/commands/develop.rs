@@ -69,8 +69,6 @@ pub async fn command(args: Args) -> Result<()> {
         .clone()
         .unwrap_or(linked_project.environment.clone());
 
-    println!("Fetching environment config...");
-
     let vars = queries::get_environment_config::Variables {
         id: environment_id.clone(),
         decrypt_variables: Some(true),
@@ -101,18 +99,10 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n{} image-based service(s) found in '{}':",
+        "\n{} image-based service(s) in '{}':",
         image_services.len(),
         env_name
     );
-    for (name, svc) in &image_services {
-        println!("  {} {}", "•".green(), name);
-        if let Some(source) = &svc.source {
-            if let Some(image) = &source.image {
-                println!("    image: {}", image.dimmed());
-            }
-        }
-    }
 
     let mut compose_services = BTreeMap::new();
 
@@ -125,6 +115,11 @@ pub async fn command(args: Args) -> Result<()> {
 
         let image = svc.source.as_ref().unwrap().image.clone().unwrap();
         let environment = svc.get_env_vars();
+        let external_ports: Vec<u16> = svc
+            .get_ports()
+            .into_iter()
+            .map(|internal_port| generate_port(service_id, internal_port))
+            .collect();
         let ports: Vec<String> = svc
             .get_ports()
             .into_iter()
@@ -134,6 +129,13 @@ pub async fn command(args: Args) -> Result<()> {
             })
             .collect();
         let start_command = svc.deploy.as_ref().and_then(|d| d.start_command.clone());
+
+        println!("  {} {}", "•".green(), service_name);
+        if !external_ports.is_empty() {
+            for port in &external_ports {
+                println!("    http://localhost:{}", port);
+            }
+        }
 
         compose_services.insert(
             slug,
@@ -145,6 +147,8 @@ pub async fn command(args: Args) -> Result<()> {
             },
         );
     }
+
+    let service_count = compose_services.len();
 
     let compose = DockerComposeFile {
         services: compose_services,
@@ -195,7 +199,10 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    println!("{}", "Containers started in background".green());
+    println!(
+        "{}",
+        format!("{} service(s) started", service_count).green()
+    );
 
     Ok(())
 }
