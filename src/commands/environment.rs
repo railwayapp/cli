@@ -2,15 +2,17 @@ use std::{collections::BTreeMap, fmt::Display, str::FromStr, time::Duration};
 
 use crate::{
     consts::TICK_STRING,
-    controllers::project::{get_project, get_service_ids_in_env},
-    controllers::variables::Variable,
+    controllers::{
+        project::{get_project, get_service_ids_in_env},
+        variables::Variable,
+    },
     errors::RailwayError,
     interact_or,
     util::{
         prompt::{
-            PromptService, fake_select, prompt_confirm_with_default, prompt_options,
-            prompt_options_skippable, prompt_text, prompt_text_with_placeholder_disappear,
-            prompt_variables,
+            PromptService, PromptServiceInstance, fake_select, prompt_confirm_with_default,
+            prompt_options, prompt_options_skippable, prompt_text,
+            prompt_text_with_placeholder_disappear, prompt_variables,
         },
         retry::{RetryConfig, retry_with_backoff},
     },
@@ -95,6 +97,12 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 async fn new_environment(args: NewArgs) -> Result<()> {
+    /*
+     * TODO: introduce a prompt: Do you want to configure a service?
+     * TODO: after, prompt for what you wish to configure (gh pr create style, currently Variables and Sources)
+     * TODO: after multi select, select services to configure in a multi-select
+     * TODO: iterate through all services, prompting for the configurable stuff. enter to skip anything (u wont want to configure everything on every service)
+     */
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -667,18 +675,14 @@ fn select_service_sources_new(
         // no duplicate id, nothing to change
         return Ok(vec![]);
     };
+
     let services = project
-        .services
+        .environments
         .edges
         .iter()
-        .filter(|s| {
-            s.node
-                .service_instances
-                .edges
-                .iter()
-                .any(|i| i.node.environment_id == *duplicate_id)
-        })
-        .collect::<Vec<_>>();
+        .find(|f| f.node.id == *duplicate_id)
+        .map(|f| f.node.service_instances.edges.clone())
+        .unwrap_or_default();
     if !args.service_sources.is_empty() {
         Ok(args
             .service_sources
@@ -690,9 +694,9 @@ fn select_service_sources_new(
                     .iter()
                     .find(|s| {
                         (s.node.id.to_lowercase() == service.to_lowercase())
-                            || (s.node.name.to_lowercase() == service.to_lowercase())
+                            || (s.node.service_name.to_lowercase() == service.to_lowercase())
                     })
-                    .map(|s| (s.node.id.clone(), s.node.name.clone()));
+                    .map(|s| (s.node.id.clone(), s.node.service_name.clone()));
                 if service_meta.is_none() {
                     println!(
                         "{}: Service {} not found (skipping updating source)",
@@ -751,11 +755,11 @@ fn select_service_sources_new(
         let mut sources: Vec<(String, Source)> = Vec::new();
         let p_services = services
             .iter()
-            .map(|s| PromptService(&s.node))
+            .map(|s| PromptServiceInstance(&s.node))
             .collect::<Vec<_>>();
-        let mut used_services: Vec<&PromptService> = Vec::new();
+        let mut used_services: Vec<&PromptServiceInstance> = Vec::new();
         loop {
-            let prompt_services: Vec<&PromptService<'_>> = p_services
+            let prompt_services: Vec<&PromptServiceInstance<'_>> = p_services
                 .iter()
                 .filter(|p| !used_services.contains(p))
                 .clone()

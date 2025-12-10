@@ -23,14 +23,6 @@ query Project($id: String!) {
               }
             }
           }
-        }
-      }
-    }
-    services {
-      edges {
-        node {
-          id
-          name
           serviceInstances {
             edges {
               node {
