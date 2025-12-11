@@ -111,6 +111,8 @@ struct DockerComposeService {
     image: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restart: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     environment: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -351,6 +353,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
             DockerComposeService {
                 image,
                 command: start_command,
+                restart: Some("on-failure".to_string()),
                 environment,
                 ports,
                 volumes: service_volumes,
