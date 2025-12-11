@@ -15,7 +15,7 @@ use crate::{
         local_dev_config::{CodeServiceConfig, LocalDevConfig},
         local_https::{
             HttpsConfig, ServicePort, certs_exist, check_mkcert_installed, ensure_mkcert_ca,
-            generate_caddyfile, generate_certs, get_existing_certs,
+            generate_caddyfile, generate_certs, get_existing_certs, is_port_443_available,
         },
         local_override::{
             HttpsOverride, OverrideMode, generate_port,
@@ -658,8 +658,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
                 .iter()
                 .find(|p| matches!(p.port_type, PortType::Http))
                 .map(|p| HttpsOverride {
-                    domain: &config.domain,
+                    domain: &config.base_domain,
                     port: p.public_port,
+                    slug: Some(slug.clone()),
+                    use_port_443: config.use_port_443,
                 })
         });
 
@@ -770,12 +772,18 @@ async fn up_command(args: UpArgs) -> Result<()> {
             }
         }
 
-        // Build port mappings for Caddy - only HTTP services go through proxy
-        let proxy_ports: Vec<String> = service_ports
-            .iter()
-            .filter(|p| p.is_http)
-            .map(|p| format!("{}:{}", p.external_port, p.external_port))
-            .collect();
+        // Build port mappings for Caddy
+        // Port 443 mode: single port for all services via SNI routing
+        // Fallback mode: per-service ports
+        let proxy_ports: Vec<String> = if config.use_port_443 {
+            vec!["443:443".to_string()]
+        } else {
+            service_ports
+                .iter()
+                .filter(|p| p.is_http)
+                .map(|p| format!("{}:{}", p.external_port, p.external_port))
+                .collect()
+        };
 
         if !proxy_ports.is_empty() {
             compose_services.insert(
@@ -804,7 +812,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         std::fs::write(develop_dir.join("Caddyfile"), caddyfile)?;
 
         // Save https_domain for railway run to pick up
-        std::fs::write(develop_dir.join("https_domain"), &config.domain)?;
+        std::fs::write(develop_dir.join("https_domain"), &config.base_domain)?;
     }
 
     let compose = DockerComposeFile {
@@ -885,22 +893,32 @@ async fn up_command(args: UpArgs) -> Result<()> {
             );
             if !summary.ports.is_empty() {
                 println!("  {}:", "Networking".dimmed());
+                let slug = slugify(&summary.name);
                 for p in &summary.ports {
                     match (&https_config, &p.port_type) {
                         (Some(config), PortType::Http) => {
-                            println!("    {}: localhost:{}", "Private".dimmed(), p.external);
-                            println!(
-                                "    {}:  https://{}:{}",
-                                "Public".dimmed(),
-                                config.domain,
-                                p.public_port
-                            );
+                            println!("    {}: http://localhost:{}", "Private".dimmed(), p.external);
+                            if config.use_port_443 {
+                                println!(
+                                    "    {}:  https://{}.{}",
+                                    "Public".dimmed(),
+                                    slug,
+                                    config.base_domain
+                                );
+                            } else {
+                                println!(
+                                    "    {}:  https://{}:{}",
+                                    "Public".dimmed(),
+                                    config.base_domain,
+                                    p.public_port
+                                );
+                            }
                         }
                         (_, PortType::Tcp) => {
                             println!("    {}:     localhost:{}", "TCP".dimmed(), p.external);
                         }
                         (None, PortType::Http) => {
-                            println!("    localhost:{}", p.external);
+                            println!("    http://localhost:{}", p.external);
                         }
                     }
                 }
@@ -991,8 +1009,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
         // HttpsOverride uses proxy_port for RAILWAY_PUBLIC_DOMAIN
         let https_override = https_config.as_ref().map(|config| HttpsOverride {
-            domain: &config.domain,
+            domain: &config.base_domain,
             port: proxy_port,
+            slug: Some(slug.clone()),
+            use_port_443: config.use_port_443,
         });
 
         let mut vars = override_railway_vars(
@@ -1016,16 +1036,25 @@ async fn up_command(args: UpArgs) -> Result<()> {
         println!("  {}:", "Networking".dimmed());
         match &https_config {
             Some(config) => {
-                println!("    {}: localhost:{}", "Private".dimmed(), internal_port);
-                println!(
-                    "    {}:  https://{}:{}",
-                    "Public".dimmed(),
-                    config.domain,
-                    proxy_port
-                );
+                println!("    {}: http://localhost:{}", "Private".dimmed(), internal_port);
+                if config.use_port_443 {
+                    println!(
+                        "    {}:  https://{}.{}",
+                        "Public".dimmed(),
+                        slug,
+                        config.base_domain
+                    );
+                } else {
+                    println!(
+                        "    {}:  https://{}:{}",
+                        "Public".dimmed(),
+                        config.base_domain,
+                        proxy_port
+                    );
+                }
             }
             None => {
-                println!("    localhost:{}", internal_port);
+                println!("    http://localhost:{}", internal_port);
             }
         }
         println!();
@@ -1202,12 +1231,15 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
         return Ok(None);
     }
 
+    // Check if port 443 is available for prettier URLs
+    let use_port_443 = is_port_443_available();
+
     let project_slug = slugify(project_name);
     let certs_dir = get_develop_dir(environment_id).join("certs");
 
-    // Check if certs already exist
-    let config = if certs_exist(&project_slug, &certs_dir) {
-        get_existing_certs(&project_slug, &certs_dir)
+    // Check if certs already exist with the right mode
+    let config = if certs_exist(&certs_dir, use_port_443) {
+        get_existing_certs(&project_slug, &certs_dir, use_port_443)
     } else {
         println!("{}", "Setting up local HTTPS...".cyan());
 
@@ -1217,9 +1249,21 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
             println!("Run 'mkcert -install' manually to trust local certificates");
         }
 
-        match generate_certs(&project_slug, &certs_dir) {
+        match generate_certs(&project_slug, &certs_dir, use_port_443) {
             Ok(config) => {
-                println!("  {} Generated certs for {}", "✓".green(), config.domain);
+                if use_port_443 {
+                    println!(
+                        "  {} Generated wildcard certs for *.{}",
+                        "✓".green(),
+                        config.base_domain
+                    );
+                } else {
+                    println!(
+                        "  {} Generated certs for {}",
+                        "✓".green(),
+                        config.base_domain
+                    );
+                }
                 config
             }
             Err(e) => {
@@ -1233,6 +1277,10 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
             }
         }
     };
+
+    if use_port_443 {
+        println!("  {} Using port 443 for prettier URLs", "✓".green());
+    }
 
     Ok(Some(config))
 }

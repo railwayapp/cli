@@ -34,6 +34,8 @@ pub struct LocalOverrideContext {
     pub slug_port_mappings: HashMap<String, HashMap<i64, u16>>,
     /// HTTPS domain for pretty URLs (e.g., "myproject.railway.localhost")
     pub https_domain: Option<String>,
+    /// Whether using port 443 mode (prettier URLs without port numbers)
+    pub use_port_443: bool,
 }
 
 /// Returns the path to the docker-compose.yml for a given environment
@@ -153,12 +155,14 @@ pub async fn build_local_override_context_with_config(
 
     // Check if HTTPS mode is active by looking for certs
     let https_domain = get_https_domain(environment_id);
+    let use_port_443 = get_https_mode(environment_id);
 
     Ok(LocalOverrideContext {
         service_slugs,
         port_mappings,
         slug_port_mappings,
         https_domain,
+        use_port_443,
     })
 }
 
@@ -183,6 +187,16 @@ fn build_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashMap<i64, u
     mapping
 }
 
+/// Reads the HTTPS mode from the https_mode file if it exists
+pub fn get_https_mode(environment_id: &str) -> bool {
+    let mode_file = get_develop_dir(environment_id)
+        .join("certs")
+        .join("https_mode");
+    std::fs::read_to_string(mode_file)
+        .map(|m| m.trim() == "port_443")
+        .unwrap_or(false)
+}
+
 /// Apply local overrides to variables for the run command (host network mode)
 pub fn apply_local_overrides(
     vars: BTreeMap<String, String>,
@@ -202,10 +216,12 @@ pub fn apply_local_overrides(
 
     // Get first HTTP port for this service for HTTPS override
     let https = ctx.https_domain.as_ref().and_then(|domain| {
-        port_mapping
-            .values()
-            .next()
-            .map(|&port| HttpsOverride { domain, port })
+        port_mapping.values().next().map(|&port| HttpsOverride {
+            domain,
+            port,
+            slug: Some(service_slug.clone()),
+            use_port_443: ctx.use_port_443,
+        })
     });
 
     override_railway_vars(
@@ -262,6 +278,10 @@ pub fn is_deprecated_railway_var(key: &str) -> bool {
 pub struct HttpsOverride<'a> {
     pub domain: &'a str,
     pub port: u16,
+    /// Service slug for subdomain-based routing (port 443 mode)
+    pub slug: Option<String>,
+    /// Whether using port 443 mode (prettier URLs without port numbers)
+    pub use_port_443: bool,
 }
 
 pub fn override_railway_vars(
@@ -282,6 +302,13 @@ pub fn override_railway_vars(
                     OverrideMode::HostNetwork => "localhost".to_string(),
                 },
                 "RAILWAY_PUBLIC_DOMAIN" => match &https {
+                    Some(h) if h.use_port_443 => {
+                        // Port 443 mode: use subdomain (no port in URL)
+                        match &h.slug {
+                            Some(slug) => format!("{}.{}", slug, h.domain),
+                            None => format!("{}.{}", service_slug, h.domain),
+                        }
+                    }
                     Some(h) => format!("{}:{}", h.domain, h.port),
                     None => "localhost".to_string(),
                 },

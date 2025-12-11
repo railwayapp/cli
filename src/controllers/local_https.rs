@@ -1,3 +1,4 @@
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -6,9 +7,16 @@ use anyhow::{Context, Result, bail};
 #[allow(dead_code)]
 pub struct HttpsConfig {
     pub project_slug: String,
-    pub domain: String,
+    pub base_domain: String,
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+    pub use_port_443: bool,
+}
+
+/// Check if port 443 is available for binding.
+/// On macOS Mojave+, unprivileged processes can bind to 443 on 0.0.0.0.
+pub fn is_port_443_available() -> bool {
+    TcpListener::bind("0.0.0.0:443").is_ok()
 }
 
 pub fn check_mkcert_installed() -> bool {
@@ -33,51 +41,85 @@ pub fn ensure_mkcert_ca() -> Result<()> {
     Ok(())
 }
 
-/// Check if certs already exist for a project
-pub fn certs_exist(_project_slug: &str, output_dir: &Path) -> bool {
+/// Check if certs already exist for a project with the required type
+pub fn certs_exist(output_dir: &Path, use_port_443: bool) -> bool {
     let cert_path = output_dir.join("cert.pem");
     let key_path = output_dir.join("key.pem");
-    cert_path.exists() && key_path.exists()
-}
+    let mode_file = output_dir.join("https_mode");
 
-/// Get config for existing certs without regenerating
-pub fn get_existing_certs(project_slug: &str, output_dir: &Path) -> HttpsConfig {
-    let domain = format!("{}.railway.localhost", project_slug);
-    HttpsConfig {
-        project_slug: project_slug.to_string(),
-        domain,
-        cert_path: output_dir.join("cert.pem"),
-        key_path: output_dir.join("key.pem"),
+    if !cert_path.exists() || !key_path.exists() {
+        return false;
+    }
+
+    // Check if the mode matches what we need
+    if let Ok(mode) = std::fs::read_to_string(&mode_file) {
+        let stored_443 = mode.trim() == "port_443";
+        stored_443 == use_port_443
+    } else {
+        // No mode file = old certs, need regeneration for port 443
+        !use_port_443
     }
 }
 
-pub fn generate_certs(project_slug: &str, output_dir: &Path) -> Result<HttpsConfig> {
-    let domain = format!("{}.railway.localhost", project_slug);
+/// Get config for existing certs without regenerating
+pub fn get_existing_certs(
+    project_slug: &str,
+    output_dir: &Path,
+    use_port_443: bool,
+) -> HttpsConfig {
+    let base_domain = format!("{}.railway.localhost", project_slug);
+    HttpsConfig {
+        project_slug: project_slug.to_string(),
+        base_domain,
+        cert_path: output_dir.join("cert.pem"),
+        key_path: output_dir.join("key.pem"),
+        use_port_443,
+    }
+}
+
+pub fn generate_certs(
+    project_slug: &str,
+    output_dir: &Path,
+    use_port_443: bool,
+) -> Result<HttpsConfig> {
+    let base_domain = format!("{}.railway.localhost", project_slug);
+    let wildcard_domain = format!("*.{}", base_domain);
 
     let cert_path = output_dir.join("cert.pem");
     let key_path = output_dir.join("key.pem");
 
     std::fs::create_dir_all(output_dir)?;
 
-    let output = Command::new("mkcert")
-        .arg("-cert-file")
+    let mut cmd = Command::new("mkcert");
+    cmd.arg("-cert-file")
         .arg(&cert_path)
         .arg("-key-file")
-        .arg(&key_path)
-        .arg(&domain)
-        .output()
-        .context("Failed to run mkcert")?;
+        .arg(&key_path);
+
+    // For port 443 mode, generate wildcard cert for all service subdomains
+    if use_port_443 {
+        cmd.arg(&wildcard_domain);
+    }
+    cmd.arg(&base_domain);
+
+    let output = cmd.output().context("Failed to run mkcert")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("mkcert failed: {}", stderr);
     }
 
+    // Save the mode so we know what type of certs we have
+    let mode_file = output_dir.join("https_mode");
+    let mode = if use_port_443 { "port_443" } else { "fallback" };
+    std::fs::write(&mode_file, mode)?;
+
     Ok(HttpsConfig {
         project_slug: project_slug.to_string(),
-        domain,
+        base_domain,
         cert_path,
         key_path,
+        use_port_443,
     })
 }
 
@@ -96,17 +138,19 @@ pub fn generate_caddyfile(services: &[ServicePort], https_config: &HttpsConfig) 
     caddyfile.push_str("    auto_https off\n");
     caddyfile.push_str("}\n\n");
 
-    // Each HTTP service gets its own port block
     for svc in services.iter().filter(|s| s.is_http) {
-        caddyfile.push_str(&format!(
-            "{}:{} {{\n",
-            https_config.domain, svc.external_port
-        ));
+        // Port 443 mode: SNI routing with subdomains (no port in URL)
+        // Fallback mode: per-service ports (current behavior)
+        let site_address = if https_config.use_port_443 {
+            format!("{}.{}", svc.slug, https_config.base_domain)
+        } else {
+            format!("{}:{}", https_config.base_domain, svc.external_port)
+        };
+
+        caddyfile.push_str(&format!("{} {{\n", site_address));
         caddyfile.push_str("    tls /certs/cert.pem /certs/key.pem\n");
 
         // Code services run on host network, image services run in Docker network
-        // For code services: proxy to internal_port (where process binds)
-        // For image services: proxy to slug:internal_port (Docker network)
         let upstream = if svc.is_code_service {
             format!("host.docker.internal:{}", svc.internal_port)
         } else {
