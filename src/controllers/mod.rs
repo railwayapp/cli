@@ -2,6 +2,7 @@ pub mod database;
 pub mod deployment;
 pub mod environment;
 pub mod environment_config;
+pub mod local_https;
 pub mod local_override;
 pub mod project;
 pub mod service;

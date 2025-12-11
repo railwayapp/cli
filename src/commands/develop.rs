@@ -9,9 +9,15 @@ use crate::{
     client::post_graphql,
     controllers::{
         environment_config::{EnvironmentConfig, ServiceInstance},
+        local_https::{
+            HttpsConfig, ServicePort, add_hosts_entry, certs_exist, check_hosts_entry,
+            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
+            get_existing_certs, remove_hosts_entry,
+        },
         local_override::{
-            OverrideMode, generate_port, get_compose_path as get_default_compose_path,
-            override_railway_vars, slugify,
+            HttpsOverride, OverrideMode, generate_port,
+            get_compose_path as get_default_compose_path, get_develop_dir, override_railway_vars,
+            slugify,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -50,6 +56,10 @@ struct UpArgs {
     /// Only generate docker-compose.yml, don't run docker compose up
     #[clap(long)]
     dry_run: bool,
+
+    /// Disable HTTPS and pretty URLs (use localhost instead)
+    #[clap(long)]
+    no_https: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -183,6 +193,22 @@ async fn down_command(args: DownArgs) -> Result<()> {
 
     if args.clean {
         if let Some(parent) = compose_path.parent() {
+            // Remove /etc/hosts entry if https_domain file exists
+            let domain_file = parent.join("https_domain");
+            if let Ok(domain) = std::fs::read_to_string(&domain_file) {
+                let domain = domain.trim();
+                if !domain.is_empty() {
+                    println!(
+                        "  {} Removing {} from /etc/hosts (requires sudo)...",
+                        "→".cyan(),
+                        domain
+                    );
+                    if let Err(e) = remove_hosts_entry(domain) {
+                        println!("  {} Failed to remove hosts entry: {}", "✗".red(), e);
+                    }
+                }
+            }
+
             std::fs::remove_dir_all(parent)?;
         }
     }
@@ -247,6 +273,13 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Set up HTTPS if not disabled
+    let https_config = if args.no_https {
+        None
+    } else {
+        setup_https(&project_data.name, &environment_id)?
+    };
+
     // Build slug -> port mappings for all image services (needed for variable substitution)
     let slug_port_mappings: HashMap<String, HashMap<i64, u16>> = image_services
         .iter()
@@ -303,6 +336,18 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
         // Get resolved variables and override Railway-specific vars
         let raw_vars = resolved_vars.get(service_id).cloned().unwrap_or_default();
+
+        // Build HTTPS override with first HTTP port for this service
+        let https_override = https_config.as_ref().and_then(|config| {
+            port_infos
+                .iter()
+                .find(|p| matches!(p.port_type, PortType::Http))
+                .map(|p| HttpsOverride {
+                    domain: &config.domain,
+                    port: p.external,
+                })
+        });
+
         let environment = override_railway_vars(
             raw_vars,
             &slug,
@@ -310,10 +355,20 @@ async fn up_command(args: UpArgs) -> Result<()> {
             &service_slugs,
             &slug_port_mappings,
             OverrideMode::DockerNetwork,
+            https_override,
         );
 
+        // When HTTPS is enabled, only expose TCP ports directly - HTTP goes through proxy
         let ports: Vec<String> = port_infos
             .iter()
+            .filter(|p| {
+                // If HTTPS enabled, don't expose HTTP ports (proxy handles them)
+                if https_config.is_some() {
+                    !matches!(p.port_type, PortType::Http)
+                } else {
+                    true
+                }
+            })
             .map(|p| format!("{}:{}", p.external, p.internal))
             .collect();
 
@@ -364,6 +419,58 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     let service_count = compose_services.len();
 
+    // Add proxy service if HTTPS is enabled
+    if let Some(ref config) = https_config {
+        // Collect HTTP service ports for Caddyfile generation
+        let service_ports: Vec<ServicePort> = service_summaries
+            .iter()
+            .flat_map(|s| {
+                s.ports.iter().map(|p| ServicePort {
+                    slug: slugify(&s.name),
+                    internal_port: p.internal,
+                    external_port: p.external,
+                    is_http: matches!(p.port_type, PortType::Http),
+                })
+            })
+            .collect();
+
+        // Build port mappings for Caddy - only HTTP services go through proxy
+        let proxy_ports: Vec<String> = service_ports
+            .iter()
+            .filter(|p| p.is_http)
+            .map(|p| format!("{}:{}", p.external_port, p.external_port))
+            .collect();
+
+        if !proxy_ports.is_empty() {
+            compose_services.insert(
+                "railway-proxy".to_string(),
+                DockerComposeService {
+                    image: "caddy:2-alpine".to_string(),
+                    command: None,
+                    restart: Some("on-failure".to_string()),
+                    environment: BTreeMap::new(),
+                    ports: proxy_ports,
+                    volumes: vec![
+                        "./Caddyfile:/etc/caddy/Caddyfile:ro".to_string(),
+                        "./certs:/certs:ro".to_string(),
+                    ],
+                    networks: vec!["railway".to_string()],
+                },
+            );
+        }
+
+        // Generate config files
+        let develop_dir = get_develop_dir(&environment_id);
+        std::fs::create_dir_all(&develop_dir)?;
+
+        // Write Caddyfile
+        let caddyfile = generate_caddyfile(&service_ports, config);
+        std::fs::write(develop_dir.join("Caddyfile"), caddyfile)?;
+
+        // Save https_domain for railway run to pick up
+        std::fs::write(develop_dir.join("https_domain"), &config.domain)?;
+    }
+
     let compose = DockerComposeFile {
         services: compose_services,
         networks: Some(DockerComposeNetworks {
@@ -374,13 +481,9 @@ async fn up_command(args: UpArgs) -> Result<()> {
         volumes: compose_volumes,
     };
 
-    let output_path = args.output.unwrap_or_else(|| {
-        let home = dirs::home_dir().expect("Unable to get home directory");
-        home.join(".railway")
-            .join("develop")
-            .join(&environment_id)
-            .join("docker-compose.yml")
-    });
+    let output_path = args
+        .output
+        .unwrap_or_else(|| get_develop_dir(&environment_id).join("docker-compose.yml"));
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -400,7 +503,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("\n{}", "Starting services...".cyan());
+    println!("{}", "Starting services...".cyan());
 
     let cmd_args = vec!["compose", "-f", output_path.to_str().unwrap(), "up", "-d"];
 
@@ -437,9 +540,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
             let networking: Vec<String> = summary
                 .ports
                 .iter()
-                .map(|p| match p.port_type {
-                    PortType::Http => format!("http://localhost:{}", p.external),
-                    PortType::Tcp => format!(":{}", p.external),
+                .map(|p| match (&https_config, &p.port_type) {
+                    (Some(config), PortType::Http) => {
+                        format!("https://{}:{}", config.domain, p.external)
+                    }
+                    (None, PortType::Http) => format!("http://localhost:{}", p.external),
+                    (_, PortType::Tcp) => format!("localhost:{}", p.external),
                 })
                 .collect();
             println!("  {}: {}", "Networking".dimmed(), networking.join(", "));
@@ -506,4 +612,69 @@ fn build_slug_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashMap<i
         }
     }
     mapping
+}
+
+fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsConfig>> {
+    use colored::Colorize;
+
+    if !check_mkcert_installed() {
+        println!("{}", "mkcert not found, falling back to HTTP mode".yellow());
+        println!("Install mkcert for HTTPS support: https://github.com/FiloSottile/mkcert");
+        return Ok(None);
+    }
+
+    let project_slug = slugify(project_name);
+    let certs_dir = get_develop_dir(environment_id).join("certs");
+
+    // Check if certs already exist
+    let (config, certs_already_exist) = if certs_exist(&project_slug, &certs_dir) {
+        (get_existing_certs(&project_slug, &certs_dir), true)
+    } else {
+        println!("{}", "Setting up local HTTPS...".cyan());
+
+        // Ensure CA is installed
+        if let Err(e) = ensure_mkcert_ca() {
+            println!("{}: {}", "Warning: Failed to install mkcert CA".yellow(), e);
+            println!("Run 'mkcert -install' manually to trust local certificates");
+        }
+
+        match generate_certs(&project_slug, &certs_dir) {
+            Ok(config) => {
+                println!("  {} Generated certs for {}", "✓".green(), config.domain);
+                (config, false)
+            }
+            Err(e) => {
+                println!(
+                    "{}: {}",
+                    "Warning: Failed to generate certificates".yellow(),
+                    e
+                );
+                println!("Falling back to HTTP mode");
+                return Ok(None);
+            }
+        }
+    };
+
+    // Check /etc/hosts entry and add if missing
+    if !check_hosts_entry(&config.domain) {
+        if certs_already_exist {
+            println!("{}", "Setting up local HTTPS...".cyan());
+        }
+        println!(
+            "  {} Adding {} to /etc/hosts (requires sudo)...",
+            "→".cyan(),
+            config.domain
+        );
+        if let Err(e) = add_hosts_entry(&config.domain) {
+            println!("  {} Failed to add hosts entry: {}", "✗".red(), e);
+            println!(
+                "    Manually run: echo \"127.0.0.1 {}\" | sudo tee -a /etc/hosts",
+                config.domain
+            );
+        } else {
+            println!("  {} Added to /etc/hosts", "✓".green());
+        }
+    }
+
+    Ok(Some(config))
 }

@@ -29,16 +29,28 @@ pub struct LocalOverrideContext {
     pub port_mappings: HashMap<String, HashMap<i64, u16>>,
     /// slug -> (internal_port -> external_port) for value substitution
     pub slug_port_mappings: HashMap<String, HashMap<i64, u16>>,
+    /// HTTPS domain for pretty URLs (e.g., "myproject.railway.dev")
+    pub https_domain: Option<String>,
 }
 
 /// Returns the path to the docker-compose.yml for a given environment
 pub fn get_compose_path(environment_id: &str) -> PathBuf {
+    get_develop_dir(environment_id).join("docker-compose.yml")
+}
+
+/// Returns the develop directory for a given environment
+pub fn get_develop_dir(environment_id: &str) -> PathBuf {
     dirs::home_dir()
         .expect("Unable to get home directory")
         .join(".railway")
         .join("develop")
         .join(environment_id)
-        .join("docker-compose.yml")
+}
+
+/// Reads the HTTPS domain from the https_domain file if it exists
+pub fn get_https_domain(environment_id: &str) -> Option<String> {
+    let domain_file = get_develop_dir(environment_id).join("https_domain");
+    std::fs::read_to_string(domain_file).ok()
 }
 
 /// Check if local develop mode is active (compose file exists)
@@ -92,10 +104,14 @@ pub async fn build_local_override_context(
         }
     }
 
+    // Check if HTTPS mode is active by looking for certs
+    let https_domain = get_https_domain(environment_id);
+
     Ok(LocalOverrideContext {
         service_slugs,
         port_mappings,
         slug_port_mappings,
+        https_domain,
     })
 }
 
@@ -137,6 +153,14 @@ pub fn apply_local_overrides(
         .cloned()
         .unwrap_or_default();
 
+    // Get first HTTP port for this service for HTTPS override
+    let https = ctx.https_domain.as_ref().and_then(|domain| {
+        port_mapping
+            .values()
+            .next()
+            .map(|&port| HttpsOverride { domain, port })
+    });
+
     override_railway_vars(
         vars,
         &service_slug,
@@ -144,6 +168,7 @@ pub fn apply_local_overrides(
         &ctx.service_slugs,
         &ctx.slug_port_mappings,
         OverrideMode::HostNetwork,
+        https,
     )
 }
 
@@ -186,6 +211,12 @@ pub fn is_deprecated_railway_var(key: &str) -> bool {
     false
 }
 
+/// HTTPS configuration for local development
+pub struct HttpsOverride<'a> {
+    pub domain: &'a str,
+    pub port: u16,
+}
+
 pub fn override_railway_vars(
     vars: BTreeMap<String, String>,
     service_slug: &str,
@@ -193,6 +224,7 @@ pub fn override_railway_vars(
     service_slugs: &HashMap<String, String>,
     slug_port_mappings: &HashMap<String, HashMap<i64, u16>>,
     mode: OverrideMode,
+    https: Option<HttpsOverride>,
 ) -> BTreeMap<String, String> {
     vars.into_iter()
         .filter(|(key, _)| !is_deprecated_railway_var(key))
@@ -202,7 +234,11 @@ pub fn override_railway_vars(
                     OverrideMode::DockerNetwork => service_slug.to_string(),
                     OverrideMode::HostNetwork => "localhost".to_string(),
                 },
-                "RAILWAY_PUBLIC_DOMAIN" | "RAILWAY_TCP_PROXY_DOMAIN" => "localhost".to_string(),
+                "RAILWAY_PUBLIC_DOMAIN" => match &https {
+                    Some(h) => format!("{}:{}", h.domain, h.port),
+                    None => "localhost".to_string(),
+                },
+                "RAILWAY_TCP_PROXY_DOMAIN" => "localhost".to_string(),
                 "RAILWAY_TCP_PROXY_PORT" => port_mapping
                     .values()
                     .next()
