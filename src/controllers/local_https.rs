@@ -86,6 +86,7 @@ pub struct ServicePort {
     pub internal_port: i64,
     pub external_port: u16,
     pub is_http: bool,
+    pub is_code_service: bool,
 }
 
 pub fn generate_caddyfile(services: &[ServicePort], https_config: &HttpsConfig) -> String {
@@ -102,10 +103,17 @@ pub fn generate_caddyfile(services: &[ServicePort], https_config: &HttpsConfig) 
             https_config.domain, svc.external_port
         ));
         caddyfile.push_str("    tls /certs/cert.pem /certs/key.pem\n");
-        caddyfile.push_str(&format!(
-            "    reverse_proxy {}:{}\n",
-            svc.slug, svc.internal_port
-        ));
+
+        // Code services run on host network, image services run in Docker network
+        // For code services: proxy to internal_port (where process binds)
+        // For image services: proxy to slug:internal_port (Docker network)
+        let upstream = if svc.is_code_service {
+            format!("host.docker.internal:{}", svc.internal_port)
+        } else {
+            format!("{}:{}", svc.slug, svc.internal_port)
+        };
+
+        caddyfile.push_str(&format!("    reverse_proxy {}\n", upstream));
         caddyfile.push_str("}\n\n");
     }
 

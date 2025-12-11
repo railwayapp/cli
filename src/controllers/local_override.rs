@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use crate::{
     client::post_graphql,
     config::Configs,
-    controllers::environment_config::{EnvironmentConfig, ServiceInstance},
+    controllers::{
+        environment_config::{EnvironmentConfig, ServiceInstance},
+        local_dev_config::LocalDevConfig,
+    },
     gql::queries::{self, project::ProjectProject},
 };
 
@@ -65,6 +68,17 @@ pub async fn build_local_override_context(
     project: &ProjectProject,
     environment_id: &str,
 ) -> Result<LocalOverrideContext> {
+    build_local_override_context_with_config(client, configs, project, environment_id, None).await
+}
+
+/// Build context from environment config with optional LocalDevConfig for code services
+pub async fn build_local_override_context_with_config(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project: &ProjectProject,
+    environment_id: &str,
+    local_dev_config: Option<&LocalDevConfig>,
+) -> Result<LocalOverrideContext> {
     let vars = queries::get_environment_config::Variables {
         id: environment_id.to_string(),
         decrypt_variables: Some(false),
@@ -101,6 +115,39 @@ pub async fn build_local_override_context(
                 slug_port_mappings.insert(slug.clone(), mapping.clone());
             }
             port_mappings.insert(service_id.clone(), mapping);
+        }
+    }
+
+    // Include code services if LocalDevConfig is provided
+    if let Some(dev_config) = local_dev_config {
+        for (service_id, svc) in config.services.iter() {
+            if svc.is_code_based() {
+                if let Some(code_config) = dev_config.services.get(service_id) {
+                    // Use configured port or infer from networking config
+                    let port = code_config
+                        .port
+                        .map(|p| p as i64)
+                        .or_else(|| svc.get_ports().first().copied())
+                        .unwrap_or(3000);
+
+                    let external_port = code_config
+                        .port
+                        .unwrap_or_else(|| generate_port(service_id, port));
+
+                    let mut mapping = HashMap::new();
+                    // For code services, map all internal ports to the configured external port
+                    for internal in svc.get_ports() {
+                        mapping.insert(internal, external_port);
+                    }
+                    // Also include the configured port itself
+                    mapping.insert(port, external_port);
+
+                    if let Some(slug) = service_slugs.get(service_id) {
+                        slug_port_mappings.insert(slug.clone(), mapping.clone());
+                    }
+                    port_mappings.insert(service_id.clone(), mapping);
+                }
+            }
         }
     }
 

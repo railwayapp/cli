@@ -120,6 +120,10 @@ impl ServiceInstance {
             .is_some_and(|s| s.image.is_some() && s.repo.is_none())
     }
 
+    pub fn is_code_based(&self) -> bool {
+        self.source.as_ref().is_none_or(|s| s.image.is_none())
+    }
+
     pub fn get_ports(&self) -> Vec<i64> {
         let mut ports = Vec::new();
         if let Some(networking) = &self.networking {
