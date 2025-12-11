@@ -10,9 +10,8 @@ use crate::{
     controllers::{
         environment_config::{EnvironmentConfig, ServiceInstance},
         local_https::{
-            HttpsConfig, ServicePort, add_hosts_entry, certs_exist, check_hosts_entry,
-            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
-            get_existing_certs, remove_hosts_entry,
+            HttpsConfig, ServicePort, certs_exist, check_mkcert_installed, ensure_mkcert_ca,
+            generate_caddyfile, generate_certs, get_existing_certs,
         },
         local_override::{
             HttpsOverride, OverrideMode, generate_port,
@@ -193,22 +192,6 @@ async fn down_command(args: DownArgs) -> Result<()> {
 
     if args.clean {
         if let Some(parent) = compose_path.parent() {
-            // Remove /etc/hosts entry if https_domain file exists
-            let domain_file = parent.join("https_domain");
-            if let Ok(domain) = std::fs::read_to_string(&domain_file) {
-                let domain = domain.trim();
-                if !domain.is_empty() {
-                    println!(
-                        "  {} Removing {} from /etc/hosts (requires sudo)...",
-                        "→".cyan(),
-                        domain
-                    );
-                    if let Err(e) = remove_hosts_entry(domain) {
-                        println!("  {} Failed to remove hosts entry: {}", "✗".red(), e);
-                    }
-                }
-            }
-
             std::fs::remove_dir_all(parent)?;
         }
     }
@@ -627,8 +610,8 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
     let certs_dir = get_develop_dir(environment_id).join("certs");
 
     // Check if certs already exist
-    let (config, certs_already_exist) = if certs_exist(&project_slug, &certs_dir) {
-        (get_existing_certs(&project_slug, &certs_dir), true)
+    let config = if certs_exist(&project_slug, &certs_dir) {
+        get_existing_certs(&project_slug, &certs_dir)
     } else {
         println!("{}", "Setting up local HTTPS...".cyan());
 
@@ -641,7 +624,7 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
         match generate_certs(&project_slug, &certs_dir) {
             Ok(config) => {
                 println!("  {} Generated certs for {}", "✓".green(), config.domain);
-                (config, false)
+                config
             }
             Err(e) => {
                 println!(
@@ -654,27 +637,6 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
             }
         }
     };
-
-    // Check /etc/hosts entry and add if missing
-    if !check_hosts_entry(&config.domain) {
-        if certs_already_exist {
-            println!("{}", "Setting up local HTTPS...".cyan());
-        }
-        println!(
-            "  {} Adding {} to /etc/hosts (requires sudo)...",
-            "→".cyan(),
-            config.domain
-        );
-        if let Err(e) = add_hosts_entry(&config.domain) {
-            println!("  {} Failed to add hosts entry: {}", "✗".red(), e);
-            println!(
-                "    Manually run: echo \"127.0.0.1 {}\" | sudo tee -a /etc/hosts",
-                config.domain
-            );
-        } else {
-            println!("  {} Added to /etc/hosts", "✓".green());
-        }
-    }
 
     Ok(Some(config))
 }

@@ -29,7 +29,7 @@ pub struct LocalOverrideContext {
     pub port_mappings: HashMap<String, HashMap<i64, u16>>,
     /// slug -> (internal_port -> external_port) for value substitution
     pub slug_port_mappings: HashMap<String, HashMap<i64, u16>>,
-    /// HTTPS domain for pretty URLs (e.g., "myproject.railway.dev")
+    /// HTTPS domain for pretty URLs (e.g., "myproject.railway.localhost")
     pub https_domain: Option<String>,
 }
 

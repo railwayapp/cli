@@ -42,7 +42,7 @@ pub fn certs_exist(_project_slug: &str, output_dir: &Path) -> bool {
 
 /// Get config for existing certs without regenerating
 pub fn get_existing_certs(project_slug: &str, output_dir: &Path) -> HttpsConfig {
-    let domain = format!("{}.railway.dev", project_slug);
+    let domain = format!("{}.railway.localhost", project_slug);
     HttpsConfig {
         project_slug: project_slug.to_string(),
         domain,
@@ -52,7 +52,7 @@ pub fn get_existing_certs(project_slug: &str, output_dir: &Path) -> HttpsConfig 
 }
 
 pub fn generate_certs(project_slug: &str, output_dir: &Path) -> Result<HttpsConfig> {
-    let domain = format!("{}.railway.dev", project_slug);
+    let domain = format!("{}.railway.localhost", project_slug);
 
     let cert_path = output_dir.join("cert.pem");
     let key_path = output_dir.join("key.pem");
@@ -79,71 +79,6 @@ pub fn generate_certs(project_slug: &str, output_dir: &Path) -> Result<HttpsConf
         cert_path,
         key_path,
     })
-}
-
-pub fn check_hosts_entry(domain: &str) -> bool {
-    std::fs::read_to_string("/etc/hosts")
-        .map(|content| content.contains(domain))
-        .unwrap_or(false)
-}
-
-pub fn add_hosts_entry(domain: &str) -> Result<()> {
-    use std::process::Stdio;
-
-    let entry = format!("127.0.0.1 {}", domain);
-
-    // Use sudo tee to append to /etc/hosts (will prompt for password)
-    let mut child = Command::new("sudo")
-        .args(["tee", "-a", "/etc/hosts"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .context("Failed to run sudo")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        writeln!(stdin, "{}", entry)?;
-    }
-
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("Failed to add hosts entry");
-    }
-
-    Ok(())
-}
-
-pub fn remove_hosts_entry(domain: &str) -> Result<()> {
-    use std::process::Stdio;
-
-    let content = std::fs::read_to_string("/etc/hosts").context("Failed to read /etc/hosts")?;
-
-    let filtered: Vec<&str> = content
-        .lines()
-        .filter(|line| !line.contains(domain))
-        .collect();
-
-    let new_content = filtered.join("\n") + "\n";
-
-    // Use sudo tee to overwrite /etc/hosts
-    let mut child = Command::new("sudo")
-        .args(["tee", "/etc/hosts"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .context("Failed to run sudo")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        write!(stdin, "{}", new_content)?;
-    }
-
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("Failed to update hosts entry");
-    }
-
-    Ok(())
 }
 
 pub struct ServicePort {
