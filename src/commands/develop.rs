@@ -57,6 +57,10 @@ struct DownArgs {
     /// Output path for docker-compose.yml (defaults to ~/.railway/develop/<project_id>/docker-compose.yml)
     #[clap(short, long)]
     output: Option<PathBuf>,
+
+    /// Remove volumes and delete compose files
+    #[clap(long)]
+    clean: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -147,16 +151,37 @@ async fn down_command(args: DownArgs) -> Result<()> {
         return Ok(());
     }
 
+    if args.clean {
+        let confirmed = crate::util::prompt::prompt_confirm_with_default(
+            "Stop services and remove volume data?",
+            false,
+        )?;
+        if !confirmed {
+            return Ok(());
+        }
+    }
+
     println!("{}", "Stopping services...".cyan());
 
+    let mut docker_args = vec!["compose", "-f", compose_path.to_str().unwrap(), "down"];
+    if args.clean {
+        docker_args.push("-v");
+    }
+
     let exit_status = tokio::process::Command::new("docker")
-        .args(["compose", "-f", compose_path.to_str().unwrap(), "down"])
+        .args(&docker_args)
         .status()
         .await?;
 
     if let Some(code) = exit_status.code() {
         if code != 0 {
             bail!("docker compose down exited with code {}", code);
+        }
+    }
+
+    if args.clean {
+        if let Some(parent) = compose_path.parent() {
+            std::fs::remove_dir_all(parent)?;
         }
     }
 
