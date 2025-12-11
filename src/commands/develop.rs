@@ -9,6 +9,10 @@ use crate::{
     client::post_graphql,
     controllers::{
         environment_config::{EnvironmentConfig, ServiceInstance},
+        local_override::{
+            OverrideMode, generate_port, get_compose_path as get_default_compose_path,
+            override_railway_vars, slugify,
+        },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
     },
@@ -128,13 +132,7 @@ async fn get_compose_path(output: &Option<PathBuf>) -> Result<PathBuf> {
 
     let configs = Configs::new()?;
     let linked_project = configs.get_linked_project().await?;
-
-    let home = dirs::home_dir().context("Unable to get home directory")?;
-    Ok(home
-        .join(".railway")
-        .join("develop")
-        .join(&linked_project.environment)
-        .join("docker-compose.yml"))
+    Ok(get_default_compose_path(&linked_project.environment))
 }
 
 fn volume_name(environment_id: &str, volume_id: &str) -> String {
@@ -222,6 +220,16 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Build slug -> port mappings for all image services (needed for variable substitution)
+    let slug_port_mappings: HashMap<String, HashMap<i64, u16>> = image_services
+        .iter()
+        .filter_map(|(service_id, svc)| {
+            let slug = service_slugs.get(*service_id)?;
+            let ports = build_slug_port_mapping(service_id, svc);
+            Some((slug.clone(), ports))
+        })
+        .collect();
+
     // Fetch resolved variables for each service in parallel
     let variable_futures: Vec<_> = image_services
         .iter()
@@ -268,7 +276,14 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
         // Get resolved variables and override Railway-specific vars
         let raw_vars = resolved_vars.get(service_id).cloned().unwrap_or_default();
-        let environment = override_railway_vars(raw_vars, &slug, &port_mapping, &service_slugs);
+        let environment = override_railway_vars(
+            raw_vars,
+            &slug,
+            &port_mapping,
+            &service_slugs,
+            &slug_port_mappings,
+            OverrideMode::DockerNetwork,
+        );
 
         let ports: Vec<String> = port_infos
             .iter()
@@ -402,7 +417,11 @@ async fn up_command(args: UpArgs) -> Result<()> {
             println!("  {}: {}", "Networking".dimmed(), networking.join(", "));
         }
         if !summary.volumes.is_empty() {
-            let label = if summary.volumes.len() == 1 { "Volume" } else { "Volumes" };
+            let label = if summary.volumes.len() == 1 {
+                "Volume"
+            } else {
+                "Volumes"
+            };
             println!("  {}: {}", label.dimmed(), summary.volumes.join(", "));
         }
         println!();
@@ -414,7 +433,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
 fn build_port_infos(service_id: &str, svc: &ServiceInstance) -> Vec<PortInfo> {
     let mut port_infos = Vec::new();
     if let Some(networking) = &svc.networking {
-        // HTTP ports from service domains
         for config in networking.service_domains.values().flatten() {
             if let Some(port) = config.port {
                 if !port_infos.iter().any(|p: &PortInfo| p.internal == port) {
@@ -426,7 +444,6 @@ fn build_port_infos(service_id: &str, svc: &ServiceInstance) -> Vec<PortInfo> {
                 }
             }
         }
-        // TCP ports from tcp_proxies
         for port_str in networking.tcp_proxies.keys() {
             if let Ok(port) = port_str.parse::<i64>() {
                 if !port_infos.iter().any(|p| p.internal == port) {
@@ -442,74 +459,23 @@ fn build_port_infos(service_id: &str, svc: &ServiceInstance) -> Vec<PortInfo> {
     port_infos
 }
 
-fn slugify(name: &str) -> String {
-    let s: String = name
-        .chars()
-        .filter_map(|c| {
-            if c.is_ascii_alphanumeric() {
-                Some(c.to_ascii_lowercase())
-            } else if c == ' ' || c == '-' || c == '_' {
-                Some('-')
-            } else {
-                None
+fn build_slug_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashMap<i64, u16> {
+    let mut mapping = HashMap::new();
+    if let Some(networking) = &svc.networking {
+        for config in networking.service_domains.values().flatten() {
+            if let Some(port) = config.port {
+                mapping
+                    .entry(port)
+                    .or_insert_with(|| generate_port(service_id, port));
             }
-        })
-        .collect();
-    s.trim_matches('-').to_string()
-}
-
-fn generate_port(service_id: &str, internal_port: i64) -> u16 {
-    let mut hash: u32 = 5381;
-    for b in service_id.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
-    }
-    hash = hash.wrapping_add(internal_port as u32);
-    // range 10000-60000
-    10000 + (hash % 50000) as u16
-}
-
-fn is_deprecated_railway_var(key: &str) -> bool {
-    if key == "RAILWAY_STATIC_URL" {
-        return true;
-    }
-    // RAILWAY_SERVICE_{name}_URL is deprecated, but RAILWAY_SERVICE_ID and RAILWAY_SERVICE_NAME are not
-    if key.starts_with("RAILWAY_SERVICE_") && key.ends_with("_URL") {
-        return true;
-    }
-    false
-}
-
-fn override_railway_vars(
-    vars: BTreeMap<String, String>,
-    service_slug: &str,
-    port_mapping: &HashMap<i64, u16>,
-    service_slugs: &HashMap<String, String>,
-) -> BTreeMap<String, String> {
-    vars.into_iter()
-        .filter(|(key, _)| !is_deprecated_railway_var(key))
-        .map(|(key, value)| {
-            let new_value = match key.as_str() {
-                "RAILWAY_PRIVATE_DOMAIN" => service_slug.to_string(),
-                "RAILWAY_PUBLIC_DOMAIN" | "RAILWAY_TCP_PROXY_DOMAIN" => "localhost".to_string(),
-                "RAILWAY_TCP_PROXY_PORT" => port_mapping
-                    .values()
-                    .next()
-                    .map(|p| p.to_string())
-                    .unwrap_or(value),
-                _ => replace_private_domain_refs(&value, service_slugs),
-            };
-            (key, new_value)
-        })
-        .collect()
-}
-
-fn replace_private_domain_refs(value: &str, service_slugs: &HashMap<String, String>) -> String {
-    let mut result = value.to_string();
-    for slug in service_slugs.values() {
-        let railway_domain = format!("{}.railway.internal", slug);
-        if result.contains(&railway_domain) {
-            result = result.replace(&railway_domain, slug);
+        }
+        for port_str in networking.tcp_proxies.keys() {
+            if let Ok(port) = port_str.parse::<i64>() {
+                mapping
+                    .entry(port)
+                    .or_insert_with(|| generate_port(service_id, port));
+            }
         }
     }
-    result
+    mapping
 }

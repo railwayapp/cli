@@ -4,6 +4,9 @@ use is_terminal::IsTerminal;
 use crate::{
     controllers::{
         environment::get_matched_environment,
+        local_override::{
+            apply_local_overrides, build_local_override_context, is_local_develop_active,
+        },
         project::{ensure_project_and_environment_exist, get_project},
         variables::get_service_variables,
     },
@@ -23,6 +26,10 @@ pub struct Args {
     /// Environment to pull variables from (defaults to linked environment)
     #[clap(short, long)]
     environment: Option<String>,
+
+    /// Skip local develop overrides even if docker-compose.yml exists
+    #[clap(long)]
+    no_local: bool,
 
     /// Args to pass to the command
     #[clap(trailing_var_arg = true)]
@@ -89,16 +96,24 @@ pub async fn command(args: Args) -> Result<()> {
         .unwrap_or(linked_project.environment.clone());
 
     let environment_id = get_matched_environment(&project, environment)?.id;
-    let service = get_service(&configs, &project, args.service).await?;
+    let service = get_service(&configs, &project, args.service.clone()).await?;
 
-    let variables = get_service_variables(
+    let mut variables = get_service_variables(
         &client,
         &configs,
         linked_project.project.clone(),
-        environment_id,
-        service,
+        environment_id.clone(),
+        service.clone(),
     )
     .await?;
+
+    // Apply local overrides if develop mode is active
+    if !args.no_local && is_local_develop_active(&environment_id) {
+        let ctx =
+            build_local_override_context(&client, &configs, &project, &environment_id).await?;
+        variables = apply_local_overrides(variables, &service, &ctx);
+        eprintln!("{}", "Using local develop services".yellow());
+    }
 
     // a bit janky :/
     ctrlc::set_handler(move || {
