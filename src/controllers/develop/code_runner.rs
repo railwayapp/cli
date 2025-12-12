@@ -76,6 +76,14 @@ impl ProcessManager {
             .spawn()
             .with_context(|| format!("Failed to spawn '{}'", command))?;
 
+        let cmd_log = LogLine {
+            service_name: service_name.clone(),
+            message: format!("$ {}", command),
+            is_stderr: false,
+            color,
+        };
+        let _ = log_tx.send(cmd_log).await;
+
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
 
