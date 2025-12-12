@@ -360,7 +360,40 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
 
         // If no existing config, do initial setup first
         if local_dev_config.get_service(&service_id).is_none() {
-            let new_config = prompt_service_config(&name, svc, None)?;
+            let mut new_config = prompt_service_config(&name, svc, None)?;
+
+            // Check for port conflicts with existing services
+            if let Some(port) = new_config.port {
+                let conflicts: Vec<_> = local_dev_config
+                    .services
+                    .iter()
+                    .filter(|(id, cfg)| *id != &service_id && cfg.port == Some(port))
+                    .map(|(id, _)| {
+                        service_names
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_else(|| id.clone())
+                    })
+                    .collect();
+
+                if !conflicts.is_empty() {
+                    println!(
+                        "\n{} Port {} is already used by: {}",
+                        "Warning:".yellow().bold(),
+                        port,
+                        conflicts.join(", ")
+                    );
+                    let suggested = generate_random_port();
+                    let port_input =
+                        prompt_text(&format!("Choose a different port [{}]:", suggested))?;
+                    new_config.port = Some(if port_input.is_empty() {
+                        suggested
+                    } else {
+                        port_input.parse().context("Invalid port number")?
+                    });
+                }
+            }
+
             local_dev_config.set_service(service_id.clone(), new_config);
             local_dev_config.save(&project_id)?;
             println!("{} Configured '{}'", "✓".green(), name);
@@ -431,11 +464,41 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                     let port_input =
                         prompt_text(&format!("Port for '{}' [{}]:", name, current_port))?;
 
-                    let new_port = if port_input.is_empty() {
+                    let mut new_port = if port_input.is_empty() {
                         current_port
                     } else {
                         port_input.parse().context("Invalid port number")?
                     };
+
+                    // Check for port conflicts
+                    let conflicts: Vec<_> = local_dev_config
+                        .services
+                        .iter()
+                        .filter(|(id, cfg)| *id != &service_id && cfg.port == Some(new_port))
+                        .map(|(id, _)| {
+                            service_names
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| id.clone())
+                        })
+                        .collect();
+
+                    if !conflicts.is_empty() {
+                        println!(
+                            "\n{} Port {} is already used by: {}",
+                            "Warning:".yellow().bold(),
+                            new_port,
+                            conflicts.join(", ")
+                        );
+                        let suggested = generate_random_port();
+                        let port_input =
+                            prompt_text(&format!("Choose a different port [{}]:", suggested))?;
+                        new_port = if port_input.is_empty() {
+                            suggested
+                        } else {
+                            port_input.parse().context("Invalid port number")?
+                        };
+                    }
 
                     let mut updated = existing.clone();
                     updated.port = Some(new_port);
@@ -566,18 +629,17 @@ fn prompt_service_config(
         resolved.to_string_lossy().to_string()
     };
 
-    // Infer port from networking config
+    // Prompt for port if service has networking config
     let inferred_port = svc.get_ports().first().map(|&p| p as u16);
-    let port = if let Some(p) = inferred_port {
-        println!("  {} Using port {} from Railway config", "✓".green(), p);
-        Some(p)
-    } else if let Some(existing_port) = existing.and_then(|e| e.port) {
-        println!(
-            "  {} Using previously configured port {}",
-            "✓".green(),
-            existing_port
-        );
-        Some(existing_port)
+    let default_port = existing.and_then(|e| e.port).or(inferred_port);
+
+    let port = if let Some(default) = default_port {
+        let port_input = prompt_text(&format!("Port for '{}' [{}]:", name, default))?;
+        if port_input.is_empty() {
+            Some(default)
+        } else {
+            Some(port_input.parse().context("Invalid port number")?)
+        }
     } else {
         None
     };
@@ -587,6 +649,96 @@ fn prompt_service_config(
         directory,
         port,
     })
+}
+
+fn generate_random_port() -> u16 {
+    use rand::Rng;
+    rand::thread_rng().gen_range(3000..9000)
+}
+
+/// Returns a list of (port, service_names) for ports that have multiple services
+fn detect_port_conflicts(
+    configs: &HashMap<String, CodeServiceConfig>,
+    service_names: &HashMap<String, String>,
+) -> Vec<(u16, Vec<String>)> {
+    let mut port_to_services: HashMap<u16, Vec<String>> = HashMap::new();
+
+    for (service_id, config) in configs {
+        if let Some(port) = config.port {
+            let name = service_names
+                .get(service_id)
+                .cloned()
+                .unwrap_or_else(|| service_id.clone());
+            port_to_services.entry(port).or_default().push(name);
+        }
+    }
+
+    port_to_services
+        .into_iter()
+        .filter(|(_, services)| services.len() > 1)
+        .collect()
+}
+
+/// Detects and resolves port conflicts. Returns true if conflicts were resolved, false if none.
+fn resolve_port_conflicts(
+    local_dev_config: &mut LocalDevConfig,
+    service_names: &HashMap<String, String>,
+    project_id: &str,
+) -> Result<bool> {
+    let conflicts = detect_port_conflicts(&local_dev_config.services, service_names);
+    if conflicts.is_empty() {
+        return Ok(false);
+    }
+
+    if !std::io::stdout().is_terminal() {
+        for (port, services) in &conflicts {
+            eprintln!(
+                "{} Port {} is used by multiple services: {}",
+                "Error:".red().bold(),
+                port,
+                services.join(", ")
+            );
+        }
+        anyhow::bail!("Port conflicts detected. Run 'railway develop configure' to resolve.");
+    }
+
+    println!("\n{} Port conflicts detected:", "Warning:".yellow().bold());
+    for (port, services) in &conflicts {
+        println!("  Port {}: {}", port, services.join(", "));
+    }
+    println!();
+
+    // Prompt to resolve each conflict - skip first service, reconfigure the rest
+    for (port, conflicting_services) in conflicts {
+        for service_name in conflicting_services.iter().skip(1) {
+            let service_id = service_names
+                .iter()
+                .find(|(_, name)| *name == service_name)
+                .map(|(id, _)| id.clone());
+
+            if let Some(service_id) = service_id {
+                let suggested = generate_random_port();
+                let port_input = prompt_text(&format!(
+                    "New port for '{}' (currently {}) [{}]:",
+                    service_name, port, suggested
+                ))?;
+
+                let new_port = if port_input.is_empty() {
+                    suggested
+                } else {
+                    port_input.parse().context("Invalid port number")?
+                };
+
+                if let Some(mut cfg) = local_dev_config.get_service(&service_id).cloned() {
+                    cfg.port = Some(new_port);
+                    local_dev_config.set_service(service_id, cfg);
+                }
+            }
+        }
+    }
+    local_dev_config.save(project_id)?;
+    println!();
+    Ok(true)
 }
 
 async fn up_command(args: UpArgs) -> Result<()> {
@@ -681,6 +833,9 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .iter()
         .filter(|(id, _)| local_dev_config.services.contains_key(*id))
         .collect();
+
+    // Check for and resolve port conflicts among configured code services
+    resolve_port_conflicts(&mut local_dev_config, &service_names, &project_id)?;
 
     if image_services.is_empty() && configured_code_services.is_empty() {
         if config.services.is_empty() {
@@ -1115,22 +1270,23 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
         let working_dir = PathBuf::from(&dev_config.directory);
 
-        // Get port info for this service
+        // Get port info for this service (only if networking is configured)
         // internal_port: what the process binds to (for private domain, direct localhost access)
         // proxy_port: what Caddy exposes (for public domain, HTTPS access)
         let internal_port = dev_config
             .port
             .map(|p| p as i64)
-            .or_else(|| svc.get_ports().first().copied())
-            .unwrap_or(3000);
-        let proxy_port = generate_port(service_id, internal_port);
+            .or_else(|| svc.get_ports().first().copied());
+        let proxy_port = internal_port.map(|p| generate_port(service_id, p));
 
         // Port mapping for private domain refs - map to internal_port (direct localhost)
         let mut port_mapping = HashMap::new();
-        for port in svc.get_ports() {
-            port_mapping.insert(port, internal_port as u16);
+        if let Some(port) = internal_port {
+            for p in svc.get_ports() {
+                port_mapping.insert(p, port as u16);
+            }
+            port_mapping.insert(port, port as u16);
         }
-        port_mapping.insert(internal_port, internal_port as u16);
 
         // Get and transform variables
         let raw_vars = code_resolved_vars
@@ -1139,12 +1295,15 @@ async fn up_command(args: UpArgs) -> Result<()> {
             .unwrap_or_default();
 
         // HttpsOverride uses proxy_port for RAILWAY_PUBLIC_DOMAIN
-        let https_override = https_config.as_ref().map(|config| HttpsOverride {
-            domain: &config.base_domain,
-            port: proxy_port,
-            slug: Some(slug.clone()),
-            use_port_443: config.use_port_443,
-        });
+        let https_override = match (&https_config, proxy_port) {
+            (Some(config), Some(port)) => Some(HttpsOverride {
+                domain: &config.base_domain,
+                port,
+                slug: Some(slug.clone()),
+                use_port_443: config.use_port_443,
+            }),
+            _ => None,
+        };
 
         let mut vars = override_railway_vars(
             raw_vars,
@@ -1156,20 +1315,23 @@ async fn up_command(args: UpArgs) -> Result<()> {
             https_override,
         );
 
-        vars.insert("PORT".to_string(), internal_port.to_string());
+        // Only set PORT if service has networking configured
+        if let Some(port) = internal_port {
+            vars.insert("PORT".to_string(), port.to_string());
+        }
 
         println!("{}", service_name.green().bold());
         println!("  {}: {}", "Command".dimmed(), dev_config.command);
         println!("  {}: {}", "Directory".dimmed(), working_dir.display());
         println!("  {}: {} variables", "Variables".dimmed(), vars.len());
-        if dev_config.port.is_some() {
+        if let (Some(port), Some(pport)) = (internal_port, proxy_port) {
             println!("  {}:", "Networking".dimmed());
             match &https_config {
                 Some(config) => {
                     println!(
                         "    {}: http://localhost:{}",
                         "Private".dimmed(),
-                        internal_port
+                        port
                     );
                     if config.use_port_443 {
                         println!(
@@ -1183,12 +1345,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
                             "    {}:  https://{}:{}",
                             "Public".dimmed(),
                             config.base_domain,
-                            proxy_port
+                            pport
                         );
                     }
                 }
                 None => {
-                    println!("    http://localhost:{}", internal_port);
+                    println!("    http://localhost:{}", port);
                 }
             }
         }
