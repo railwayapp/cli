@@ -688,7 +688,8 @@ async fn up_command(args: UpArgs) -> Result<()> {
         setup_https(&project_data.name, &project_id)?
     };
 
-    // Build slug -> port mappings for all services (needed for variable substitution)
+    // Maps service slug -> (internal_port -> external_port) for variable substitution.
+    // Used to rewrite "{slug}.railway.internal:{port}" refs in any service's variables.
     let mut slug_port_mappings: HashMap<String, HashMap<i64, u16>> = image_services
         .iter()
         .filter_map(|(service_id, svc)| {
@@ -698,8 +699,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         })
         .collect();
 
-    // Add code service port mappings
-    // For code services: internal_port is what process binds to, used for private domain refs
+    // Code services run on host, not Docker - all configured ports map to the single bound port
     for (service_id, svc) in &configured_code_services {
         if let Some(slug) = service_slugs.get(*service_id) {
             if let Some(dev_config) = local_dev_config.get_service(service_id) {
@@ -708,7 +708,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
                     .map(|p| p as i64)
                     .or_else(|| svc.get_ports().first().copied())
                     .unwrap_or(3000);
-                // For private domain refs, map to internal_port (direct localhost access)
                 let mut mapping = HashMap::new();
                 for port in svc.get_ports() {
                     mapping.insert(port, internal_port as u16);
@@ -971,7 +970,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
             }
         }
 
-        // Wait for services to be ready before starting code services
+        // Wait for containers before starting code services that depend on them
         if !configured_code_services.is_empty() {
             println!("\n{}", "Waiting for services to be ready...".dimmed());
             wait_for_services(&output_path, Duration::from_secs(60)).await?;
