@@ -27,6 +27,14 @@ pub fn check_mkcert_installed() -> bool {
         .unwrap_or(false)
 }
 
+pub fn check_docker_compose_installed() -> bool {
+    Command::new("docker")
+        .args(["compose", "version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 pub fn ensure_mkcert_ca() -> Result<()> {
     let output = Command::new("mkcert")
         .arg("-install")

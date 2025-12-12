@@ -15,10 +15,11 @@ use crate::{
             DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
             HttpsConfig, HttpsOverride, LocalDevConfig, OverrideMode, PortType, ProcessManager,
             ServicePort, ServiceSummary, build_port_infos, build_slug_port_mapping, certs_exist,
-            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
-            generate_port, get_compose_path as develop_get_compose_path, get_develop_dir,
-            get_existing_certs, get_https_mode, is_port_443_available, override_railway_vars,
-            print_log_line, slugify, volume_name,
+            check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
+            generate_caddyfile, generate_certs, generate_port,
+            get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
+            get_https_mode, is_port_443_available, override_railway_vars, print_log_line, slugify,
+            volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -118,7 +119,20 @@ async fn get_compose_path(output: &Option<PathBuf>) -> Result<PathBuf> {
     Ok(develop_get_compose_path(&linked_project.project))
 }
 
+fn require_docker_compose() {
+    if !check_docker_compose_installed() {
+        eprintln!(
+            "{}",
+            "Docker Compose not found. Install Docker: https://docs.docker.com/engine/install/"
+                .yellow()
+        );
+        std::process::exit(1);
+    }
+}
+
 async fn down_command(args: DownArgs) -> Result<()> {
+    require_docker_compose();
+
     let compose_path = get_compose_path(&args.output).await?;
 
     if !compose_path.exists() {
@@ -144,6 +158,8 @@ async fn down_command(args: DownArgs) -> Result<()> {
 }
 
 async fn clean_command(args: CleanArgs) -> Result<()> {
+    require_docker_compose();
+
     let compose_path = get_compose_path(&args.output).await?;
 
     if !compose_path.exists() {
@@ -405,6 +421,8 @@ fn prompt_service_config(
 }
 
 async fn up_command(args: UpArgs) -> Result<()> {
+    require_docker_compose();
+
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
