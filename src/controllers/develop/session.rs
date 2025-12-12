@@ -28,7 +28,10 @@ impl DevelopSessionLock {
 
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Self { _file: file, path }),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
                 bail!(
                     "Another develop session is already running for this project.\n\
                      Stop it with Ctrl+C before starting a new one."
