@@ -128,3 +128,90 @@ pub fn build_slug_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashM
     }
     mapping
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controllers::config::{DomainConfig, ServiceInstance, ServiceNetworking};
+
+    #[test]
+    fn test_volume_name() {
+        assert_eq!(
+            volume_name("env-12345678-xxxx", "vol-abcdefgh-yyyy"),
+            "railway_env-1234_vol-abcd"
+        );
+    }
+
+    #[test]
+    fn test_build_port_infos_with_http_domain() {
+        let svc = ServiceInstance {
+            networking: Some(ServiceNetworking {
+                service_domains: BTreeMap::from([(
+                    "example.up.railway.app".to_string(),
+                    Some(DomainConfig { port: Some(8080) }),
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ports = build_port_infos("svc-123", &svc);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].internal, 8080);
+        assert!(matches!(ports[0].port_type, PortType::Http));
+    }
+
+    #[test]
+    fn test_build_port_infos_with_tcp_proxy() {
+        let svc = ServiceInstance {
+            networking: Some(ServiceNetworking {
+                tcp_proxies: BTreeMap::from([("6379".to_string(), None)]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ports = build_port_infos("redis-svc", &svc);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].internal, 6379);
+        assert!(matches!(ports[0].port_type, PortType::Tcp));
+    }
+
+    #[test]
+    fn test_build_port_infos_deduplicates() {
+        let svc = ServiceInstance {
+            networking: Some(ServiceNetworking {
+                service_domains: BTreeMap::from([
+                    (
+                        "a.railway.app".to_string(),
+                        Some(DomainConfig { port: Some(3000) }),
+                    ),
+                    (
+                        "b.railway.app".to_string(),
+                        Some(DomainConfig { port: Some(3000) }),
+                    ),
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ports = build_port_infos("svc", &svc);
+        assert_eq!(ports.len(), 1);
+    }
+
+    #[test]
+    fn test_build_slug_port_mapping() {
+        let svc = ServiceInstance {
+            networking: Some(ServiceNetworking {
+                service_domains: BTreeMap::from([(
+                    "example.railway.app".to_string(),
+                    Some(DomainConfig { port: Some(8080) }),
+                )]),
+                tcp_proxies: BTreeMap::from([("5432".to_string(), None)]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mapping = build_slug_port_mapping("svc-123", &svc);
+        assert!(mapping.contains_key(&8080));
+        assert!(mapping.contains_key(&5432));
+    }
+}

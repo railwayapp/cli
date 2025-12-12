@@ -70,3 +70,29 @@ impl LocalDevConfig {
         self.services.remove(service_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_service_operations() {
+        let mut config = LocalDevConfig::default();
+        assert!(config.get_service("svc-123").is_none());
+
+        config.set_service(
+            "svc-123".to_string(),
+            CodeServiceConfig {
+                command: "npm start".to_string(),
+                directory: "/app".to_string(),
+                port: Some(3000),
+            },
+        );
+
+        assert!(config.get_service("svc-123").is_some());
+        assert_eq!(config.get_service("svc-123").unwrap().command, "npm start");
+
+        config.remove_service("svc-123");
+        assert!(config.get_service("svc-123").is_none());
+    }
+}

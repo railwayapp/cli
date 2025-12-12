@@ -162,3 +162,115 @@ pub fn generate_caddyfile(services: &[ServicePort], https_config: &HttpsConfig) 
 
     caddyfile
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_generate_caddyfile_port_443_mode() {
+        let services = vec![ServicePort {
+            slug: "api".to_string(),
+            internal_port: 3000,
+            external_port: 12345,
+            is_http: true,
+            is_code_service: false,
+        }];
+        let config = HttpsConfig {
+            project_slug: "myproj".to_string(),
+            base_domain: "myproj.railway.localhost".to_string(),
+            cert_path: PathBuf::from("/certs/cert.pem"),
+            key_path: PathBuf::from("/certs/key.pem"),
+            use_port_443: true,
+        };
+        let result = generate_caddyfile(&services, &config);
+        assert!(result.contains("api.myproj.railway.localhost {"));
+        assert!(result.contains("reverse_proxy api:3000"));
+    }
+
+    #[test]
+    fn test_generate_caddyfile_fallback_mode() {
+        let services = vec![ServicePort {
+            slug: "api".to_string(),
+            internal_port: 3000,
+            external_port: 12345,
+            is_http: true,
+            is_code_service: false,
+        }];
+        let config = HttpsConfig {
+            project_slug: "myproj".to_string(),
+            base_domain: "myproj.railway.localhost".to_string(),
+            cert_path: PathBuf::from("/certs/cert.pem"),
+            key_path: PathBuf::from("/certs/key.pem"),
+            use_port_443: false,
+        };
+        let result = generate_caddyfile(&services, &config);
+        assert!(result.contains("myproj.railway.localhost:12345 {"));
+        assert!(result.contains("reverse_proxy api:3000"));
+    }
+
+    #[test]
+    fn test_generate_caddyfile_code_service() {
+        let services = vec![ServicePort {
+            slug: "web".to_string(),
+            internal_port: 8080,
+            external_port: 54321,
+            is_http: true,
+            is_code_service: true,
+        }];
+        let config = HttpsConfig {
+            project_slug: "myproj".to_string(),
+            base_domain: "myproj.railway.localhost".to_string(),
+            cert_path: PathBuf::from("/certs/cert.pem"),
+            key_path: PathBuf::from("/certs/key.pem"),
+            use_port_443: false,
+        };
+        let result = generate_caddyfile(&services, &config);
+        assert!(result.contains("reverse_proxy host.docker.internal:8080"));
+    }
+
+    #[test]
+    fn test_generate_caddyfile_filters_non_http() {
+        let services = vec![
+            ServicePort {
+                slug: "api".to_string(),
+                internal_port: 3000,
+                external_port: 12345,
+                is_http: true,
+                is_code_service: false,
+            },
+            ServicePort {
+                slug: "redis".to_string(),
+                internal_port: 6379,
+                external_port: 54321,
+                is_http: false,
+                is_code_service: false,
+            },
+        ];
+        let config = HttpsConfig {
+            project_slug: "myproj".to_string(),
+            base_domain: "myproj.railway.localhost".to_string(),
+            cert_path: PathBuf::from("/certs/cert.pem"),
+            key_path: PathBuf::from("/certs/key.pem"),
+            use_port_443: false,
+        };
+        let result = generate_caddyfile(&services, &config);
+        assert!(result.contains("api"));
+        assert!(!result.contains("redis"));
+    }
+
+    #[test]
+    fn test_certs_exist_returns_false_when_missing() {
+        let temp = TempDir::new().unwrap();
+        assert!(!certs_exist(temp.path(), false));
+    }
+
+    #[test]
+    fn test_certs_exist_returns_true_when_present() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("cert.pem"), "cert").unwrap();
+        std::fs::write(temp.path().join("key.pem"), "key").unwrap();
+        assert!(certs_exist(temp.path(), false));
+    }
+}
