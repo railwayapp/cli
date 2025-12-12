@@ -409,11 +409,12 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                     let directory = if input_path.is_absolute() {
                         input_path.to_string_lossy().to_string()
                     } else {
-                        cwd.join(&input_path)
-                            .canonicalize()
-                            .unwrap_or_else(|_| cwd.join(&input_path))
-                            .to_string_lossy()
-                            .to_string()
+                        let joined = cwd.join(&input_path);
+                        #[cfg(unix)]
+                        let resolved = joined.canonicalize().unwrap_or(joined);
+                        #[cfg(windows)]
+                        let resolved = joined;
+                        resolved.to_string_lossy().to_string()
                     };
 
                     let mut updated = existing.clone();
@@ -557,11 +558,12 @@ fn prompt_service_config(
     let directory = if input_path.is_absolute() {
         input_path.to_string_lossy().to_string()
     } else {
-        cwd.join(&input_path)
-            .canonicalize()
-            .unwrap_or_else(|_| cwd.join(&input_path))
-            .to_string_lossy()
-            .to_string()
+        let joined = cwd.join(&input_path);
+        #[cfg(unix)]
+        let resolved = joined.canonicalize().unwrap_or(joined);
+        #[cfg(windows)]
+        let resolved = joined;
+        resolved.to_string_lossy().to_string()
     };
 
     // Infer port from networking config
