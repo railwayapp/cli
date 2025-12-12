@@ -13,7 +13,7 @@ pub mod completion;
 pub mod connect;
 pub mod deploy;
 pub mod deployment;
-pub mod develop;
+pub mod dev;
 pub mod docs;
 pub mod domain;
 pub mod down;

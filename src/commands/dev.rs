@@ -41,8 +41,10 @@ pub struct Args {
 enum DevelopCommand {
     /// Start services (default when no subcommand provided)
     Up(UpArgs),
-    /// Stop and remove services
+    /// Stop services
     Down(DownArgs),
+    /// Stop services and remove volumes/data
+    Clean(CleanArgs),
     /// Configure local code services
     Configure(ConfigureArgs),
 }
@@ -82,16 +84,25 @@ struct DownArgs {
     /// Output path for docker-compose.yml (defaults to ~/.railway/develop/<project_id>/docker-compose.yml)
     #[clap(short, long)]
     output: Option<PathBuf>,
+}
 
-    /// Remove volumes and delete compose files
-    #[clap(long)]
-    clean: bool,
+#[derive(Debug, Parser)]
+struct CleanArgs {
+    /// Output path for docker-compose.yml (defaults to ~/.railway/develop/<project_id>/docker-compose.yml)
+    #[clap(short, long)]
+    output: Option<PathBuf>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    eprintln!(
+        "{}",
+        "Experimental feature. API may change without notice.".yellow()
+    );
+
     match args.command {
         Some(DevelopCommand::Up(args)) => up_command(args).await,
         Some(DevelopCommand::Down(args)) => down_command(args).await,
+        Some(DevelopCommand::Clean(args)) => clean_command(args).await,
         Some(DevelopCommand::Configure(args)) => configure_command(args).await,
         None => up_command(UpArgs::default()).await,
     }
@@ -115,25 +126,10 @@ async fn down_command(args: DownArgs) -> Result<()> {
         return Ok(());
     }
 
-    if args.clean {
-        let confirmed = crate::util::prompt::prompt_confirm_with_default(
-            "Stop services and remove volume data?",
-            false,
-        )?;
-        if !confirmed {
-            return Ok(());
-        }
-    }
-
     println!("{}", "Stopping services...".cyan());
 
-    let mut docker_args = vec!["compose", "-f", compose_path.to_str().unwrap(), "down"];
-    if args.clean {
-        docker_args.push("-v");
-    }
-
     let exit_status = tokio::process::Command::new("docker")
-        .args(&docker_args)
+        .args(["compose", "-f", compose_path.to_str().unwrap(), "down"])
         .status()
         .await?;
 
@@ -143,13 +139,50 @@ async fn down_command(args: DownArgs) -> Result<()> {
         }
     }
 
-    if args.clean {
-        if let Some(parent) = compose_path.parent() {
-            std::fs::remove_dir_all(parent)?;
+    println!("{}", "Services stopped".green());
+    Ok(())
+}
+
+async fn clean_command(args: CleanArgs) -> Result<()> {
+    let compose_path = get_compose_path(&args.output).await?;
+
+    if !compose_path.exists() {
+        println!("{}", "Nothing to clean".green());
+        return Ok(());
+    }
+
+    let confirmed = crate::util::prompt::prompt_confirm_with_default(
+        "Stop services and remove volume data?",
+        false,
+    )?;
+    if !confirmed {
+        return Ok(());
+    }
+
+    println!("{}", "Cleaning up services...".cyan());
+
+    let exit_status = tokio::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            compose_path.to_str().unwrap(),
+            "down",
+            "-v",
+        ])
+        .status()
+        .await?;
+
+    if let Some(code) = exit_status.code() {
+        if code != 0 {
+            bail!("docker compose down exited with code {}", code);
         }
     }
 
-    println!("{}", "Services stopped".green());
+    if let Some(parent) = compose_path.parent() {
+        std::fs::remove_dir_all(parent)?;
+    }
+
+    println!("{}", "Services cleaned".green());
     Ok(())
 }
 
@@ -778,7 +811,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
         // Wait for services to be ready before starting code services
         if !configured_code_services.is_empty() {
-            println!("{}", "Waiting for services to be ready...".dimmed());
+            println!("\n{}", "Waiting for services to be ready...".dimmed());
             wait_for_services(&output_path, Duration::from_secs(60)).await?;
         }
     }
@@ -791,9 +824,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
             "services"
         };
         println!(
-            "\n{}\n",
-            format!("Started {} image {} locally", service_count, svc_word).green()
+            " {} Started {} image {}",
+            "✓".green(),
+            service_count,
+            svc_word
         );
+        println!();
 
         for summary in &service_summaries {
             println!("{}", summary.name.green().bold());
@@ -1132,10 +1168,6 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
             }
         }
     };
-
-    if use_port_443 {
-        println!("  {} Using port 443 for prettier URLs", "✓".green());
-    }
 
     Ok(Some(config))
 }
