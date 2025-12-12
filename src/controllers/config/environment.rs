@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 /// Root environment config from `environment.config` GraphQL field
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentConfig {
     #[serde(default)]
@@ -20,7 +20,7 @@ pub struct EnvironmentConfig {
     pub private_network_disabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceInstance {
     #[serde(default)]
@@ -39,7 +39,7 @@ pub struct ServiceInstance {
     pub is_deleted: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceSource {
     pub image: Option<String>,
@@ -48,7 +48,7 @@ pub struct ServiceSource {
     pub root_directory: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceNetworking {
     #[serde(default)]
@@ -60,15 +60,15 @@ pub struct ServiceNetworking {
     pub private_network_endpoint: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct DomainConfig {
     pub port: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct TcpProxyConfig {}
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Variable {
     pub value: Option<String>,
@@ -77,7 +77,7 @@ pub struct Variable {
     pub is_optional: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployConfig {
     pub start_command: Option<String>,
@@ -86,7 +86,7 @@ pub struct DeployConfig {
     pub cron_schedule: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildConfig {
     pub builder: Option<String>,
@@ -94,20 +94,20 @@ pub struct BuildConfig {
     pub dockerfile_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeInstance {
     pub size_mb: Option<i64>,
     pub region: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BucketInstance {
     pub region: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeMount {
     pub mount_path: Option<String>,

@@ -5,25 +5,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::{
     client::post_graphql,
     controllers::{
-        develop_lock::DevelopSessionLock,
-        environment_config::{EnvironmentConfig, ServiceInstance},
-        local_dev_config::{CodeServiceConfig, LocalDevConfig},
-        local_https::{
-            HttpsConfig, ServicePort, certs_exist, check_mkcert_installed, ensure_mkcert_ca,
-            generate_caddyfile, generate_certs, get_existing_certs, is_port_443_available,
+        config::{EnvironmentConfig, ServiceInstance},
+        develop::{
+            CodeServiceConfig, ComposeServiceStatus, DevelopSessionLock, DockerComposeFile,
+            DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
+            HttpsConfig, HttpsOverride, LocalDevConfig, OverrideMode, PortType, ProcessManager,
+            ServicePort, ServiceSummary, build_port_infos, build_slug_port_mapping, certs_exist,
+            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
+            generate_port, get_compose_path as develop_get_compose_path, get_develop_dir,
+            get_existing_certs, get_https_mode, is_port_443_available, override_railway_vars,
+            print_log_line, slugify, volume_name,
         },
-        local_override::{
-            HttpsOverride, OverrideMode, generate_port,
-            get_compose_path as get_default_compose_path, get_develop_dir, get_https_mode,
-            override_railway_vars, slugify,
-        },
-        process_manager::{ProcessManager, print_log_line},
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
     },
@@ -92,67 +89,6 @@ struct DownArgs {
     clean: bool,
 }
 
-#[derive(Debug, Clone)]
-enum PortType {
-    Http,
-    Tcp,
-}
-
-#[derive(Debug, Clone)]
-struct PortInfo {
-    internal: i64,
-    external: u16,    // Docker exposed port for direct access (private domain)
-    public_port: u16, // Caddy exposed port for HTTPS access (public domain)
-    port_type: PortType,
-}
-
-struct ServiceSummary {
-    name: String,
-    image: String,
-    var_count: usize,
-    ports: Vec<PortInfo>,
-    volumes: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct DockerComposeFile {
-    services: BTreeMap<String, DockerComposeService>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    networks: Option<DockerComposeNetworks>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    volumes: BTreeMap<String, DockerComposeVolume>,
-}
-
-#[derive(Debug, Serialize)]
-struct DockerComposeVolume {}
-
-#[derive(Debug, Serialize)]
-struct DockerComposeNetworks {
-    railway: DockerComposeNetwork,
-}
-
-#[derive(Debug, Serialize)]
-struct DockerComposeNetwork {
-    driver: String,
-}
-
-#[derive(Debug, Serialize)]
-struct DockerComposeService {
-    image: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    restart: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    environment: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    ports: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    volumes: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    networks: Vec<String>,
-}
-
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Some(DevelopCommand::Up(args)) => up_command(args).await,
@@ -169,11 +105,7 @@ async fn get_compose_path(output: &Option<PathBuf>) -> Result<PathBuf> {
 
     let configs = Configs::new()?;
     let linked_project = configs.get_linked_project().await?;
-    Ok(get_default_compose_path(&linked_project.environment))
-}
-
-fn volume_name(environment_id: &str, volume_id: &str) -> String {
-    format!("railway_{}_{}", &environment_id[..8], &volume_id[..8])
+    Ok(develop_get_compose_path(&linked_project.environment))
 }
 
 async fn down_command(args: DownArgs) -> Result<()> {
@@ -1117,18 +1049,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-struct ComposeServiceStatus {
-    #[serde(rename = "Service")]
-    service: String,
-    #[serde(rename = "State")]
-    state: String,
-    #[serde(rename = "Health")]
-    health: String,
-    #[serde(rename = "ExitCode")]
-    exit_code: i32,
-}
-
 async fn wait_for_services(compose_path: &Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
 
@@ -1176,62 +1096,6 @@ async fn wait_for_services(compose_path: &Path, timeout: Duration) -> Result<()>
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-}
-
-fn build_port_infos(service_id: &str, svc: &ServiceInstance) -> Vec<PortInfo> {
-    let mut port_infos = Vec::new();
-    if let Some(networking) = &svc.networking {
-        for config in networking.service_domains.values().flatten() {
-            if let Some(port) = config.port {
-                if !port_infos.iter().any(|p: &PortInfo| p.internal == port) {
-                    let private_port = generate_port(service_id, port);
-                    // Generate different port for Caddy HTTPS (offset by 1 to get different hash)
-                    let public_port = generate_port(service_id, port + 10000);
-                    port_infos.push(PortInfo {
-                        internal: port,
-                        external: private_port,
-                        public_port,
-                        port_type: PortType::Http,
-                    });
-                }
-            }
-        }
-        for port_str in networking.tcp_proxies.keys() {
-            if let Ok(port) = port_str.parse::<i64>() {
-                if !port_infos.iter().any(|p| p.internal == port) {
-                    let ext_port = generate_port(service_id, port);
-                    port_infos.push(PortInfo {
-                        internal: port,
-                        external: ext_port,
-                        public_port: ext_port, // TCP doesn't use Caddy
-                        port_type: PortType::Tcp,
-                    });
-                }
-            }
-        }
-    }
-    port_infos
-}
-
-fn build_slug_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashMap<i64, u16> {
-    let mut mapping = HashMap::new();
-    if let Some(networking) = &svc.networking {
-        for config in networking.service_domains.values().flatten() {
-            if let Some(port) = config.port {
-                mapping
-                    .entry(port)
-                    .or_insert_with(|| generate_port(service_id, port));
-            }
-        }
-        for port_str in networking.tcp_proxies.keys() {
-            if let Ok(port) = port_str.parse::<i64>() {
-                mapping
-                    .entry(port)
-                    .or_insert_with(|| generate_port(service_id, port));
-            }
-        }
-    }
-    mapping
 }
 
 fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsConfig>> {

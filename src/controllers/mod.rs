@@ -1,8 +1,9 @@
+pub mod config;
 pub mod database;
 pub mod deployment;
+pub mod develop;
 pub mod develop_lock;
 pub mod environment;
-pub mod environment_config;
 pub mod local_dev_config;
 pub mod local_https;
 pub mod local_override;

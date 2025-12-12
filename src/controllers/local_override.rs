@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::PathBuf,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 
@@ -9,20 +6,19 @@ use crate::{
     client::post_graphql,
     config::Configs,
     controllers::{
-        environment_config::{EnvironmentConfig, ServiceInstance},
+        config::{EnvironmentConfig, ServiceInstance},
         local_dev_config::LocalDevConfig,
     },
     gql::queries::{self, project::ProjectProject},
 };
 
-/// Mode for variable overrides - affects how domains/ports are transformed
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverrideMode {
-    /// For docker-compose services - use service slugs for inter-container communication
-    DockerNetwork,
-    /// For host commands - use localhost with external ports
-    HostNetwork,
-}
+// Re-export from develop modules for backward compatibility
+pub use crate::controllers::develop::ports::{
+    generate_port, get_https_domain, get_https_mode, is_local_develop_active, slugify,
+};
+pub use crate::controllers::develop::variables::{
+    HttpsOverride, OverrideMode, override_railway_vars,
+};
 
 /// Context for applying local variable overrides
 pub struct LocalOverrideContext {
@@ -36,31 +32,6 @@ pub struct LocalOverrideContext {
     pub https_domain: Option<String>,
     /// Whether using port 443 mode (prettier URLs without port numbers)
     pub use_port_443: bool,
-}
-
-/// Returns the path to the docker-compose.yml for a given environment
-pub fn get_compose_path(environment_id: &str) -> PathBuf {
-    get_develop_dir(environment_id).join("docker-compose.yml")
-}
-
-/// Returns the develop directory for a given environment
-pub fn get_develop_dir(environment_id: &str) -> PathBuf {
-    dirs::home_dir()
-        .expect("Unable to get home directory")
-        .join(".railway")
-        .join("develop")
-        .join(environment_id)
-}
-
-/// Reads the HTTPS domain from the https_domain file if it exists
-pub fn get_https_domain(environment_id: &str) -> Option<String> {
-    let domain_file = get_develop_dir(environment_id).join("https_domain");
-    std::fs::read_to_string(domain_file).ok()
-}
-
-/// Check if local develop mode is active (compose file exists)
-pub fn is_local_develop_active(environment_id: &str) -> bool {
-    get_compose_path(environment_id).exists()
 }
 
 /// Build context from environment config (fetches from API)
@@ -187,16 +158,6 @@ fn build_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashMap<i64, u
     mapping
 }
 
-/// Reads the HTTPS mode from the https_mode file if it exists
-pub fn get_https_mode(environment_id: &str) -> bool {
-    let mode_file = get_develop_dir(environment_id)
-        .join("certs")
-        .join("https_mode");
-    std::fs::read_to_string(mode_file)
-        .map(|m| m.trim() == "port_443")
-        .unwrap_or(false)
-}
-
 /// Apply local overrides to variables for the run command (host network mode)
 pub fn apply_local_overrides(
     vars: BTreeMap<String, String>,
@@ -233,162 +194,4 @@ pub fn apply_local_overrides(
         OverrideMode::HostNetwork,
         https,
     )
-}
-
-// --- Shared functions (used by both develop and run) ---
-
-pub fn slugify(name: &str) -> String {
-    let s: String = name
-        .chars()
-        .filter_map(|c| {
-            if c.is_ascii_alphanumeric() {
-                Some(c.to_ascii_lowercase())
-            } else if c == ' ' || c == '-' || c == '_' {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .collect();
-    s.trim_matches('-').to_string()
-}
-
-pub fn generate_port(service_id: &str, internal_port: i64) -> u16 {
-    let mut hash: u32 = 5381;
-    for b in service_id.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
-    }
-    hash = hash.wrapping_add(internal_port as u32);
-    // range 10000-60000
-    10000 + (hash % 50000) as u16
-}
-
-pub fn is_deprecated_railway_var(key: &str) -> bool {
-    if key == "RAILWAY_STATIC_URL" {
-        return true;
-    }
-    // RAILWAY_SERVICE_{name}_URL is deprecated, but RAILWAY_SERVICE_ID and RAILWAY_SERVICE_NAME are not
-    if key.starts_with("RAILWAY_SERVICE_") && key.ends_with("_URL") {
-        return true;
-    }
-    false
-}
-
-/// HTTPS configuration for local development
-pub struct HttpsOverride<'a> {
-    pub domain: &'a str,
-    pub port: u16,
-    /// Service slug for subdomain-based routing (port 443 mode)
-    pub slug: Option<String>,
-    /// Whether using port 443 mode (prettier URLs without port numbers)
-    pub use_port_443: bool,
-}
-
-pub fn override_railway_vars(
-    vars: BTreeMap<String, String>,
-    service_slug: &str,
-    port_mapping: &HashMap<i64, u16>,
-    service_slugs: &HashMap<String, String>,
-    slug_port_mappings: &HashMap<String, HashMap<i64, u16>>,
-    mode: OverrideMode,
-    https: Option<HttpsOverride>,
-) -> BTreeMap<String, String> {
-    vars.into_iter()
-        .filter(|(key, _)| !is_deprecated_railway_var(key))
-        .map(|(key, value)| {
-            let new_value = match key.as_str() {
-                "RAILWAY_PRIVATE_DOMAIN" => match mode {
-                    OverrideMode::DockerNetwork => service_slug.to_string(),
-                    OverrideMode::HostNetwork => "localhost".to_string(),
-                },
-                "RAILWAY_PUBLIC_DOMAIN" => match &https {
-                    Some(h) if h.use_port_443 => {
-                        // Port 443 mode: use subdomain (no port in URL)
-                        match &h.slug {
-                            Some(slug) => format!("{}.{}", slug, h.domain),
-                            None => format!("{}.{}", service_slug, h.domain),
-                        }
-                    }
-                    Some(h) => format!("{}:{}", h.domain, h.port),
-                    None => "localhost".to_string(),
-                },
-                "RAILWAY_TCP_PROXY_DOMAIN" => "localhost".to_string(),
-                "RAILWAY_TCP_PROXY_PORT" => port_mapping
-                    .values()
-                    .next()
-                    .map(|p| p.to_string())
-                    .unwrap_or(value),
-                _ => replace_domain_refs(&value, service_slugs, slug_port_mappings, mode),
-            };
-            (key, new_value)
-        })
-        .collect()
-}
-
-fn replace_domain_refs(
-    value: &str,
-    service_slugs: &HashMap<String, String>,
-    slug_port_mappings: &HashMap<String, HashMap<i64, u16>>,
-    mode: OverrideMode,
-) -> String {
-    let mut result = value.to_string();
-
-    for slug in service_slugs.values() {
-        let port_mapping = slug_port_mappings.get(slug);
-
-        // Replace {slug}.railway.internal:{port} patterns
-        let railway_domain = format!("{}.railway.internal", slug);
-        if result.contains(&railway_domain) {
-            match mode {
-                OverrideMode::DockerNetwork => {
-                    // For docker network, just use the slug (containers resolve by name)
-                    result = result.replace(&railway_domain, slug);
-                }
-                OverrideMode::HostNetwork => {
-                    // For host network, replace with localhost and map ports
-                    if let Some(ports) = port_mapping {
-                        result = replace_domain_with_port_mapping(&result, &railway_domain, ports);
-                    } else {
-                        result = result.replace(&railway_domain, "localhost");
-                    }
-                }
-            }
-        }
-
-        // For host network mode, also replace bare {slug}:{port} patterns
-        // Only replace exact patterns to avoid replacing protocol schemes like redis://
-        if mode == OverrideMode::HostNetwork {
-            if let Some(ports) = port_mapping {
-                for (internal, external) in ports {
-                    let old_pattern = format!("{}:{}", slug, internal);
-                    let new_pattern = format!("localhost:{}", external);
-                    result = result.replace(&old_pattern, &new_pattern);
-                }
-            }
-        }
-    }
-
-    result
-}
-
-/// Replace domain:port patterns with localhost:external_port
-/// Also replaces bare domain references (for .railway.internal domains)
-fn replace_domain_with_port_mapping(
-    value: &str,
-    domain: &str,
-    port_mapping: &HashMap<i64, u16>,
-) -> String {
-    let mut result = value.to_string();
-
-    for (internal, external) in port_mapping {
-        let old_pattern = format!("{}:{}", domain, internal);
-        let new_pattern = format!("localhost:{}", external);
-        result = result.replace(&old_pattern, &new_pattern);
-    }
-
-    // Replace any remaining bare domain references with localhost
-    // This is safe for .railway.internal domains but should not be used for bare slugs
-    result = result.replace(domain, "localhost");
-
-    result
 }
