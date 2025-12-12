@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use crate::{
     client::post_graphql,
     controllers::{
+        develop_lock::DevelopSessionLock,
         environment_config::{EnvironmentConfig, ServiceInstance},
         local_dev_config::{CodeServiceConfig, LocalDevConfig},
         local_https::{
@@ -19,8 +20,8 @@ use crate::{
         },
         local_override::{
             HttpsOverride, OverrideMode, generate_port,
-            get_compose_path as get_default_compose_path, get_develop_dir, override_railway_vars,
-            slugify,
+            get_compose_path as get_default_compose_path, get_develop_dir, get_https_mode,
+            override_railway_vars, slugify,
         },
         process_manager::{ProcessManager, print_log_line},
         project::{self, ensure_project_and_environment_exist},
@@ -897,7 +898,11 @@ async fn up_command(args: UpArgs) -> Result<()> {
                 for p in &summary.ports {
                     match (&https_config, &p.port_type) {
                         (Some(config), PortType::Http) => {
-                            println!("    {}: http://localhost:{}", "Private".dimmed(), p.external);
+                            println!(
+                                "    {}: http://localhost:{}",
+                                "Private".dimmed(),
+                                p.external
+                            );
                             if config.use_port_443 {
                                 println!(
                                     "    {}:  https://{}.{}",
@@ -939,6 +944,9 @@ async fn up_command(args: UpArgs) -> Result<()> {
     if configured_code_services.is_empty() {
         return Ok(());
     }
+
+    // Acquire exclusive lock for this environment's code services
+    let _session_lock = DevelopSessionLock::try_acquire(&environment_id)?;
 
     // Spawn code services as child processes
     println!("{}", "Starting code services...".cyan());
@@ -1036,7 +1044,11 @@ async fn up_command(args: UpArgs) -> Result<()> {
         println!("  {}:", "Networking".dimmed());
         match &https_config {
             Some(config) => {
-                println!("    {}: http://localhost:{}", "Private".dimmed(), internal_port);
+                println!(
+                    "    {}: http://localhost:{}",
+                    "Private".dimmed(),
+                    internal_port
+                );
                 if config.use_port_443 {
                     println!(
                         "    {}:  https://{}.{}",
@@ -1231,8 +1243,8 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
         return Ok(None);
     }
 
-    // Check if port 443 is available for prettier URLs
-    let use_port_443 = is_port_443_available();
+    // Check if we're already in port 443 mode, or if port 443 is available
+    let use_port_443 = get_https_mode(environment_id) || is_port_443_available();
 
     let project_slug = slugify(project_name);
     let certs_dir = get_develop_dir(environment_id).join("certs");

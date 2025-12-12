@@ -1,5 +1,6 @@
 pub mod database;
 pub mod deployment;
+pub mod develop_lock;
 pub mod environment;
 pub mod environment_config;
 pub mod local_dev_config;
