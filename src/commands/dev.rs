@@ -241,6 +241,14 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
     let env_response = fetch_environment_config(&client, &configs, &environment_id, false).await?;
     let config = env_response.config;
 
+    if config.services.is_empty() {
+        println!(
+            "{}",
+            "No services in this environment. Add services with 'railway add'.".yellow()
+        );
+        return Ok(());
+    }
+
     let code_services: Vec<_> = config
         .services
         .iter()
@@ -250,7 +258,8 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
     if code_services.is_empty() {
         println!(
             "{}",
-            "No code-based services found in this environment".yellow()
+            "No code-based services found. This environment only has image-based services."
+                .yellow()
         );
         return Ok(());
     }
@@ -672,10 +681,17 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .collect();
 
     if image_services.is_empty() && configured_code_services.is_empty() {
-        println!(
-            "No services to run in environment '{}'. Use 'railway develop configure' to set up code services.",
-            env_name
-        );
+        if config.services.is_empty() {
+            println!(
+                "No services in environment '{}'. Add services with 'railway add'.",
+                env_name
+            );
+        } else {
+            println!(
+                "No services to run in environment '{}'. Use 'railway develop configure' to set up code services.",
+                env_name
+            );
+        }
         return Ok(());
     }
 
