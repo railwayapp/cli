@@ -24,7 +24,7 @@ use crate::{
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
     },
-    util::prompt::{prompt_options, prompt_path_with_default, prompt_text},
+    util::prompt::{prompt_multi_options, prompt_options, prompt_path_with_default, prompt_text},
 };
 
 use clap::Subcommand;
@@ -368,12 +368,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                     .services
                     .iter()
                     .filter(|(id, cfg)| *id != &service_id && cfg.port == Some(port))
-                    .map(|(id, _)| {
-                        service_names
-                            .get(id)
-                            .cloned()
-                            .unwrap_or_else(|| id.clone())
-                    })
+                    .map(|(id, _)| service_names.get(id).cloned().unwrap_or_else(|| id.clone()))
                     .collect();
 
                 if !conflicts.is_empty() {
@@ -475,12 +470,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                         .services
                         .iter()
                         .filter(|(id, cfg)| *id != &service_id && cfg.port == Some(new_port))
-                        .map(|(id, _)| {
-                            service_names
-                                .get(id)
-                                .cloned()
-                                .unwrap_or_else(|| id.clone())
-                        })
+                        .map(|(id, _)| service_names.get(id).cloned().unwrap_or_else(|| id.clone()))
                         .collect();
 
                     if !conflicts.is_empty() {
@@ -656,6 +646,90 @@ fn generate_random_port() -> u16 {
     rand::thread_rng().gen_range(3000..9000)
 }
 
+/// Prompts user to select and configure multiple services at once
+fn prompt_initial_service_setup(
+    code_services: &[(&String, &ServiceInstance)],
+    service_names: &HashMap<String, String>,
+    config: &crate::controllers::config::EnvironmentConfig,
+    local_dev_config: &mut LocalDevConfig,
+) -> Result<()> {
+    println!("\n{}", "Configure local code services".cyan().bold());
+    println!("{}", "(Press space to select, enter to confirm)".dimmed());
+
+    let options: Vec<_> = code_services
+        .iter()
+        .map(|(id, _)| CodeServiceDisplay {
+            service_id: (*id).clone(),
+            name: service_names
+                .get(*id)
+                .cloned()
+                .unwrap_or_else(|| (*id).clone()),
+            configured: false,
+        })
+        .collect();
+
+    let selected = prompt_multi_options("Select services to configure:", options)?;
+
+    for service_display in &selected {
+        let svc = config
+            .services
+            .get(&service_display.service_id)
+            .context("Service not found")?;
+        let name = &service_display.name;
+
+        let mut new_config = prompt_service_config(name, svc, None)?;
+
+        // Check for port conflicts with already-configured services
+        if let Some(port) = new_config.port {
+            let conflicts: Vec<_> = local_dev_config
+                .services
+                .iter()
+                .filter(|(id, cfg)| *id != &service_display.service_id && cfg.port == Some(port))
+                .map(|(id, _)| service_names.get(id).cloned().unwrap_or_else(|| id.clone()))
+                .collect();
+
+            if !conflicts.is_empty() {
+                println!(
+                    "\n{} Port {} is already used by: {}",
+                    "Warning:".yellow().bold(),
+                    port,
+                    conflicts.join(", ")
+                );
+                let suggested = generate_random_port();
+                let port_input = prompt_text(&format!("Choose a different port [{}]:", suggested))?;
+                new_config.port = Some(if port_input.is_empty() {
+                    suggested
+                } else {
+                    port_input.parse().context("Invalid port number")?
+                });
+            }
+        }
+
+        local_dev_config.set_service(service_display.service_id.clone(), new_config);
+    }
+
+    // Show summary if any services were configured
+    if !selected.is_empty() {
+        println!("\n{}", "Configured services:".green().bold());
+        for service_display in &selected {
+            if let Some(cfg) = local_dev_config.get_service(&service_display.service_id) {
+                let port_str = cfg
+                    .port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "  {} {} (port {})",
+                    "•".dimmed(),
+                    service_display.name.cyan(),
+                    port_str
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Returns a list of (port, service_names) for ports that have multiple services
 fn detect_port_conflicts(
     configs: &HashMap<String, CodeServiceConfig>,
@@ -789,42 +863,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     // Only prompt for first-time setup (no local-dev.json file yet)
     if !config_file_exists && !code_services.is_empty() && std::io::stdout().is_terminal() {
-        println!("\n{}", "Configure local code services".cyan().bold());
-
-        let mut options = vec![CodeServiceDisplay {
-            service_id: String::new(),
-            name: "None".to_string(),
-            configured: false,
-        }];
-
-        options.extend(code_services.iter().map(|(id, _)| {
-            CodeServiceDisplay {
-                service_id: (*id).clone(),
-                name: service_names
-                    .get(*id)
-                    .cloned()
-                    .unwrap_or_else(|| (*id).clone()),
-                configured: false,
-            }
-        }));
-
-        let selected = prompt_options("Select service to configure:", options)?;
-
-        if !selected.service_id.is_empty() {
-            let svc = config
-                .services
-                .get(&selected.service_id)
-                .context("Service not found")?;
-            let name = service_names
-                .get(&selected.service_id)
-                .cloned()
-                .unwrap_or_else(|| selected.service_id.clone());
-
-            let new_config = prompt_service_config(&name, svc, None)?;
-            local_dev_config.set_service(selected.service_id, new_config);
-        }
-
-        // Always save to prevent prompting again
+        prompt_initial_service_setup(
+            &code_services,
+            &service_names,
+            &config,
+            &mut local_dev_config,
+        )?;
         local_dev_config.save(&project_id)?;
         println!();
     }
@@ -1328,11 +1372,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
             println!("  {}:", "Networking".dimmed());
             match &https_config {
                 Some(config) => {
-                    println!(
-                        "    {}: http://localhost:{}",
-                        "Private".dimmed(),
-                        port
-                    );
+                    println!("    {}: http://localhost:{}", "Private".dimmed(), port);
                     if config.use_port_443 {
                         println!(
                             "    {}:  https://{}.{}",
