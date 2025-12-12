@@ -1155,32 +1155,34 @@ async fn up_command(args: UpArgs) -> Result<()> {
         println!("  {}: {}", "Command".dimmed(), dev_config.command);
         println!("  {}: {}", "Directory".dimmed(), working_dir.display());
         println!("  {}: {} variables", "Variables".dimmed(), vars.len());
-        println!("  {}:", "Networking".dimmed());
-        match &https_config {
-            Some(config) => {
-                println!(
-                    "    {}: http://localhost:{}",
-                    "Private".dimmed(),
-                    internal_port
-                );
-                if config.use_port_443 {
+        if dev_config.port.is_some() {
+            println!("  {}:", "Networking".dimmed());
+            match &https_config {
+                Some(config) => {
                     println!(
-                        "    {}:  https://{}.{}",
-                        "Public".dimmed(),
-                        slug,
-                        config.base_domain
+                        "    {}: http://localhost:{}",
+                        "Private".dimmed(),
+                        internal_port
                     );
-                } else {
-                    println!(
-                        "    {}:  https://{}:{}",
-                        "Public".dimmed(),
-                        config.base_domain,
-                        proxy_port
-                    );
+                    if config.use_port_443 {
+                        println!(
+                            "    {}:  https://{}.{}",
+                            "Public".dimmed(),
+                            slug,
+                            config.base_domain
+                        );
+                    } else {
+                        println!(
+                            "    {}:  https://{}:{}",
+                            "Public".dimmed(),
+                            config.base_domain,
+                            proxy_port
+                        );
+                    }
                 }
-            }
-            None => {
-                println!("    http://localhost:{}", internal_port);
+                None => {
+                    println!("    http://localhost:{}", internal_port);
+                }
             }
         }
         println!();
