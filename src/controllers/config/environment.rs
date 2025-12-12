@@ -1,3 +1,4 @@
+// Fields on deserialization structs may not all be read
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -147,13 +148,6 @@ impl ServiceInstance {
             }
         }
         ports
-    }
-
-    pub fn get_env_vars(&self) -> BTreeMap<String, String> {
-        self.variables
-            .iter()
-            .filter_map(|(k, v)| v.value.clone().map(|val| (k.clone(), val)))
-            .collect()
     }
 }
 

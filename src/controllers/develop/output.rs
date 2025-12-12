@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::compose::PortInfo;
 
 pub struct ServiceSummary {
