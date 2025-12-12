@@ -7,8 +7,8 @@ use crate::{
     controllers::{
         config::{ServiceInstance, fetch_environment_config},
         develop::{
-            HttpsOverride, LocalDevConfig, OverrideMode, generate_port, get_https_domain,
-            get_https_mode, override_railway_vars, slugify,
+            HttpsOverride, LocalDevConfig, OverrideMode, build_service_endpoints, generate_port,
+            get_https_domain, get_https_mode, override_railway_vars,
         },
     },
     gql::queries::project::ProjectProject,
@@ -58,10 +58,7 @@ pub async fn build_local_override_context_with_config(
         .map(|e| (e.node.id.clone(), e.node.name.clone()))
         .collect();
 
-    let service_slugs: HashMap<String, String> = service_names
-        .iter()
-        .map(|(id, name)| (id.clone(), slugify(name)))
-        .collect();
+    let service_slugs = build_service_endpoints(&service_names, &config);
 
     let mut port_mappings = HashMap::new();
     let mut slug_port_mappings = HashMap::new();

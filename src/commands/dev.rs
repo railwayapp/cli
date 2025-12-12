@@ -14,12 +14,12 @@ use crate::{
             CodeServiceConfig, ComposeServiceStatus, DevelopSessionLock, DockerComposeFile,
             DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
             HttpsConfig, HttpsOverride, LocalDevConfig, OverrideMode, PortType, ProcessManager,
-            ServicePort, ServiceSummary, build_port_infos, build_slug_port_mapping, certs_exist,
-            check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
-            generate_caddyfile, generate_certs, generate_port,
-            get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
-            get_https_mode, is_port_443_available, override_railway_vars, print_log_line, slugify,
-            volume_name,
+            ServicePort, ServiceSummary, build_port_infos, build_service_endpoints,
+            build_slug_port_mapping, certs_exist, check_docker_compose_installed,
+            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
+            generate_port, get_compose_path as develop_get_compose_path, get_develop_dir,
+            get_existing_certs, get_https_mode, is_port_443_available, override_railway_vars,
+            print_log_line, slugify, volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -607,19 +607,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
     let env_name = env_response.name;
     let config = env_response.config;
 
-    // Use privateNetworkEndpoint when available, fall back to slugified name
-    let service_slugs: HashMap<String, String> = service_names
-        .iter()
-        .map(|(id, name)| {
-            let endpoint = config
-                .services
-                .get(id)
-                .and_then(|svc| svc.networking.as_ref())
-                .and_then(|n| n.private_network_endpoint.clone())
-                .unwrap_or_else(|| slugify(name));
-            (id.clone(), endpoint)
-        })
-        .collect();
+    let service_slugs = build_service_endpoints(&service_names, &config);
 
     let image_services: Vec<_> = config
         .services

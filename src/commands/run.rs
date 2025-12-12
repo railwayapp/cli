@@ -107,7 +107,7 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
 
-    if !args.no_local && is_local_develop_active(&environment_id) {
+    if !args.no_local && is_local_develop_active(&project.id) {
         let ctx =
             build_local_override_context(&client, &configs, &project, &environment_id).await?;
         variables = apply_local_overrides(variables, &service, &ctx);
