@@ -684,16 +684,27 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     if image_services.is_empty() && configured_code_services.is_empty() {
         if config.services.is_empty() {
+            println!();
             println!(
-                "No services in environment '{}'. Add services with 'railway add'.",
-                env_name
+                "No services in environment {}",
+                env_name.blue().bold()
+            );
+            println!(
+                "Add services with {}",
+                "railway add".cyan()
             );
         } else {
+            println!();
             println!(
-                "No services to run in environment '{}'. Use 'railway develop configure' to set up code services.",
-                env_name
+                "No services to run in environment {}",
+                env_name.blue().bold()
+            );
+            println!(
+                "Use {} to set up code services",
+                "railway develop configure".cyan()
             );
         }
+        println!();
         return Ok(());
     }
 
