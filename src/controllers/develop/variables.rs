@@ -31,13 +31,18 @@ pub fn is_deprecated_railway_var(key: &str) -> bool {
     false
 }
 
+/// Maps production public domain -> local public domain for cross-service references
+pub type PublicDomainMapping = HashMap<String, String>;
+
 /// Transform Railway variables for local development
+#[allow(clippy::too_many_arguments)]
 pub fn override_railway_vars(
     vars: BTreeMap<String, String>,
     service_slug: &str,
     port_mapping: &HashMap<i64, u16>,
     service_slugs: &HashMap<String, String>,
     slug_port_mappings: &HashMap<String, HashMap<i64, u16>>,
+    public_domain_mapping: &PublicDomainMapping,
     mode: OverrideMode,
     https: Option<HttpsOverride>,
 ) -> BTreeMap<String, String> {
@@ -66,7 +71,13 @@ pub fn override_railway_vars(
                     .next()
                     .map(|p| p.to_string())
                     .unwrap_or(value),
-                _ => replace_domain_refs(&value, service_slugs, slug_port_mappings, mode),
+                _ => replace_domain_refs(
+                    &value,
+                    service_slugs,
+                    slug_port_mappings,
+                    public_domain_mapping,
+                    mode,
+                ),
             };
             (key, new_value)
         })
@@ -77,6 +88,7 @@ fn replace_domain_refs(
     value: &str,
     service_slugs: &HashMap<String, String>,
     slug_port_mappings: &HashMap<String, HashMap<i64, u16>>,
+    public_domain_mapping: &PublicDomainMapping,
     mode: OverrideMode,
 ) -> String {
     let mut result = value.to_string();
@@ -114,6 +126,11 @@ fn replace_domain_refs(
                 }
             }
         }
+    }
+
+    // Replace production public domains with local equivalents
+    for (prod_domain, local_domain) in public_domain_mapping {
+        result = result.replace(prod_domain, local_domain);
     }
 
     result
@@ -166,6 +183,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             OverrideMode::DockerNetwork,
             None,
         );
@@ -187,6 +205,7 @@ mod tests {
         let result = override_railway_vars(
             vars,
             "my-service",
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -218,6 +237,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             OverrideMode::HostNetwork,
             Some(https),
         );
@@ -241,6 +261,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             OverrideMode::HostNetwork,
             None,
         );
@@ -248,5 +269,106 @@ mod tests {
         assert!(!result.contains_key("RAILWAY_STATIC_URL"));
         assert!(!result.contains_key("RAILWAY_SERVICE_API_URL"));
         assert!(result.contains_key("DATABASE_URL"));
+    }
+
+    #[test]
+    fn test_replace_cross_service_domains() {
+        let mut vars = BTreeMap::new();
+        // Private domain reference
+        vars.insert(
+            "REDIS_URL".to_string(),
+            "redis://redis.railway.internal:6379".to_string(),
+        );
+        // Public domain references (railway + custom)
+        vars.insert(
+            "API_URL".to_string(),
+            "https://api-prod.up.railway.app/v1".to_string(),
+        );
+        vars.insert(
+            "CUSTOM_URL".to_string(),
+            "https://api.mycompany.io/graphql".to_string(),
+        );
+        // Multiple domains in one var
+        vars.insert(
+            "COMBINED".to_string(),
+            "api=https://api-prod.up.railway.app,custom=https://api.mycompany.io".to_string(),
+        );
+
+        let mut service_slugs = HashMap::new();
+        service_slugs.insert("svc-redis".to_string(), "redis".to_string());
+
+        let mut slug_port_mappings = HashMap::new();
+        let mut redis_ports = HashMap::new();
+        redis_ports.insert(6379i64, 16379u16);
+        slug_port_mappings.insert("redis".to_string(), redis_ports);
+
+        let mut public_domain_mapping = HashMap::new();
+        public_domain_mapping.insert(
+            "api-prod.up.railway.app".to_string(),
+            "api.local.railway.localhost".to_string(),
+        );
+        public_domain_mapping.insert(
+            "api.mycompany.io".to_string(),
+            "custom.local.railway.localhost".to_string(),
+        );
+
+        let result = override_railway_vars(
+            vars,
+            "my-service",
+            &HashMap::new(),
+            &service_slugs,
+            &slug_port_mappings,
+            &public_domain_mapping,
+            OverrideMode::HostNetwork,
+            None,
+        );
+
+        assert_eq!(
+            result.get("REDIS_URL"),
+            Some(&"redis://localhost:16379".to_string())
+        );
+        assert_eq!(
+            result.get("API_URL"),
+            Some(&"https://api.local.railway.localhost/v1".to_string())
+        );
+        assert_eq!(
+            result.get("CUSTOM_URL"),
+            Some(&"https://custom.local.railway.localhost/graphql".to_string())
+        );
+        assert_eq!(
+            result.get("COMBINED"),
+            Some(
+                &"api=https://api.local.railway.localhost,custom=https://custom.local.railway.localhost"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_private_domain_docker_mode() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "REDIS_URL".to_string(),
+            "redis://redis.railway.internal:6379".to_string(),
+        );
+
+        let mut service_slugs = HashMap::new();
+        service_slugs.insert("svc-redis".to_string(), "redis".to_string());
+
+        let result = override_railway_vars(
+            vars,
+            "my-service",
+            &HashMap::new(),
+            &service_slugs,
+            &HashMap::new(),
+            &HashMap::new(),
+            OverrideMode::DockerNetwork,
+            None,
+        );
+
+        assert_eq!(
+            result.get("REDIS_URL"),
+            Some(&"redis://redis:6379".to_string())
+        );
     }
 }

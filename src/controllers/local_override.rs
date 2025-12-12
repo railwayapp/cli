@@ -7,8 +7,9 @@ use crate::{
     controllers::{
         config::{ServiceInstance, fetch_environment_config},
         develop::{
-            HttpsOverride, LocalDevConfig, OverrideMode, build_service_endpoints, generate_port,
-            get_https_domain, get_https_mode, override_railway_vars,
+            HttpsOverride, LocalDevConfig, OverrideMode, PublicDomainMapping,
+            build_service_endpoints, generate_port, get_https_domain, get_https_mode,
+            override_railway_vars,
         },
     },
     gql::queries::project::ProjectProject,
@@ -154,15 +155,25 @@ pub fn apply_local_overrides(
         .cloned()
         .unwrap_or_default();
 
-    // Get first HTTP port for this service for HTTPS override
-    let https = ctx.https_domain.as_ref().and_then(|domain| {
-        port_mapping.values().next().map(|&port| HttpsOverride {
+    // Get HTTPS override for this service
+    let https = ctx.https_domain.as_ref().map(|domain| {
+        let port = port_mapping
+            .values()
+            .next()
+            .copied()
+            .unwrap_or_else(|| generate_port(service_id, 3000));
+        HttpsOverride {
             domain,
             port,
             slug: Some(service_slug.clone()),
             use_port_443: ctx.use_port_443,
-        })
+        }
     });
+
+    // TODO: For full cross-service public domain replacement in `run` command,
+    // we'd need to fetch all service variables upfront and build the mapping.
+    // For now, use empty mapping - cross-service refs won't be replaced.
+    let public_domain_mapping: PublicDomainMapping = HashMap::new();
 
     override_railway_vars(
         vars,
@@ -170,7 +181,153 @@ pub fn apply_local_overrides(
         &port_mapping,
         &ctx.service_slugs,
         &ctx.slug_port_mappings,
+        &public_domain_mapping,
         OverrideMode::HostNetwork,
         https,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_context(
+        https_domain: Option<&str>,
+        use_port_443: bool,
+        service_slugs: HashMap<String, String>,
+        port_mappings: HashMap<String, HashMap<i64, u16>>,
+    ) -> LocalOverrideContext {
+        LocalOverrideContext {
+            service_slugs,
+            port_mappings,
+            slug_port_mappings: HashMap::new(),
+            https_domain: https_domain.map(String::from),
+            use_port_443,
+        }
+    }
+
+    #[test]
+    fn test_apply_local_overrides_public_domain_with_port_mapping() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "RAILWAY_PUBLIC_DOMAIN".to_string(),
+            "old.railway.app".to_string(),
+        );
+
+        let mut service_slugs = HashMap::new();
+        service_slugs.insert("svc-1".to_string(), "api".to_string());
+
+        let mut port_mappings = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert(3000, 12345u16);
+        port_mappings.insert("svc-1".to_string(), mapping);
+
+        let ctx = make_context(
+            Some("myproject.localhost"),
+            true,
+            service_slugs,
+            port_mappings,
+        );
+
+        let result = apply_local_overrides(vars, "svc-1", &ctx);
+        assert_eq!(
+            result.get("RAILWAY_PUBLIC_DOMAIN"),
+            Some(&"api.myproject.localhost".to_string())
+        );
+    }
+
+    #[test]
+    fn test_apply_local_overrides_public_domain_without_port_mapping() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "RAILWAY_PUBLIC_DOMAIN".to_string(),
+            "old.railway.app".to_string(),
+        );
+
+        let mut service_slugs = HashMap::new();
+        service_slugs.insert("svc-1".to_string(), "api".to_string());
+
+        let ctx = make_context(
+            Some("myproject.localhost"),
+            true,
+            service_slugs,
+            HashMap::new(),
+        );
+
+        let result = apply_local_overrides(vars, "svc-1", &ctx);
+        assert_eq!(
+            result.get("RAILWAY_PUBLIC_DOMAIN"),
+            Some(&"api.myproject.localhost".to_string())
+        );
+    }
+
+    #[test]
+    fn test_apply_local_overrides_public_domain_port_mode() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "RAILWAY_PUBLIC_DOMAIN".to_string(),
+            "old.railway.app".to_string(),
+        );
+
+        let mut service_slugs = HashMap::new();
+        service_slugs.insert("svc-1".to_string(), "api".to_string());
+
+        let mut port_mappings = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert(3000, 12345u16);
+        port_mappings.insert("svc-1".to_string(), mapping);
+
+        let ctx = make_context(
+            Some("myproject.localhost"),
+            false,
+            service_slugs,
+            port_mappings,
+        );
+
+        let result = apply_local_overrides(vars, "svc-1", &ctx);
+        assert_eq!(
+            result.get("RAILWAY_PUBLIC_DOMAIN"),
+            Some(&"myproject.localhost:12345".to_string())
+        );
+    }
+
+    #[test]
+    fn test_apply_local_overrides_no_https_domain() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "RAILWAY_PUBLIC_DOMAIN".to_string(),
+            "old.railway.app".to_string(),
+        );
+
+        let mut service_slugs = HashMap::new();
+        service_slugs.insert("svc-1".to_string(), "api".to_string());
+
+        let ctx = make_context(None, false, service_slugs, HashMap::new());
+
+        let result = apply_local_overrides(vars, "svc-1", &ctx);
+        assert_eq!(
+            result.get("RAILWAY_PUBLIC_DOMAIN"),
+            Some(&"localhost".to_string())
+        );
+    }
+
+    #[test]
+    fn test_apply_local_overrides_private_domain() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "RAILWAY_PRIVATE_DOMAIN".to_string(),
+            "old.railway.internal".to_string(),
+        );
+
+        let mut service_slugs = HashMap::new();
+        service_slugs.insert("svc-1".to_string(), "api".to_string());
+
+        let ctx = make_context(None, false, service_slugs, HashMap::new());
+
+        let result = apply_local_overrides(vars, "svc-1", &ctx);
+        assert_eq!(
+            result.get("RAILWAY_PRIVATE_DOMAIN"),
+            Some(&"localhost".to_string())
+        );
+    }
 }

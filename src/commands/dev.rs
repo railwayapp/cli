@@ -14,12 +14,13 @@ use crate::{
             CodeServiceConfig, ComposeServiceStatus, DevelopSessionLock, DockerComposeFile,
             DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
             HttpsConfig, HttpsOverride, LocalDevConfig, OverrideMode, PortType, ProcessManager,
-            ServicePort, ServiceSummary, build_port_infos, build_service_endpoints,
-            build_slug_port_mapping, certs_exist, check_docker_compose_installed,
-            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
-            generate_port, get_compose_path as develop_get_compose_path, get_develop_dir,
-            get_existing_certs, get_https_mode, is_port_443_available, override_railway_vars,
-            print_log_line, slugify, volume_name,
+            PublicDomainMapping, ServicePort, ServiceSummary, build_port_infos,
+            build_service_endpoints, build_slug_port_mapping, certs_exist,
+            check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
+            generate_caddyfile, generate_certs, generate_port,
+            get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
+            get_https_mode, is_port_443_available, override_railway_vars, print_log_line, slugify,
+            volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -967,6 +968,45 @@ async fn up_command(args: UpArgs) -> Result<()> {
         })
         .collect();
 
+    // Build public domain mapping: production public domain -> local public domain
+    // Used to replace cross-service public domain references
+    let mut public_domain_mapping: PublicDomainMapping = HashMap::new();
+    for (service_id, svc) in &image_services {
+        if let Some(vars) = resolved_vars.get(*service_id) {
+            if let Some(prod_domain) = vars.get("RAILWAY_PUBLIC_DOMAIN") {
+                let service_name = service_names
+                    .get(*service_id)
+                    .cloned()
+                    .unwrap_or_else(|| (*service_id).clone());
+                let slug = slugify(&service_name);
+                let port_infos = build_port_infos(service_id, svc);
+
+                let local_domain = match &https_config {
+                    Some(config) if config.use_port_443 => {
+                        format!("{}.{}", slug, config.base_domain)
+                    }
+                    Some(config) => {
+                        let port = port_infos
+                            .iter()
+                            .find(|p| matches!(p.port_type, PortType::Http))
+                            .map(|p| p.public_port)
+                            .unwrap_or(443);
+                        format!("{}:{}", config.base_domain, port)
+                    }
+                    None => {
+                        let port = port_infos
+                            .iter()
+                            .find(|p| matches!(p.port_type, PortType::Http))
+                            .map(|p| p.external)
+                            .unwrap_or(3000);
+                        format!("localhost:{}", port)
+                    }
+                };
+                public_domain_mapping.insert(prod_domain.clone(), local_domain);
+            }
+        }
+    }
+
     let mut compose_services = BTreeMap::new();
     let mut compose_volumes = BTreeMap::new();
     let mut service_summaries = Vec::new();
@@ -1007,6 +1047,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
             &port_mapping,
             &service_slugs,
             &slug_port_mappings,
+            &public_domain_mapping,
             OverrideMode::DockerNetwork,
             https_override,
         );
@@ -1307,6 +1348,36 @@ async fn up_command(args: UpArgs) -> Result<()> {
         })
         .collect();
 
+    // Extend public domain mapping with code services
+    for (service_id, svc) in &configured_code_services {
+        if let Some(vars) = code_resolved_vars.get(*service_id) {
+            if let Some(prod_domain) = vars.get("RAILWAY_PUBLIC_DOMAIN") {
+                let service_name = service_names
+                    .get(*service_id)
+                    .cloned()
+                    .unwrap_or_else(|| (*service_id).clone());
+                let slug = slugify(&service_name);
+                let dev_config = local_dev_config.get_service(service_id);
+                let internal_port = dev_config
+                    .and_then(|c| c.port.map(|p| p as i64))
+                    .or_else(|| svc.get_ports().first().copied());
+                let proxy_port = internal_port.map(|p| generate_port(service_id, p));
+
+                let local_domain = match (&https_config, proxy_port) {
+                    (Some(config), Some(_)) if config.use_port_443 => {
+                        format!("{}.{}", slug, config.base_domain)
+                    }
+                    (Some(config), Some(port)) => {
+                        format!("{}:{}", config.base_domain, port)
+                    }
+                    (None, Some(port)) => format!("localhost:{}", port),
+                    _ => "localhost".to_string(),
+                };
+                public_domain_mapping.insert(prod_domain.clone(), local_domain);
+            }
+        }
+    }
+
     for (service_id, svc) in &configured_code_services {
         let dev_config = match local_dev_config.get_service(service_id) {
             Some(c) => c,
@@ -1362,6 +1433,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
             &port_mapping,
             &service_slugs,
             &slug_port_mappings,
+            &public_domain_mapping,
             OverrideMode::HostNetwork,
             https_override,
         );
