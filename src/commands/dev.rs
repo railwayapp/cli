@@ -119,12 +119,23 @@ async fn get_compose_path(output: &Option<PathBuf>) -> Result<PathBuf> {
     Ok(develop_get_compose_path(&linked_project.project))
 }
 
+fn docker_install_url() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "https://docs.docker.com/desktop/setup/install/mac-install",
+        "windows" => "https://docs.docker.com/desktop/setup/install/windows-install",
+        _ => "https://docs.docker.com/desktop/setup/install/linux",
+    }
+}
+
 fn require_docker_compose() {
     if !check_docker_compose_installed() {
         eprintln!(
             "{}",
-            "Docker Compose not found. Install Docker: https://docs.docker.com/engine/install/"
-                .yellow()
+            format!(
+                "Docker Compose not found. Install Docker: {}",
+                docker_install_url()
+            )
+            .yellow()
         );
         std::process::exit(1);
     }
