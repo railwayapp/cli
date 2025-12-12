@@ -55,9 +55,7 @@ pub fn get_https_domain(project_id: &str) -> Option<String> {
 
 /// Reads the HTTPS mode from the https_mode file
 pub fn get_https_mode(project_id: &str) -> bool {
-    let mode_file = get_develop_dir(project_id)
-        .join("certs")
-        .join("https_mode");
+    let mode_file = get_develop_dir(project_id).join("certs").join("https_mode");
     std::fs::read_to_string(mode_file)
         .map(|m| m.trim() == "port_443")
         .unwrap_or(false)

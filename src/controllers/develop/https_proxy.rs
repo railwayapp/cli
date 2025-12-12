@@ -51,7 +51,6 @@ pub fn certs_exist(output_dir: &Path, use_port_443: bool) -> bool {
         return false;
     }
 
-    // Check if the mode matches what we need
     if let Ok(mode) = std::fs::read_to_string(&mode_file) {
         let stored_443 = mode.trim() == "port_443";
         stored_443 == use_port_443

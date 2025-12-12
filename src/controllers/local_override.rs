@@ -51,7 +51,6 @@ pub async fn build_local_override_context_with_config(
     let env_response = fetch_environment_config(client, configs, environment_id, false).await?;
     let config = env_response.config;
 
-    // Build service name -> slug mapping from project data
     let service_names: HashMap<String, String> = project
         .services
         .edges
@@ -64,7 +63,6 @@ pub async fn build_local_override_context_with_config(
         .map(|(id, name)| (id.clone(), slugify(name)))
         .collect();
 
-    // Build port mappings for image-based services
     let mut port_mappings = HashMap::new();
     let mut slug_port_mappings = HashMap::new();
 
@@ -78,12 +76,10 @@ pub async fn build_local_override_context_with_config(
         }
     }
 
-    // Include code services if LocalDevConfig is provided
     if let Some(dev_config) = local_dev_config {
         for (service_id, svc) in config.services.iter() {
             if svc.is_code_based() {
                 if let Some(code_config) = dev_config.services.get(service_id) {
-                    // Use configured port or infer from networking config
                     let port = code_config
                         .port
                         .map(|p| p as i64)
@@ -111,7 +107,6 @@ pub async fn build_local_override_context_with_config(
         }
     }
 
-    // Check if HTTPS mode is active by looking for certs
     let https_domain = get_https_domain(environment_id);
     let use_port_443 = get_https_mode(environment_id);
 

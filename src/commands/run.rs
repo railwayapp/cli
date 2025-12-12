@@ -107,7 +107,6 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
 
-    // Apply local overrides if develop mode is active
     if !args.no_local && is_local_develop_active(&environment_id) {
         let ctx =
             build_local_override_context(&client, &configs, &project, &environment_id).await?;

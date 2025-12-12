@@ -241,16 +241,13 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
 
     let mut local_dev_config = LocalDevConfig::load(&project_id)?;
 
-    // Handle --remove flag
     if args.remove {
         let service_to_remove = if let Some(ref name) = args.service {
-            // Find service by name
             code_services
                 .iter()
                 .find(|(id, _)| service_names.get(*id).map(|n| n == name).unwrap_or(false))
                 .map(|(id, _)| (*id).clone())
         } else {
-            // Prompt for service
             let configured: Vec<_> = code_services
                 .iter()
                 .filter(|(id, _)| local_dev_config.services.contains_key(*id))
@@ -292,7 +289,6 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Configure a service
     let service_id_to_configure = if let Some(ref name) = args.service {
         code_services
             .iter()
@@ -375,7 +371,6 @@ fn prompt_service_config(
         &default_dir,
     )?;
 
-    // Convert to absolute path
     let directory = if input_path.is_absolute() {
         input_path.to_string_lossy().to_string()
     } else {
@@ -453,7 +448,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .filter(|(_, svc)| svc.is_code_based())
         .collect();
 
-    // Load local dev config for code services
     let mut local_dev_config = LocalDevConfig::load(&project_id)?;
     let config_file_exists = LocalDevConfig::path(&project_id).exists();
 
@@ -461,7 +455,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
     if !config_file_exists && !code_services.is_empty() && std::io::stdout().is_terminal() {
         println!("\n{}", "Configure local code services".cyan().bold());
 
-        // Add "None" option first (default)
         let mut options = vec![CodeServiceDisplay {
             service_id: String::new(),
             name: "None".to_string(),
@@ -500,7 +493,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         println!();
     }
 
-    // Get configured code services
     let configured_code_services: Vec<_> = code_services
         .iter()
         .filter(|(id, _)| local_dev_config.services.contains_key(*id))
@@ -514,7 +506,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Set up HTTPS if not disabled
     let https_config = if args.no_https {
         None
     } else {
@@ -552,7 +543,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         }
     }
 
-    // Fetch resolved variables for each service in parallel
     let variable_futures: Vec<_> = image_services
         .iter()
         .map(|(service_id, _)| {
@@ -589,14 +579,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
         let image = svc.source.as_ref().unwrap().image.clone().unwrap();
 
-        // Build port info with types
         let port_infos = build_port_infos(service_id, svc);
         let port_mapping: HashMap<i64, u16> = port_infos
             .iter()
             .map(|p| (p.internal, p.external))
             .collect();
 
-        // Get resolved variables and override Railway-specific vars
         let raw_vars = resolved_vars.get(*service_id).cloned().unwrap_or_default();
 
         // Build HTTPS override with first HTTP port for this service (uses public_port for Caddy)
@@ -629,7 +617,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
             .map(|p| format!("{}:{}", p.external, p.internal))
             .collect();
 
-        // Build volume mounts
         let mut service_volumes = Vec::new();
         for (vol_id, vol_mount) in &svc.volume_mounts {
             if let Some(mount_path) = &vol_mount.mount_path {
@@ -676,7 +663,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     let service_count = compose_services.len();
 
-    // Add proxy service if HTTPS is enabled
     if let Some(ref config) = https_config {
         // Collect HTTP service ports for Caddyfile generation (image services)
         // For image services: internal_port for Docker network routing, public_port for Caddy listening
@@ -750,11 +736,9 @@ async fn up_command(args: UpArgs) -> Result<()> {
             );
         }
 
-        // Generate config files
         let develop_dir = get_develop_dir(&project_id);
         std::fs::create_dir_all(&develop_dir)?;
 
-        // Write Caddyfile
         let caddyfile = generate_caddyfile(&service_ports, config);
         std::fs::write(develop_dir.join("Caddyfile"), caddyfile)?;
 
@@ -794,7 +778,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Start docker compose for image services (if any)
     if !image_services.is_empty() {
         println!("{}", "Starting image services...".cyan());
 
@@ -818,7 +801,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         }
     }
 
-    // Print summary for image services
     if !service_summaries.is_empty() {
         let svc_word = if service_count == 1 {
             "service"
@@ -889,21 +871,17 @@ async fn up_command(args: UpArgs) -> Result<()> {
         }
     }
 
-    // If no code services, we're done
     if configured_code_services.is_empty() {
         return Ok(());
     }
 
-    // Acquire exclusive lock for this project's code services
     let _session_lock = DevelopSessionLock::try_acquire(&project_id)?;
 
-    // Spawn code services as child processes
     println!("{}", "Starting code services...".cyan());
 
     let (log_tx, mut log_rx) = mpsc::channel(100);
     let mut process_manager = ProcessManager::new();
 
-    // Fetch variables for code services
     let code_var_futures: Vec<_> = configured_code_services
         .iter()
         .map(|(service_id, _)| {
@@ -982,10 +960,8 @@ async fn up_command(args: UpArgs) -> Result<()> {
             https_override,
         );
 
-        // Set PORT env var so the process knows what port to bind to
         vars.insert("PORT".to_string(), internal_port.to_string());
 
-        // Print summary
         println!("{}", service_name.green().bold());
         println!("  {}: {}", "Command".dimmed(), dev_config.command);
         println!("  {}: {}", "Directory".dimmed(), working_dir.display());
@@ -1037,7 +1013,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
     println!("{}", "Streaming logs (Ctrl+C to stop)...".dimmed());
     println!();
 
-    // Event loop: stream logs and handle shutdown
     loop {
         tokio::select! {
             Some(log) = log_rx.recv() => {
@@ -1050,10 +1025,8 @@ async fn up_command(args: UpArgs) -> Result<()> {
         }
     }
 
-    // Graceful shutdown
     process_manager.shutdown().await;
 
-    // Stop docker services if any were running
     if !image_services.is_empty() {
         println!("{}", "Stopping image services...".cyan());
         let _ = tokio::process::Command::new("docker")
@@ -1091,14 +1064,12 @@ async fn wait_for_services(compose_path: &Path, timeout: Duration) -> Result<()>
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
 
-        // Check for failures first
         for s in &services {
             if s.state == "exited" && s.exit_code != 0 {
                 bail!("Service '{}' exited with code {}", s.service, s.exit_code);
             }
         }
 
-        // Check if all ready
         let all_ready = services.iter().all(|s| {
             if !s.health.is_empty() {
                 s.health == "healthy"
