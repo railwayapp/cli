@@ -3,6 +3,14 @@ use std::path::PathBuf;
 
 use crate::controllers::config::EnvironmentConfig;
 
+/// Port range for deterministic port generation (10000-59999)
+pub const PORT_RANGE_MIN: u16 = 10000;
+pub const PORT_RANGE_SIZE: u16 = 50000;
+
+/// Port range for random port generation during configuration
+pub const RANDOM_PORT_MIN: u16 = 3000;
+pub const RANDOM_PORT_MAX: u16 = 9000;
+
 /// Converts a service name to a slug (lowercase, alphanumeric, dashes)
 pub fn slugify(name: &str) -> String {
     let s: String = name
@@ -21,14 +29,31 @@ pub fn slugify(name: &str) -> String {
 }
 
 /// Generates a deterministic external port from service_id and internal_port
-/// Range: 10000-60000
 pub fn generate_port(service_id: &str, internal_port: i64) -> u16 {
     let mut hash: u32 = 5381;
     for b in service_id.bytes() {
         hash = hash.wrapping_mul(33).wrapping_add(b as u32);
     }
     hash = hash.wrapping_add(internal_port as u32);
-    10000 + (hash % 50000) as u16
+    PORT_RANGE_MIN + (hash % PORT_RANGE_SIZE as u32) as u16
+}
+
+/// Generates a random port for user configuration prompts
+pub fn generate_random_port() -> u16 {
+    use rand::Rng;
+    rand::thread_rng().gen_range(RANDOM_PORT_MIN..RANDOM_PORT_MAX)
+}
+
+/// Resolves a path, canonicalizing on Unix but not on Windows (to avoid UNC path prefix)
+pub fn resolve_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        path.canonicalize().unwrap_or(path)
+    }
+    #[cfg(windows)]
+    {
+        path
+    }
 }
 
 /// Returns the develop directory for a given project
@@ -107,7 +132,7 @@ mod tests {
     #[test]
     fn test_generate_port_in_range() {
         let port = generate_port("test-service", 8080);
-        assert!((10000..60000).contains(&port));
+        assert!((PORT_RANGE_MIN..(PORT_RANGE_MIN + PORT_RANGE_SIZE)).contains(&port));
     }
 
     #[test]

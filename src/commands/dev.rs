@@ -17,10 +17,10 @@ use crate::{
             PublicDomainMapping, ServicePort, ServiceSummary, build_port_infos,
             build_service_endpoints, build_slug_port_mapping, certs_exist,
             check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
-            generate_caddyfile, generate_certs, generate_port,
+            generate_caddyfile, generate_certs, generate_port, generate_random_port,
             get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
-            get_https_mode, is_port_443_available, override_railway_vars, print_log_line, slugify,
-            volume_name,
+            get_https_mode, is_port_443_available, override_railway_vars, print_log_line,
+            resolve_path, slugify, volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -445,12 +445,9 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                     let directory = if input_path.is_absolute() {
                         input_path.to_string_lossy().to_string()
                     } else {
-                        let joined = cwd.join(&input_path);
-                        #[cfg(unix)]
-                        let resolved = joined.canonicalize().unwrap_or(joined);
-                        #[cfg(windows)]
-                        let resolved = joined;
-                        resolved.to_string_lossy().to_string()
+                        resolve_path(cwd.join(&input_path))
+                            .to_string_lossy()
+                            .to_string()
                     };
 
                     let mut updated = existing.clone();
@@ -619,12 +616,9 @@ fn prompt_service_config(
     let directory = if input_path.is_absolute() {
         input_path.to_string_lossy().to_string()
     } else {
-        let joined = cwd.join(&input_path);
-        #[cfg(unix)]
-        let resolved = joined.canonicalize().unwrap_or(joined);
-        #[cfg(windows)]
-        let resolved = joined;
-        resolved.to_string_lossy().to_string()
+        resolve_path(cwd.join(&input_path))
+            .to_string_lossy()
+            .to_string()
     };
 
     // Prompt for port if service has networking config
@@ -647,11 +641,6 @@ fn prompt_service_config(
         directory,
         port,
     })
-}
-
-fn generate_random_port() -> u16 {
-    use rand::Rng;
-    rand::thread_rng().gen_range(3000..9000)
 }
 
 /// Prompts user to select and configure multiple services at once
@@ -968,226 +957,39 @@ async fn up_command(args: UpArgs) -> Result<()> {
         })
         .collect();
 
-    // Build public domain mapping: production public domain -> local public domain
-    // Used to replace cross-service public domain references
-    let mut public_domain_mapping: PublicDomainMapping = HashMap::new();
-    for (service_id, svc) in &image_services {
-        if let Some(vars) = resolved_vars.get(*service_id) {
-            if let Some(prod_domain) = vars.get("RAILWAY_PUBLIC_DOMAIN") {
-                let service_name = service_names
-                    .get(*service_id)
-                    .cloned()
-                    .unwrap_or_else(|| (*service_id).clone());
-                let slug = slugify(&service_name);
-                let port_infos = build_port_infos(service_id, svc);
+    let mut public_domain_mapping = build_public_domain_mapping(
+        &image_services,
+        &resolved_vars,
+        &service_names,
+        &https_config,
+    );
 
-                let local_domain = match &https_config {
-                    Some(config) if config.use_port_443 => {
-                        format!("{}.{}", slug, config.base_domain)
-                    }
-                    Some(config) => {
-                        let port = port_infos
-                            .iter()
-                            .find(|p| matches!(p.port_type, PortType::Http))
-                            .map(|p| p.public_port)
-                            .unwrap_or(443);
-                        format!("{}:{}", config.base_domain, port)
-                    }
-                    None => {
-                        let port = port_infos
-                            .iter()
-                            .find(|p| matches!(p.port_type, PortType::Http))
-                            .map(|p| p.external)
-                            .unwrap_or(3000);
-                        format!("localhost:{}", port)
-                    }
-                };
-                public_domain_mapping.insert(prod_domain.clone(), local_domain);
-            }
-        }
-    }
+    let compose_result = build_image_service_compose(
+        &image_services,
+        &service_names,
+        &service_slugs,
+        &slug_port_mappings,
+        &public_domain_mapping,
+        &resolved_vars,
+        &https_config,
+        &environment_id,
+    );
 
-    let mut compose_services = BTreeMap::new();
-    let mut compose_volumes = BTreeMap::new();
-    let mut service_summaries = Vec::new();
-
-    for (service_id, svc) in &image_services {
-        let service_name = service_names
-            .get(*service_id)
-            .cloned()
-            .unwrap_or_else(|| (*service_id).clone());
-        let slug = slugify(&service_name);
-
-        let image = svc.source.as_ref().unwrap().image.clone().unwrap();
-
-        let port_infos = build_port_infos(service_id, svc);
-        let port_mapping: HashMap<i64, u16> = port_infos
-            .iter()
-            .map(|p| (p.internal, p.external))
-            .collect();
-
-        let raw_vars = resolved_vars.get(*service_id).cloned().unwrap_or_default();
-
-        // Build HTTPS override with first HTTP port for this service (uses public_port for Caddy)
-        let https_override = https_config.as_ref().and_then(|config| {
-            port_infos
-                .iter()
-                .find(|p| matches!(p.port_type, PortType::Http))
-                .map(|p| HttpsOverride {
-                    domain: &config.base_domain,
-                    port: p.public_port,
-                    slug: Some(slug.clone()),
-                    use_port_443: config.use_port_443,
-                })
-        });
-
-        let environment = override_railway_vars(
-            raw_vars,
-            &slug,
-            &port_mapping,
-            &service_slugs,
-            &slug_port_mappings,
-            &public_domain_mapping,
-            OverrideMode::DockerNetwork,
-            https_override,
-        );
-
-        // Expose all ports from Docker for direct access (private domain)
-        // HTTP ports are exposed for private domain refs, Caddy uses separate public_port for HTTPS
-        let ports: Vec<String> = port_infos
-            .iter()
-            .map(|p| format!("{}:{}", p.external, p.internal))
-            .collect();
-
-        let mut service_volumes = Vec::new();
-        for (vol_id, vol_mount) in &svc.volume_mounts {
-            if let Some(mount_path) = &vol_mount.mount_path {
-                let vol_name = volume_name(&environment_id, vol_id);
-                service_volumes.push(format!("{}:{}", vol_name, mount_path));
-                compose_volumes.insert(vol_name, DockerComposeVolume {});
-            }
-        }
-
-        // Escape $ as $$ so docker-compose passes them to the container shell
-        let start_command = svc
-            .deploy
-            .as_ref()
-            .and_then(|d| d.start_command.clone())
-            .map(|cmd| cmd.replace('$', "$$"));
-
-        let volume_paths: Vec<String> = svc
-            .volume_mounts
-            .values()
-            .filter_map(|v| v.mount_path.clone())
-            .collect();
-
-        service_summaries.push(ServiceSummary {
-            name: service_name,
-            image: image.clone(),
-            var_count: environment.len(),
-            ports: port_infos,
-            volumes: volume_paths,
-        });
-
-        compose_services.insert(
-            slug,
-            DockerComposeService {
-                image,
-                command: start_command,
-                restart: Some("on-failure".to_string()),
-                environment,
-                ports,
-                volumes: service_volumes,
-                networks: vec!["railway".to_string()],
-                extra_hosts: Vec::new(),
-            },
-        );
-    }
-
+    let mut compose_services = compose_result.services;
+    let compose_volumes = compose_result.volumes;
+    let service_summaries = compose_result.summaries;
     let service_count = compose_services.len();
 
     if let Some(ref config) = https_config {
-        // Collect HTTP service ports for Caddyfile generation (image services)
-        // For image services: internal_port for Docker network routing, public_port for Caddy listening
-        let mut service_ports: Vec<ServicePort> = service_summaries
-            .iter()
-            .flat_map(|s| {
-                s.ports.iter().map(|p| ServicePort {
-                    slug: slugify(&s.name),
-                    internal_port: p.internal,
-                    external_port: p.public_port, // Caddy listens on public_port
-                    is_http: matches!(p.port_type, PortType::Http),
-                    is_code_service: false,
-                })
-            })
-            .collect();
-
-        // Add code service ports for Caddyfile
-        // internal_port = what process binds to, proxy_port = what Caddy exposes (always generated)
-        for (service_id, svc) in &configured_code_services {
-            if let Some(dev_config) = local_dev_config.get_service(service_id) {
-                let slug = service_slugs
-                    .get(*service_id)
-                    .cloned()
-                    .unwrap_or_else(|| slugify(service_id));
-                let internal_port = dev_config
-                    .port
-                    .map(|p| p as i64)
-                    .or_else(|| svc.get_ports().first().copied())
-                    .unwrap_or(3000);
-                // proxy_port is always generated - separate from internal_port to avoid conflicts
-                let proxy_port = generate_port(service_id, internal_port);
-
-                service_ports.push(ServicePort {
-                    slug,
-                    internal_port,
-                    external_port: proxy_port,
-                    is_http: true,
-                    is_code_service: true,
-                });
-            }
-        }
-
-        // Build port mappings for Caddy
-        // Port 443 mode: single port for all services via SNI routing
-        // Fallback mode: per-service ports
-        let proxy_ports: Vec<String> = if config.use_port_443 {
-            vec!["443:443".to_string()]
-        } else {
-            service_ports
-                .iter()
-                .filter(|p| p.is_http)
-                .map(|p| format!("{}:{}", p.external_port, p.external_port))
-                .collect()
-        };
-
-        if !proxy_ports.is_empty() {
-            compose_services.insert(
-                "railway-proxy".to_string(),
-                DockerComposeService {
-                    image: "caddy:2-alpine".to_string(),
-                    command: None,
-                    restart: Some("on-failure".to_string()),
-                    environment: BTreeMap::new(),
-                    ports: proxy_ports,
-                    volumes: vec![
-                        "./Caddyfile:/etc/caddy/Caddyfile:ro".to_string(),
-                        "./certs:/certs:ro".to_string(),
-                    ],
-                    networks: vec!["railway".to_string()],
-                    extra_hosts: vec!["host.docker.internal:host-gateway".to_string()],
-                },
-            );
-        }
-
-        let develop_dir = get_develop_dir(&project_id);
-        std::fs::create_dir_all(&develop_dir)?;
-
-        let caddyfile = generate_caddyfile(&service_ports, config);
-        std::fs::write(develop_dir.join("Caddyfile"), caddyfile)?;
-
-        // Save https_domain for railway run to pick up
-        std::fs::write(develop_dir.join("https_domain"), &config.base_domain)?;
+        setup_caddy_proxy(
+            &mut compose_services,
+            &service_summaries,
+            &configured_code_services,
+            &local_dev_config,
+            &service_slugs,
+            config,
+            &project_id,
+        )?;
     }
 
     let compose = DockerComposeFile {
@@ -1259,58 +1061,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         println!();
 
         for summary in &service_summaries {
-            println!("{}", summary.name.green().bold());
-            println!("  {}: {}", "Image".dimmed(), summary.image);
-            println!(
-                "  {}: {} variables",
-                "Variables".dimmed(),
-                summary.var_count
-            );
-            if !summary.ports.is_empty() {
-                println!("  {}:", "Networking".dimmed());
-                let slug = slugify(&summary.name);
-                for p in &summary.ports {
-                    match (&https_config, &p.port_type) {
-                        (Some(config), PortType::Http) => {
-                            println!(
-                                "    {}: http://localhost:{}",
-                                "Private".dimmed(),
-                                p.external
-                            );
-                            if config.use_port_443 {
-                                println!(
-                                    "    {}:  https://{}.{}",
-                                    "Public".dimmed(),
-                                    slug,
-                                    config.base_domain
-                                );
-                            } else {
-                                println!(
-                                    "    {}:  https://{}:{}",
-                                    "Public".dimmed(),
-                                    config.base_domain,
-                                    p.public_port
-                                );
-                            }
-                        }
-                        (_, PortType::Tcp) => {
-                            println!("    {}:     localhost:{}", "TCP".dimmed(), p.external);
-                        }
-                        (None, PortType::Http) => {
-                            println!("    http://localhost:{}", p.external);
-                        }
-                    }
-                }
-            }
-            if !summary.volumes.is_empty() {
-                let label = if summary.volumes.len() == 1 {
-                    "Volume"
-                } else {
-                    "Volumes"
-                };
-                println!("  {}: {}", label.dimmed(), summary.volumes.join(", "));
-            }
-            println!();
+            print_image_service_summary(summary, &https_config);
         }
     }
 
@@ -1444,37 +1195,15 @@ async fn up_command(args: UpArgs) -> Result<()> {
             vars.insert("PORT".to_string(), port.to_string());
         }
 
-        println!("{}", service_name.green().bold());
-        println!("  {}: {}", "Command".dimmed(), dev_config.command);
-        println!("  {}: {}", "Directory".dimmed(), working_dir.display());
-        println!("  {}: {} variables", "Variables".dimmed(), vars.len());
-        if let (Some(port), Some(pport)) = (internal_port, proxy_port) {
-            println!("  {}:", "Networking".dimmed());
-            match &https_config {
-                Some(config) => {
-                    println!("    {}: http://localhost:{}", "Private".dimmed(), port);
-                    if config.use_port_443 {
-                        println!(
-                            "    {}:  https://{}.{}",
-                            "Public".dimmed(),
-                            slug,
-                            config.base_domain
-                        );
-                    } else {
-                        println!(
-                            "    {}:  https://{}:{}",
-                            "Public".dimmed(),
-                            config.base_domain,
-                            pport
-                        );
-                    }
-                }
-                None => {
-                    println!("    http://localhost:{}", port);
-                }
-            }
-        }
-        println!();
+        print_code_service_summary(
+            &service_name,
+            &dev_config.command,
+            &working_dir,
+            vars.len(),
+            internal_port,
+            proxy_port,
+            &https_config,
+        );
 
         process_manager
             .spawn_service(
@@ -1545,6 +1274,352 @@ fn print_next_steps(
         }
         println!();
     }
+}
+
+fn print_image_service_summary(summary: &ServiceSummary, https_config: &Option<HttpsConfig>) {
+    println!("{}", summary.name.green().bold());
+    println!("  {}: {}", "Image".dimmed(), summary.image);
+    println!(
+        "  {}: {} variables",
+        "Variables".dimmed(),
+        summary.var_count
+    );
+    if !summary.ports.is_empty() {
+        println!("  {}:", "Networking".dimmed());
+        let slug = slugify(&summary.name);
+        for p in &summary.ports {
+            match (https_config, &p.port_type) {
+                (Some(config), PortType::Http) => {
+                    println!(
+                        "    {}: http://localhost:{}",
+                        "Private".dimmed(),
+                        p.external
+                    );
+                    if config.use_port_443 {
+                        println!(
+                            "    {}:  https://{}.{}",
+                            "Public".dimmed(),
+                            slug,
+                            config.base_domain
+                        );
+                    } else {
+                        println!(
+                            "    {}:  https://{}:{}",
+                            "Public".dimmed(),
+                            config.base_domain,
+                            p.public_port
+                        );
+                    }
+                }
+                (_, PortType::Tcp) => {
+                    println!("    {}:     localhost:{}", "TCP".dimmed(), p.external);
+                }
+                (None, PortType::Http) => {
+                    println!("    http://localhost:{}", p.external);
+                }
+            }
+        }
+    }
+    if !summary.volumes.is_empty() {
+        let label = if summary.volumes.len() == 1 {
+            "Volume"
+        } else {
+            "Volumes"
+        };
+        println!("  {}: {}", label.dimmed(), summary.volumes.join(", "));
+    }
+    println!();
+}
+
+fn print_code_service_summary(
+    service_name: &str,
+    command: &str,
+    working_dir: &Path,
+    var_count: usize,
+    internal_port: Option<i64>,
+    proxy_port: Option<u16>,
+    https_config: &Option<HttpsConfig>,
+) {
+    let slug = slugify(service_name);
+    println!("{}", service_name.green().bold());
+    println!("  {}: {}", "Command".dimmed(), command);
+    println!("  {}: {}", "Directory".dimmed(), working_dir.display());
+    println!("  {}: {} variables", "Variables".dimmed(), var_count);
+    if let (Some(port), Some(pport)) = (internal_port, proxy_port) {
+        println!("  {}:", "Networking".dimmed());
+        match https_config {
+            Some(config) => {
+                println!("    {}: http://localhost:{}", "Private".dimmed(), port);
+                if config.use_port_443 {
+                    println!(
+                        "    {}:  https://{}.{}",
+                        "Public".dimmed(),
+                        slug,
+                        config.base_domain
+                    );
+                } else {
+                    println!(
+                        "    {}:  https://{}:{}",
+                        "Public".dimmed(),
+                        config.base_domain,
+                        pport
+                    );
+                }
+            }
+            None => {
+                println!("    http://localhost:{}", port);
+            }
+        }
+    }
+    println!();
+}
+
+fn build_public_domain_mapping(
+    services: &[(&String, &ServiceInstance)],
+    resolved_vars: &HashMap<String, BTreeMap<String, String>>,
+    service_names: &HashMap<String, String>,
+    https_config: &Option<HttpsConfig>,
+) -> PublicDomainMapping {
+    let mut mapping: PublicDomainMapping = HashMap::new();
+
+    for (service_id, svc) in services {
+        if let Some(vars) = resolved_vars.get(*service_id) {
+            if let Some(prod_domain) = vars.get("RAILWAY_PUBLIC_DOMAIN") {
+                let service_name = service_names
+                    .get(*service_id)
+                    .cloned()
+                    .unwrap_or_else(|| (*service_id).clone());
+                let slug = slugify(&service_name);
+                let port_infos = build_port_infos(service_id, svc);
+
+                let local_domain = match https_config {
+                    Some(config) if config.use_port_443 => {
+                        format!("{}.{}", slug, config.base_domain)
+                    }
+                    Some(config) => {
+                        let port = port_infos
+                            .iter()
+                            .find(|p| matches!(p.port_type, PortType::Http))
+                            .map(|p| p.public_port)
+                            .unwrap_or(443);
+                        format!("{}:{}", config.base_domain, port)
+                    }
+                    None => {
+                        let port = port_infos
+                            .iter()
+                            .find(|p| matches!(p.port_type, PortType::Http))
+                            .map(|p| p.external)
+                            .unwrap_or(3000);
+                        format!("localhost:{}", port)
+                    }
+                };
+                mapping.insert(prod_domain.clone(), local_domain);
+            }
+        }
+    }
+
+    mapping
+}
+
+struct ImageServiceComposeResult {
+    services: BTreeMap<String, DockerComposeService>,
+    volumes: BTreeMap<String, DockerComposeVolume>,
+    summaries: Vec<ServiceSummary>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_image_service_compose(
+    image_services: &[(&String, &ServiceInstance)],
+    service_names: &HashMap<String, String>,
+    service_slugs: &HashMap<String, String>,
+    slug_port_mappings: &HashMap<String, HashMap<i64, u16>>,
+    public_domain_mapping: &PublicDomainMapping,
+    resolved_vars: &HashMap<String, BTreeMap<String, String>>,
+    https_config: &Option<HttpsConfig>,
+    environment_id: &str,
+) -> ImageServiceComposeResult {
+    let mut compose_services = BTreeMap::new();
+    let mut compose_volumes = BTreeMap::new();
+    let mut service_summaries = Vec::new();
+
+    for (service_id, svc) in image_services {
+        let service_name = service_names
+            .get(*service_id)
+            .cloned()
+            .unwrap_or_else(|| (*service_id).clone());
+        let slug = slugify(&service_name);
+
+        let image = svc.source.as_ref().unwrap().image.clone().unwrap();
+
+        let port_infos = build_port_infos(service_id, svc);
+        let port_mapping: HashMap<i64, u16> = port_infos
+            .iter()
+            .map(|p| (p.internal, p.external))
+            .collect();
+
+        let raw_vars = resolved_vars.get(*service_id).cloned().unwrap_or_default();
+
+        let https_override = https_config.as_ref().and_then(|config| {
+            port_infos
+                .iter()
+                .find(|p| matches!(p.port_type, PortType::Http))
+                .map(|p| HttpsOverride {
+                    domain: &config.base_domain,
+                    port: p.public_port,
+                    slug: Some(slug.clone()),
+                    use_port_443: config.use_port_443,
+                })
+        });
+
+        let environment = override_railway_vars(
+            raw_vars,
+            &slug,
+            &port_mapping,
+            service_slugs,
+            slug_port_mappings,
+            public_domain_mapping,
+            OverrideMode::DockerNetwork,
+            https_override,
+        );
+
+        let ports: Vec<String> = port_infos
+            .iter()
+            .map(|p| format!("{}:{}", p.external, p.internal))
+            .collect();
+
+        let mut service_volumes = Vec::new();
+        for (vol_id, vol_mount) in &svc.volume_mounts {
+            if let Some(mount_path) = &vol_mount.mount_path {
+                let vol_name = volume_name(environment_id, vol_id);
+                service_volumes.push(format!("{}:{}", vol_name, mount_path));
+                compose_volumes.insert(vol_name, DockerComposeVolume {});
+            }
+        }
+
+        let start_command = svc
+            .deploy
+            .as_ref()
+            .and_then(|d| d.start_command.clone())
+            .map(|cmd| cmd.replace('$', "$$"));
+
+        let volume_paths: Vec<String> = svc
+            .volume_mounts
+            .values()
+            .filter_map(|v| v.mount_path.clone())
+            .collect();
+
+        service_summaries.push(ServiceSummary {
+            name: service_name,
+            image: image.clone(),
+            var_count: environment.len(),
+            ports: port_infos,
+            volumes: volume_paths,
+        });
+
+        compose_services.insert(
+            slug,
+            DockerComposeService {
+                image,
+                command: start_command,
+                restart: Some("on-failure".to_string()),
+                environment,
+                ports,
+                volumes: service_volumes,
+                networks: vec!["railway".to_string()],
+                extra_hosts: Vec::new(),
+            },
+        );
+    }
+
+    ImageServiceComposeResult {
+        services: compose_services,
+        volumes: compose_volumes,
+        summaries: service_summaries,
+    }
+}
+
+fn setup_caddy_proxy(
+    compose_services: &mut BTreeMap<String, DockerComposeService>,
+    service_summaries: &[ServiceSummary],
+    configured_code_services: &[&(&String, &ServiceInstance)],
+    local_dev_config: &LocalDevConfig,
+    service_slugs: &HashMap<String, String>,
+    https_config: &HttpsConfig,
+    project_id: &str,
+) -> Result<()> {
+    let mut service_ports: Vec<ServicePort> = service_summaries
+        .iter()
+        .flat_map(|s| {
+            s.ports.iter().map(|p| ServicePort {
+                slug: slugify(&s.name),
+                internal_port: p.internal,
+                external_port: p.public_port,
+                is_http: matches!(p.port_type, PortType::Http),
+                is_code_service: false,
+            })
+        })
+        .collect();
+
+    for &(service_id, svc) in configured_code_services {
+        if let Some(dev_config) = local_dev_config.get_service(service_id) {
+            let slug = service_slugs
+                .get(*service_id)
+                .cloned()
+                .unwrap_or_else(|| slugify(service_id));
+            let internal_port = dev_config
+                .port
+                .map(|p| p as i64)
+                .or_else(|| svc.get_ports().first().copied())
+                .unwrap_or(3000);
+            let proxy_port = generate_port(service_id, internal_port);
+
+            service_ports.push(ServicePort {
+                slug,
+                internal_port,
+                external_port: proxy_port,
+                is_http: true,
+                is_code_service: true,
+            });
+        }
+    }
+
+    let proxy_ports: Vec<String> = if https_config.use_port_443 {
+        vec!["443:443".to_string()]
+    } else {
+        service_ports
+            .iter()
+            .filter(|p| p.is_http)
+            .map(|p| format!("{}:{}", p.external_port, p.external_port))
+            .collect()
+    };
+
+    if !proxy_ports.is_empty() {
+        compose_services.insert(
+            "railway-proxy".to_string(),
+            DockerComposeService {
+                image: "caddy:2-alpine".to_string(),
+                command: None,
+                restart: Some("on-failure".to_string()),
+                environment: BTreeMap::new(),
+                ports: proxy_ports,
+                volumes: vec![
+                    "./Caddyfile:/etc/caddy/Caddyfile:ro".to_string(),
+                    "./certs:/certs:ro".to_string(),
+                ],
+                networks: vec!["railway".to_string()],
+                extra_hosts: vec!["host.docker.internal:host-gateway".to_string()],
+            },
+        );
+    }
+
+    let develop_dir = get_develop_dir(project_id);
+    std::fs::create_dir_all(&develop_dir)?;
+
+    let caddyfile = generate_caddyfile(&service_ports, https_config);
+    std::fs::write(develop_dir.join("Caddyfile"), caddyfile)?;
+    std::fs::write(develop_dir.join("https_domain"), &https_config.base_domain)?;
+
+    Ok(())
 }
 
 async fn wait_for_services(compose_path: &Path, timeout: Duration) -> Result<()> {
