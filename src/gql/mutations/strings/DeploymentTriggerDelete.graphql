@@ -1,0 +1,3 @@
+mutation DeploymentTriggerDelete($id: String!) {
+  deploymentTriggerDelete(id: $id)
+}
