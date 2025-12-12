@@ -129,14 +129,10 @@ fn docker_install_url() -> &'static str {
 
 fn require_docker_compose() {
     if !check_docker_compose_installed() {
-        eprintln!(
-            "{}",
-            format!(
-                "Docker Compose not found. Install Docker: {}",
-                docker_install_url()
-            )
-            .yellow()
-        );
+        eprintln!();
+        eprintln!("{}", "Docker Compose not found.".yellow());
+        eprintln!("Install Docker:");
+        eprintln!("  {}", docker_install_url());
         std::process::exit(1);
     }
 }

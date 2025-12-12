@@ -28,7 +28,7 @@ pub fn check_mkcert_installed() -> bool {
 }
 
 pub fn check_docker_compose_installed() -> bool {
-    Command::new("docker")
+    Command::new("asdfdocker")
         .args(["compose", "version"])
         .output()
         .map(|o| o.status.success())
