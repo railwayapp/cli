@@ -2,7 +2,11 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::{Context, Result};
+use reqwest::Client;
 use serde::Deserialize;
+
+use crate::{client::post_graphql, config::Configs, gql::queries};
 
 /// Root environment config from `environment.config` GraphQL field
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -151,4 +155,35 @@ impl ServiceInstance {
             .filter_map(|(k, v)| v.value.clone().map(|val| (k.clone(), val)))
             .collect()
     }
+}
+
+/// Response from fetch_environment_config containing config and metadata
+pub struct EnvironmentConfigResponse {
+    pub config: EnvironmentConfig,
+    pub name: String,
+}
+
+/// Fetch environment config from Railway API
+pub async fn fetch_environment_config(
+    client: &Client,
+    configs: &Configs,
+    environment_id: &str,
+    decrypt_variables: bool,
+) -> Result<EnvironmentConfigResponse> {
+    let vars = queries::get_environment_config::Variables {
+        id: environment_id.to_string(),
+        decrypt_variables: Some(decrypt_variables),
+    };
+
+    let data =
+        post_graphql::<queries::GetEnvironmentConfig, _>(client, configs.get_backboard(), vars)
+            .await?;
+
+    let config: EnvironmentConfig = serde_json::from_value(data.environment.config)
+        .context("Failed to parse environment config")?;
+
+    Ok(EnvironmentConfigResponse {
+        config,
+        name: data.environment.name,
+    })
 }

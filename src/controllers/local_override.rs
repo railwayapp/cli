@@ -1,24 +1,20 @@
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::{
-    client::post_graphql,
     config::Configs,
     controllers::{
-        config::{EnvironmentConfig, ServiceInstance},
-        local_dev_config::LocalDevConfig,
+        config::{ServiceInstance, fetch_environment_config},
+        develop::{
+            HttpsOverride, LocalDevConfig, OverrideMode, generate_port, get_https_domain,
+            get_https_mode, override_railway_vars, slugify,
+        },
     },
-    gql::queries::{self, project::ProjectProject},
+    gql::queries::project::ProjectProject,
 };
 
-// Re-export from develop modules for backward compatibility
-pub use crate::controllers::develop::ports::{
-    generate_port, get_https_domain, get_https_mode, is_local_develop_active, slugify,
-};
-pub use crate::controllers::develop::variables::{
-    HttpsOverride, OverrideMode, override_railway_vars,
-};
+pub use crate::controllers::develop::ports::is_local_develop_active;
 
 /// Context for applying local variable overrides
 pub struct LocalOverrideContext {
@@ -52,17 +48,8 @@ pub async fn build_local_override_context_with_config(
     environment_id: &str,
     local_dev_config: Option<&LocalDevConfig>,
 ) -> Result<LocalOverrideContext> {
-    let vars = queries::get_environment_config::Variables {
-        id: environment_id.to_string(),
-        decrypt_variables: Some(false),
-    };
-
-    let data =
-        post_graphql::<queries::GetEnvironmentConfig, _>(client, configs.get_backboard(), vars)
-            .await?;
-
-    let config: EnvironmentConfig = serde_json::from_value(data.environment.config)
-        .context("Failed to parse environment config")?;
+    let env_response = fetch_environment_config(client, configs, environment_id, false).await?;
+    let config = env_response.config;
 
     // Build service name -> slug mapping from project data
     let service_names: HashMap<String, String> = project

@@ -8,9 +8,8 @@ use std::{
 use tokio::sync::mpsc;
 
 use crate::{
-    client::post_graphql,
     controllers::{
-        config::{EnvironmentConfig, ServiceInstance},
+        config::{ServiceInstance, fetch_environment_config},
         develop::{
             CodeServiceConfig, ComposeServiceStatus, DevelopSessionLock, DockerComposeFile,
             DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
@@ -189,17 +188,8 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
 
     let environment_id = linked_project.environment.clone();
 
-    let vars = queries::get_environment_config::Variables {
-        id: environment_id.clone(),
-        decrypt_variables: Some(false),
-    };
-
-    let data =
-        post_graphql::<queries::GetEnvironmentConfig, _>(&client, configs.get_backboard(), vars)
-            .await?;
-
-    let config: EnvironmentConfig = serde_json::from_value(data.environment.config)
-        .context("Failed to parse environment config")?;
+    let env_response = fetch_environment_config(&client, &configs, &environment_id, false).await?;
+    let config = env_response.config;
 
     let code_services: Vec<_> = config
         .services
@@ -412,20 +402,9 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .clone()
         .unwrap_or(linked_project.environment.clone());
 
-    let vars = queries::get_environment_config::Variables {
-        id: environment_id.clone(),
-        decrypt_variables: Some(true),
-    };
-
-    let data =
-        post_graphql::<queries::GetEnvironmentConfig, _>(&client, configs.get_backboard(), vars)
-            .await?;
-
-    let env_name = data.environment.name;
-    let config_json = data.environment.config;
-
-    let config: EnvironmentConfig =
-        serde_json::from_value(config_json).context("Failed to parse environment config")?;
+    let env_response = fetch_environment_config(&client, &configs, &environment_id, true).await?;
+    let env_name = env_response.name;
+    let config = env_response.config;
 
     let image_services: Vec<_> = config
         .services
