@@ -115,7 +115,7 @@ async fn get_compose_path(output: &Option<PathBuf>) -> Result<PathBuf> {
 
     let configs = Configs::new()?;
     let linked_project = configs.get_linked_project().await?;
-    Ok(develop_get_compose_path(&linked_project.environment))
+    Ok(develop_get_compose_path(&linked_project.project))
 }
 
 async fn down_command(args: DownArgs) -> Result<()> {
@@ -219,6 +219,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         .map(|e| (e.node.id.clone(), e.node.name.clone()))
         .collect();
 
+    let project_id = linked_project.project.clone();
     let environment_id = linked_project.environment.clone();
 
     let env_response = fetch_environment_config(&client, &configs, &environment_id, false).await?;
@@ -238,7 +239,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut local_dev_config = LocalDevConfig::load(&environment_id)?;
+    let mut local_dev_config = LocalDevConfig::load(&project_id)?;
 
     // Handle --remove flag
     if args.remove {
@@ -278,7 +279,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                 .cloned()
                 .unwrap_or_else(|| service_id.clone());
             if local_dev_config.remove_service(&service_id).is_some() {
-                local_dev_config.save(&environment_id)?;
+                local_dev_config.save(&project_id)?;
                 println!("{} Removed configuration for '{}'", "✓".green(), name);
             } else {
                 println!(
@@ -326,7 +327,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         let new_config =
             prompt_service_config(&name, svc, local_dev_config.get_service(&service_id))?;
         local_dev_config.set_service(service_id, new_config);
-        local_dev_config.save(&environment_id)?;
+        local_dev_config.save(&project_id)?;
         println!("{} Configured '{}'", "✓".green(), name);
     }
 
@@ -430,6 +431,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .map(|(id, name)| (id.clone(), slugify(name)))
         .collect();
 
+    let project_id = linked_project.project.clone();
     let environment_id = args
         .environment
         .clone()
@@ -452,8 +454,8 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .collect();
 
     // Load local dev config for code services
-    let mut local_dev_config = LocalDevConfig::load(&environment_id)?;
-    let config_file_exists = LocalDevConfig::path(&environment_id).exists();
+    let mut local_dev_config = LocalDevConfig::load(&project_id)?;
+    let config_file_exists = LocalDevConfig::path(&project_id).exists();
 
     // Only prompt for first-time setup (no local-dev.json file yet)
     if !config_file_exists && !code_services.is_empty() && std::io::stdout().is_terminal() {
@@ -494,7 +496,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         }
 
         // Always save to prevent prompting again
-        local_dev_config.save(&environment_id)?;
+        local_dev_config.save(&project_id)?;
         println!();
     }
 
@@ -516,7 +518,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
     let https_config = if args.no_https {
         None
     } else {
-        setup_https(&project_data.name, &environment_id)?
+        setup_https(&project_data.name, &project_id)?
     };
 
     // Build slug -> port mappings for all services (needed for variable substitution)
@@ -749,7 +751,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         }
 
         // Generate config files
-        let develop_dir = get_develop_dir(&environment_id);
+        let develop_dir = get_develop_dir(&project_id);
         std::fs::create_dir_all(&develop_dir)?;
 
         // Write Caddyfile
@@ -772,7 +774,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     let output_path = args
         .output
-        .unwrap_or_else(|| get_develop_dir(&environment_id).join("docker-compose.yml"));
+        .unwrap_or_else(|| get_develop_dir(&project_id).join("docker-compose.yml"));
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -892,8 +894,8 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Acquire exclusive lock for this environment's code services
-    let _session_lock = DevelopSessionLock::try_acquire(&environment_id)?;
+    // Acquire exclusive lock for this project's code services
+    let _session_lock = DevelopSessionLock::try_acquire(&project_id)?;
 
     // Spawn code services as child processes
     println!("{}", "Starting code services...".cyan());
@@ -1113,7 +1115,7 @@ async fn wait_for_services(compose_path: &Path, timeout: Duration) -> Result<()>
     }
 }
 
-fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsConfig>> {
+fn setup_https(project_name: &str, project_id: &str) -> Result<Option<HttpsConfig>> {
     use colored::Colorize;
 
     if !check_mkcert_installed() {
@@ -1123,10 +1125,10 @@ fn setup_https(project_name: &str, environment_id: &str) -> Result<Option<HttpsC
     }
 
     // Check if we're already in port 443 mode, or if port 443 is available
-    let use_port_443 = get_https_mode(environment_id) || is_port_443_available();
+    let use_port_443 = get_https_mode(project_id) || is_port_443_available();
 
     let project_slug = slugify(project_name);
-    let certs_dir = get_develop_dir(environment_id).join("certs");
+    let certs_dir = get_develop_dir(project_id).join("certs");
 
     // Check if certs already exist with the right mode
     let config = if certs_exist(&certs_dir, use_port_443) {

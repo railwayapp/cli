@@ -28,34 +28,34 @@ pub fn generate_port(service_id: &str, internal_port: i64) -> u16 {
     10000 + (hash % 50000) as u16
 }
 
-/// Returns the develop directory for a given environment
-pub fn get_develop_dir(environment_id: &str) -> PathBuf {
+/// Returns the develop directory for a given project
+pub fn get_develop_dir(project_id: &str) -> PathBuf {
     dirs::home_dir()
         .expect("Unable to get home directory")
         .join(".railway")
         .join("develop")
-        .join(environment_id)
+        .join(project_id)
 }
 
-/// Returns the path to the docker-compose.yml for a given environment
-pub fn get_compose_path(environment_id: &str) -> PathBuf {
-    get_develop_dir(environment_id).join("docker-compose.yml")
+/// Returns the path to the docker-compose.yml for a given project
+pub fn get_compose_path(project_id: &str) -> PathBuf {
+    get_develop_dir(project_id).join("docker-compose.yml")
 }
 
 /// Check if local develop mode is active (compose file exists)
-pub fn is_local_develop_active(environment_id: &str) -> bool {
-    get_compose_path(environment_id).exists()
+pub fn is_local_develop_active(project_id: &str) -> bool {
+    get_compose_path(project_id).exists()
 }
 
 /// Reads the HTTPS domain from the https_domain file if it exists
-pub fn get_https_domain(environment_id: &str) -> Option<String> {
-    let domain_file = get_develop_dir(environment_id).join("https_domain");
+pub fn get_https_domain(project_id: &str) -> Option<String> {
+    let domain_file = get_develop_dir(project_id).join("https_domain");
     std::fs::read_to_string(domain_file).ok()
 }
 
 /// Reads the HTTPS mode from the https_mode file
-pub fn get_https_mode(environment_id: &str) -> bool {
-    let mode_file = get_develop_dir(environment_id)
+pub fn get_https_mode(project_id: &str) -> bool {
+    let mode_file = get_develop_dir(project_id)
         .join("certs")
         .join("https_mode");
     std::fs::read_to_string(mode_file)

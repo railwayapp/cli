@@ -20,12 +20,12 @@ pub struct CodeServiceConfig {
 }
 
 impl LocalDevConfig {
-    pub fn path(environment_id: &str) -> PathBuf {
-        get_develop_dir(environment_id).join("local-dev.json")
+    pub fn path(project_id: &str) -> PathBuf {
+        get_develop_dir(project_id).join("local-dev.json")
     }
 
-    pub fn load(environment_id: &str) -> Result<Self> {
-        let path = Self::path(environment_id);
+    pub fn load(project_id: &str) -> Result<Self> {
+        let path = Self::path(project_id);
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -35,8 +35,8 @@ impl LocalDevConfig {
             .with_context(|| format!("Failed to parse {}", path.display()))
     }
 
-    pub fn save(&self, environment_id: &str) -> Result<()> {
-        let path = Self::path(environment_id);
+    pub fn save(&self, project_id: &str) -> Result<()> {
+        let path = Self::path(project_id);
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)

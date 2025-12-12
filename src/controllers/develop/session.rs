@@ -12,10 +12,10 @@ pub struct DevelopSessionLock {
 }
 
 impl DevelopSessionLock {
-    /// Try to acquire exclusive lock for code services in this environment.
+    /// Try to acquire exclusive lock for code services in this project.
     /// Returns Ok(lock) if acquired, Err if another session is running.
-    pub fn try_acquire(environment_id: &str) -> Result<Self> {
-        let develop_dir = get_develop_dir(environment_id);
+    pub fn try_acquire(project_id: &str) -> Result<Self> {
+        let develop_dir = get_develop_dir(project_id);
         Self::try_acquire_at(&develop_dir)
     }
 
@@ -30,7 +30,7 @@ impl DevelopSessionLock {
             Ok(()) => Ok(Self { _file: file, path }),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 bail!(
-                    "Another develop session is already running for this environment.\n\
+                    "Another develop session is already running for this project.\n\
                      Stop it with Ctrl+C before starting a new one."
                 )
             }
