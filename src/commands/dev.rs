@@ -56,9 +56,9 @@ struct ConfigureArgs {
     #[clap(long)]
     service: Option<String>,
 
-    /// Remove configuration for a service
-    #[clap(long)]
-    remove: bool,
+    /// Remove configuration for a service (optionally specify service name)
+    #[clap(long, num_args = 0..=1, default_missing_value = "")]
+    remove: Option<String>,
 }
 
 #[derive(Debug, Parser, Default)]
@@ -257,13 +257,20 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
 
     let mut local_dev_config = LocalDevConfig::load(&project_id)?;
 
-    if args.remove {
-        let service_to_remove = if let Some(ref name) = args.service {
+    if let Some(ref remove_arg) = args.remove {
+        let service_to_remove = if !remove_arg.is_empty() {
+            // --remove <service_name>
             code_services
                 .iter()
-                .find(|(id, _)| service_names.get(*id).map(|n| n == name).unwrap_or(false))
+                .find(|(id, _)| {
+                    service_names
+                        .get(*id)
+                        .map(|n| n == remove_arg)
+                        .unwrap_or(false)
+                })
                 .map(|(id, _)| (*id).clone())
         } else {
+            // --remove (no arg) - prompt for selection
             let configured: Vec<_> = code_services
                 .iter()
                 .filter(|(id, _)| local_dev_config.services.contains_key(*id))
@@ -305,29 +312,34 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         return Ok(());
     }
 
-    let service_id_to_configure = if let Some(ref name) = args.service {
-        code_services
-            .iter()
-            .find(|(id, _)| service_names.get(*id).map(|n| n == name).unwrap_or(false))
-            .map(|(id, _)| (*id).clone())
-    } else {
-        let options: Vec<_> = code_services
-            .iter()
-            .map(|(id, _)| CodeServiceDisplay {
-                service_id: (*id).clone(),
-                name: service_names
-                    .get(*id)
-                    .cloned()
-                    .unwrap_or_else(|| (*id).clone()),
-                configured: local_dev_config.services.contains_key(*id),
-            })
-            .collect();
+    // Service list loop
+    loop {
+        let service_id_to_configure = if let Some(ref name) = args.service {
+            code_services
+                .iter()
+                .find(|(id, _)| service_names.get(*id).map(|n| n == name).unwrap_or(false))
+                .map(|(id, _)| (*id).clone())
+        } else {
+            let options: Vec<_> = code_services
+                .iter()
+                .map(|(id, _)| CodeServiceDisplay {
+                    service_id: (*id).clone(),
+                    name: service_names
+                        .get(*id)
+                        .cloned()
+                        .unwrap_or_else(|| (*id).clone()),
+                    configured: local_dev_config.services.contains_key(*id),
+                })
+                .collect();
 
-        let selected = prompt_options("Select service to configure:", options)?;
-        Some(selected.service_id)
-    };
+            let selected = prompt_options("Select service to configure:", options)?;
+            Some(selected.service_id)
+        };
 
-    if let Some(service_id) = service_id_to_configure {
+        let Some(service_id) = service_id_to_configure else {
+            return Ok(());
+        };
+
         let svc = config
             .services
             .get(&service_id)
@@ -336,14 +348,160 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
             .get(&service_id)
             .cloned()
             .unwrap_or_else(|| service_id.clone());
-        let new_config =
-            prompt_service_config(&name, svc, local_dev_config.get_service(&service_id))?;
-        local_dev_config.set_service(service_id, new_config);
-        local_dev_config.save(&project_id)?;
-        println!("{} Configured '{}'", "✓".green(), name);
-    }
 
-    Ok(())
+        // If no existing config, do initial setup first
+        if local_dev_config.get_service(&service_id).is_none() {
+            let new_config = prompt_service_config(&name, svc, None)?;
+            local_dev_config.set_service(service_id.clone(), new_config);
+            local_dev_config.save(&project_id)?;
+            println!("{} Configured '{}'", "✓".green(), name);
+        }
+
+        // Service config menu loop
+        loop {
+            let action = show_service_config_menu(
+                &name,
+                local_dev_config.get_service(&service_id).unwrap(),
+            )?;
+
+            match action {
+                ConfigAction::ChangeCommand => {
+                    let existing = local_dev_config.get_service(&service_id).unwrap();
+                    let new_command = prompt_text(&format!(
+                        "Dev command for '{}' [{}]:",
+                        name, existing.command
+                    ))
+                    .map(|s| {
+                        if s.is_empty() {
+                            existing.command.clone()
+                        } else {
+                            s
+                        }
+                    })?;
+                    let mut updated = existing.clone();
+                    updated.command = new_command;
+                    local_dev_config.set_service(service_id.clone(), updated);
+                    local_dev_config.save(&project_id)?;
+                    println!("{} Updated command for '{}'", "✓".green(), name);
+                }
+                ConfigAction::ChangeDirectory => {
+                    let existing = local_dev_config.get_service(&service_id).unwrap();
+                    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+                    let default_dir = PathBuf::from(&existing.directory)
+                        .strip_prefix(&cwd)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| existing.directory.clone());
+
+                    let input_path = prompt_path_with_default(
+                        &format!("Directory for '{}' (relative to cwd):", name),
+                        &default_dir,
+                    )?;
+
+                    let directory = if input_path.is_absolute() {
+                        input_path.to_string_lossy().to_string()
+                    } else {
+                        cwd.join(&input_path)
+                            .canonicalize()
+                            .unwrap_or_else(|_| cwd.join(&input_path))
+                            .to_string_lossy()
+                            .to_string()
+                    };
+
+                    let mut updated = existing.clone();
+                    updated.directory = directory;
+                    local_dev_config.set_service(service_id.clone(), updated);
+                    local_dev_config.save(&project_id)?;
+                    println!("{} Updated directory for '{}'", "✓".green(), name);
+                }
+                ConfigAction::ChangePort => {
+                    let existing = local_dev_config.get_service(&service_id).unwrap();
+                    let railway_port = svc.get_ports().first().map(|&p| p as u16);
+                    let current_port = existing.port.or(railway_port).unwrap_or(3000);
+
+                    let port_input =
+                        prompt_text(&format!("Port for '{}' [{}]:", name, current_port))?;
+
+                    let new_port = if port_input.is_empty() {
+                        current_port
+                    } else {
+                        port_input.parse().context("Invalid port number")?
+                    };
+
+                    let mut updated = existing.clone();
+                    updated.port = Some(new_port);
+                    local_dev_config.set_service(service_id.clone(), updated);
+                    local_dev_config.save(&project_id)?;
+                    println!("{} Updated port for '{}'", "✓".green(), name);
+                }
+                ConfigAction::Remove => {
+                    local_dev_config.remove_service(&service_id);
+                    local_dev_config.save(&project_id)?;
+                    println!("{} Removed configuration for '{}'", "✓".green(), name);
+                    break; // Back to service list
+                }
+                ConfigAction::Back => {
+                    break; // Back to service list
+                }
+            }
+        }
+
+        // If --service was specified, exit after handling that service
+        if args.service.is_some() {
+            return Ok(());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConfigAction {
+    ChangeCommand,
+    ChangeDirectory,
+    ChangePort,
+    Remove,
+    Back,
+}
+
+impl std::fmt::Display for ConfigAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigAction::ChangeCommand => write!(f, "Change command"),
+            ConfigAction::ChangeDirectory => write!(f, "Change directory"),
+            ConfigAction::ChangePort => write!(f, "Change port"),
+            ConfigAction::Remove => write!(f, "Remove configuration"),
+            ConfigAction::Back => write!(f, "← Configure another service"),
+        }
+    }
+}
+
+fn show_service_config_menu(name: &str, config: &CodeServiceConfig) -> Result<ConfigAction> {
+    let cwd = std::env::current_dir().ok();
+    let display_dir = cwd
+        .as_ref()
+        .and_then(|cwd| {
+            PathBuf::from(&config.directory)
+                .strip_prefix(cwd)
+                .ok()
+                .map(|p| format!("./{}", p.display()))
+        })
+        .unwrap_or_else(|| config.directory.clone());
+
+    println!("\n{}", format!("Service '{}'", name).cyan().bold());
+    println!("  {}: {}", "command".dimmed(), config.command);
+    println!("  {}: {}", "directory".dimmed(), display_dir);
+    if let Some(port) = config.port {
+        println!("  {}: {}", "port".dimmed(), port);
+    }
+    println!();
+
+    let options = vec![
+        ConfigAction::ChangeCommand,
+        ConfigAction::ChangeDirectory,
+        ConfigAction::ChangePort,
+        ConfigAction::Remove,
+        ConfigAction::Back,
+    ];
+
+    prompt_options("", options)
 }
 
 fn prompt_service_config(
