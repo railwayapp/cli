@@ -129,7 +129,7 @@ async fn down_command(args: DownArgs) -> Result<()> {
     println!("{}", "Stopping services...".cyan());
 
     let exit_status = tokio::process::Command::new("docker")
-        .args(["compose", "-f", compose_path.to_str().unwrap(), "down"])
+        .args(["compose", "-f", &*compose_path.to_string_lossy(), "down"])
         .status()
         .await?;
 
@@ -165,7 +165,7 @@ async fn clean_command(args: CleanArgs) -> Result<()> {
         .args([
             "compose",
             "-f",
-            compose_path.to_str().unwrap(),
+            &*compose_path.to_string_lossy(),
             "down",
             "-v",
         ])
@@ -657,6 +657,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
                 ports,
                 volumes: service_volumes,
                 networks: vec!["railway".to_string()],
+                extra_hosts: Vec::new(),
             },
         );
     }
@@ -732,6 +733,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
                         "./certs:/certs:ro".to_string(),
                     ],
                     networks: vec!["railway".to_string()],
+                    extra_hosts: vec!["host.docker.internal:host-gateway".to_string()],
                 },
             );
         }
@@ -781,10 +783,9 @@ async fn up_command(args: UpArgs) -> Result<()> {
     if !image_services.is_empty() {
         println!("{}", "Starting image services...".cyan());
 
-        let cmd_args = vec!["compose", "-f", output_path.to_str().unwrap(), "up", "-d"];
-
+        let output_path_str = output_path.to_string_lossy();
         let exit_status = tokio::process::Command::new("docker")
-            .args(&cmd_args)
+            .args(["compose", "-f", &*output_path_str, "up", "-d"])
             .status()
             .await?;
 
@@ -1030,7 +1031,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
     if !image_services.is_empty() {
         println!("{}", "Stopping image services...".cyan());
         let _ = tokio::process::Command::new("docker")
-            .args(["compose", "-f", output_path.to_str().unwrap(), "down"])
+            .args(["compose", "-f", &*output_path.to_string_lossy(), "down"])
             .status()
             .await;
     }
@@ -1051,7 +1052,7 @@ async fn wait_for_services(compose_path: &Path, timeout: Duration) -> Result<()>
             .args([
                 "compose",
                 "-f",
-                compose_path.to_str().unwrap(),
+                &*compose_path.to_string_lossy(),
                 "ps",
                 "--format",
                 "json",

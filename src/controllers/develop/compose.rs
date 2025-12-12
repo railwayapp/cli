@@ -56,6 +56,8 @@ pub struct DockerComposeService {
     pub volumes: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub networks: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_hosts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

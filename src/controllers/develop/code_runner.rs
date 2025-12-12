@@ -54,11 +54,20 @@ impl ProcessManager {
     ) -> Result<()> {
         let color = COLORS[self.processes.len() % COLORS.len()];
 
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        let (program, args) = parts.split_first().context("Empty command")?;
+        #[cfg(unix)]
+        let mut child = Command::new("sh")
+            .args(["-c", command])
+            .current_dir(&working_dir)
+            .envs(env_vars)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("Failed to spawn '{}'", command))?;
 
-        let mut child = Command::new(program)
-            .args(args)
+        #[cfg(windows)]
+        let mut child = Command::new("cmd")
+            .args(["/C", command])
             .current_dir(&working_dir)
             .envs(env_vars)
             .stdout(Stdio::piped())
