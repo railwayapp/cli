@@ -1315,6 +1315,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
     }
 
     if configured_code_services.is_empty() {
+        print_next_steps(&code_services, &service_names);
         return Ok(());
     }
 
@@ -1516,6 +1517,34 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     println!("{}", "All services stopped".green());
     Ok(())
+}
+
+fn print_next_steps(
+    unconfigured_code_services: &[(&String, &ServiceInstance)],
+    service_names: &HashMap<String, String>,
+) {
+    println!("{}", "Next steps".cyan().bold());
+    println!();
+
+    println!(
+        "  {} Run a command with access to these services:",
+        "•".dimmed()
+    );
+    println!("    {}", "railway run <command>".cyan());
+    println!();
+
+    if !unconfigured_code_services.is_empty() {
+        println!("  {} Configure code services to run locally:", "•".dimmed());
+        println!("    {}", "railway dev configure".cyan());
+        println!();
+        println!("    {}", "Available:".dimmed());
+        for (id, _) in unconfigured_code_services {
+            if let Some(name) = service_names.get(*id) {
+                println!("      {} {}", "·".dimmed(), name);
+            }
+        }
+        println!();
+    }
 }
 
 async fn wait_for_services(compose_path: &Path, timeout: Duration) -> Result<()> {
