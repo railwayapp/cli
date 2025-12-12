@@ -597,11 +597,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .map(|e| (e.node.id.clone(), e.node.name.clone()))
         .collect();
 
-    let service_slugs: HashMap<String, String> = service_names
-        .iter()
-        .map(|(id, name)| (id.clone(), slugify(name)))
-        .collect();
-
     let project_id = linked_project.project.clone();
     let environment_id = args
         .environment
@@ -611,6 +606,20 @@ async fn up_command(args: UpArgs) -> Result<()> {
     let env_response = fetch_environment_config(&client, &configs, &environment_id, true).await?;
     let env_name = env_response.name;
     let config = env_response.config;
+
+    // Use privateNetworkEndpoint when available, fall back to slugified name
+    let service_slugs: HashMap<String, String> = service_names
+        .iter()
+        .map(|(id, name)| {
+            let endpoint = config
+                .services
+                .get(id)
+                .and_then(|svc| svc.networking.as_ref())
+                .and_then(|n| n.private_network_endpoint.clone())
+                .unwrap_or_else(|| slugify(name));
+            (id.clone(), endpoint)
+        })
+        .collect();
 
     let image_services: Vec<_> = config
         .services
