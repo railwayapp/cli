@@ -5,3 +5,4 @@ bin/railway
 .direnv/*
 .env
 .DS_Store
+test

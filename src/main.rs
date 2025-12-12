@@ -30,6 +30,7 @@ commands!(
     connect,
     deploy,
     deployment,
+    dev(develop),
     domain,
     docs,
     down,

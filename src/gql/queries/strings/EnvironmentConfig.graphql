@@ -1,0 +1,7 @@
+query GetEnvironmentConfig($id: String!, $decryptVariables: Boolean) {
+	environment(id: $id) {
+		id
+		name
+		config(decryptVariables: $decryptVariables)
+	}
+}
