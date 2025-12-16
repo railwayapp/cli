@@ -19,8 +19,9 @@ use crate::{
             check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
             generate_caddyfile, generate_certs, generate_port, generate_random_port,
             get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
-            get_https_mode, is_port_443_available, override_railway_vars, print_context_info,
-            print_domain_info, print_log_line, resolve_path, slugify, volume_name,
+            is_port_443_available, is_project_proxy_on_443, override_railway_vars,
+            print_context_info, print_domain_info, print_log_line, resolve_path, slugify,
+            volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -1619,8 +1620,20 @@ fn setup_https(project_name: &str, project_id: &str) -> Result<Option<HttpsConfi
         return Ok(None);
     }
 
-    // Check if we're already in port 443 mode, or if port 443 is available
-    let use_port_443 = get_https_mode(project_id) || is_port_443_available();
+    // Determine if we can use port 443
+    let use_port_443 = if is_port_443_available() {
+        true
+    } else if is_project_proxy_on_443(project_id) {
+        // Our proxy already has 443, we can reuse it
+        true
+    } else {
+        // Something else has 443, fallback to per-service ports
+        println!(
+            "{}",
+            "Port 443 in use by another process, using per-service ports".yellow()
+        );
+        false
+    };
 
     let project_slug = slugify(project_name);
     let certs_dir = get_develop_dir(project_id).join("certs");
