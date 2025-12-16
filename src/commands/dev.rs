@@ -13,9 +13,9 @@ use crate::{
         develop::{
             CodeServiceConfig, ComposeServiceStatus, DevelopSessionLock, DockerComposeFile,
             DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
-            HttpsConfig, LocalDevConfig, LocalDevelopContext, NetworkMode, PortType,
-            ProcessManager, ServiceDomainConfig, ServicePort, ServiceSummary, build_port_infos,
-            build_service_endpoints, build_slug_port_mapping, certs_exist,
+            HttpsConfig, HttpsDomainConfig, LocalDevConfig, LocalDevelopContext, NetworkMode,
+            PortType, ProcessManager, ServiceDomainConfig, ServicePort, ServiceSummary,
+            build_port_infos, build_service_endpoints, build_slug_port_mapping, certs_exist,
             check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
             generate_caddyfile, generate_certs, generate_port, generate_random_port,
             get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
@@ -921,12 +921,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     // Build LocalDevelopContext with all service domain info
     let mut ctx = LocalDevelopContext::new(NetworkMode::Docker);
-    ctx.https_enabled = https_config.is_some();
-    ctx.https_base_domain = https_config.as_ref().map(|c| c.base_domain.clone());
-    ctx.use_port_443 = https_config
-        .as_ref()
-        .map(|c| c.use_port_443)
-        .unwrap_or(false);
+    ctx.https_config = https_config.as_ref().map(|c| HttpsDomainConfig {
+        base_domain: c.base_domain.clone(),
+        use_port_443: c.use_port_443,
+    });
 
     // Add image services to context (public_domain_prod populated after fetching vars)
     for (service_id, svc) in &image_services {

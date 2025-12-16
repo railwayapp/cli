@@ -7,9 +7,9 @@ use crate::{
     controllers::{
         config::{ServiceInstance, fetch_environment_config},
         develop::{
-            LocalDevConfig, LocalDevelopContext, NetworkMode, ServiceDomainConfig,
-            build_service_endpoints, generate_port, get_https_domain, get_https_mode,
-            override_railway_vars,
+            HttpsDomainConfig, LocalDevConfig, LocalDevelopContext, NetworkMode,
+            ServiceDomainConfig, build_service_endpoints, generate_port, get_https_domain,
+            get_https_mode, override_railway_vars,
         },
     },
     gql::queries::project::ProjectProject,
@@ -48,8 +48,10 @@ pub async fn build_local_override_context_with_config(
     let service_slugs = build_service_endpoints(&service_names, &config);
 
     let mut ctx = LocalDevelopContext::new(NetworkMode::Host);
-    ctx.https_base_domain = get_https_domain(environment_id);
-    ctx.use_port_443 = get_https_mode(environment_id);
+    ctx.https_config = get_https_domain(environment_id).map(|domain| HttpsDomainConfig {
+        base_domain: domain,
+        use_port_443: get_https_mode(environment_id),
+    });
 
     for (service_id, svc) in config.services.iter() {
         let slug = service_slugs.get(service_id).cloned().unwrap_or_default();
@@ -150,8 +152,10 @@ mod tests {
         services: HashMap<String, ServiceDomainConfig>,
     ) -> LocalDevelopContext {
         let mut ctx = LocalDevelopContext::new(NetworkMode::Host);
-        ctx.https_base_domain = https_domain.map(String::from);
-        ctx.use_port_443 = use_port_443;
+        ctx.https_config = https_domain.map(|domain| HttpsDomainConfig {
+            base_domain: domain.to_string(),
+            use_port_443,
+        });
         ctx.services = services;
         ctx
     }

@@ -9,6 +9,13 @@ pub enum NetworkMode {
     Host,
 }
 
+/// HTTPS configuration for local development
+#[derive(Debug, Clone)]
+pub struct HttpsDomainConfig {
+    pub base_domain: String,
+    pub use_port_443: bool,
+}
+
 /// Per-service domain configuration (input)
 #[derive(Debug, Clone, Default)]
 pub struct ServiceDomainConfig {
@@ -30,9 +37,7 @@ pub struct ServiceLocalDomains {
 #[derive(Debug, Clone)]
 pub struct LocalDevelopContext {
     pub mode: NetworkMode,
-    pub https_enabled: bool,
-    pub https_base_domain: Option<String>,
-    pub use_port_443: bool,
+    pub https_config: Option<HttpsDomainConfig>,
     pub services: HashMap<String, ServiceDomainConfig>,
 }
 
@@ -40,11 +45,13 @@ impl LocalDevelopContext {
     pub fn new(mode: NetworkMode) -> Self {
         Self {
             mode,
-            https_enabled: true,
-            https_base_domain: None,
-            use_port_443: false,
+            https_config: None,
             services: HashMap::new(),
         }
+    }
+
+    pub fn https_enabled(&self) -> bool {
+        self.https_config.is_some()
     }
 
     /// Get resolved local domain values for a service
@@ -73,13 +80,13 @@ impl LocalDevelopContext {
         slug: &str,
         port_mapping: &HashMap<i64, u16>,
     ) -> Option<String> {
-        let base = self.https_base_domain.as_ref()?;
+        let https = self.https_config.as_ref()?;
 
-        Some(if self.use_port_443 {
-            format!("{}.{}", slug, base)
+        Some(if https.use_port_443 {
+            format!("{}.{}", slug, https.base_domain)
         } else {
             let port = port_mapping.values().next().copied().unwrap_or(443);
-            format!("{}:{}", base, port)
+            format!("{}:{}", https.base_domain, port)
         })
     }
 
@@ -235,7 +242,7 @@ fn replace_domain_refs(
 
     // Replace public domains (prod -> local)
     for (prod_domain, local_domain) in public_domain_mapping {
-        if !ctx.https_enabled {
+        if !ctx.https_enabled() {
             // When HTTPS disabled, also replace https://prod -> http://local
             let https_prod = format!("https://{}", prod_domain);
             let http_local = format!("http://{}", local_domain);
@@ -420,8 +427,10 @@ mod tests {
             },
         );
 
-        ctx.https_base_domain = Some("local.railway.localhost".to_string());
-        ctx.use_port_443 = true;
+        ctx.https_config = Some(HttpsDomainConfig {
+            base_domain: "local.railway.localhost".to_string(),
+            use_port_443: true,
+        });
 
         let service = make_service("localhost");
         let result = override_railway_vars(vars, &service, &ctx);
@@ -475,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn test_https_to_http_conversion_when_disabled() {
+    fn test_no_public_domain_mapping_when_https_disabled() {
         let mut vars = BTreeMap::new();
         vars.insert(
             "API_URL".to_string(),
@@ -483,9 +492,7 @@ mod tests {
         );
 
         let mut ctx = make_context(NetworkMode::Host);
-        ctx.https_enabled = false;
-        ctx.https_base_domain = Some("localhost".to_string());
-        ctx.use_port_443 = false;
+        // https_config is None, so no public domain mapping happens
 
         let mut api_ports = HashMap::new();
         api_ports.insert(3000i64, 13000u16);
@@ -501,17 +508,20 @@ mod tests {
         let service = make_service("localhost");
         let result = override_railway_vars(vars, &service, &ctx);
 
+        // Without https_config, prod domain is not replaced
         assert_eq!(
             result.get("API_URL"),
-            Some(&"http://localhost:13000/v1".to_string())
+            Some(&"https://api-prod.up.railway.app/v1".to_string())
         );
     }
 
     #[test]
     fn test_for_service_docker_mode() {
         let mut ctx = LocalDevelopContext::new(NetworkMode::Docker);
-        ctx.https_base_domain = Some("myproject.localhost".to_string());
-        ctx.use_port_443 = true;
+        ctx.https_config = Some(HttpsDomainConfig {
+            base_domain: "myproject.localhost".to_string(),
+            use_port_443: true,
+        });
 
         let mut ports = HashMap::new();
         ports.insert(3000i64, 13000u16);
@@ -537,8 +547,10 @@ mod tests {
     #[test]
     fn test_for_service_host_mode() {
         let mut ctx = LocalDevelopContext::new(NetworkMode::Host);
-        ctx.https_base_domain = Some("myproject.localhost".to_string());
-        ctx.use_port_443 = false;
+        ctx.https_config = Some(HttpsDomainConfig {
+            base_domain: "myproject.localhost".to_string(),
+            use_port_443: false,
+        });
 
         let mut ports = HashMap::new();
         ports.insert(3000i64, 13000u16);
