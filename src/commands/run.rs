@@ -3,6 +3,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     controllers::{
+        develop::{print_context_info, print_domain_info},
         environment::get_matched_environment,
         local_override::{
             apply_local_overrides, build_local_override_context, is_local_develop_active,
@@ -30,6 +31,10 @@ pub struct Args {
     /// Skip local develop overrides even if docker-compose.yml exists
     #[clap(long)]
     no_local: bool,
+
+    /// Show verbose domain replacement info
+    #[clap(short, long)]
+    verbose: bool,
 
     /// Args to pass to the command
     #[clap(trailing_var_arg = true)]
@@ -110,6 +115,21 @@ pub async fn command(args: Args) -> Result<()> {
     if !args.no_local && is_local_develop_active(&project.id) {
         let ctx =
             build_local_override_context(&client, &configs, &project, &environment_id).await?;
+
+        if args.verbose {
+            if let Some(domains) = ctx.for_service(&service) {
+                let service_name = project
+                    .services
+                    .edges
+                    .iter()
+                    .find(|e| e.node.id == service)
+                    .map(|e| e.node.name.clone())
+                    .unwrap_or_else(|| service.clone());
+                print_domain_info(&service_name, &domains);
+            }
+            print_context_info(&ctx);
+        }
+
         variables = apply_local_overrides(variables, &service, &ctx);
         eprintln!("{}", "Using local develop services".yellow());
     }

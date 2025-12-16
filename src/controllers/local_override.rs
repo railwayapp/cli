@@ -7,7 +7,7 @@ use crate::{
     controllers::{
         config::{ServiceInstance, fetch_environment_config},
         develop::{
-            HttpsOverride, LocalDevConfig, OverrideMode, PublicDomainMapping,
+            LocalDevConfig, LocalDevelopContext, NetworkMode, ServiceDomainConfig,
             build_service_endpoints, generate_port, get_https_domain, get_https_mode,
             override_railway_vars,
         },
@@ -17,27 +17,13 @@ use crate::{
 
 pub use crate::controllers::develop::ports::is_local_develop_active;
 
-/// Context for applying local variable overrides
-pub struct LocalOverrideContext {
-    /// service_id -> service slug
-    pub service_slugs: HashMap<String, String>,
-    /// service_id -> (internal_port -> external_port)
-    pub port_mappings: HashMap<String, HashMap<i64, u16>>,
-    /// slug -> (internal_port -> external_port) for value substitution
-    pub slug_port_mappings: HashMap<String, HashMap<i64, u16>>,
-    /// HTTPS domain for pretty URLs (e.g., "myproject.railway.localhost")
-    pub https_domain: Option<String>,
-    /// Whether using port 443 mode (prettier URLs without port numbers)
-    pub use_port_443: bool,
-}
-
 /// Build context from environment config (fetches from API)
 pub async fn build_local_override_context(
     client: &reqwest::Client,
     configs: &Configs,
     project: &ProjectProject,
     environment_id: &str,
-) -> Result<LocalOverrideContext> {
+) -> Result<LocalDevelopContext> {
     build_local_override_context_with_config(client, configs, project, environment_id, None).await
 }
 
@@ -48,7 +34,7 @@ pub async fn build_local_override_context_with_config(
     project: &ProjectProject,
     environment_id: &str,
     local_dev_config: Option<&LocalDevConfig>,
-) -> Result<LocalOverrideContext> {
+) -> Result<LocalDevelopContext> {
     let env_response = fetch_environment_config(client, configs, environment_id, false).await?;
     let config = env_response.config;
 
@@ -61,16 +47,23 @@ pub async fn build_local_override_context_with_config(
 
     let service_slugs = build_service_endpoints(&service_names, &config);
 
-    let mut port_mappings = HashMap::new();
-    let mut slug_port_mappings = HashMap::new();
+    let mut ctx = LocalDevelopContext::new(NetworkMode::Host);
+    ctx.https_base_domain = get_https_domain(environment_id);
+    ctx.use_port_443 = get_https_mode(environment_id);
 
     for (service_id, svc) in config.services.iter() {
+        let slug = service_slugs.get(service_id).cloned().unwrap_or_default();
+
         if svc.is_image_based() {
-            let mapping = build_port_mapping(service_id, svc);
-            if let Some(slug) = service_slugs.get(service_id) {
-                slug_port_mappings.insert(slug.clone(), mapping.clone());
-            }
-            port_mappings.insert(service_id.clone(), mapping);
+            let port_mapping = build_port_mapping(service_id, svc);
+            ctx.services.insert(
+                service_id.clone(),
+                ServiceDomainConfig {
+                    slug,
+                    port_mapping,
+                    public_domain_prod: None,
+                },
+            );
         }
     }
 
@@ -78,6 +71,8 @@ pub async fn build_local_override_context_with_config(
         for (service_id, svc) in config.services.iter() {
             if svc.is_code_based() {
                 if let Some(code_config) = dev_config.services.get(service_id) {
+                    let slug = service_slugs.get(service_id).cloned().unwrap_or_default();
+
                     let port = code_config
                         .port
                         .map(|p| p as i64)
@@ -88,33 +83,26 @@ pub async fn build_local_override_context_with_config(
                         .port
                         .unwrap_or_else(|| generate_port(service_id, port));
 
-                    let mut mapping = HashMap::new();
-                    // For code services, map all internal ports to the configured external port
+                    let mut port_mapping = HashMap::new();
                     for internal in svc.get_ports() {
-                        mapping.insert(internal, external_port);
+                        port_mapping.insert(internal, external_port);
                     }
-                    // Also include the configured port itself
-                    mapping.insert(port, external_port);
+                    port_mapping.insert(port, external_port);
 
-                    if let Some(slug) = service_slugs.get(service_id) {
-                        slug_port_mappings.insert(slug.clone(), mapping.clone());
-                    }
-                    port_mappings.insert(service_id.clone(), mapping);
+                    ctx.services.insert(
+                        service_id.clone(),
+                        ServiceDomainConfig {
+                            slug,
+                            port_mapping,
+                            public_domain_prod: None,
+                        },
+                    );
                 }
             }
         }
     }
 
-    let https_domain = get_https_domain(environment_id);
-    let use_port_443 = get_https_mode(environment_id);
-
-    Ok(LocalOverrideContext {
-        service_slugs,
-        port_mappings,
-        slug_port_mappings,
-        https_domain,
-        use_port_443,
-    })
+    Ok(ctx)
 }
 
 fn build_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashMap<i64, u16> {
@@ -142,49 +130,14 @@ fn build_port_mapping(service_id: &str, svc: &ServiceInstance) -> HashMap<i64, u
 pub fn apply_local_overrides(
     vars: BTreeMap<String, String>,
     service_id: &str,
-    ctx: &LocalOverrideContext,
+    ctx: &LocalDevelopContext,
 ) -> BTreeMap<String, String> {
-    let service_slug = ctx
-        .service_slugs
-        .get(service_id)
-        .cloned()
-        .unwrap_or_default();
-    let port_mapping = ctx
-        .port_mappings
-        .get(service_id)
-        .cloned()
-        .unwrap_or_default();
+    let service = match ctx.for_service(service_id) {
+        Some(s) => s,
+        None => return vars,
+    };
 
-    // Get HTTPS override for this service
-    let https = ctx.https_domain.as_ref().map(|domain| {
-        let port = port_mapping
-            .values()
-            .next()
-            .copied()
-            .unwrap_or_else(|| generate_port(service_id, 3000));
-        HttpsOverride {
-            domain,
-            port,
-            slug: Some(service_slug.clone()),
-            use_port_443: ctx.use_port_443,
-        }
-    });
-
-    // TODO: For full cross-service public domain replacement in `run` command,
-    // we'd need to fetch all service variables upfront and build the mapping.
-    // For now, use empty mapping - cross-service refs won't be replaced.
-    let public_domain_mapping: PublicDomainMapping = HashMap::new();
-
-    override_railway_vars(
-        vars,
-        &service_slug,
-        &port_mapping,
-        &ctx.service_slugs,
-        &ctx.slug_port_mappings,
-        &public_domain_mapping,
-        OverrideMode::HostNetwork,
-        https,
-    )
+    override_railway_vars(vars, &service, ctx)
 }
 
 #[cfg(test)]
@@ -194,16 +147,13 @@ mod tests {
     fn make_context(
         https_domain: Option<&str>,
         use_port_443: bool,
-        service_slugs: HashMap<String, String>,
-        port_mappings: HashMap<String, HashMap<i64, u16>>,
-    ) -> LocalOverrideContext {
-        LocalOverrideContext {
-            service_slugs,
-            port_mappings,
-            slug_port_mappings: HashMap::new(),
-            https_domain: https_domain.map(String::from),
-            use_port_443,
-        }
+        services: HashMap<String, ServiceDomainConfig>,
+    ) -> LocalDevelopContext {
+        let mut ctx = LocalDevelopContext::new(NetworkMode::Host);
+        ctx.https_base_domain = https_domain.map(String::from);
+        ctx.use_port_443 = use_port_443;
+        ctx.services = services;
+        ctx
     }
 
     #[test]
@@ -214,20 +164,19 @@ mod tests {
             "old.railway.app".to_string(),
         );
 
-        let mut service_slugs = HashMap::new();
-        service_slugs.insert("svc-1".to_string(), "api".to_string());
-
-        let mut port_mappings = HashMap::new();
-        let mut mapping = HashMap::new();
-        mapping.insert(3000, 12345u16);
-        port_mappings.insert("svc-1".to_string(), mapping);
-
-        let ctx = make_context(
-            Some("myproject.localhost"),
-            true,
-            service_slugs,
-            port_mappings,
+        let mut services = HashMap::new();
+        let mut port_mapping = HashMap::new();
+        port_mapping.insert(3000, 12345u16);
+        services.insert(
+            "svc-1".to_string(),
+            ServiceDomainConfig {
+                slug: "api".to_string(),
+                port_mapping,
+                public_domain_prod: None,
+            },
         );
+
+        let ctx = make_context(Some("myproject.localhost"), true, services);
 
         let result = apply_local_overrides(vars, "svc-1", &ctx);
         assert_eq!(
@@ -244,15 +193,17 @@ mod tests {
             "old.railway.app".to_string(),
         );
 
-        let mut service_slugs = HashMap::new();
-        service_slugs.insert("svc-1".to_string(), "api".to_string());
-
-        let ctx = make_context(
-            Some("myproject.localhost"),
-            true,
-            service_slugs,
-            HashMap::new(),
+        let mut services = HashMap::new();
+        services.insert(
+            "svc-1".to_string(),
+            ServiceDomainConfig {
+                slug: "api".to_string(),
+                port_mapping: HashMap::new(),
+                public_domain_prod: None,
+            },
         );
+
+        let ctx = make_context(Some("myproject.localhost"), true, services);
 
         let result = apply_local_overrides(vars, "svc-1", &ctx);
         assert_eq!(
@@ -269,20 +220,19 @@ mod tests {
             "old.railway.app".to_string(),
         );
 
-        let mut service_slugs = HashMap::new();
-        service_slugs.insert("svc-1".to_string(), "api".to_string());
-
-        let mut port_mappings = HashMap::new();
-        let mut mapping = HashMap::new();
-        mapping.insert(3000, 12345u16);
-        port_mappings.insert("svc-1".to_string(), mapping);
-
-        let ctx = make_context(
-            Some("myproject.localhost"),
-            false,
-            service_slugs,
-            port_mappings,
+        let mut services = HashMap::new();
+        let mut port_mapping = HashMap::new();
+        port_mapping.insert(3000, 12345u16);
+        services.insert(
+            "svc-1".to_string(),
+            ServiceDomainConfig {
+                slug: "api".to_string(),
+                port_mapping,
+                public_domain_prod: None,
+            },
         );
+
+        let ctx = make_context(Some("myproject.localhost"), false, services);
 
         let result = apply_local_overrides(vars, "svc-1", &ctx);
         assert_eq!(
@@ -299,10 +249,17 @@ mod tests {
             "old.railway.app".to_string(),
         );
 
-        let mut service_slugs = HashMap::new();
-        service_slugs.insert("svc-1".to_string(), "api".to_string());
+        let mut services = HashMap::new();
+        services.insert(
+            "svc-1".to_string(),
+            ServiceDomainConfig {
+                slug: "api".to_string(),
+                port_mapping: HashMap::new(),
+                public_domain_prod: None,
+            },
+        );
 
-        let ctx = make_context(None, false, service_slugs, HashMap::new());
+        let ctx = make_context(None, false, services);
 
         let result = apply_local_overrides(vars, "svc-1", &ctx);
         assert_eq!(
@@ -319,10 +276,17 @@ mod tests {
             "old.railway.internal".to_string(),
         );
 
-        let mut service_slugs = HashMap::new();
-        service_slugs.insert("svc-1".to_string(), "api".to_string());
+        let mut services = HashMap::new();
+        services.insert(
+            "svc-1".to_string(),
+            ServiceDomainConfig {
+                slug: "api".to_string(),
+                port_mapping: HashMap::new(),
+                public_domain_prod: None,
+            },
+        );
 
-        let ctx = make_context(None, false, service_slugs, HashMap::new());
+        let ctx = make_context(None, false, services);
 
         let result = apply_local_overrides(vars, "svc-1", &ctx);
         assert_eq!(
