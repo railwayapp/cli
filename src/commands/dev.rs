@@ -1108,8 +1108,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
         );
         println!();
 
-        for summary in &service_summaries {
-            print_image_service_summary(summary, &https_config);
+        let use_tui =
+            !args.no_tui && std::io::stdout().is_terminal() && !configured_code_services.is_empty();
+        if !use_tui {
+            for summary in &service_summaries {
+                print_image_service_summary(summary, &https_config);
+            }
         }
     }
 
@@ -1208,15 +1212,17 @@ async fn up_command(args: UpArgs) -> Result<()> {
             inject_mkcert_ca_vars(&mut vars);
         }
 
-        print_code_service_summary(
-            &service_name,
-            &dev_config.command,
-            &working_dir,
-            vars.len(),
-            internal_port,
-            proxy_port,
-            &https_config,
-        );
+        if args.no_tui || !std::io::stdout().is_terminal() {
+            print_code_service_summary(
+                &service_name,
+                &dev_config.command,
+                &working_dir,
+                vars.len(),
+                internal_port,
+                proxy_port,
+                &https_config,
+            );
+        }
 
         // Build TUI service info while we have all the data
         let (private_url, public_url) = match (internal_port, proxy_port) {

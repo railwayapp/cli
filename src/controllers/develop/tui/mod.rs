@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use app::TuiApp;
+use crossterm::cursor::Show;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, MouseEventKind,
 };
@@ -29,8 +30,8 @@ pub async fn run(
     execute!(stdout(), EnableMouseCapture)?;
 
     let _cleanup = scopeguard::guard((), |_| {
-        let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
+        let _ = execute!(stdout(), DisableMouseCapture, Show);
     });
 
     let mut app = TuiApp::new(services);
