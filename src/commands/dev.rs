@@ -385,7 +385,6 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         if local_dev_config.get_service(&service_id).is_none() {
             let mut new_config = prompt_service_config(&name, svc, None)?;
 
-            // Check for port conflicts with existing services
             if let Some(port) = new_config.port {
                 let conflicts: Vec<_> = local_dev_config
                     .services
@@ -485,7 +484,6 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                         port_input.parse().context("Invalid port number")?
                     };
 
-                    // Check for port conflicts
                     let conflicts: Vec<_> = local_dev_config
                         .services
                         .iter()
@@ -557,16 +555,13 @@ impl std::fmt::Display for ConfigAction {
 }
 
 fn show_service_config_menu(name: &str, config: &CodeServiceConfig) -> Result<ConfigAction> {
-    let cwd = std::env::current_dir().ok();
-    let display_dir = cwd
-        .as_ref()
-        .and_then(|cwd| {
-            PathBuf::from(&config.directory)
-                .strip_prefix(cwd)
-                .ok()
-                .map(|p| format!("./{}", p.display()))
-        })
-        .unwrap_or_else(|| config.directory.clone());
+    let display_dir = match std::env::current_dir() {
+        Ok(cwd) => PathBuf::from(&config.directory)
+            .strip_prefix(&cwd)
+            .map(|p| format!("./{}", p.display()))
+            .unwrap_or_else(|_| config.directory.clone()),
+        Err(_) => config.directory.clone(),
+    };
 
     println!("\n{}", format!("Service '{}'", name).cyan().bold());
     println!("  {}: {}", "command".dimmed(), config.command);
@@ -611,11 +606,9 @@ fn prompt_service_config(
         })?
     };
 
-    // For existing configs, show relative to cwd; for new configs, default to "."
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
     let default_dir = existing
         .map(|e| {
-            // Try to make existing absolute path relative to cwd for display
             PathBuf::from(&e.directory)
                 .strip_prefix(&cwd)
                 .map(|p| p.to_string_lossy().to_string())
@@ -942,7 +935,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     // Add configured code services to context
     for (service_id, svc) in &configured_code_services {
-        let slug = service_slugs.get(*service_id).cloned().unwrap_or_default();
+        let slug = service_slugs
+            .get(*service_id)
+            .cloned()
+            .unwrap_or_else(|| slugify(service_id));
         if let Some(dev_config) = local_dev_config.get_service(service_id) {
             let internal_port = dev_config
                 .port
@@ -1182,14 +1178,9 @@ async fn up_command(args: UpArgs) -> Result<()> {
             .cloned()
             .unwrap_or_default();
 
-        let service_domains = ctx.for_service(service_id).unwrap_or_else(|| {
-            crate::controllers::develop::ServiceLocalDomains {
-                private_domain: "localhost".to_string(),
-                public_domain: None,
-                tcp_domain: "localhost".to_string(),
-                tcp_port: None,
-            }
-        });
+        let service_domains = ctx
+            .for_service(service_id)
+            .expect("service added to ctx above");
 
         if args.verbose {
             print_domain_info(&service_name, &service_domains);
@@ -1411,14 +1402,9 @@ fn build_image_service_compose(
 
         let raw_vars = resolved_vars.get(*service_id).cloned().unwrap_or_default();
 
-        let service_domains = ctx.for_service(service_id).unwrap_or_else(|| {
-            crate::controllers::develop::ServiceLocalDomains {
-                private_domain: slug.clone(),
-                public_domain: None,
-                tcp_domain: "localhost".to_string(),
-                tcp_port: None,
-            }
-        });
+        let service_domains = ctx
+            .for_service(service_id)
+            .expect("image services added to ctx before calling this fn");
 
         let environment = override_railway_vars(raw_vars, &service_domains, ctx);
 

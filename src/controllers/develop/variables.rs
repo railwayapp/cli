@@ -127,7 +127,6 @@ pub fn is_deprecated_railway_var(key: &str) -> bool {
     false
 }
 
-/// Print verbose domain info for a service
 pub fn print_domain_info(service_name: &str, domains: &ServiceLocalDomains) {
     use colored::Colorize;
     println!();
@@ -158,7 +157,6 @@ pub fn print_domain_info(service_name: &str, domains: &ServiceLocalDomains) {
     }
 }
 
-/// Print verbose context info showing all services and cross-service mappings
 pub fn print_context_info(ctx: &LocalDevelopContext) {
     use colored::Colorize;
     println!();
