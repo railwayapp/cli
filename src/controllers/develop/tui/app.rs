@@ -1,5 +1,5 @@
 use colored::Color;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use super::log_store::{LogStore, StoredLogLine};
 use crate::controllers::develop::LogLine;
@@ -25,6 +25,7 @@ pub struct TuiApp {
     pub log_store: LogStore,
     pub services: Vec<ServiceInfo>,
     service_name_to_idx: std::collections::HashMap<String, usize>,
+    visible_height: usize,
 }
 
 impl TuiApp {
@@ -42,7 +43,12 @@ impl TuiApp {
             log_store: LogStore::new(services.len()),
             services,
             service_name_to_idx,
+            visible_height: 20,
         }
+    }
+
+    pub fn set_visible_height(&mut self, height: usize) {
+        self.visible_height = height;
     }
 
     pub fn push_log(&mut self, log: LogLine, is_docker: bool) {
@@ -93,20 +99,20 @@ impl TuiApp {
 
             // Scrolling
             KeyCode::Char('j') | KeyCode::Down => {
+                self.exit_follow_mode();
                 self.scroll_down(1);
-                self.follow_mode = false;
             }
             KeyCode::Char('k') | KeyCode::Up => {
+                self.exit_follow_mode();
                 self.scroll_up(1);
-                self.follow_mode = false;
             }
             KeyCode::PageDown => {
+                self.exit_follow_mode();
                 self.scroll_down(20);
-                self.follow_mode = false;
             }
             KeyCode::PageUp => {
+                self.exit_follow_mode();
                 self.scroll_up(20);
-                self.follow_mode = false;
             }
             KeyCode::Char('g') => {
                 self.scroll_to_top();
@@ -128,6 +134,28 @@ impl TuiApp {
             _ => {}
         }
         false
+    }
+
+    pub fn handle_mouse(&mut self, event: MouseEvent) {
+        match event.kind {
+            MouseEventKind::ScrollDown => {
+                self.exit_follow_mode();
+                self.scroll_down(1);
+            }
+            MouseEventKind::ScrollUp => {
+                self.exit_follow_mode();
+                self.scroll_up(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn exit_follow_mode(&mut self) {
+        if self.follow_mode {
+            let total = self.current_log_count();
+            self.scroll_offset = total.saturating_sub(self.visible_height);
+            self.follow_mode = false;
+        }
     }
 
     fn select_tab(&mut self, idx: usize) {

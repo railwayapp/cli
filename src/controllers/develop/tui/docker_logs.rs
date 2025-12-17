@@ -78,6 +78,12 @@ fn parse_log_line(line: &str, service_mapping: &ServiceMapping) -> Option<LogLin
     // The -1 suffix is the container instance number
     if let Some(pipe_idx) = line.find(" | ") {
         let service_part = line[..pipe_idx].trim();
+
+        // Skip railway-proxy infrastructure logs
+        if service_part.starts_with("railway-proxy") {
+            return None;
+        }
+
         let message = line[pipe_idx + 3..].to_string();
 
         // Try to match to a known service by slug

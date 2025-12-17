@@ -31,13 +31,16 @@ fn convert_color(c: colored::Color) -> Color {
     }
 }
 
-pub fn render(app: &TuiApp, frame: &mut Frame) {
+pub fn render(app: &mut TuiApp, frame: &mut Frame) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
     .split(frame.area());
+
+    let visible_height = chunks[1].height.saturating_sub(2) as usize;
+    app.set_visible_height(visible_height);
 
     render_tabs(app, frame, chunks[0]);
     render_logs(app, frame, chunks[1]);
