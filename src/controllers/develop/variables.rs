@@ -172,9 +172,10 @@ pub fn print_context_info(ctx: &LocalDevelopContext) {
 }
 
 /// Transform Railway variables for local development
+/// If `service` is None, only cross-service replacements are applied
 pub fn override_railway_vars(
     vars: BTreeMap<String, String>,
-    service: &ServiceLocalDomains,
+    service: Option<&ServiceLocalDomains>,
     ctx: &LocalDevelopContext,
 ) -> BTreeMap<String, String> {
     let public_domain_mapping = ctx.public_domain_mapping();
@@ -182,15 +183,15 @@ pub fn override_railway_vars(
     vars.into_iter()
         .filter(|(key, _)| !is_deprecated_railway_var(key))
         .map(|(key, value)| {
-            let new_value = match key.as_str() {
-                "RAILWAY_PRIVATE_DOMAIN" => service.private_domain.clone(),
-                "RAILWAY_PUBLIC_DOMAIN" => service
+            let new_value = match (key.as_str(), service) {
+                ("RAILWAY_PRIVATE_DOMAIN", Some(svc)) => svc.private_domain.clone(),
+                ("RAILWAY_PUBLIC_DOMAIN", Some(svc)) => svc
                     .public_domain
                     .clone()
                     .unwrap_or_else(|| "localhost".to_string()),
-                "RAILWAY_TCP_PROXY_DOMAIN" => service.tcp_domain.clone(),
-                "RAILWAY_TCP_PROXY_PORT" => {
-                    service.tcp_port.map(|p| p.to_string()).unwrap_or(value)
+                ("RAILWAY_TCP_PROXY_DOMAIN", Some(svc)) => svc.tcp_domain.clone(),
+                ("RAILWAY_TCP_PROXY_PORT", Some(svc)) => {
+                    svc.tcp_port.map(|p| p.to_string()).unwrap_or(value)
                 }
                 _ => replace_domain_refs(&value, ctx, &public_domain_mapping),
             };
@@ -307,7 +308,7 @@ mod tests {
         let ctx = make_context(NetworkMode::Docker);
         let service = make_service("my-service");
 
-        let result = override_railway_vars(vars, &service, &ctx);
+        let result = override_railway_vars(vars, Some(&service), &ctx);
 
         assert_eq!(
             result.get("RAILWAY_PRIVATE_DOMAIN"),
@@ -326,7 +327,7 @@ mod tests {
         let ctx = make_context(NetworkMode::Host);
         let service = make_service("localhost");
 
-        let result = override_railway_vars(vars, &service, &ctx);
+        let result = override_railway_vars(vars, Some(&service), &ctx);
 
         assert_eq!(
             result.get("RAILWAY_PRIVATE_DOMAIN"),
@@ -347,7 +348,7 @@ mod tests {
             tcp_port: None,
         };
 
-        let result = override_railway_vars(vars, &service, &ctx);
+        let result = override_railway_vars(vars, Some(&service), &ctx);
 
         assert_eq!(
             result.get("RAILWAY_PUBLIC_DOMAIN"),
@@ -365,7 +366,7 @@ mod tests {
         let ctx = make_context(NetworkMode::Host);
         let service = make_service("localhost");
 
-        let result = override_railway_vars(vars, &service, &ctx);
+        let result = override_railway_vars(vars, Some(&service), &ctx);
 
         assert!(!result.contains_key("RAILWAY_STATIC_URL"));
         assert!(!result.contains_key("RAILWAY_SERVICE_API_URL"));
@@ -434,7 +435,7 @@ mod tests {
         });
 
         let service = make_service("localhost");
-        let result = override_railway_vars(vars, &service, &ctx);
+        let result = override_railway_vars(vars, Some(&service), &ctx);
 
         assert_eq!(
             result.get("REDIS_URL"),
@@ -477,7 +478,7 @@ mod tests {
         );
 
         let service = make_service("my-service");
-        let result = override_railway_vars(vars, &service, &ctx);
+        let result = override_railway_vars(vars, Some(&service), &ctx);
 
         assert_eq!(
             result.get("REDIS_URL"),
@@ -509,7 +510,7 @@ mod tests {
         );
 
         let service = make_service("localhost");
-        let result = override_railway_vars(vars, &service, &ctx);
+        let result = override_railway_vars(vars, Some(&service), &ctx);
 
         // Without https_config, prod domain is not replaced
         assert_eq!(

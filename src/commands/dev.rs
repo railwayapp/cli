@@ -1189,7 +1189,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
             print_domain_info(&service_name, &service_domains);
         }
 
-        let mut vars = override_railway_vars(raw_vars, &service_domains, &ctx);
+        let mut vars = override_railway_vars(raw_vars, Some(&service_domains), &ctx);
 
         // Only set PORT if service has networking configured
         if let Some(port) = internal_port {
@@ -1409,7 +1409,7 @@ fn build_image_service_compose(
             .for_service(service_id)
             .expect("image services added to ctx before calling this fn");
 
-        let environment = override_railway_vars(raw_vars, &service_domains, ctx);
+        let environment = override_railway_vars(raw_vars, Some(&service_domains), ctx);
 
         let ports: Vec<String> = port_infos
             .iter()

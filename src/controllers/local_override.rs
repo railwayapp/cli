@@ -7,7 +7,7 @@ use crate::{
     controllers::{
         config::{ServiceInstance, fetch_environment_config},
         develop::{
-            HttpsDomainConfig, LocalDevConfig, LocalDevelopContext, NetworkMode,
+            DEFAULT_PORT, HttpsDomainConfig, LocalDevConfig, LocalDevelopContext, NetworkMode,
             ServiceDomainConfig, build_service_endpoints, generate_port, get_https_domain,
             get_https_mode, override_railway_vars,
         },
@@ -17,26 +17,17 @@ use crate::{
 
 pub use crate::controllers::develop::ports::is_local_develop_active;
 
-/// Build context from environment config (fetches from API)
+/// Build context from environment config (fetches from API, auto-loads LocalDevConfig)
 pub async fn build_local_override_context(
     client: &reqwest::Client,
     configs: &Configs,
     project: &ProjectProject,
     environment_id: &str,
 ) -> Result<LocalDevelopContext> {
-    build_local_override_context_with_config(client, configs, project, environment_id, None).await
-}
-
-/// Build context from environment config with optional LocalDevConfig for code services
-pub async fn build_local_override_context_with_config(
-    client: &reqwest::Client,
-    configs: &Configs,
-    project: &ProjectProject,
-    environment_id: &str,
-    local_dev_config: Option<&LocalDevConfig>,
-) -> Result<LocalDevelopContext> {
     let env_response = fetch_environment_config(client, configs, environment_id, false).await?;
     let config = env_response.config;
+
+    let local_dev_config = LocalDevConfig::load(&project.id).ok();
 
     let service_names: HashMap<String, String> = project
         .services
@@ -69,8 +60,39 @@ pub async fn build_local_override_context_with_config(
         }
     }
 
-    // Code services are handled by the dev command, not here
-    let _ = local_dev_config;
+    if let Some(dev_config) = &local_dev_config {
+        for (service_id, svc) in config.services.iter() {
+            if svc.is_code_based() {
+                if let Some(code_config) = dev_config.services.get(service_id) {
+                    let slug = service_slugs.get(service_id).cloned().unwrap_or_default();
+                    let port = code_config
+                        .port
+                        .map(|p| p as i64)
+                        .or_else(|| svc.get_ports().first().copied())
+                        .unwrap_or(DEFAULT_PORT as i64);
+                    let external_port = code_config
+                        .port
+                        .unwrap_or_else(|| generate_port(service_id, port));
+
+                    let mut port_mapping = HashMap::new();
+                    for internal in svc.get_ports() {
+                        port_mapping.insert(internal, external_port);
+                    }
+                    port_mapping.insert(port, external_port);
+
+                    ctx.services.insert(
+                        service_id.clone(),
+                        ServiceDomainConfig {
+                            slug,
+                            port_mapping,
+                            public_domain_prod: None,
+                            https_proxy_port: Some(generate_port(service_id, port)),
+                        },
+                    );
+                }
+            }
+        }
+    }
 
     Ok(ctx)
 }
@@ -102,12 +124,8 @@ pub fn apply_local_overrides(
     service_id: &str,
     ctx: &LocalDevelopContext,
 ) -> BTreeMap<String, String> {
-    let service = match ctx.for_service(service_id) {
-        Some(s) => s,
-        None => return vars,
-    };
-
-    override_railway_vars(vars, &service, ctx)
+    let service = ctx.for_service(service_id);
+    override_railway_vars(vars, service.as_ref(), ctx)
 }
 
 #[cfg(test)]
