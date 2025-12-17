@@ -35,6 +35,7 @@ pub fn render(app: &mut TuiApp, frame: &mut Frame) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
+        Constraint::Length(5),
         Constraint::Length(1),
     ])
     .split(frame.area());
@@ -44,7 +45,8 @@ pub fn render(app: &mut TuiApp, frame: &mut Frame) {
 
     render_tabs(app, frame, chunks[0]);
     render_logs(app, frame, chunks[1]);
-    render_help_bar(app, frame, chunks[2]);
+    render_info_pane(app, frame, chunks[2]);
+    render_help_bar(app, frame, chunks[3]);
 }
 
 fn render_tabs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
@@ -59,10 +61,10 @@ fn render_tabs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
 
     let tabs = Tabs::new(titles)
         .select(selected)
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(Color::Gray))
         .highlight_style(
             Style::default()
-                .fg(Color::White)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
         .divider("|");
@@ -174,6 +176,65 @@ fn render_log_entries(
             Line::from(vec![prefix, content])
         })
         .collect()
+}
+
+fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
+    let services_to_show: Vec<&super::app::ServiceInfo> = match app.current_tab {
+        Tab::Local => app.services.iter().filter(|s| !s.is_docker).collect(),
+        Tab::Image => app.services.iter().filter(|s| s.is_docker).collect(),
+        Tab::Service(idx) => app.services.get(idx).into_iter().collect(),
+    };
+
+    let lines: Vec<Line> = services_to_show
+        .iter()
+        .map(|svc| {
+            let mut spans = vec![Span::styled(
+                format!("{}: ", svc.name),
+                Style::default()
+                    .fg(convert_color(svc.color))
+                    .add_modifier(Modifier::BOLD),
+            )];
+
+            match (&svc.private_url, &svc.public_url) {
+                (Some(priv_url), Some(pub_url)) => {
+                    spans.push(Span::raw(priv_url.clone()));
+                    spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::raw(pub_url.clone()));
+                }
+                (Some(url), None) | (None, Some(url)) => {
+                    spans.push(Span::raw(url.clone()));
+                }
+                (None, None) => {
+                    if let Some(cmd) = &svc.command {
+                        spans.push(Span::styled(cmd.clone(), Style::default().fg(Color::Gray)));
+                    } else if let Some(img) = &svc.image {
+                        spans.push(Span::styled(img.clone(), Style::default().fg(Color::Gray)));
+                    }
+                }
+            }
+
+            spans.push(Span::styled(
+                format!(" ({} vars)", svc.var_count),
+                Style::default().fg(Color::DarkGray),
+            ));
+
+            Line::from(spans)
+        })
+        .collect();
+
+    let title = match app.current_tab {
+        Tab::Local => "Local Services",
+        Tab::Image => "Image Services",
+        Tab::Service(_) => "Service Info",
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 fn render_help_bar(_app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {

@@ -1160,7 +1160,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
     // Switch to host network mode for code services
     ctx.mode = NetworkMode::Host;
 
-    for (service_id, svc) in &configured_code_services {
+    // Build TUI services as we spawn code services (to capture all info)
+    let mut tui_services: Vec<tui::ServiceInfo> = Vec::new();
+
+    for (i, (service_id, svc)) in configured_code_services.iter().enumerate() {
         let dev_config = match local_dev_config.get_service(service_id) {
             Some(c) => c,
             None => continue,
@@ -1215,6 +1218,35 @@ async fn up_command(args: UpArgs) -> Result<()> {
             &https_config,
         );
 
+        // Build TUI service info while we have all the data
+        let (private_url, public_url) = match (internal_port, proxy_port) {
+            (Some(port), Some(pport)) => {
+                let private = format!("http://localhost:{}", port);
+                let public = https_config.as_ref().map(|config| {
+                    let slug = slugify(&service_name);
+                    if config.use_port_443 {
+                        format!("https://{}.{}", slug, config.base_domain)
+                    } else {
+                        format!("https://{}:{}", config.base_domain, pport)
+                    }
+                });
+                (Some(private), public)
+            }
+            _ => (None, None),
+        };
+
+        let color = crate::controllers::develop::code_runner::COLORS[i % 6];
+        tui_services.push(tui::ServiceInfo {
+            name: service_name.clone(),
+            is_docker: false,
+            color,
+            var_count: vars.len(),
+            private_url,
+            public_url,
+            command: Some(dev_config.command.clone()),
+            image: None,
+        });
+
         process_manager
             .spawn_service(
                 service_name,
@@ -1229,34 +1261,40 @@ async fn up_command(args: UpArgs) -> Result<()> {
     // Drop the original sender so the channel closes when all processes exit
     drop(log_tx);
 
-    // Build service info for TUI (code services first, then image services)
-    let mut tui_services: Vec<tui::ServiceInfo> = configured_code_services
-        .iter()
-        .enumerate()
-        .map(|(i, (service_id, _))| {
-            let name = service_names
-                .get(*service_id)
-                .cloned()
-                .unwrap_or_else(|| (*service_id).clone());
-            let color = crate::controllers::develop::code_runner::COLORS[i % 6];
-            tui::ServiceInfo {
-                name,
-                is_docker: false,
-                color,
-            }
-        })
-        .collect();
-
     // Add image services to TUI and build docker service mapping
     let mut docker_service_mapping = tui::ServiceMapping::new();
     for (i, summary) in service_summaries.iter().enumerate() {
         let color = crate::controllers::develop::code_runner::COLORS[(tui_services.len() + i) % 6];
         let slug = slugify(&summary.name);
-        docker_service_mapping.insert(slug, (summary.name.clone(), color));
+        docker_service_mapping.insert(slug.clone(), (summary.name.clone(), color));
+
+        // Build URLs for image service (use first HTTP port if available)
+        let (private_url, public_url) = summary
+            .ports
+            .iter()
+            .find(|p| matches!(p.port_type, PortType::Http))
+            .map(|p| {
+                let private = format!("http://localhost:{}", p.external);
+                let public = https_config.as_ref().map(|config| {
+                    if config.use_port_443 {
+                        format!("https://{}.{}", slug, config.base_domain)
+                    } else {
+                        format!("https://{}:{}", config.base_domain, p.public_port)
+                    }
+                });
+                (Some(private), public)
+            })
+            .unwrap_or((None, None));
+
         tui_services.push(tui::ServiceInfo {
             name: summary.name.clone(),
             is_docker: true,
             color,
+            var_count: summary.var_count,
+            private_url,
+            public_url,
+            command: None,
+            image: Some(summary.image.clone()),
         });
     }
 

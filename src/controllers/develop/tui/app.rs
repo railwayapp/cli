@@ -16,6 +16,11 @@ pub struct ServiceInfo {
     pub name: String,
     pub is_docker: bool,
     pub color: Color,
+    pub var_count: usize,
+    pub private_url: Option<String>,
+    pub public_url: Option<String>,
+    pub command: Option<String>,
+    pub image: Option<String>,
 }
 
 pub struct TuiApp {
