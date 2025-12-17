@@ -929,6 +929,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
                 slug,
                 port_mapping,
                 public_domain_prod: None,
+                https_proxy_port: None, // port_mapping already has generated ports
             },
         );
     }
@@ -950,12 +951,14 @@ async fn up_command(args: UpArgs) -> Result<()> {
                 port_mapping.insert(port, internal_port as u16);
             }
             port_mapping.insert(internal_port, internal_port as u16);
+            let https_proxy_port = Some(generate_port(service_id, internal_port));
             ctx.services.insert(
                 (*service_id).clone(),
                 ServiceDomainConfig {
                     slug,
                     port_mapping,
                     public_domain_prod: None,
+                    https_proxy_port,
                 },
             );
         }

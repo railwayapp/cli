@@ -22,6 +22,7 @@ pub struct ServiceDomainConfig {
     pub slug: String,
     pub port_mapping: HashMap<i64, u16>,
     pub public_domain_prod: Option<String>,
+    pub https_proxy_port: Option<u16>,
 }
 
 /// Resolved local domain values for a service (output)
@@ -63,7 +64,7 @@ impl LocalDevelopContext {
             NetworkMode::Host => "localhost".to_string(),
         };
 
-        let public_domain = self.resolve_public_domain(&config.slug, &config.port_mapping);
+        let public_domain = self.resolve_public_domain(config);
 
         let tcp_port = config.port_mapping.values().next().copied();
 
@@ -75,17 +76,16 @@ impl LocalDevelopContext {
         })
     }
 
-    fn resolve_public_domain(
-        &self,
-        slug: &str,
-        port_mapping: &HashMap<i64, u16>,
-    ) -> Option<String> {
+    fn resolve_public_domain(&self, config: &ServiceDomainConfig) -> Option<String> {
         let https = self.https_config.as_ref()?;
 
         Some(if https.use_port_443 {
-            format!("{}.{}", slug, https.base_domain)
+            format!("{}.{}", config.slug, https.base_domain)
         } else {
-            let port = port_mapping.values().next().copied().unwrap_or(443);
+            let port = config
+                .https_proxy_port
+                .or_else(|| config.port_mapping.values().next().copied())
+                .unwrap_or(443);
             format!("{}:{}", https.base_domain, port)
         })
     }
@@ -96,7 +96,7 @@ impl LocalDevelopContext {
             .values()
             .filter_map(|config| {
                 let prod = config.public_domain_prod.as_ref()?;
-                let local = self.resolve_public_domain(&config.slug, &config.port_mapping)?;
+                let local = self.resolve_public_domain(config)?;
                 Some((prod.clone(), local))
             })
             .collect()
@@ -402,6 +402,7 @@ mod tests {
                 slug: "redis".to_string(),
                 port_mapping: redis_ports,
                 public_domain_prod: None,
+                https_proxy_port: None,
             },
         );
 
@@ -413,6 +414,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping: api_ports,
                 public_domain_prod: Some("api-prod.up.railway.app".to_string()),
+                https_proxy_port: None,
             },
         );
 
@@ -422,6 +424,7 @@ mod tests {
                 slug: "custom".to_string(),
                 port_mapping: HashMap::new(),
                 public_domain_prod: Some("api.mycompany.io".to_string()),
+                https_proxy_port: None,
             },
         );
 
@@ -469,6 +472,7 @@ mod tests {
                 slug: "redis".to_string(),
                 port_mapping: HashMap::new(),
                 public_domain_prod: None,
+                https_proxy_port: None,
             },
         );
 
@@ -500,6 +504,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping: api_ports,
                 public_domain_prod: Some("api-prod.up.railway.app".to_string()),
+                https_proxy_port: None,
             },
         );
 
@@ -529,6 +534,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping: ports,
                 public_domain_prod: Some("api.railway.app".to_string()),
+                https_proxy_port: None,
             },
         );
 
@@ -558,6 +564,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping: ports,
                 public_domain_prod: Some("api.railway.app".to_string()),
+                https_proxy_port: Some(41191),
             },
         );
 
@@ -565,7 +572,7 @@ mod tests {
         assert_eq!(service.private_domain, "localhost");
         assert_eq!(
             service.public_domain,
-            Some("myproject.localhost:13000".to_string())
+            Some("myproject.localhost:41191".to_string())
         );
     }
 }

@@ -64,6 +64,7 @@ pub async fn build_local_override_context_with_config(
                     slug,
                     port_mapping,
                     public_domain_prod: None,
+                    https_proxy_port: None,
                 },
             );
         }
@@ -91,12 +92,14 @@ pub async fn build_local_override_context_with_config(
                     }
                     port_mapping.insert(port, external_port);
 
+                    let https_proxy_port = Some(generate_port(service_id, port));
                     ctx.services.insert(
                         service_id.clone(),
                         ServiceDomainConfig {
                             slug,
                             port_mapping,
                             public_domain_prod: None,
+                            https_proxy_port,
                         },
                     );
                 }
@@ -177,6 +180,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping,
                 public_domain_prod: None,
+                https_proxy_port: None,
             },
         );
 
@@ -204,6 +208,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping: HashMap::new(),
                 public_domain_prod: None,
+                https_proxy_port: None,
             },
         );
 
@@ -233,6 +238,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping,
                 public_domain_prod: None,
+                https_proxy_port: Some(54321),
             },
         );
 
@@ -241,7 +247,7 @@ mod tests {
         let result = apply_local_overrides(vars, "svc-1", &ctx);
         assert_eq!(
             result.get("RAILWAY_PUBLIC_DOMAIN"),
-            Some(&"myproject.localhost:12345".to_string())
+            Some(&"myproject.localhost:54321".to_string())
         );
     }
 
@@ -260,6 +266,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping: HashMap::new(),
                 public_domain_prod: None,
+                https_proxy_port: None,
             },
         );
 
@@ -287,6 +294,7 @@ mod tests {
                 slug: "api".to_string(),
                 port_mapping: HashMap::new(),
                 public_domain_prod: None,
+                https_proxy_port: None,
             },
         );
 
