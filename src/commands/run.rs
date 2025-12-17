@@ -3,6 +3,7 @@ use is_terminal::IsTerminal;
 
 use crate::{
     controllers::{
+        develop::variables::inject_mkcert_ca_vars,
         environment::get_matched_environment,
         local_override::{
             apply_local_overrides, build_local_override_context, is_local_develop_active,
@@ -116,6 +117,9 @@ pub async fn command(args: Args) -> Result<()> {
             build_local_override_context(&client, &configs, &project, &environment_id).await?;
 
         variables = apply_local_overrides(variables, &service, &ctx);
+        if ctx.https_enabled() {
+            inject_mkcert_ca_vars(&mut variables);
+        }
         eprintln!("{}", "Using local develop services".yellow());
     }
 

@@ -19,9 +19,9 @@ use crate::{
             build_slug_port_mapping, certs_exist, check_docker_compose_installed,
             check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
             generate_port, generate_random_port, get_compose_path as develop_get_compose_path,
-            get_develop_dir, get_existing_certs, is_port_443_available, is_project_proxy_on_443,
-            override_railway_vars, print_context_info, print_domain_info, print_log_line,
-            resolve_path, slugify, volume_name,
+            get_develop_dir, get_existing_certs, inject_mkcert_ca_vars, is_port_443_available,
+            is_project_proxy_on_443, override_railway_vars, print_context_info, print_domain_info,
+            print_log_line, resolve_path, slugify, volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -1194,6 +1194,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
         // Only set PORT if service has networking configured
         if let Some(port) = internal_port {
             vars.insert("PORT".to_string(), port.to_string());
+        }
+
+        if ctx.https_enabled() {
+            inject_mkcert_ca_vars(&mut vars);
         }
 
         print_code_service_summary(

@@ -271,6 +271,25 @@ fn replace_domain_with_port_mapping(
     result
 }
 
+/// Inject mkcert CA environment variables for runtimes that bundle their own CA stores.
+/// Silently does nothing if mkcert is not installed or the CA root doesn't exist.
+pub fn inject_mkcert_ca_vars(vars: &mut BTreeMap<String, String>) {
+    let Some(ca_root) = super::https_proxy::get_mkcert_ca_root() else {
+        return;
+    };
+    let ca_file = ca_root.join("rootCA.pem").to_string_lossy().to_string();
+    let ca_dir = ca_root.to_string_lossy().to_string();
+
+    vars.entry("NODE_EXTRA_CA_CERTS".into())
+        .or_insert(ca_file.clone());
+    vars.entry("REQUESTS_CA_BUNDLE".into())
+        .or_insert(ca_file.clone());
+    vars.entry("SSL_CERT_FILE".into())
+        .or_insert(ca_file.clone());
+    vars.entry("CURL_CA_BUNDLE".into()).or_insert(ca_file);
+    vars.entry("SSL_CERT_DIR".into()).or_insert(ca_dir);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

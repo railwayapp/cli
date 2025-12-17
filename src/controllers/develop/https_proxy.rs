@@ -67,6 +67,21 @@ pub fn ensure_mkcert_ca() -> Result<()> {
     Ok(())
 }
 
+/// Get the mkcert CA root directory if available.
+/// Returns None if mkcert is not installed or the CA root doesn't exist.
+pub fn get_mkcert_ca_root() -> Option<PathBuf> {
+    Command::new("mkcert")
+        .arg("-CAROOT")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let path = PathBuf::from(path);
+            path.join("rootCA.pem").exists().then_some(path)
+        })
+}
+
 /// Check if certs already exist for a project with the required type
 pub fn certs_exist(output_dir: &Path, use_port_443: bool) -> bool {
     let cert_path = output_dir.join("cert.pem");
