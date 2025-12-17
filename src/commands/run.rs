@@ -31,6 +31,10 @@ pub struct Args {
     #[clap(long)]
     no_local: bool,
 
+    /// Show verbose domain replacement info
+    #[clap(short, long)]
+    verbose: bool,
+
     /// Args to pass to the command
     #[clap(trailing_var_arg = true)]
     args: Vec<String>,
@@ -110,6 +114,7 @@ pub async fn command(args: Args) -> Result<()> {
     if !args.no_local && is_local_develop_active(&project.id) {
         let ctx =
             build_local_override_context(&client, &configs, &project, &environment_id).await?;
+
         variables = apply_local_overrides(variables, &service, &ctx);
         eprintln!("{}", "Using local develop services".yellow());
     }

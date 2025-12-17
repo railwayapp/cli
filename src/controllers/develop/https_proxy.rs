@@ -19,6 +19,24 @@ pub fn is_port_443_available() -> bool {
     TcpListener::bind("0.0.0.0:443").is_ok()
 }
 
+/// Check if this project's railway-proxy container is running with port 443
+pub fn is_project_proxy_on_443(project_id: &str) -> bool {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &format!("name={}-railway-proxy", project_id),
+            "--format",
+            "{{.Ports}}",
+        ])
+        .output()
+        .ok();
+
+    output
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("443"))
+        .unwrap_or(false)
+}
+
 pub fn check_mkcert_installed() -> bool {
     Command::new("mkcert")
         .arg("-help")
