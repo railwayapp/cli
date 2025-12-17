@@ -54,9 +54,8 @@ pub async fn build_local_override_context_with_config(
     });
 
     for (service_id, svc) in config.services.iter() {
-        let slug = service_slugs.get(service_id).cloned().unwrap_or_default();
-
         if svc.is_image_based() {
+            let slug = service_slugs.get(service_id).cloned().unwrap_or_default();
             let port_mapping = build_port_mapping(service_id, svc);
             ctx.services.insert(
                 service_id.clone(),
@@ -70,42 +69,8 @@ pub async fn build_local_override_context_with_config(
         }
     }
 
-    if let Some(dev_config) = local_dev_config {
-        for (service_id, svc) in config.services.iter() {
-            if svc.is_code_based() {
-                if let Some(code_config) = dev_config.services.get(service_id) {
-                    let slug = service_slugs.get(service_id).cloned().unwrap_or_default();
-
-                    let port = code_config
-                        .port
-                        .map(|p| p as i64)
-                        .or_else(|| svc.get_ports().first().copied())
-                        .unwrap_or(3000);
-
-                    let external_port = code_config
-                        .port
-                        .unwrap_or_else(|| generate_port(service_id, port));
-
-                    let mut port_mapping = HashMap::new();
-                    for internal in svc.get_ports() {
-                        port_mapping.insert(internal, external_port);
-                    }
-                    port_mapping.insert(port, external_port);
-
-                    let https_proxy_port = Some(generate_port(service_id, port));
-                    ctx.services.insert(
-                        service_id.clone(),
-                        ServiceDomainConfig {
-                            slug,
-                            port_mapping,
-                            public_domain_prod: None,
-                            https_proxy_port,
-                        },
-                    );
-                }
-            }
-        }
-    }
+    // Code services are handled by the dev command, not here
+    let _ = local_dev_config;
 
     Ok(ctx)
 }

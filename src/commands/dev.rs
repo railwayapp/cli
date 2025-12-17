@@ -11,17 +11,17 @@ use crate::{
     controllers::{
         config::{ServiceInstance, fetch_environment_config},
         develop::{
-            CodeServiceConfig, ComposeServiceStatus, DevelopSessionLock, DockerComposeFile,
-            DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
-            HttpsConfig, HttpsDomainConfig, LocalDevConfig, LocalDevelopContext, NetworkMode,
-            PortType, ProcessManager, ServiceDomainConfig, ServicePort, ServiceSummary,
-            build_port_infos, build_service_endpoints, build_slug_port_mapping, certs_exist,
-            check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
-            generate_caddyfile, generate_certs, generate_port, generate_random_port,
-            get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
-            is_port_443_available, is_project_proxy_on_443, override_railway_vars,
-            print_context_info, print_domain_info, print_log_line, resolve_path, slugify,
-            volume_name,
+            CodeServiceConfig, ComposeServiceStatus, DEFAULT_PORT, DevelopSessionLock,
+            DockerComposeFile, DockerComposeNetwork, DockerComposeNetworks, DockerComposeService,
+            DockerComposeVolume, HttpsConfig, HttpsDomainConfig, LocalDevConfig,
+            LocalDevelopContext, NetworkMode, PortType, ProcessManager, ServiceDomainConfig,
+            ServicePort, ServiceSummary, build_port_infos, build_service_endpoints,
+            build_slug_port_mapping, certs_exist, check_docker_compose_installed,
+            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
+            generate_port, generate_random_port, get_compose_path as develop_get_compose_path,
+            get_develop_dir, get_existing_certs, is_port_443_available, is_project_proxy_on_443,
+            override_railway_vars, print_context_info, print_domain_info, print_log_line,
+            resolve_path, slugify, volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -473,7 +473,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                 ConfigAction::ChangePort => {
                     let existing = local_dev_config.get_service(&service_id).unwrap();
                     let railway_port = svc.get_ports().first().map(|&p| p as u16);
-                    let current_port = existing.port.or(railway_port).unwrap_or(3000);
+                    let current_port = existing.port.or(railway_port).unwrap_or(DEFAULT_PORT);
 
                     let port_input =
                         prompt_text(&format!("Port for '{}' [{}]:", name, current_port))?;
@@ -945,7 +945,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
                 .port
                 .map(|p| p as i64)
                 .or_else(|| svc.get_ports().first().copied())
-                .unwrap_or(3000);
+                .unwrap_or(DEFAULT_PORT as i64);
             let mut port_mapping = HashMap::new();
             for port in svc.get_ports() {
                 port_mapping.insert(port, internal_port as u16);
@@ -1499,7 +1499,7 @@ fn setup_caddy_proxy(
                 .port
                 .map(|p| p as i64)
                 .or_else(|| svc.get_ports().first().copied())
-                .unwrap_or(3000);
+                .unwrap_or(DEFAULT_PORT as i64);
             let proxy_port = generate_port(service_id, internal_port);
 
             service_ports.push(ServicePort {

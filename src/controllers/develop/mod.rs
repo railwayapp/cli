@@ -15,3 +15,5 @@ pub use output::*;
 pub use ports::*;
 pub use session::*;
 pub use variables::*;
+
+pub const DEFAULT_PORT: u16 = 8080;
