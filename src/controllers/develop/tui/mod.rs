@@ -7,10 +7,13 @@ pub use app::ServiceInfo;
 pub use docker_logs::{ServiceMapping, spawn_docker_logs};
 
 use std::io::stdout;
+use std::time::Duration;
 
 use anyhow::Result;
 use app::TuiApp;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, MouseEventKind,
+};
 use crossterm::execute;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -44,16 +47,16 @@ pub async fn run(
                 app.push_log(log, true);
             }
             Some(Ok(event)) = events.next() => {
-                match event {
-                    Event::Key(key) => {
-                        if app.handle_key(key) {
-                            break;
-                        }
+                if process_event(&mut app, event) {
+                    break;
+                }
+                // Drain any queued events to batch scroll and prevent momentum lag
+                while let Ok(Some(Ok(event))) =
+                    tokio::time::timeout(Duration::from_millis(1), events.next()).await
+                {
+                    if process_event(&mut app, event) {
+                        break;
                     }
-                    Event::Mouse(mouse) => {
-                        app.handle_mouse(mouse);
-                    }
-                    _ => {}
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -63,4 +66,22 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+fn process_event(app: &mut TuiApp, event: Event) -> bool {
+    match event {
+        Event::Key(key) => {
+            if app.handle_key(key) {
+                return true;
+            }
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                app.handle_mouse(mouse);
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    false
 }
