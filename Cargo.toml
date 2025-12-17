@@ -100,6 +100,8 @@ pastey = "0.1.1"
 nix = { version = "0.30.1", features = ["signal"] }
 fs2 = "0.4.3"
 async-trait = "0.1.89"
+ratatui = "0.29"
+scopeguard = "1.2"
 
 [profile.release]
 lto = "fat"

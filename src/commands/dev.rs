@@ -14,14 +14,15 @@ use crate::{
             CodeServiceConfig, ComposeServiceStatus, DEFAULT_PORT, DevelopSessionLock,
             DockerComposeFile, DockerComposeNetwork, DockerComposeNetworks, DockerComposeService,
             DockerComposeVolume, HttpsConfig, HttpsDomainConfig, LocalDevConfig,
-            LocalDevelopContext, NetworkMode, PortType, ProcessManager, ServiceDomainConfig,
-            ServicePort, ServiceSummary, build_port_infos, build_service_endpoints,
-            build_slug_port_mapping, certs_exist, check_docker_compose_installed,
-            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
-            generate_port, generate_random_port, get_compose_path as develop_get_compose_path,
-            get_develop_dir, get_existing_certs, inject_mkcert_ca_vars, is_port_443_available,
-            is_project_proxy_on_443, override_railway_vars, print_context_info, print_domain_info,
-            print_log_line, resolve_path, slugify, volume_name,
+            LocalDevelopContext, LogLine, NetworkMode, PortType, ProcessManager,
+            ServiceDomainConfig, ServicePort, ServiceSummary, build_port_infos,
+            build_service_endpoints, build_slug_port_mapping, certs_exist,
+            check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
+            generate_caddyfile, generate_certs, generate_port, generate_random_port,
+            get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
+            inject_mkcert_ca_vars, is_port_443_available, is_project_proxy_on_443,
+            override_railway_vars, print_context_info, print_domain_info, print_log_line,
+            resolve_path, slugify, tui, volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -88,6 +89,10 @@ struct UpArgs {
     /// Show verbose domain replacement info
     #[clap(short, long)]
     verbose: bool,
+
+    /// Disable TUI, stream logs to stdout instead
+    #[clap(long)]
+    no_tui: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1224,19 +1229,72 @@ async fn up_command(args: UpArgs) -> Result<()> {
     // Drop the original sender so the channel closes when all processes exit
     drop(log_tx);
 
-    println!("{}", "Streaming logs (Ctrl+C to stop)...".dimmed());
-    println!();
-
-    loop {
-        tokio::select! {
-            Some(log) = log_rx.recv() => {
-                print_log_line(&log);
+    // Build service info for TUI (code services first, then image services)
+    let mut tui_services: Vec<tui::ServiceInfo> = configured_code_services
+        .iter()
+        .enumerate()
+        .map(|(i, (service_id, _))| {
+            let name = service_names
+                .get(*service_id)
+                .cloned()
+                .unwrap_or_else(|| (*service_id).clone());
+            let color = crate::controllers::develop::code_runner::COLORS[i % 6];
+            tui::ServiceInfo {
+                name,
+                is_docker: false,
+                color,
             }
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("\n{}", "Shutting down...".yellow());
-                break;
+        })
+        .collect();
+
+    // Add image services to TUI and build docker service mapping
+    let mut docker_service_mapping = tui::ServiceMapping::new();
+    for (i, summary) in service_summaries.iter().enumerate() {
+        let color = crate::controllers::develop::code_runner::COLORS[(tui_services.len() + i) % 6];
+        let slug = slugify(&summary.name);
+        docker_service_mapping.insert(slug, (summary.name.clone(), color));
+        tui_services.push(tui::ServiceInfo {
+            name: summary.name.clone(),
+            is_docker: true,
+            color,
+        });
+    }
+
+    // Start docker log streaming if there are image services
+    let (docker_tx, mut docker_rx) = mpsc::channel::<LogLine>(100);
+    let _docker_handle = if !image_services.is_empty() {
+        Some(
+            tui::spawn_docker_logs(&output_path, docker_service_mapping, docker_tx)
+                .await
+                .ok(),
+        )
+    } else {
+        drop(docker_tx);
+        None
+    };
+
+    if args.no_tui || !std::io::stdout().is_terminal() {
+        // Non-TUI mode: print to stdout
+        println!("{}", "Streaming logs (Ctrl+C to stop)...".dimmed());
+        println!();
+
+        loop {
+            tokio::select! {
+                Some(log) = log_rx.recv() => {
+                    print_log_line(&log);
+                }
+                Some(log) = docker_rx.recv() => {
+                    print_log_line(&log);
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\n{}", "Shutting down...".yellow());
+                    break;
+                }
             }
         }
+    } else {
+        // TUI mode (default)
+        tui::run(log_rx, docker_rx, tui_services).await?;
     }
 
     process_manager.shutdown().await;

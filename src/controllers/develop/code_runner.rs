@@ -8,7 +8,7 @@ use tokio::{
     sync::mpsc,
 };
 
-const COLORS: &[Color] = &[
+pub const COLORS: &[Color] = &[
     Color::Cyan,
     Color::Green,
     Color::Yellow,
@@ -17,7 +17,7 @@ const COLORS: &[Color] = &[
     Color::Red,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogLine {
     pub service_name: String,
     pub message: String,
