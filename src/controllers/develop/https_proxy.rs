@@ -67,6 +67,19 @@ pub fn ensure_mkcert_ca() -> Result<()> {
     Ok(())
 }
 
+pub fn get_mkcert_ca_root() -> Option<PathBuf> {
+    let output = Command::new("mkcert").arg("-CAROOT").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(path);
+    if path.exists() { Some(path) } else { None }
+}
+
 /// Check if certs already exist for a project with the required type
 pub fn certs_exist(output_dir: &Path, use_port_443: bool) -> bool {
     let cert_path = output_dir.join("cert.pem");

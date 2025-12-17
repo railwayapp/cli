@@ -77,17 +77,20 @@ impl LocalDevelopContext {
     }
 
     fn resolve_public_domain(&self, config: &ServiceDomainConfig) -> Option<String> {
-        let https = self.https_config.as_ref()?;
-
-        Some(if https.use_port_443 {
-            format!("{}.{}", config.slug, https.base_domain)
+        if let Some(https) = self.https_config.as_ref() {
+            Some(if https.use_port_443 {
+                format!("{}.{}", config.slug, https.base_domain)
+            } else {
+                let port = config
+                    .https_proxy_port
+                    .or_else(|| config.port_mapping.values().next().copied())
+                    .unwrap_or(443);
+                format!("{}:{}", https.base_domain, port)
+            })
         } else {
-            let port = config
-                .https_proxy_port
-                .or_else(|| config.port_mapping.values().next().copied())
-                .unwrap_or(443);
-            format!("{}:{}", https.base_domain, port)
-        })
+            let port = config.port_mapping.values().next().copied()?;
+            Some(format!("localhost:{}", port))
+        }
     }
 
     /// Build public domain mapping (prod -> local) for cross-service replacement
@@ -269,6 +272,25 @@ fn replace_domain_with_port_mapping(
     result = result.replace(domain, "localhost");
 
     result
+}
+
+/// Inject mkcert CA environment variables for runtimes that bundle their own CA stores.
+/// Silently does nothing if mkcert is not installed or the CA root doesn't exist.
+pub fn inject_mkcert_ca_vars(vars: &mut BTreeMap<String, String>) {
+    let Some(ca_root) = super::https_proxy::get_mkcert_ca_root() else {
+        return;
+    };
+    let ca_file = ca_root.join("rootCA.pem").to_string_lossy().to_string();
+    let ca_dir = ca_root.to_string_lossy().to_string();
+
+    vars.entry("NODE_EXTRA_CA_CERTS".into())
+        .or_insert(ca_file.clone());
+    vars.entry("REQUESTS_CA_BUNDLE".into())
+        .or_insert(ca_file.clone());
+    vars.entry("SSL_CERT_FILE".into())
+        .or_insert(ca_file.clone());
+    vars.entry("CURL_CA_BUNDLE".into()).or_insert(ca_file);
+    vars.entry("SSL_CERT_DIR".into()).or_insert(ca_dir);
 }
 
 #[cfg(test)]
@@ -487,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_public_domain_mapping_when_https_disabled() {
+    fn test_public_domain_replaced_when_https_disabled() {
         let mut vars = BTreeMap::new();
         vars.insert(
             "API_URL".to_string(),
@@ -495,7 +517,7 @@ mod tests {
         );
 
         let mut ctx = make_context(NetworkMode::Host);
-        // https_config is None, so no public domain mapping happens
+        // https_config is None, but public domain should still be replaced
 
         let mut api_ports = HashMap::new();
         api_ports.insert(3000i64, 13000u16);
@@ -512,10 +534,10 @@ mod tests {
         let service = make_service("localhost");
         let result = override_railway_vars(vars, Some(&service), &ctx);
 
-        // Without https_config, prod domain is not replaced
+        // Without https_config, prod domain is replaced with localhost and https -> http
         assert_eq!(
             result.get("API_URL"),
-            Some(&"https://api-prod.up.railway.app/v1".to_string())
+            Some(&"http://localhost:13000/v1".to_string())
         );
     }
 
