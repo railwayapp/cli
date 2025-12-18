@@ -1338,16 +1338,43 @@ async fn up_command(args: UpArgs) -> Result<()> {
         tui::run(log_rx, docker_rx, tui_services).await?;
     }
 
-    process_manager.shutdown().await;
-
-    if !image_services.is_empty() {
-        println!("{}", "Stopping image services...".cyan());
-        let _ = tokio::process::Command::new("docker")
-            .args(["compose", "-f", &*output_path.to_string_lossy(), "down"])
-            .status()
-            .await;
+    // Clear terminal after TUI to remove old scrollback
+    if !args.no_tui && std::io::stdout().is_terminal() {
+        print!("\x1b[2J\x1b[H");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
+    let code_count = configured_code_services.len();
+    let image_count = image_services.len();
+
+    println!("{}", "Stopping services...".dimmed());
+
+    process_manager.shutdown().await;
+    if code_count > 0 {
+        println!(
+            " {} Stopped {} code service{}",
+            "✓".green(),
+            code_count,
+            if code_count == 1 { "" } else { "s" }
+        );
+    }
+
+    if !image_services.is_empty() {
+        let _ = tokio::process::Command::new("docker")
+            .args(["compose", "-f", &*output_path.to_string_lossy(), "down"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        println!(
+            " {} Stopped {} image service{}",
+            "✓".green(),
+            image_count,
+            if image_count == 1 { "" } else { "s" }
+        );
+    }
+
+    println!();
     println!("{}", "All services stopped".green());
     Ok(())
 }
