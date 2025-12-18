@@ -1305,7 +1305,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
     }
 
     // Start docker log streaming if there are image services
-    let (docker_tx, mut docker_rx) = mpsc::channel::<LogLine>(100);
+    let (docker_tx, docker_rx) = mpsc::channel::<LogLine>(100);
     let _docker_handle = if !image_services.is_empty() {
         Some(
             tui::spawn_docker_logs(&output_path, docker_service_mapping, docker_tx)
@@ -1325,9 +1325,6 @@ async fn up_command(args: UpArgs) -> Result<()> {
         loop {
             tokio::select! {
                 Some(log) = log_rx.recv() => {
-                    print_log_line(&log);
-                }
-                Some(log) = docker_rx.recv() => {
                     print_log_line(&log);
                 }
                 _ = tokio::signal::ctrl_c() => {
