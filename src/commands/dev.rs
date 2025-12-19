@@ -5,23 +5,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::mpsc;
-
 use crate::{
     controllers::{
         config::{ServiceInstance, fetch_environment_config},
         develop::{
-            CodeServiceConfig, ComposeServiceStatus, DEFAULT_PORT, DevelopSessionLock,
-            DockerComposeFile, DockerComposeNetwork, DockerComposeNetworks, DockerComposeService,
-            DockerComposeVolume, HttpsConfig, HttpsDomainConfig, LocalDevConfig,
-            LocalDevelopContext, NetworkMode, PortType, ProcessManager, ServiceDomainConfig,
-            ServicePort, ServiceSummary, build_port_infos, build_service_endpoints,
-            build_slug_port_mapping, certs_exist, check_docker_compose_installed,
-            check_mkcert_installed, ensure_mkcert_ca, generate_caddyfile, generate_certs,
-            generate_port, generate_random_port, get_compose_path as develop_get_compose_path,
-            get_develop_dir, get_existing_certs, inject_mkcert_ca_vars, is_port_443_available,
-            is_project_proxy_on_443, override_railway_vars, print_context_info, print_domain_info,
-            print_log_line, resolve_path, slugify, volume_name,
+            CodeServiceConfig, ComposeServiceStatus, DEFAULT_PORT, DevSession, DockerComposeFile,
+            DockerComposeNetwork, DockerComposeNetworks, DockerComposeService, DockerComposeVolume,
+            HttpsConfig, HttpsDomainConfig, LocalDevConfig, LocalDevelopContext, NetworkMode,
+            PortType, ServiceDomainConfig, ServicePort, ServiceSummary, build_port_infos,
+            build_service_endpoints, build_slug_port_mapping, certs_exist,
+            check_docker_compose_installed, check_mkcert_installed, ensure_mkcert_ca,
+            generate_caddyfile, generate_certs, generate_port, generate_random_port,
+            get_compose_path as develop_get_compose_path, get_develop_dir, get_existing_certs,
+            is_port_443_available, is_project_proxy_on_443, override_railway_vars,
+            print_context_info, print_domain_info, resolve_path, slugify, volume_name,
         },
         project::{self, ensure_project_and_environment_exist},
         variables::get_service_variables,
@@ -88,6 +85,10 @@ struct UpArgs {
     /// Show verbose domain replacement info
     #[clap(short, long)]
     verbose: bool,
+
+    /// Disable TUI, stream logs to stdout instead
+    #[clap(long)]
+    no_tui: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1103,8 +1104,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
         );
         println!();
 
-        for summary in &service_summaries {
-            print_image_service_summary(summary, &https_config);
+        let use_tui =
+            !args.no_tui && std::io::stdout().is_terminal() && !configured_code_services.is_empty();
+        if !use_tui {
+            for summary in &service_summaries {
+                print_image_service_summary(summary, &https_config);
+            }
         }
     }
 
@@ -1113,13 +1118,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
-    let _session_lock = DevelopSessionLock::try_acquire(&project_id)?;
-
-    println!("{}", "Starting code services...".cyan());
-
-    let (log_tx, mut log_rx) = mpsc::channel(100);
-    let mut process_manager = ProcessManager::new();
-
+    // Fetch variables for code services
     let code_var_futures: Vec<_> = configured_code_services
         .iter()
         .map(|(service_id, _)| {
@@ -1155,101 +1154,27 @@ async fn up_command(args: UpArgs) -> Result<()> {
     // Switch to host network mode for code services
     ctx.mode = NetworkMode::Host;
 
-    for (service_id, svc) in &configured_code_services {
-        let dev_config = match local_dev_config.get_service(service_id) {
-            Some(c) => c,
-            None => continue,
-        };
+    let use_tui = !args.no_tui && std::io::stdout().is_terminal();
 
-        let service_name = service_names
-            .get(*service_id)
-            .cloned()
-            .unwrap_or_else(|| (*service_id).clone());
+    let mut session = DevSession::start(
+        &project_id,
+        &configured_code_services,
+        &service_names,
+        &local_dev_config,
+        &code_resolved_vars,
+        &ctx,
+        &https_config,
+        &service_summaries,
+        output_path,
+        !image_services.is_empty(),
+        use_tui,
+        args.verbose,
+    )
+    .await?;
 
-        let working_dir = PathBuf::from(&dev_config.directory);
+    session.run(use_tui).await?;
+    session.shutdown().await;
 
-        // Get port info for this service
-        let internal_port = dev_config
-            .port
-            .map(|p| p as i64)
-            .or_else(|| svc.get_ports().first().copied());
-        let proxy_port = internal_port.map(|p| generate_port(service_id, p));
-
-        // Get and transform variables
-        let raw_vars = code_resolved_vars
-            .get(*service_id)
-            .cloned()
-            .unwrap_or_default();
-
-        let service_domains = ctx
-            .for_service(service_id)
-            .expect("service added to ctx above");
-
-        if args.verbose {
-            print_domain_info(&service_name, &service_domains);
-        }
-
-        let mut vars = override_railway_vars(raw_vars, Some(&service_domains), &ctx);
-
-        // Only set PORT if service has networking configured
-        if let Some(port) = internal_port {
-            vars.insert("PORT".to_string(), port.to_string());
-        }
-
-        if ctx.https_enabled() {
-            inject_mkcert_ca_vars(&mut vars);
-        }
-
-        print_code_service_summary(
-            &service_name,
-            &dev_config.command,
-            &working_dir,
-            vars.len(),
-            internal_port,
-            proxy_port,
-            &https_config,
-        );
-
-        process_manager
-            .spawn_service(
-                service_name,
-                &dev_config.command,
-                working_dir,
-                vars,
-                log_tx.clone(),
-            )
-            .await?;
-    }
-
-    // Drop the original sender so the channel closes when all processes exit
-    drop(log_tx);
-
-    println!("{}", "Streaming logs (Ctrl+C to stop)...".dimmed());
-    println!();
-
-    loop {
-        tokio::select! {
-            Some(log) = log_rx.recv() => {
-                print_log_line(&log);
-            }
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("\n{}", "Shutting down...".yellow());
-                break;
-            }
-        }
-    }
-
-    process_manager.shutdown().await;
-
-    if !image_services.is_empty() {
-        println!("{}", "Stopping image services...".cyan());
-        let _ = tokio::process::Command::new("docker")
-            .args(["compose", "-f", &*output_path.to_string_lossy(), "down"])
-            .status()
-            .await;
-    }
-
-    println!("{}", "All services stopped".green());
     Ok(())
 }
 
@@ -1332,49 +1257,6 @@ fn print_image_service_summary(summary: &ServiceSummary, https_config: &Option<H
             "Volumes"
         };
         println!("  {}: {}", label.dimmed(), summary.volumes.join(", "));
-    }
-    println!();
-}
-
-fn print_code_service_summary(
-    service_name: &str,
-    command: &str,
-    working_dir: &Path,
-    var_count: usize,
-    internal_port: Option<i64>,
-    proxy_port: Option<u16>,
-    https_config: &Option<HttpsConfig>,
-) {
-    let slug = slugify(service_name);
-    println!("{}", service_name.green().bold());
-    println!("  {}: {}", "Command".dimmed(), command);
-    println!("  {}: {}", "Directory".dimmed(), working_dir.display());
-    println!("  {}: {} variables", "Variables".dimmed(), var_count);
-    if let (Some(port), Some(pport)) = (internal_port, proxy_port) {
-        println!("  {}:", "Networking".dimmed());
-        match https_config {
-            Some(config) => {
-                println!("    {}: http://localhost:{}", "Private".dimmed(), port);
-                if config.use_port_443 {
-                    println!(
-                        "    {}:  https://{}.{}",
-                        "Public".dimmed(),
-                        slug,
-                        config.base_domain
-                    );
-                } else {
-                    println!(
-                        "    {}:  https://{}:{}",
-                        "Public".dimmed(),
-                        config.base_domain,
-                        pport
-                    );
-                }
-            }
-            None => {
-                println!("    http://localhost:{}", port);
-            }
-        }
     }
     println!();
 }

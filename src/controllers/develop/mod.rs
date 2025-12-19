@@ -5,6 +5,7 @@ pub mod local_config;
 pub mod output;
 pub mod ports;
 pub mod session;
+pub mod tui;
 pub mod variables;
 
 pub use code_runner::*;

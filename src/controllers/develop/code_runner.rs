@@ -8,7 +8,7 @@ use tokio::{
     sync::mpsc,
 };
 
-const COLORS: &[Color] = &[
+pub const COLORS: &[Color] = &[
     Color::Cyan,
     Color::Green,
     Color::Yellow,
@@ -17,7 +17,7 @@ const COLORS: &[Color] = &[
     Color::Red,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogLine {
     pub service_name: String,
     pub message: String,
@@ -59,9 +59,11 @@ impl ProcessManager {
             .args(["-c", command])
             .current_dir(&working_dir)
             .envs(env_vars)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
+            .process_group(0)
             .spawn()
             .with_context(|| format!("Failed to spawn '{}'", command))?;
 
@@ -70,6 +72,7 @@ impl ProcessManager {
             .args(["/C", command])
             .current_dir(&working_dir)
             .envs(env_vars)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -110,12 +113,12 @@ impl ProcessManager {
     pub async fn shutdown(&mut self) {
         #[cfg(unix)]
         {
-            use nix::sys::signal::{Signal, kill};
+            use nix::sys::signal::{Signal, killpg};
             use nix::unistd::Pid;
 
             for proc in &self.processes {
                 if let Some(pid) = proc.child.id() {
-                    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
                 }
             }
         }
