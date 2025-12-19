@@ -191,7 +191,6 @@ impl DevSession {
 
         drop(log_tx);
 
-        // Add image services to TUI and build docker service mapping
         let mut docker_service_mapping = tui::ServiceMapping::new();
         for (i, summary) in service_summaries.iter().enumerate() {
             let color = COLORS[(tui_services.len() + i) % 6];
@@ -227,7 +226,6 @@ impl DevSession {
             });
         }
 
-        // Start docker log streaming if there are image services
         let (docker_tx, docker_rx) = mpsc::channel::<LogLine>(100);
         if has_image_services {
             let _ = tui::spawn_docker_logs(&output_path, docker_service_mapping, docker_tx).await;
@@ -266,14 +264,12 @@ impl DevSession {
             }
         } else {
             self.tui_services.sort_by_key(|s| s.private_url.is_none());
-            // Take ownership of receivers for tui::run
             let log_rx = std::mem::replace(&mut self.log_rx, mpsc::channel(1).1);
             let docker_rx = std::mem::replace(&mut self.docker_rx, mpsc::channel(1).1);
             let tui_services = std::mem::take(&mut self.tui_services);
             tui::run(log_rx, docker_rx, tui_services).await?;
         }
 
-        // Clear terminal after TUI
         if use_tui {
             print!("\x1b[2J\x1b[H");
             let _ = std::io::stdout().flush();
