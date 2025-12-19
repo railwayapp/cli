@@ -109,6 +109,267 @@ struct CleanArgs {
     output: Option<PathBuf>,
 }
 
+struct DevSession {
+    process_manager: ProcessManager,
+    tui_services: Vec<tui::ServiceInfo>,
+    log_rx: mpsc::Receiver<LogLine>,
+    docker_rx: mpsc::Receiver<LogLine>,
+    output_path: PathBuf,
+    has_image_services: bool,
+    code_count: usize,
+    image_count: usize,
+    _session_lock: DevelopSessionLock,
+}
+
+#[allow(clippy::too_many_arguments)]
+impl DevSession {
+    async fn start(
+        project_id: &str,
+        configured_code_services: &[&(&String, &ServiceInstance)],
+        service_names: &HashMap<String, String>,
+        local_dev_config: &LocalDevConfig,
+        code_resolved_vars: &HashMap<String, BTreeMap<String, String>>,
+        ctx: &LocalDevelopContext,
+        https_config: &Option<HttpsConfig>,
+        service_summaries: &[ServiceSummary],
+        output_path: PathBuf,
+        has_image_services: bool,
+        use_tui: bool,
+        verbose: bool,
+    ) -> Result<Self> {
+        let session_lock = DevelopSessionLock::try_acquire(project_id)?;
+
+        println!("{}", "Starting code services...".cyan());
+
+        let (log_tx, log_rx) = mpsc::channel(100);
+        let mut process_manager = ProcessManager::new();
+        let mut tui_services: Vec<tui::ServiceInfo> = Vec::new();
+
+        for (i, (service_id, svc)) in configured_code_services.iter().enumerate() {
+            let dev_config = match local_dev_config.get_service(service_id) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let service_name = service_names
+                .get(*service_id)
+                .cloned()
+                .unwrap_or_else(|| (*service_id).clone());
+
+            let working_dir = PathBuf::from(&dev_config.directory);
+
+            let internal_port = dev_config
+                .port
+                .map(|p| p as i64)
+                .or_else(|| svc.get_ports().first().copied());
+            let proxy_port = internal_port.map(|p| generate_port(service_id, p));
+
+            let raw_vars = code_resolved_vars
+                .get(*service_id)
+                .cloned()
+                .unwrap_or_default();
+
+            let service_domains = ctx
+                .for_service(service_id)
+                .expect("service added to ctx above");
+
+            if verbose {
+                print_domain_info(&service_name, &service_domains);
+            }
+
+            let mut vars = override_railway_vars(raw_vars, Some(&service_domains), ctx);
+
+            if let Some(port) = internal_port {
+                vars.insert("PORT".to_string(), port.to_string());
+            }
+
+            if ctx.https_enabled() {
+                inject_mkcert_ca_vars(&mut vars);
+            }
+
+            if !use_tui {
+                print_code_service_summary(
+                    &service_name,
+                    &dev_config.command,
+                    &working_dir,
+                    vars.len(),
+                    internal_port,
+                    proxy_port,
+                    https_config,
+                );
+            }
+
+            let (private_url, public_url) = match (internal_port, proxy_port) {
+                (Some(port), Some(pport)) => {
+                    let private = format!("http://localhost:{}", port);
+                    let public = https_config.as_ref().map(|config| {
+                        let slug = slugify(&service_name);
+                        if config.use_port_443 {
+                            format!("https://{}.{}", slug, config.base_domain)
+                        } else {
+                            format!("https://{}:{}", config.base_domain, pport)
+                        }
+                    });
+                    (Some(private), public)
+                }
+                _ => (None, None),
+            };
+
+            let color = crate::controllers::develop::code_runner::COLORS[i % 6];
+            tui_services.push(tui::ServiceInfo {
+                name: service_name.clone(),
+                is_docker: false,
+                color,
+                var_count: vars.len(),
+                private_url,
+                public_url,
+                command: Some(dev_config.command.clone()),
+                image: None,
+            });
+
+            process_manager
+                .spawn_service(
+                    service_name,
+                    &dev_config.command,
+                    working_dir,
+                    vars,
+                    log_tx.clone(),
+                )
+                .await?;
+        }
+
+        drop(log_tx);
+
+        // Add image services to TUI and build docker service mapping
+        let mut docker_service_mapping = tui::ServiceMapping::new();
+        for (i, summary) in service_summaries.iter().enumerate() {
+            let color =
+                crate::controllers::develop::code_runner::COLORS[(tui_services.len() + i) % 6];
+            let slug = slugify(&summary.name);
+            docker_service_mapping.insert(slug.clone(), (summary.name.clone(), color));
+
+            let (private_url, public_url) = summary
+                .ports
+                .iter()
+                .find(|p| matches!(p.port_type, PortType::Http))
+                .map(|p| {
+                    let private = format!("http://localhost:{}", p.external);
+                    let public = https_config.as_ref().map(|config| {
+                        if config.use_port_443 {
+                            format!("https://{}.{}", slug, config.base_domain)
+                        } else {
+                            format!("https://{}:{}", config.base_domain, p.public_port)
+                        }
+                    });
+                    (Some(private), public)
+                })
+                .unwrap_or((None, None));
+
+            tui_services.push(tui::ServiceInfo {
+                name: summary.name.clone(),
+                is_docker: true,
+                color,
+                var_count: summary.var_count,
+                private_url,
+                public_url,
+                command: None,
+                image: Some(summary.image.clone()),
+            });
+        }
+
+        // Start docker log streaming if there are image services
+        let (docker_tx, docker_rx) = mpsc::channel::<LogLine>(100);
+        if has_image_services {
+            let _ = tui::spawn_docker_logs(&output_path, docker_service_mapping, docker_tx).await;
+        } else {
+            drop(docker_tx);
+        }
+
+        Ok(Self {
+            process_manager,
+            tui_services,
+            log_rx,
+            docker_rx,
+            output_path,
+            has_image_services,
+            code_count: configured_code_services.len(),
+            image_count: service_summaries.len(),
+            _session_lock: session_lock,
+        })
+    }
+
+    async fn run(&mut self, use_tui: bool) -> Result<()> {
+        if !use_tui {
+            println!("{}", "Streaming logs (Ctrl+C to stop)...".dimmed());
+            println!();
+
+            loop {
+                tokio::select! {
+                    Some(log) = self.log_rx.recv() => {
+                        print_log_line(&log);
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\n{}", "Shutting down...".yellow());
+                        break;
+                    }
+                }
+            }
+        } else {
+            self.tui_services.sort_by_key(|s| s.private_url.is_none());
+            // Take ownership of receivers for tui::run
+            let log_rx = std::mem::replace(&mut self.log_rx, mpsc::channel(1).1);
+            let docker_rx = std::mem::replace(&mut self.docker_rx, mpsc::channel(1).1);
+            let tui_services = std::mem::take(&mut self.tui_services);
+            tui::run(log_rx, docker_rx, tui_services).await?;
+        }
+
+        // Clear terminal after TUI
+        if use_tui {
+            print!("\x1b[2J\x1b[H");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) {
+        println!("{}", "Stopping services...".dimmed());
+
+        self.process_manager.shutdown().await;
+        if self.code_count > 0 {
+            println!(
+                " {} Stopped {} code service{}",
+                "✓".green(),
+                self.code_count,
+                if self.code_count == 1 { "" } else { "s" }
+            );
+        }
+
+        if self.has_image_services {
+            let _ = tokio::process::Command::new("docker")
+                .args([
+                    "compose",
+                    "-f",
+                    &*self.output_path.to_string_lossy(),
+                    "down",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+            println!(
+                " {} Stopped {} image service{}",
+                "✓".green(),
+                self.image_count,
+                if self.image_count == 1 { "" } else { "s" }
+            );
+        }
+
+        println!();
+        println!("{}", "All services stopped".green());
+    }
+}
+
 pub async fn command(args: Args) -> Result<()> {
     eprintln!(
         "{}",
@@ -1122,13 +1383,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
         return Ok(());
     }
 
-    let _session_lock = DevelopSessionLock::try_acquire(&project_id)?;
-
-    println!("{}", "Starting code services...".cyan());
-
-    let (log_tx, mut log_rx) = mpsc::channel(100);
-    let mut process_manager = ProcessManager::new();
-
+    // Fetch variables for code services
     let code_var_futures: Vec<_> = configured_code_services
         .iter()
         .map(|(service_id, _)| {
@@ -1164,218 +1419,27 @@ async fn up_command(args: UpArgs) -> Result<()> {
     // Switch to host network mode for code services
     ctx.mode = NetworkMode::Host;
 
-    // Build TUI services as we spawn code services (to capture all info)
-    let mut tui_services: Vec<tui::ServiceInfo> = Vec::new();
+    let use_tui = !args.no_tui && std::io::stdout().is_terminal();
 
-    for (i, (service_id, svc)) in configured_code_services.iter().enumerate() {
-        let dev_config = match local_dev_config.get_service(service_id) {
-            Some(c) => c,
-            None => continue,
-        };
+    let mut session = DevSession::start(
+        &project_id,
+        &configured_code_services,
+        &service_names,
+        &local_dev_config,
+        &code_resolved_vars,
+        &ctx,
+        &https_config,
+        &service_summaries,
+        output_path,
+        !image_services.is_empty(),
+        use_tui,
+        args.verbose,
+    )
+    .await?;
 
-        let service_name = service_names
-            .get(*service_id)
-            .cloned()
-            .unwrap_or_else(|| (*service_id).clone());
+    session.run(use_tui).await?;
+    session.shutdown().await;
 
-        let working_dir = PathBuf::from(&dev_config.directory);
-
-        // Get port info for this service
-        let internal_port = dev_config
-            .port
-            .map(|p| p as i64)
-            .or_else(|| svc.get_ports().first().copied());
-        let proxy_port = internal_port.map(|p| generate_port(service_id, p));
-
-        // Get and transform variables
-        let raw_vars = code_resolved_vars
-            .get(*service_id)
-            .cloned()
-            .unwrap_or_default();
-
-        let service_domains = ctx
-            .for_service(service_id)
-            .expect("service added to ctx above");
-
-        if args.verbose {
-            print_domain_info(&service_name, &service_domains);
-        }
-
-        let mut vars = override_railway_vars(raw_vars, Some(&service_domains), &ctx);
-
-        // Only set PORT if service has networking configured
-        if let Some(port) = internal_port {
-            vars.insert("PORT".to_string(), port.to_string());
-        }
-
-        if ctx.https_enabled() {
-            inject_mkcert_ca_vars(&mut vars);
-        }
-
-        if args.no_tui || !std::io::stdout().is_terminal() {
-            print_code_service_summary(
-                &service_name,
-                &dev_config.command,
-                &working_dir,
-                vars.len(),
-                internal_port,
-                proxy_port,
-                &https_config,
-            );
-        }
-
-        // Build TUI service info while we have all the data
-        let (private_url, public_url) = match (internal_port, proxy_port) {
-            (Some(port), Some(pport)) => {
-                let private = format!("http://localhost:{}", port);
-                let public = https_config.as_ref().map(|config| {
-                    let slug = slugify(&service_name);
-                    if config.use_port_443 {
-                        format!("https://{}.{}", slug, config.base_domain)
-                    } else {
-                        format!("https://{}:{}", config.base_domain, pport)
-                    }
-                });
-                (Some(private), public)
-            }
-            _ => (None, None),
-        };
-
-        let color = crate::controllers::develop::code_runner::COLORS[i % 6];
-        tui_services.push(tui::ServiceInfo {
-            name: service_name.clone(),
-            is_docker: false,
-            color,
-            var_count: vars.len(),
-            private_url,
-            public_url,
-            command: Some(dev_config.command.clone()),
-            image: None,
-        });
-
-        process_manager
-            .spawn_service(
-                service_name,
-                &dev_config.command,
-                working_dir,
-                vars,
-                log_tx.clone(),
-            )
-            .await?;
-    }
-
-    // Drop the original sender so the channel closes when all processes exit
-    drop(log_tx);
-
-    // Add image services to TUI and build docker service mapping
-    let mut docker_service_mapping = tui::ServiceMapping::new();
-    for (i, summary) in service_summaries.iter().enumerate() {
-        let color = crate::controllers::develop::code_runner::COLORS[(tui_services.len() + i) % 6];
-        let slug = slugify(&summary.name);
-        docker_service_mapping.insert(slug.clone(), (summary.name.clone(), color));
-
-        // Build URLs for image service (use first HTTP port if available)
-        let (private_url, public_url) = summary
-            .ports
-            .iter()
-            .find(|p| matches!(p.port_type, PortType::Http))
-            .map(|p| {
-                let private = format!("http://localhost:{}", p.external);
-                let public = https_config.as_ref().map(|config| {
-                    if config.use_port_443 {
-                        format!("https://{}.{}", slug, config.base_domain)
-                    } else {
-                        format!("https://{}:{}", config.base_domain, p.public_port)
-                    }
-                });
-                (Some(private), public)
-            })
-            .unwrap_or((None, None));
-
-        tui_services.push(tui::ServiceInfo {
-            name: summary.name.clone(),
-            is_docker: true,
-            color,
-            var_count: summary.var_count,
-            private_url,
-            public_url,
-            command: None,
-            image: Some(summary.image.clone()),
-        });
-    }
-
-    // Start docker log streaming if there are image services
-    let (docker_tx, docker_rx) = mpsc::channel::<LogLine>(100);
-    let _docker_handle = if !image_services.is_empty() {
-        Some(
-            tui::spawn_docker_logs(&output_path, docker_service_mapping, docker_tx)
-                .await
-                .ok(),
-        )
-    } else {
-        drop(docker_tx);
-        None
-    };
-
-    if args.no_tui || !std::io::stdout().is_terminal() {
-        // Non-TUI mode: print to stdout
-        println!("{}", "Streaming logs (Ctrl+C to stop)...".dimmed());
-        println!();
-
-        loop {
-            tokio::select! {
-                Some(log) = log_rx.recv() => {
-                    print_log_line(&log);
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("\n{}", "Shutting down...".yellow());
-                    break;
-                }
-            }
-        }
-    } else {
-        // TUI mode (default)
-        tui::run(log_rx, docker_rx, tui_services).await?;
-    }
-
-    // Clear terminal after TUI to remove old scrollback
-    if !args.no_tui && std::io::stdout().is_terminal() {
-        print!("\x1b[2J\x1b[H");
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-    }
-
-    let code_count = configured_code_services.len();
-    let image_count = image_services.len();
-
-    println!("{}", "Stopping services...".dimmed());
-
-    process_manager.shutdown().await;
-    if code_count > 0 {
-        println!(
-            " {} Stopped {} code service{}",
-            "✓".green(),
-            code_count,
-            if code_count == 1 { "" } else { "s" }
-        );
-    }
-
-    if !image_services.is_empty() {
-        let _ = tokio::process::Command::new("docker")
-            .args(["compose", "-f", &*output_path.to_string_lossy(), "down"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
-        println!(
-            " {} Stopped {} image service{}",
-            "✓".green(),
-            image_count,
-            if image_count == 1 { "" } else { "s" }
-        );
-    }
-
-    println!();
-    println!("{}", "All services stopped".green());
     Ok(())
 }
 

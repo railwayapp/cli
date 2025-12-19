@@ -8,16 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use crate::controllers::develop::LogLine;
-
-const DOCKER_COLORS: &[Color] = &[
-    Color::Cyan,
-    Color::Green,
-    Color::Yellow,
-    Color::Magenta,
-    Color::Blue,
-    Color::Red,
-];
+use crate::controllers::develop::{COLORS, LogLine};
 
 /// Maps slug -> (display_name, color)
 pub type ServiceMapping = HashMap<String, (String, Color)>;
@@ -103,12 +94,11 @@ fn parse_log_line(line: &str, service_mapping: &ServiceMapping) -> Option<LogLin
             }
         }
 
-        // If no match, use the service part as-is with default color
         return Some(LogLine {
             service_name: service_part.to_string(),
             message,
             is_stderr: false,
-            color: DOCKER_COLORS[0],
+            color: COLORS[0],
         });
     }
 

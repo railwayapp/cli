@@ -65,7 +65,6 @@ impl TuiApp {
 
         let stored = StoredLogLine {
             message: log.message,
-            is_stderr: log.is_stderr,
             color: log.color,
         };
 

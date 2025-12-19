@@ -63,7 +63,7 @@ impl ProcessManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .process_group(0) // create new process group so we can kill all children
+            .process_group(0)
             .spawn()
             .with_context(|| format!("Failed to spawn '{}'", command))?;
 
@@ -116,7 +116,6 @@ impl ProcessManager {
             use nix::sys::signal::{Signal, killpg};
             use nix::unistd::Pid;
 
-            // kill the entire process group (negative pid) to ensure all children are terminated
             for proc in &self.processes {
                 if let Some(pid) = proc.child.id() {
                     let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
