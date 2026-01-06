@@ -88,12 +88,10 @@ pub async fn command(args: Args) -> Result<()> {
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
 
-    // Validate: --environment is required when using --project
     if args.project.is_some() && args.environment.is_none() {
         bail!("--environment is required when using --project");
     }
 
-    // Fetch linked project only if --project not provided
     let linked_project = if args.project.is_none() {
         Some(configs.get_linked_project().await?)
     } else {
@@ -103,7 +101,6 @@ pub async fn command(args: Args) -> Result<()> {
     let linked_project_path = linked_project.as_ref().map(|lp| lp.project_path.clone());
     let deploy_paths = get_deploy_paths(&args, linked_project_path)?;
 
-    // Use args with fallback to linked project
     let project_id = args
         .project
         .clone()
