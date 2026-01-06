@@ -35,6 +35,8 @@ pub struct ServiceInfo {
     pub public_url: Option<String>,
     pub command: Option<String>,
     pub image: Option<String>,
+    /// Original index in ProcessManager for code services (None for docker)
+    pub process_index: Option<usize>,
 }
 
 pub struct TuiApp {

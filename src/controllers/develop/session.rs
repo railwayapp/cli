@@ -177,6 +177,7 @@ impl DevSession {
                 public_url,
                 command: Some(dev_config.command.clone()),
                 image: None,
+                process_index: Some(i),
             });
 
             process_manager
@@ -222,6 +223,7 @@ impl DevSession {
                 public_url,
                 command: None,
                 image: Some(summary.image.clone()),
+                process_index: None,
             });
         }
 
@@ -271,7 +273,6 @@ impl DevSession {
             let (restart_tx, mut restart_rx) = mpsc::channel::<tui::RestartRequest>(10);
             let log_tx = self.log_tx.clone();
             let output_path = self.output_path.clone();
-            let code_count = self.code_count;
             let tui_services_clone = tui_services.clone();
             let process_manager = self.process_manager.clone();
 
@@ -325,9 +326,9 @@ impl DevSession {
                                 send_restart_log(&log_tx, &svc.name, svc.color, svc.is_docker);
                                 if svc.is_docker {
                                     restart_docker_service(&svc.name, &output_path).await;
-                                } else if idx < code_count {
+                                } else if let Some(process_idx) = svc.process_index {
                                     let mut pm = process_manager.lock().await;
-                                    let _ = pm.restart_service(idx, log_tx.clone()).await;
+                                    let _ = pm.restart_service(process_idx, log_tx.clone()).await;
                                 }
                             }
                         }

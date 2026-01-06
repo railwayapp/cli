@@ -67,7 +67,7 @@ pub async fn run(
     let mut app = TuiApp::new(services);
     let mut events = EventStream::new();
 
-    loop {
+    'main: loop {
         terminal.draw(|f| ui::render(&mut app, f))?;
 
         tokio::select! {
@@ -79,7 +79,7 @@ pub async fn run(
             }
             Some(Ok(event)) = events.next() => {
                 match process_event(&mut app, event, &restart_tx) {
-                    TuiAction::Quit => break,
+                    TuiAction::Quit => break 'main,
                     TuiAction::Restart(req) => {
                         if let Some(tx) = &restart_tx {
                             let _ = tx.send(req).await;
@@ -92,7 +92,7 @@ pub async fn run(
                     tokio::time::timeout(Duration::from_millis(1), events.next()).await
                 {
                     match process_event(&mut app, event, &restart_tx) {
-                        TuiAction::Quit => break,
+                        TuiAction::Quit => break 'main,
                         TuiAction::Restart(req) => {
                             if let Some(tx) = &restart_tx {
                                 let _ = tx.send(req).await;
