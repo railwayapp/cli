@@ -52,8 +52,8 @@ pub struct Args {
     /// Environment to deploy to (defaults to linked environment)
     environment: Option<String>,
 
-    #[clap(short = 'p', long)]
-    /// Project to deploy to (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    /// Project ID to deploy to (defaults to linked project)
     project: Option<String>,
 
     #[clap(long)]
