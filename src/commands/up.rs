@@ -413,9 +413,10 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
             archive_prefix_path: path,
         })
     } else {
-        let project_dir: PathBuf = linked_project_path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current directory"));
+        let project_dir: PathBuf = match linked_project_path {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_dir().context("Failed to get current directory")?,
+        };
         let project_path = match args.path {
             Some(ref path) => path.clone(),
             None => project_dir.clone(),
