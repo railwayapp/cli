@@ -1,3 +1,5 @@
+use is_terminal::IsTerminal;
+
 use crate::{
     controllers::{
         deployment::{fetch_build_logs, fetch_deploy_logs, stream_build_logs, stream_deploy_logs},
@@ -69,8 +71,8 @@ pub async fn command(args: Args) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    // Stream only if no line limit is specified
-    let should_stream = args.lines.is_none();
+    // Stream only if no line limit is specified and running in a terminal
+    let should_stream = args.lines.is_none() && std::io::stdout().is_terminal();
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
