@@ -126,7 +126,7 @@ pub async fn get_ssh_connect_params(
     let service_id = if let Some(service_id_or_name) = args.service {
         find_service_by_name(client, configs, &project, &service_id_or_name).await?
     } else {
-        get_or_prompt_service(linked_project.clone().unwrap(), project, None)
+        get_or_prompt_service(linked_project.clone(), project, None)
             .await?
             .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?
     };

@@ -52,6 +52,10 @@ pub struct Args {
     /// Environment to deploy to (defaults to linked environment)
     environment: Option<String>,
 
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    /// Project ID to deploy to (defaults to linked project)
+    project: Option<String>,
+
     #[clap(long)]
     /// Don't ignore paths from .gitignore
     no_gitignore: bool,
@@ -83,19 +87,42 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
 
-    let deploy_paths = get_deploy_paths(&args, &linked_project)?;
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
 
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+
+    let linked_project_path = linked_project.as_ref().map(|lp| lp.project_path.clone());
+    let deploy_paths = get_deploy_paths(&args, linked_project_path)?;
+
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
 
     let environment = args
         .environment
         .clone()
-        .unwrap_or(linked_project.environment.clone());
+        .or_else(|| linked_project.as_ref().map(|lp| lp.environment.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No environment specified. Use --environment or run `railway link` first"
+            )
+        })?;
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service = get_or_prompt_service(linked_project.clone(), project, args.service).await?;
+    let service = get_or_prompt_service(linked_project, project, args.service).await?;
 
     let spinner = if std::io::stdout().is_terminal() {
         let spinner = ProgressBar::new_spinner()
@@ -197,7 +224,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let url = format!(
         "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
-        linked_project.project,
+        project_id,
         environment_id,
         service.clone().unwrap_or_default(),
     );
@@ -371,7 +398,7 @@ struct DeployPaths {
     archive_prefix_path: PathBuf,
 }
 
-fn get_deploy_paths(args: &Args, linked_project: &LinkedProject) -> Result<DeployPaths> {
+fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<DeployPaths> {
     if args.path_as_root {
         if args.path.is_none() {
             bail!("--path-as-root requires a path to be specified");
@@ -383,7 +410,10 @@ fn get_deploy_paths(args: &Args, linked_project: &LinkedProject) -> Result<Deplo
             archive_prefix_path: path,
         })
     } else {
-        let project_dir: PathBuf = linked_project.project_path.clone().into();
+        let project_dir: PathBuf = match linked_project_path {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_dir().context("Failed to get current directory")?,
+        };
         let project_path = match args.path {
             Some(ref path) => path.clone(),
             None => project_dir.clone(),
