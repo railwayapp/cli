@@ -26,11 +26,12 @@ pub struct LogLine {
 }
 
 struct ManagedProcess {
-    #[allow(dead_code)]
     service_name: String,
     child: Child,
-    #[allow(dead_code)]
     color: Color,
+    command: String,
+    working_dir: PathBuf,
+    env_vars: BTreeMap<String, String>,
 }
 
 pub struct ProcessManager {
@@ -58,7 +59,7 @@ impl ProcessManager {
         let mut child = Command::new("sh")
             .args(["-c", command])
             .current_dir(&working_dir)
-            .envs(env_vars)
+            .envs(env_vars.clone())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -71,7 +72,7 @@ impl ProcessManager {
         let mut child = Command::new("cmd")
             .args(["/C", command])
             .current_dir(&working_dir)
-            .envs(env_vars)
+            .envs(env_vars.clone())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -105,8 +106,104 @@ impl ProcessManager {
             service_name,
             child,
             color,
+            command: command.to_string(),
+            working_dir,
+            env_vars,
         });
 
+        Ok(())
+    }
+
+    pub async fn restart_service(
+        &mut self,
+        service_idx: usize,
+        log_tx: mpsc::Sender<LogLine>,
+    ) -> Result<()> {
+        let proc = self.processes.get_mut(service_idx);
+        let proc = match proc {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{Signal, killpg};
+            use nix::unistd::Pid;
+            if let Some(pid) = proc.child.id() {
+                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = proc.child.kill().await;
+        }
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), proc.child.wait()).await;
+        let _ = proc.child.kill().await;
+
+        let service_name = proc.service_name.clone();
+        let command = proc.command.clone();
+        let working_dir = proc.working_dir.clone();
+        let env_vars = proc.env_vars.clone();
+        let color = proc.color;
+
+        #[cfg(unix)]
+        let mut child = Command::new("sh")
+            .args(["-c", &command])
+            .current_dir(&working_dir)
+            .envs(env_vars.clone())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0)
+            .spawn()
+            .with_context(|| format!("Failed to spawn '{}'", command))?;
+
+        #[cfg(windows)]
+        let mut child = Command::new("cmd")
+            .args(["/C", &command])
+            .current_dir(&working_dir)
+            .envs(env_vars.clone())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("Failed to spawn '{}'", command))?;
+
+        let cmd_log = LogLine {
+            service_name: service_name.clone(),
+            message: format!("$ {}", command),
+            is_stderr: false,
+            color,
+        };
+        let _ = log_tx.send(cmd_log).await;
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        let name = service_name.clone();
+        let tx = log_tx.clone();
+        tokio::spawn(async move {
+            stream_output(stdout, name, color, false, tx).await;
+        });
+
+        let name2 = service_name.clone();
+        tokio::spawn(async move {
+            stream_output(stderr, name2, color, true, log_tx).await;
+        });
+
+        proc.child = child;
+
+        Ok(())
+    }
+
+    pub async fn restart_all(&mut self, log_tx: mpsc::Sender<LogLine>) -> Result<()> {
+        for i in 0..self.processes.len() {
+            self.restart_service(i, log_tx.clone()).await?;
+        }
         Ok(())
     }
 
