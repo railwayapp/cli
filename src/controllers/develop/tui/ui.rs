@@ -156,6 +156,7 @@ fn render_logs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
         .border_style(Style::default().fg(Color::DarkGray));
 
     let paragraph = Paragraph::new(lines).block(block);
+    // Clear prevents stale logs from previous tab rendering through
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
 }

@@ -78,7 +78,7 @@ pub async fn run(
                 app.push_log(log, true);
             }
             Some(Ok(event)) = events.next() => {
-                match process_event(&mut app, event, &restart_tx) {
+                match process_event(&mut app, event) {
                     TuiAction::Quit => break 'main,
                     TuiAction::Restart(req) => {
                         if let Some(tx) = &restart_tx {
@@ -91,7 +91,7 @@ pub async fn run(
                 while let Ok(Some(Ok(event))) =
                     tokio::time::timeout(Duration::from_millis(1), events.next()).await
                 {
-                    match process_event(&mut app, event, &restart_tx) {
+                    match process_event(&mut app, event) {
                         TuiAction::Quit => break 'main,
                         TuiAction::Restart(req) => {
                             if let Some(tx) = &restart_tx {
@@ -111,11 +111,7 @@ pub async fn run(
     Ok(())
 }
 
-fn process_event(
-    app: &mut TuiApp,
-    event: Event,
-    _restart_tx: &Option<mpsc::Sender<RestartRequest>>,
-) -> TuiAction {
+fn process_event(app: &mut TuiApp, event: Event) -> TuiAction {
     match event {
         Event::Key(key) => {
             return app.handle_key(key);
