@@ -42,7 +42,7 @@ query UserProjects {
       team {
         id
       }
-      projects {
+      projects(first: 500) {
         edges {
           node {
             id
