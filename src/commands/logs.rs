@@ -25,7 +25,8 @@ use super::{
   railway logs --service backend --environment production            # Stream latest deployment logs from a specific service in a specific environment
   railway logs --lines 10 --filter \"@level:error\"                    # View 10 latest error logs
   railway logs --lines 10 --filter \"@level:warn AND rate limit\"      # View 10 latest warning logs related to rate limiting
-  railway logs --json                                                # Get logs in JSON format"
+  railway logs --json                                                # Get logs in JSON format
+  railway logs --latest                                              # Stream logs from the latest deployment (even if failed/building)"
 )]
 pub struct Args {
     /// Service to view logs from (defaults to linked service). Can be service name or service ID
@@ -60,6 +61,10 @@ pub struct Args {
     /// Can be a text search ("error message" or "user signup"), attribute filters (@level:error, @level:warn), or a combination with the operators AND, OR, - (not). See https://docs.railway.com/guides/logs for full syntax.
     #[clap(long, short = 'f')]
     filter: Option<String>,
+
+    /// Always show logs from the latest deployment, even if it failed or is still building
+    #[clap(long)]
+    latest: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -121,11 +126,15 @@ pub async fn command(args: Args) -> Result<()> {
         .map(|deployment| deployment.node)
         .collect();
     all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let default_deployment = all_deployments
-        .iter()
-        .find(|d| d.status == DeploymentStatus::SUCCESS)
-        .or_else(|| all_deployments.first())
-        .context("No deployments found")?;
+    let default_deployment = if args.latest {
+        all_deployments.first()
+    } else {
+        all_deployments
+            .iter()
+            .find(|d| d.status == DeploymentStatus::SUCCESS)
+            .or_else(|| all_deployments.first())
+    }
+    .context("No deployments found")?;
 
     let deployment_id = if let Some(deployment_id) = args.deployment_id {
         // Use the provided deployment ID directly
