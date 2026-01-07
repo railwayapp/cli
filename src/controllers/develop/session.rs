@@ -61,9 +61,10 @@ impl Drop for DevelopSessionLock {
 }
 
 pub struct DevSession {
-    process_manager: ProcessManager,
+    process_manager: std::sync::Arc<tokio::sync::Mutex<ProcessManager>>,
     tui_services: Vec<tui::ServiceInfo>,
     log_rx: mpsc::Receiver<LogLine>,
+    log_tx: mpsc::Sender<LogLine>,
     docker_rx: mpsc::Receiver<LogLine>,
     output_path: PathBuf,
     has_image_services: bool,
@@ -176,6 +177,7 @@ impl DevSession {
                 public_url,
                 command: Some(dev_config.command.clone()),
                 image: None,
+                process_index: Some(i),
             });
 
             process_manager
@@ -188,8 +190,6 @@ impl DevSession {
                 )
                 .await?;
         }
-
-        drop(log_tx);
 
         let mut docker_service_mapping = tui::ServiceMapping::new();
         for (i, summary) in service_summaries.iter().enumerate() {
@@ -223,6 +223,7 @@ impl DevSession {
                 public_url,
                 command: None,
                 image: Some(summary.image.clone()),
+                process_index: None,
             });
         }
 
@@ -234,9 +235,10 @@ impl DevSession {
         }
 
         Ok(Self {
-            process_manager,
+            process_manager: std::sync::Arc::new(tokio::sync::Mutex::new(process_manager)),
             tui_services,
             log_rx,
+            log_tx,
             docker_rx,
             output_path,
             has_image_services,
@@ -267,7 +269,75 @@ impl DevSession {
             let log_rx = std::mem::replace(&mut self.log_rx, mpsc::channel(1).1);
             let docker_rx = std::mem::replace(&mut self.docker_rx, mpsc::channel(1).1);
             let tui_services = std::mem::take(&mut self.tui_services);
-            tui::run(log_rx, docker_rx, tui_services).await?;
+
+            let (restart_tx, mut restart_rx) = mpsc::channel::<tui::RestartRequest>(10);
+            let log_tx = self.log_tx.clone();
+            let output_path = self.output_path.clone();
+            let tui_services_clone = tui_services.clone();
+            let process_manager = self.process_manager.clone();
+
+            let restart_handle = tokio::spawn(async move {
+                async fn restart_docker_service(name: &str, path: &Path) {
+                    let slug = slugify(name);
+                    let _ = tokio::process::Command::new("docker")
+                        .args(["compose", "-f", &*path.to_string_lossy(), "restart", &slug])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .await;
+                }
+
+                fn send_restart_log(
+                    log_tx: &mpsc::Sender<LogLine>,
+                    name: &str,
+                    color: colored::Color,
+                    is_docker: bool,
+                ) {
+                    let msg = if is_docker {
+                        "Restarting container..."
+                    } else {
+                        "Restarting service..."
+                    };
+                    let _ = log_tx.try_send(LogLine {
+                        service_name: name.to_string(),
+                        message: msg.to_string(),
+                        is_stderr: false,
+                        color,
+                    });
+                }
+
+                while let Some(req) = restart_rx.recv().await {
+                    match req {
+                        tui::RestartRequest::Local => {
+                            for svc in tui_services_clone.iter().filter(|s| !s.is_docker) {
+                                send_restart_log(&log_tx, &svc.name, svc.color, false);
+                            }
+                            let mut pm = process_manager.lock().await;
+                            let _ = pm.restart_all(log_tx.clone()).await;
+                        }
+                        tui::RestartRequest::Image => {
+                            for svc in tui_services_clone.iter().filter(|s| s.is_docker) {
+                                send_restart_log(&log_tx, &svc.name, svc.color, true);
+                                restart_docker_service(&svc.name, &output_path).await;
+                            }
+                        }
+                        tui::RestartRequest::Service(idx) => {
+                            if let Some(svc) = tui_services_clone.get(idx) {
+                                send_restart_log(&log_tx, &svc.name, svc.color, svc.is_docker);
+                                if svc.is_docker {
+                                    restart_docker_service(&svc.name, &output_path).await;
+                                } else if let Some(process_idx) = svc.process_index {
+                                    let mut pm = process_manager.lock().await;
+                                    let _ = pm.restart_service(process_idx, log_tx.clone()).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            tui::run(log_rx, docker_rx, tui_services, Some(restart_tx)).await?;
+            restart_handle.abort();
         }
 
         if use_tui {
@@ -281,7 +351,7 @@ impl DevSession {
     pub async fn shutdown(&mut self) {
         println!("{}", "Stopping services...".dimmed());
 
-        self.process_manager.shutdown().await;
+        self.process_manager.lock().await.shutdown().await;
         if self.code_count > 0 {
             println!(
                 " {} Stopped {} code service{}",

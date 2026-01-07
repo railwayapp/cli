@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, Paragraph, Tabs},
 };
 
 use super::app::{Tab, TuiApp};
@@ -50,11 +50,17 @@ pub fn render(app: &mut TuiApp, frame: &mut Frame) {
 }
 
 fn render_tabs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
-    let mut titles: Vec<Line> = vec![Line::from("Local"), Line::from("Image")];
+    let mut titles: Vec<Line> = Vec::new();
+
+    if app.show_local_tab() {
+        titles.push(Line::from("Local"));
+    }
+    if app.show_image_tab() {
+        titles.push(Line::from("Image"));
+    }
 
     for service in &app.services {
-        let suffix = if service.is_docker { "" } else { " *" };
-        titles.push(Line::from(format!("{}{}", service.name, suffix)));
+        titles.push(Line::from(service.name.clone()));
     }
 
     let selected = app.tab_index();
@@ -150,6 +156,8 @@ fn render_logs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
         .border_style(Style::default().fg(Color::DarkGray));
 
     let paragraph = Paragraph::new(lines).block(block);
+    // Clear prevents stale logs from previous tab rendering through
+    frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
 }
 
@@ -249,6 +257,8 @@ fn render_help_bar(_app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect
         Span::raw(" top/bottom  "),
         Span::styled("f", Style::default().fg(Color::Yellow)),
         Span::raw(" follow  "),
+        Span::styled("r", Style::default().fg(Color::Yellow)),
+        Span::raw(" restart  "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
         Span::raw(" quit"),
     ];

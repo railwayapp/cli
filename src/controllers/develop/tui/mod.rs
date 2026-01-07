@@ -3,7 +3,7 @@ mod docker_logs;
 mod log_store;
 mod ui;
 
-pub use app::ServiceInfo;
+pub use app::{RestartRequest, ServiceInfo, TuiAction};
 pub use docker_logs::{ServiceMapping, spawn_docker_logs};
 
 use std::io::stdout;
@@ -50,6 +50,7 @@ pub async fn run(
     mut log_rx: mpsc::Receiver<LogLine>,
     mut docker_rx: mpsc::Receiver<LogLine>,
     services: Vec<ServiceInfo>,
+    restart_tx: Option<mpsc::Sender<RestartRequest>>,
 ) -> Result<()> {
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -66,7 +67,7 @@ pub async fn run(
     let mut app = TuiApp::new(services);
     let mut events = EventStream::new();
 
-    loop {
+    'main: loop {
         terminal.draw(|f| ui::render(&mut app, f))?;
 
         tokio::select! {
@@ -77,15 +78,27 @@ pub async fn run(
                 app.push_log(log, true);
             }
             Some(Ok(event)) = events.next() => {
-                if process_event(&mut app, event) {
-                    break;
+                match process_event(&mut app, event) {
+                    TuiAction::Quit => break 'main,
+                    TuiAction::Restart(req) => {
+                        if let Some(tx) = &restart_tx {
+                            let _ = tx.send(req).await;
+                        }
+                    }
+                    TuiAction::None => {}
                 }
                 // Drain any queued events to batch scroll and prevent momentum lag
                 while let Ok(Some(Ok(event))) =
                     tokio::time::timeout(Duration::from_millis(1), events.next()).await
                 {
-                    if process_event(&mut app, event) {
-                        break;
+                    match process_event(&mut app, event) {
+                        TuiAction::Quit => break 'main,
+                        TuiAction::Restart(req) => {
+                            if let Some(tx) = &restart_tx {
+                                let _ = tx.send(req).await;
+                            }
+                        }
+                        TuiAction::None => {}
                     }
                 }
             }
@@ -98,12 +111,10 @@ pub async fn run(
     Ok(())
 }
 
-fn process_event(app: &mut TuiApp, event: Event) -> bool {
+fn process_event(app: &mut TuiApp, event: Event) -> TuiAction {
     match event {
         Event::Key(key) => {
-            if app.handle_key(key) {
-                return true;
-            }
+            return app.handle_key(key);
         }
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
@@ -113,5 +124,5 @@ fn process_event(app: &mut TuiApp, event: Event) -> bool {
         },
         _ => {}
     }
-    false
+    TuiAction::None
 }

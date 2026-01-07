@@ -11,6 +11,20 @@ pub enum Tab {
     Service(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartRequest {
+    Local,
+    Image,
+    Service(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiAction {
+    None,
+    Quit,
+    Restart(RestartRequest),
+}
+
 #[derive(Debug, Clone)]
 pub struct ServiceInfo {
     pub name: String,
@@ -21,6 +35,7 @@ pub struct ServiceInfo {
     pub public_url: Option<String>,
     pub command: Option<String>,
     pub image: Option<String>,
+    pub process_index: Option<usize>,
 }
 
 pub struct TuiApp {
@@ -31,6 +46,8 @@ pub struct TuiApp {
     pub services: Vec<ServiceInfo>,
     service_name_to_idx: std::collections::HashMap<String, usize>,
     visible_height: usize,
+    code_count: usize,
+    image_count: usize,
 }
 
 impl TuiApp {
@@ -41,15 +58,38 @@ impl TuiApp {
             .map(|(i, s)| (s.name.clone(), i))
             .collect();
 
+        let code_count = services.iter().filter(|s| !s.is_docker).count();
+        let image_count = services.iter().filter(|s| s.is_docker).count();
+
+        let initial_tab = if code_count > 1 {
+            Tab::Local
+        } else if image_count > 1 {
+            Tab::Image
+        } else if !services.is_empty() {
+            Tab::Service(0)
+        } else {
+            Tab::Local
+        };
+
         Self {
-            current_tab: Tab::Local,
+            current_tab: initial_tab,
             scroll_offset: 0,
             follow_mode: true,
             log_store: LogStore::new(services.len()),
             services,
             service_name_to_idx,
             visible_height: 20,
+            code_count,
+            image_count,
         }
+    }
+
+    pub fn show_local_tab(&self) -> bool {
+        self.code_count > 1
+    }
+
+    pub fn show_image_tab(&self) -> bool {
+        self.image_count > 1
     }
 
     pub fn set_visible_height(&mut self, height: usize) {
@@ -75,10 +115,22 @@ impl TuiApp {
         }
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+    pub fn handle_key(&mut self, key: KeyEvent) -> TuiAction {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char('q') | KeyCode::Esc => return TuiAction::Quit,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return TuiAction::Quit;
+            }
+
+            // Restart
+            KeyCode::Char('r') => {
+                let request = match self.current_tab {
+                    Tab::Local => RestartRequest::Local,
+                    Tab::Image => RestartRequest::Image,
+                    Tab::Service(idx) => RestartRequest::Service(idx),
+                };
+                return TuiAction::Restart(request);
+            }
 
             // Tab selection by number
             KeyCode::Char('1') => self.select_tab(0),
@@ -137,7 +189,7 @@ impl TuiApp {
 
             _ => {}
         }
-        false
+        TuiAction::None
     }
 
     pub fn handle_mouse(&mut self, event: MouseEvent) {
@@ -162,35 +214,67 @@ impl TuiApp {
         }
     }
 
-    fn select_tab(&mut self, idx: usize) {
-        let tab = match idx {
-            0 => Tab::Local,
-            1 => Tab::Image,
-            n => {
-                let service_idx = n - 2;
-                if service_idx < self.services.len() {
-                    Tab::Service(service_idx)
-                } else {
-                    return;
-                }
+    fn select_tab(&mut self, visual_idx: usize) {
+        let tab = self.visual_to_tab(visual_idx);
+        if let Some(t) = tab {
+            self.current_tab = t;
+            self.scroll_offset = 0;
+            if self.follow_mode {
+                self.scroll_to_bottom();
             }
-        };
-        self.current_tab = tab;
-        self.scroll_offset = 0;
-        if self.follow_mode {
-            self.scroll_to_bottom();
         }
     }
 
+    fn visual_to_tab(&self, visual_idx: usize) -> Option<Tab> {
+        let mut idx = visual_idx;
+
+        if self.show_local_tab() {
+            if idx == 0 {
+                return Some(Tab::Local);
+            }
+            idx -= 1;
+        }
+
+        if self.show_image_tab() {
+            if idx == 0 {
+                return Some(Tab::Image);
+            }
+            idx -= 1;
+        }
+
+        if idx < self.services.len() {
+            Some(Tab::Service(idx))
+        } else {
+            None
+        }
+    }
+
+    fn total_visible_tabs(&self) -> usize {
+        let mut count = self.services.len();
+        if self.show_local_tab() {
+            count += 1;
+        }
+        if self.show_image_tab() {
+            count += 1;
+        }
+        count
+    }
+
     fn next_tab(&mut self) {
-        let total_tabs = 2 + self.services.len();
+        let total_tabs = self.total_visible_tabs();
+        if total_tabs == 0 {
+            return;
+        }
         let current_idx = self.tab_index();
         let next_idx = (current_idx + 1) % total_tabs;
         self.select_tab(next_idx);
     }
 
     fn prev_tab(&mut self) {
-        let total_tabs = 2 + self.services.len();
+        let total_tabs = self.total_visible_tabs();
+        if total_tabs == 0 {
+            return;
+        }
         let current_idx = self.tab_index();
         let prev_idx = if current_idx == 0 {
             total_tabs - 1
@@ -201,10 +285,25 @@ impl TuiApp {
     }
 
     pub fn tab_index(&self) -> usize {
+        let mut idx = 0;
+
         match self.current_tab {
-            Tab::Local => 0,
-            Tab::Image => 1,
-            Tab::Service(i) => 2 + i,
+            Tab::Local => idx,
+            Tab::Image => {
+                if self.show_local_tab() {
+                    idx += 1;
+                }
+                idx
+            }
+            Tab::Service(i) => {
+                if self.show_local_tab() {
+                    idx += 1;
+                }
+                if self.show_image_tab() {
+                    idx += 1;
+                }
+                idx + i
+            }
         }
     }
 
