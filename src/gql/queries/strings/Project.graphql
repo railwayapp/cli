@@ -28,6 +28,12 @@ query Project($id: String!) {
                   createdAt
                   deploymentStopped
                 }
+                activeDeployments {
+                  id
+                  status
+                  createdAt
+                  meta
+                }
                 source {
                   repo
                   image
