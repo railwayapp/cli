@@ -34,7 +34,7 @@ pub async fn command(args: Args) -> Result<()> {
             match get_user(&client, &configs).await {
                 Ok(user) => {
                     println!("{} found", "RAILWAY_TOKEN".bold());
-                    print_user(user, false);
+                    print_user(user);
                     return Ok(());
                 }
                 Err(_e) => {
