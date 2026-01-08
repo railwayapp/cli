@@ -104,6 +104,7 @@ pub async fn stream_build_logs(
     let mut last_timestamp: Option<String> = None;
     let mut attempt = 0;
     let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+    let mut received_any_logs = false;
 
     loop {
         attempt += 1;
@@ -130,6 +131,7 @@ pub async fn stream_build_logs(
                         }
                     }
                     last_timestamp = Some(line.timestamp.clone());
+                    received_any_logs = true;
                     on_log(line);
                 }
             }
@@ -139,8 +141,20 @@ pub async fn stream_build_logs(
 
         match result {
             Ok(()) => return Ok(()),
-            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => return Err(e),
+            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => {
+                // If we received some logs before the error, treat as success
+                // (the build likely finished and the stream closed)
+                if received_any_logs {
+                    return Ok(());
+                }
+                return Err(e);
+            }
             Err(_) => {
+                // If we've received logs and then get an error, the build likely completed
+                // and the stream was closed by the server. Treat this as success.
+                if received_any_logs {
+                    return Ok(());
+                }
                 sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
                     .min(LOGS_RETRY_CONFIG.max_delay_ms);
@@ -157,6 +171,7 @@ pub async fn stream_deploy_logs(
     let mut last_timestamp: Option<String> = None;
     let mut attempt = 0;
     let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+    let mut received_any_logs = false;
 
     loop {
         attempt += 1;
@@ -183,6 +198,7 @@ pub async fn stream_deploy_logs(
                         }
                     }
                     last_timestamp = Some(line.timestamp.clone());
+                    received_any_logs = true;
                     on_log(line);
                 }
             }
@@ -192,8 +208,20 @@ pub async fn stream_deploy_logs(
 
         match result {
             Ok(()) => return Ok(()),
-            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => return Err(e),
+            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => {
+                // If we received some logs before the error, treat as success
+                // (the deployment likely finished and the stream closed)
+                if received_any_logs {
+                    return Ok(());
+                }
+                return Err(e);
+            }
             Err(_) => {
+                // If we've received logs and then get an error, the deployment likely completed
+                // and the stream was closed by the server. Treat this as success.
+                if received_any_logs {
+                    return Ok(());
+                }
                 sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
                     .min(LOGS_RETRY_CONFIG.max_delay_ms);

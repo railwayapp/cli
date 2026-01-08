@@ -313,6 +313,11 @@ pub async fn command(args: Args) -> Result<()> {
 
     //	Create vector of log streaming tasks
     //	Always stream build logs
+    //  Add a small delay before starting log streaming to allow the backend
+    //  to fully register the deployment. This prevents race conditions where
+    //  the WebSocket subscription fails because the deployment isn't ready yet.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     let build_deployment_id = deployment_id.clone();
     let mut tasks = vec![tokio::task::spawn(async move {
         if let Err(e) = stream_build_logs(build_deployment_id, None, |log| {
