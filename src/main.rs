@@ -56,6 +56,7 @@ commands!(
     whoami,
     volume,
     redeploy,
+    restart,
     scale,
     check_updates,
     functions(function, func, fn, funcs, fns)
