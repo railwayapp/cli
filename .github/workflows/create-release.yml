@@ -12,6 +12,11 @@ on:
           - minor
           - major
 
+# Prevent concurrent releases
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   create-release:
     name: Bump Version & Publish
@@ -49,13 +54,14 @@ jobs:
           echo "New version: $NEW_VERSION"
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
-
+      # Push BEFORE publishing to crates.io - if push fails, we haven't published yet
       - name: Push changes and tag
         run: |
           git pull --rebase origin master
           git push origin master
           git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
