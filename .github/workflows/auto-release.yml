@@ -39,20 +39,35 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Waiting for CI checks on master..."
-          # Get the latest commit on master
+          git fetch origin master
           MASTER_SHA=$(git rev-parse origin/master)
+          echo "Master SHA: $MASTER_SHA"
 
           # Wait up to 10 minutes for CI to complete
           for i in {1..20}; do
-            STATUS=$(gh api repos/${{ github.repository }}/commits/$MASTER_SHA/status --jq '.state')
-            echo "CI status: $STATUS"
+            # Use check-runs API (what GitHub Actions CI uses) instead of status API
+            CHECKS=$(gh api repos/${{ github.repository }}/commits/$MASTER_SHA/check-runs --jq '{
+              total: .total_count,
+              completed: [.check_runs[] | select(.status == "completed")] | length,
+              success: [.check_runs[] | select(.conclusion == "success")] | length,
+              failure: [.check_runs[] | select(.conclusion == "failure")] | length
+            }')
 
-            if [ "$STATUS" = "success" ]; then
-              echo "CI passed!"
-              break
-            elif [ "$STATUS" = "failure" ]; then
+            TOTAL=$(echo "$CHECKS" | jq -r '.total')
+            COMPLETED=$(echo "$CHECKS" | jq -r '.completed')
+            SUCCESS=$(echo "$CHECKS" | jq -r '.success')
+            FAILURE=$(echo "$CHECKS" | jq -r '.failure')
+
+            echo "CI checks: $COMPLETED/$TOTAL completed, $SUCCESS success, $FAILURE failure"
+
+            if [ "$FAILURE" -gt "0" ]; then
               echo "CI failed, aborting release"
               exit 1
+            fi
+
+            if [ "$TOTAL" -gt "0" ] && [ "$COMPLETED" -eq "$TOTAL" ]; then
+              echo "All CI checks passed!"
+              break
             fi
 
             echo "Waiting for CI... (attempt $i/20)"
