@@ -50,8 +50,38 @@ impl TerminalClient {
 
                 if server_msg.r#type != "welcome" {
                     // If it's an error message, extract and display the actual error message
-                    if server_msg.r#type == "error" && !server_msg.payload.message.is_empty() {
-                        bail!("Failed to connect: {}", server_msg.payload.message);
+                    if server_msg.r#type == "error" {
+                        if !server_msg.payload.message.is_empty() {
+                            let msg = &server_msg.payload.message;
+
+                            // Check for serverless/sleeping container errors
+                            // The server sends "Your application is not running or in a unexpected state"
+                            // when no running deployment instance is found (common with serverless services)
+                            if msg.contains("not running")
+                                || msg.contains("Deployment instance not found")
+                            {
+                                bail!(
+                                    "Failed to connect: {}\n\n\
+                                    This may happen because the service is serverless (sleeping) and has scaled to zero.\n\
+                                    Serverless containers cannot accept SSH connections when idle.\n\n\
+                                    To SSH into this service:\n\
+                                    - Send a request to wake the service, then retry\n\
+                                    - Or disable 'Sleep when idle' in service settings to keep it running",
+                                    msg
+                                );
+                            }
+                            bail!("Failed to connect: {}", msg);
+                        } else {
+                            // Server sent error type but with empty message
+                            bail!(
+                                "Failed to connect to the service.\n\n\
+                                This may happen if:\n\
+                                - The service is serverless (sleeping) and has scaled to zero\n\
+                                - The service has no active deployment\n\
+                                - The deployment is still starting up\n\n\
+                                If the service is serverless, disable the 'Sleep when idle' setting to keep it running."
+                            );
+                        }
                     }
                     bail!("Expected welcome message, received: {:?}", server_msg);
                 }
