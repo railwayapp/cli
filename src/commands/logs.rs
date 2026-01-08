@@ -6,7 +6,7 @@ use crate::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::logs::print_log,
+    util::{logs::print_log, time::parse_time},
 };
 use anyhow::bail;
 
@@ -18,12 +18,15 @@ use super::{
 #[derive(Parser)]
 #[clap(
     about = "View build or deploy logs from a Railway deployment",
-    long_about = "View build or deploy logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines flag is provided.",
+    long_about = "View build or deploy logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines, --since, or --until flags are provided.",
     after_help = "Examples:
 
   railway logs                                                       # Stream live logs from latest deployment
   railway logs --build 7422c95b-c604-46bc-9de4-b7a43e1fd53d          # Stream build logs from a specific deployment
   railway logs --lines 100                                           # Pull last 100 logs without streaming
+  railway logs --since 1h                                            # View logs from the last hour
+  railway logs --since 30m --until 10m                               # View logs from 30 minutes ago until 10 minutes ago
+  railway logs --since 2024-01-15T10:00:00Z                          # View logs since a specific timestamp
   railway logs --service backend --environment production            # Stream latest deployment logs from a specific service in a specific environment
   railway logs --lines 10 --filter \"@level:error\"                    # View 10 latest error logs
   railway logs --lines 10 --filter \"@level:warn AND rate limit\"      # View 10 latest warning logs related to rate limiting
@@ -67,6 +70,14 @@ pub struct Args {
     /// Always show logs from the latest deployment, even if it failed or is still building
     #[clap(long)]
     latest: bool,
+
+    /// Show logs since a specific time (disables streaming). Accepts relative times (e.g., 30s, 5m, 2h, 1d, 1w) or ISO 8601 timestamps (e.g., 2024-01-15T10:30:00Z)
+    #[clap(long, short = 'S', value_name = "TIME")]
+    since: Option<String>,
+
+    /// Show logs until a specific time (disables streaming). Same formats as --since
+    #[clap(long, short = 'U', value_name = "TIME")]
+    until: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -76,8 +87,20 @@ pub async fn command(args: Args) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    // Stream only if no line limit is specified and running in a terminal
-    let should_stream = args.lines.is_none() && std::io::stdout().is_terminal();
+    let start_date = args.since.as_ref().map(|s| parse_time(s)).transpose()?;
+    let end_date = args.until.as_ref().map(|s| parse_time(s)).transpose()?;
+
+    if let (Some(s), Some(e)) = (&start_date, &end_date) {
+        if s >= e {
+            bail!("--since time must be before --until time");
+        }
+    }
+
+    let has_time_filter = start_date.is_some() || end_date.is_some();
+
+    // Stream only if no line limit or time filter is specified and running in a terminal
+    let should_stream =
+        args.lines.is_none() && !has_time_filter && std::io::stdout().is_terminal();
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
@@ -162,6 +185,8 @@ pub async fn command(args: Args) -> Result<()> {
                 deployment_id.clone(),
                 args.lines.or(Some(500)),
                 args.filter.clone(),
+                start_date,
+                end_date,
                 |log| print_log(log, args.json, false), // Build logs use simple output
             )
             .await?;
@@ -178,6 +203,8 @@ pub async fn command(args: Args) -> Result<()> {
             deployment_id.clone(),
             args.lines.or(Some(500)),
             args.filter.clone(),
+            start_date,
+            end_date,
             |log| print_log(log, args.json, true), // Deploy logs use formatted output
         )
         .await?;

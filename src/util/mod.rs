@@ -4,4 +4,5 @@ pub mod logs;
 pub mod progress;
 pub mod prompt;
 pub mod retry;
+pub mod time;
 pub mod watcher;

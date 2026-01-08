@@ -8,6 +8,7 @@ use crate::{
     util::retry::RetryConfig,
 };
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use reqwest::Client;
 use std::time::Duration;
@@ -39,12 +40,15 @@ pub async fn fetch_build_logs(
     deployment_id: String,
     limit: Option<i64>,
     filter: Option<String>,
+    start_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
     on_log: impl Fn(queries::build_logs::BuildLogsBuildLogs),
 ) -> Result<()> {
     let vars = queries::build_logs::Variables {
         deployment_id,
         limit,
-        start_date: None,
+        start_date,
+        end_date,
         filter,
     };
 
@@ -67,12 +71,16 @@ pub async fn fetch_deploy_logs(
     deployment_id: String,
     limit: Option<i64>,
     filter: Option<String>,
+    start_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
     on_log: impl Fn(queries::deployment_logs::LogFields),
 ) -> Result<()> {
     let vars = queries::deployment_logs::Variables {
         deployment_id,
         limit,
         filter,
+        start_date,
+        end_date,
     };
 
     let response = post_graphql::<queries::DeploymentLogs, _>(client, backboard, vars).await?;
