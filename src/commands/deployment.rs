@@ -92,10 +92,10 @@ async fn list_deployments(
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let limit = if limit > 1000 {
-        eprintln!("Warning: limit cannot exceed 1000, using 1000 instead");
+        eprintln!("{}", "Warning: limit cannot exceed 1000, using 1000 instead".yellow());
         1000
     } else if limit < 1 {
-        eprintln!("Warning: limit must be at least 1, using 1 instead");
+        eprintln!("{}", "Warning: limit must be at least 1, using 1 instead".yellow());
         1
     } else {
         limit
