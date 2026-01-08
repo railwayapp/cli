@@ -35,13 +35,19 @@ pub async fn command(args: Args) -> Result<()> {
         );
 
         if let Some(linked_service) = linked_project.service {
-            let service = project
+            if let Some(service) = project
                 .services
                 .edges
                 .iter()
                 .find(|service| service.node.id == linked_service)
-                .expect("the linked service doesn't exist");
-            println!("Service: {}", service.node.name.green().bold());
+            {
+                println!("Service: {}", service.node.name.green().bold());
+            } else {
+                println!(
+                    "Service: {} (not found in project, run `railway service` to relink)",
+                    linked_service.yellow().bold()
+                );
+            }
         } else {
             println!("Service: {}", "None".red().bold())
         }
