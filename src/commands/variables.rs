@@ -10,6 +10,7 @@ use crate::{
     table::Table,
 };
 use anyhow::bail;
+use std::io::{IsTerminal, Read};
 use std::time::Duration;
 
 /// Show variables for active environment
@@ -33,6 +34,14 @@ pub struct Args {
     /// railway variables --set "MY_SPECIAL_ENV_VAR=1" --set "BACKEND_PORT=3000"
     #[clap(long)]
     set: Vec<Variable>,
+
+    /// Set a variable with the value read from stdin. Provide the variable name as the argument.
+    /// Example:
+    ///
+    /// echo "secret_value" | railway variables --set-from-stdin MY_SECRET
+    /// openssl rand -hex 16 | railway variables --set-from-stdin SECRET_KEY
+    #[clap(long, value_name = "KEY")]
+    set_from_stdin: Option<String>,
 
     /// Output in JSON format
     #[clap(long)]
@@ -73,6 +82,22 @@ pub async fn command(args: Args) -> Result<()> {
         // Otherwise it's a user error
         _ => bail!(RailwayError::NoServiceLinked),
     };
+
+    if let Some(key) = args.set_from_stdin {
+        let value = read_value_from_stdin()?;
+        let variable = Variable { key, value };
+        set_variables(
+            vec![variable],
+            linked_project.project.clone(),
+            environment_id,
+            service_id,
+            &client,
+            &configs,
+            args.skip_deploys,
+        )
+        .await?;
+        return Ok(());
+    }
 
     if !args.set.is_empty() {
         set_variables(
@@ -163,4 +188,24 @@ async fn set_variables(
         .await?;
     spinner.finish_with_message(format!("Set variables {fmt_variables}"));
     Ok(())
+}
+
+fn read_value_from_stdin() -> Result<String> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        bail!(
+            "No input provided via stdin. Use --set-from-stdin with piped input, e.g.:\n  echo \"value\" | railway variables --set-from-stdin KEY"
+        );
+    }
+
+    let mut value = String::new();
+    stdin.lock().read_to_string(&mut value)?;
+
+    let value = value.trim_end_matches('\n').trim_end_matches('\r');
+
+    if value.is_empty() {
+        bail!("Empty value provided via stdin");
+    }
+
+    Ok(value.to_string())
 }
