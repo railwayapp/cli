@@ -32,7 +32,11 @@ structstruck::strike! {
     enum Commands {
         /// List volumes
         #[clap(alias = "ls")]
-        List,
+        List(struct {
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
+        }),
 
         /// Add a new volume
         #[clap(alias = "create")]
@@ -99,7 +103,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     match args.command {
         Commands::Add(a) => add(service, environment, a.mount_path, project).await?,
-        Commands::List => list(environment, project).await?,
+        Commands::List(l) => list(environment, project, l.json).await?,
         Commands::Delete(d) => delete(environment, d.volume, project).await?,
         Commands::Update(u) => update(environment, u.volume, u.mount_path, u.name, project).await?,
         Commands::Detach(d) => detach(environment, d.volume, project).await?,
@@ -355,7 +359,7 @@ async fn delete(
     Ok(())
 }
 
-async fn list(environment: String, project: ProjectProject) -> Result<()> {
+async fn list(environment: String, project: ProjectProject, json: bool) -> Result<()> {
     let env = project
         .environments
         .edges
@@ -367,9 +371,45 @@ async fn list(environment: String, project: ProjectProject) -> Result<()> {
     let volumes = &env.node.volume_instances.edges;
 
     if volumes.is_empty() {
-        bail!(
-            "No volumes found in environment {}",
-            environment_name.blue()
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "volumes": [] }))?
+            );
+        } else {
+            bail!(
+                "No volumes found in environment {}",
+                environment_name.blue()
+            );
+        }
+    } else if json {
+        let volumes_json: Vec<serde_json::Value> = volumes
+            .iter()
+            .map(|volume_edge| {
+                let volume = &volume_edge.node;
+                let service_name = project
+                    .services
+                    .edges
+                    .iter()
+                    .find(|s| s.node.id == volume.service_id.clone().unwrap_or_default())
+                    .map(|s| s.node.name.clone());
+                serde_json::json!({
+                    "id": volume.volume.id,
+                    "name": volume.volume.name,
+                    "mountPath": volume.mount_path,
+                    "serviceName": service_name,
+                    "currentSizeMB": volume.current_size_mb,
+                    "sizeMB": volume.size_mb,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "project": project.name,
+                "environment": environment_name,
+                "volumes": volumes_json,
+            }))?
         );
     } else {
         println!("Project: {}", project.name.cyan().bold());
