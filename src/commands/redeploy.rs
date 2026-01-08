@@ -91,6 +91,12 @@ pub async fn command(args: Args) -> Result<()> {
                 "The latest deployment from service {} has been redeployed",
                 service.node.name.green()
             ));
+        } else {
+            bail!(
+                "The latest deployment for service {} cannot be redeployed. \
+                This may be because it's currently building, deploying, or was removed.",
+                service.node.name
+            );
         }
     } else {
         bail!("No deployment found for service")
