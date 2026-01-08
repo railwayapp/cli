@@ -16,6 +16,7 @@ pub struct Args {
 enum InstallMethod {
     Homebrew,
     Npm,
+    Bun,
     Cargo,
     Shell,
     Scoop,
@@ -37,6 +38,11 @@ impl InstallMethod {
             || path_str.contains("linuxbrew")
         {
             return InstallMethod::Homebrew;
+        }
+
+        // Check for Bun global install (must be before npm since bun uses node_modules internally)
+        if path_str.contains(".bun") {
+            return InstallMethod::Bun;
         }
 
         // Check for npm global install
@@ -74,6 +80,7 @@ impl InstallMethod {
         match self {
             InstallMethod::Homebrew => "Homebrew",
             InstallMethod::Npm => "npm",
+            InstallMethod::Bun => "Bun",
             InstallMethod::Cargo => "Cargo",
             InstallMethod::Shell => "Shell script",
             InstallMethod::Scoop => "Scoop",
@@ -85,6 +92,7 @@ impl InstallMethod {
         match self {
             InstallMethod::Homebrew => Some("brew upgrade railway"),
             InstallMethod::Npm => Some("npm update -g @railway/cli"),
+            InstallMethod::Bun => Some("bun update -g @railway/cli"),
             InstallMethod::Cargo => Some("cargo install railwayapp"),
             InstallMethod::Scoop => Some("scoop update railway"),
             InstallMethod::Shell => Some("bash <(curl -fsSL cli.new)"),
@@ -97,6 +105,7 @@ impl InstallMethod {
             self,
             InstallMethod::Homebrew
                 | InstallMethod::Npm
+                | InstallMethod::Bun
                 | InstallMethod::Cargo
                 | InstallMethod::Scoop
         )
@@ -107,6 +116,7 @@ fn run_upgrade_command(method: InstallMethod) -> Result<()> {
     let (program, args): (&str, Vec<&str>) = match method {
         InstallMethod::Homebrew => ("brew", vec!["upgrade", "railway"]),
         InstallMethod::Npm => ("npm", vec!["update", "-g", "@railway/cli"]),
+        InstallMethod::Bun => ("bun", vec!["update", "-g", "@railway/cli"]),
         InstallMethod::Cargo => ("cargo", vec!["install", "railwayapp"]),
         InstallMethod::Scoop => ("scoop", vec!["update", "railway"]),
         InstallMethod::Shell | InstallMethod::Unknown => {
@@ -172,6 +182,9 @@ pub async fn command(args: Args) -> Result<()> {
             println!();
             println!("  {}", "npm:".bold());
             println!("    npm update -g @railway/cli");
+            println!();
+            println!("  {}", "Bun:".bold());
+            println!("    bun update -g @railway/cli");
             println!();
             println!("  {}", "Cargo:".bold());
             println!("    cargo install railwayapp");
