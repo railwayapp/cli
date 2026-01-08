@@ -56,5 +56,6 @@ jobs:
 
       - name: Push changes and tag
         run: |
+          git pull --rebase origin master
           git push origin master
           git push origin "v${{ steps.bump.outputs.version }}"
