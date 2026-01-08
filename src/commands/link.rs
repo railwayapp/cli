@@ -1,6 +1,7 @@
 use anyhow::bail;
 use colored::*;
 use is_terminal::IsTerminal;
+use serde::Serialize;
 use std::fmt::Display;
 
 use crate::{
@@ -33,6 +34,23 @@ pub struct Args {
     /// The workspace to link to.
     #[clap(long, short)]
     workspace: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkOutput {
+    project_id: String,
+    project_name: String,
+    environment_id: String,
+    environment_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_name: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -64,23 +82,39 @@ pub async fn command(args: Args) -> Result<()> {
     let service = select_service(&project, &environment, args.service)?;
 
     configs.link_project(
-        project.id,
+        project.id.clone(),
         Some(project.name.clone()),
-        environment.id,
-        Some(environment.name),
+        environment.id.clone(),
+        Some(environment.name.clone()),
     )?;
-    if let Some(service) = service {
-        configs.link_service(service.id)?;
-    }
 
-    println!(
-        "\n{} {} {}",
-        "Project".green(),
-        project.name.magenta().bold(),
-        "linked successfully! 🎉".green()
-    );
+    let (service_id, service_name) = if let Some(ref svc) = service {
+        configs.link_service(svc.id.clone())?;
+        (Some(svc.id.clone()), Some(svc.name.clone()))
+    } else {
+        (None, None)
+    };
 
     configs.write()?;
+
+    if args.json {
+        let output = LinkOutput {
+            project_id: project.id,
+            project_name: project.name,
+            environment_id: environment.id,
+            environment_name: environment.name,
+            service_id,
+            service_name,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "\n{} {} {}",
+            "Project".green(),
+            project.name.magenta().bold(),
+            "linked successfully! 🎉".green()
+        );
+    }
 
     Ok(())
 }
