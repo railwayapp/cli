@@ -51,6 +51,7 @@ commands!(
     status,
     unlink,
     up,
+    upgrade,
     variables,
     whoami,
     volume,
