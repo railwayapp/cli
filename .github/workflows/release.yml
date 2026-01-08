@@ -183,9 +183,26 @@ jobs:
         run: |
           gh release upload "${{ needs.create-release.outputs.railway_version }}" "railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb"
 
+  publish-crates:
+    name: Publish to crates.io
+    needs: ["create-release"]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+
   publish-release:
     name: Publish Release
-    needs: ["create-release", "build-release"]
+    needs: ["create-release", "build-release", "publish-crates"]
     runs-on: ubuntu-latest
 
     steps:
