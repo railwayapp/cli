@@ -43,7 +43,7 @@ commands!(
     logout,
     logs,
     open,
-    run,
+    run(local),
     service,
     shell,
     ssh,
