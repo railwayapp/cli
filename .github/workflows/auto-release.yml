@@ -1,0 +1,183 @@
+name: Auto Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+# Queue releases - don't cancel, let them aggregate
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  auto-release:
+    name: Auto Release
+    # Only run if PR was merged (not just closed) and has a release label
+    if: |
+      github.event.pull_request.merged == true &&
+      (contains(github.event.pull_request.labels.*.name, 'release/patch') ||
+       contains(github.event.pull_request.labels.*.name, 'release/minor') ||
+       contains(github.event.pull_request.labels.*.name, 'release/major'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      # Debounce - wait for more PRs to potentially merge
+      - name: Wait for batch window
+        run: |
+          echo "Waiting 2 minutes for more PRs to merge..."
+          sleep 120
+
+      # Wait for CI to pass on master
+      - name: Wait for CI on master
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Waiting for CI checks on master..."
+          # Get the latest commit on master
+          MASTER_SHA=$(git rev-parse origin/master)
+
+          # Wait up to 10 minutes for CI to complete
+          for i in {1..20}; do
+            STATUS=$(gh api repos/${{ github.repository }}/commits/$MASTER_SHA/status --jq '.state')
+            echo "CI status: $STATUS"
+
+            if [ "$STATUS" = "success" ]; then
+              echo "CI passed!"
+              break
+            elif [ "$STATUS" = "failure" ]; then
+              echo "CI failed, aborting release"
+              exit 1
+            fi
+
+            echo "Waiting for CI... (attempt $i/20)"
+            sleep 30
+          done
+
+      # Check if another release workflow is running
+      - name: Check for running release workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if create-release workflow is currently running
+          RUNNING=$(gh api repos/${{ github.repository }}/actions/workflows/create-release.yml/runs \
+            --jq '[.workflow_runs[] | select(.status == "in_progress" or .status == "queued")] | length')
+
+          if [ "$RUNNING" -gt "0" ]; then
+            echo "Another release is in progress, skipping to avoid conflicts"
+            exit 0
+          fi
+
+      # Determine bump type from all PRs merged since last release
+      - name: Determine release type
+        id: release-type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the last release tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous release found, using all merged PRs"
+            SINCE=""
+          else
+            SINCE="--search merged:>=$(git log -1 --format=%cI $LAST_TAG)"
+          fi
+
+          # Find all merged PRs since last release with release labels
+          echo "Finding merged PRs since $LAST_TAG..."
+
+          HAS_MAJOR=false
+          HAS_MINOR=false
+          HAS_PATCH=false
+
+          # Get merged PRs with release labels
+          gh pr list --state merged --base master --json number,labels,mergedAt --limit 100 | \
+          jq -r '.[] | select(.labels[].name | test("release/")) | .labels[].name' | \
+          while read -r label; do
+            case "$label" in
+              release/major) echo "major" >> /tmp/bump_types ;;
+              release/minor) echo "minor" >> /tmp/bump_types ;;
+              release/patch) echo "patch" >> /tmp/bump_types ;;
+            esac
+          done
+
+          # Also check PRs merged since the last tag by commit
+          if [ -n "$LAST_TAG" ]; then
+            COMMITS_SINCE=$(git log $LAST_TAG..HEAD --oneline | wc -l)
+            echo "Found $COMMITS_SINCE commits since $LAST_TAG"
+
+            # Get PR numbers from merge commits
+            git log $LAST_TAG..HEAD --oneline --merges | grep -oP '#\K[0-9]+' | while read -r pr_num; do
+              LABELS=$(gh pr view $pr_num --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+              for label in $LABELS; do
+                case "$label" in
+                  release/major) echo "major" >> /tmp/bump_types ;;
+                  release/minor) echo "minor" >> /tmp/bump_types ;;
+                  release/patch) echo "patch" >> /tmp/bump_types ;;
+                esac
+              done
+            done
+          fi
+
+          # Determine highest bump type
+          if [ -f /tmp/bump_types ]; then
+            if grep -q "major" /tmp/bump_types; then
+              BUMP="major"
+            elif grep -q "minor" /tmp/bump_types; then
+              BUMP="minor"
+            elif grep -q "patch" /tmp/bump_types; then
+              BUMP="patch"
+            else
+              BUMP="patch"
+            fi
+          else
+            # Fall back to the current PR's label
+            if ${{ contains(github.event.pull_request.labels.*.name, 'release/major') }}; then
+              BUMP="major"
+            elif ${{ contains(github.event.pull_request.labels.*.name, 'release/minor') }}; then
+              BUMP="minor"
+            else
+              BUMP="patch"
+            fi
+          fi
+
+          echo "Determined bump type: $BUMP"
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+
+      # Check if there are actually changes to release
+      - name: Check for unreleased changes
+        id: check-changes
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag, proceeding with release"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            CHANGES=$(git log $LAST_TAG..HEAD --oneline | wc -l)
+            if [ "$CHANGES" -gt "0" ]; then
+              echo "Found $CHANGES commits since $LAST_TAG"
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            else
+              echo "No changes since $LAST_TAG"
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      # Trigger the actual release workflow
+      - name: Trigger release
+        if: steps.check-changes.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          echo "Triggering ${{ steps.release-type.outputs.bump }} release..."
+          gh workflow run create-release.yml \
+            --field bump=${{ steps.release-type.outputs.bump }}
+
+          echo "Release workflow triggered!"
