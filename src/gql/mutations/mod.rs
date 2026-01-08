@@ -41,6 +41,14 @@ pub struct ProjectCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ProjectDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ProjectDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ServiceDomainCreate.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

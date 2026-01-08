@@ -28,6 +28,7 @@ commands!(
     add,
     completion,
     connect,
+    delete,
     deploy,
     deployment,
     dev(develop),
