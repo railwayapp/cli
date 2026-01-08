@@ -88,7 +88,7 @@ jobs:
             exit 0
           fi
 
-      # Determine bump type from all PRs merged since last release
+      # Determine bump type from PRs merged since last release
       - name: Determine release type
         id: release-type
         env:
@@ -97,62 +97,45 @@ jobs:
           # Get the last release tag
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
+          # Clean slate
+          rm -f /tmp/bump_types
+          touch /tmp/bump_types
+
           if [ -z "$LAST_TAG" ]; then
-            echo "No previous release found, using all merged PRs"
-            SINCE=""
+            echo "No previous release found, using current PR label only"
           else
-            SINCE="--search merged:>=$(git log -1 --format=%cI $LAST_TAG)"
-          fi
-
-          # Find all merged PRs since last release with release labels
-          echo "Finding merged PRs since $LAST_TAG..."
-
-          HAS_MAJOR=false
-          HAS_MINOR=false
-          HAS_PATCH=false
-
-          # Get merged PRs with release labels
-          gh pr list --state merged --base master --json number,labels,mergedAt --limit 100 | \
-          jq -r '.[] | select(.labels[].name | test("release/")) | .labels[].name' | \
-          while read -r label; do
-            case "$label" in
-              release/major) echo "major" >> /tmp/bump_types ;;
-              release/minor) echo "minor" >> /tmp/bump_types ;;
-              release/patch) echo "patch" >> /tmp/bump_types ;;
-            esac
-          done
-
-          # Also check PRs merged since the last tag by commit
-          if [ -n "$LAST_TAG" ]; then
+            echo "Finding PRs merged since $LAST_TAG..."
             COMMITS_SINCE=$(git log $LAST_TAG..HEAD --oneline | wc -l)
             echo "Found $COMMITS_SINCE commits since $LAST_TAG"
 
-            # Get PR numbers from merge commits
-            git log $LAST_TAG..HEAD --oneline --merges | grep -oP '#\K[0-9]+' | while read -r pr_num; do
+            # Get PR numbers from merge commits since last tag
+            for pr_num in $(git log $LAST_TAG..HEAD --oneline | grep -oE '#[0-9]+' | tr -d '#' | sort -u); do
+              echo "Checking PR #$pr_num..."
               LABELS=$(gh pr view $pr_num --json labels --jq '.labels[].name' 2>/dev/null || echo "")
               for label in $LABELS; do
                 case "$label" in
-                  release/major) echo "major" >> /tmp/bump_types ;;
-                  release/minor) echo "minor" >> /tmp/bump_types ;;
-                  release/patch) echo "patch" >> /tmp/bump_types ;;
+                  release/major) echo "Found major label on PR #$pr_num"; echo "major" >> /tmp/bump_types ;;
+                  release/minor) echo "Found minor label on PR #$pr_num"; echo "minor" >> /tmp/bump_types ;;
+                  release/patch) echo "Found patch label on PR #$pr_num"; echo "patch" >> /tmp/bump_types ;;
                 esac
               done
             done
           fi
 
           # Determine highest bump type
-          if [ -f /tmp/bump_types ]; then
+          if [ -s /tmp/bump_types ]; then
+            echo "Labels found:"
+            cat /tmp/bump_types
             if grep -q "major" /tmp/bump_types; then
               BUMP="major"
             elif grep -q "minor" /tmp/bump_types; then
               BUMP="minor"
-            elif grep -q "patch" /tmp/bump_types; then
-              BUMP="patch"
             else
               BUMP="patch"
             fi
           else
             # Fall back to the current PR's label
+            echo "No labels from commits, using current PR label"
             if ${{ contains(github.event.pull_request.labels.*.name, 'release/major') }}; then
               BUMP="major"
             elif ${{ contains(github.event.pull_request.labels.*.name, 'release/minor') }}; then
@@ -193,6 +176,6 @@ jobs:
         run: |
           echo "Triggering ${{ steps.release-type.outputs.bump }} release..."
           gh workflow run create-release.yml \
-            --field bump=${{ steps.release-type.outputs.bump }}
+            -f bump=${{ steps.release-type.outputs.bump }}
 
           echo "Release workflow triggered!"
