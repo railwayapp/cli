@@ -97,11 +97,6 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
 
-    if variables.is_empty() {
-        eprintln!("No variables found");
-        return Ok(());
-    }
-
     if args.kv {
         for (key, value) in variables {
             println!("{key}={value}");
@@ -111,6 +106,11 @@ pub async fn command(args: Args) -> Result<()> {
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&variables)?);
+        return Ok(());
+    }
+
+    if variables.is_empty() {
+        eprintln!("No variables found");
         return Ok(());
     }
 
