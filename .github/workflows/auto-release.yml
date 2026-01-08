@@ -214,21 +214,5 @@ jobs:
           git push origin master
           git push origin "v${{ steps.bump.outputs.version }}"
 
-      - name: Publish to crates.io
-        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
-
-      - name: Setup Node.js for npm publish
-        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Publish to npm
-        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+      # Publishing (crates.io, npm, binaries) is handled by release.yml
+      # which triggers on the tag push above
