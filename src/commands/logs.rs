@@ -99,8 +99,7 @@ pub async fn command(args: Args) -> Result<()> {
     let has_time_filter = start_date.is_some() || end_date.is_some();
 
     // Stream only if no line limit or time filter is specified and running in a terminal
-    let should_stream =
-        args.lines.is_none() && !has_time_filter && std::io::stdout().is_terminal();
+    let should_stream = args.lines.is_none() && !has_time_filter && std::io::stdout().is_terminal();
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
