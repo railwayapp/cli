@@ -24,6 +24,12 @@ use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
 mod delete;
 mod link;
 mod new;
+/*
+TODO: railway env edit:
+- allow input from STDIN in JSON of environment config (see PR from JR)
+- a --message flag for setting a patch message
+- a --stage option to not commit immediately
+*/
 
 /// Create, delete or link an environment
 #[derive(Parser)]
