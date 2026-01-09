@@ -54,26 +54,6 @@ pub async fn new_environment(args: Args) -> Result<()> {
         "created! 🎉".green()
     ));
 
-    // let (variables, sources) = tokio::join!(
-    //     upsert_variables(
-    //         &configs,
-    //         client.clone(),
-    //         project.clone(),
-    //         service_variables,
-    //         env_id.clone()
-    //     ),
-    //     upsert_sources(
-    //         &configs,
-    //         client,
-    //         project.id.clone(),
-    //         service_sources,
-    //         env_id.clone()
-    //     )
-    // );
-
-    // variables?;
-    // sources?;
-
     configs.link_project(
         project_id,
         linked_project.name.clone(),

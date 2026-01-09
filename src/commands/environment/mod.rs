@@ -7,7 +7,7 @@ use crate::{
     interact_or,
     util::{
         prompt::{
-            PromptServiceInstance, fake_select, prompt_confirm_with_default, prompt_multi_options,
+            PromptServiceInstance, fake_select, prompt_multi_options,
             prompt_multi_options_with_defaults, prompt_options, prompt_options_skippable,
             prompt_text, prompt_variables,
         },
