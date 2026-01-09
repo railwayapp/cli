@@ -96,6 +96,7 @@ tokio-util = "0.7.15"
 similar = "2.7.0"
 pathdiff = "0.2.3"
 pastey = "0.1.1"
+derive_more = { version = "2.1.1", features = ["display"] }
 
 [profile.release]
 lto = "fat"

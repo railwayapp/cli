@@ -131,6 +131,23 @@ pub fn prompt_multi_options<T: Display>(message: &str, options: Vec<T>) -> Resul
         .context("Failed to prompt for multi options")
 }
 
+pub fn prompt_multi_options_with_defaults<T: Display + Clone>(
+    message: &str,
+    options: Vec<(T, bool)>,
+) -> Result<Vec<T>> {
+    let opts = options.iter().map(|(t, _)| t.clone()).collect::<Vec<T>>();
+    let default_indicies = options
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (_, enabled))| if *enabled { Some(idx) } else { None })
+        .collect::<Vec<usize>>();
+    inquire::MultiSelect::new(message, opts)
+        .with_render_config(Configs::get_render_config())
+        .with_default(&default_indicies)
+        .prompt()
+        .context("Failed to prompt for multi options")
+}
+
 pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
     inquire::Select::new(message, options)
         .with_render_config(Configs::get_render_config())
@@ -149,11 +166,16 @@ pub fn fake_select(message: &str, selected: &str) {
     println!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
-pub fn prompt_variables() -> Result<Vec<Variable>> {
+pub fn prompt_variables(service_name: Option<&str>) -> Result<Vec<Variable>> {
     let mut variables: Vec<Variable> = Vec::new();
     loop {
         if let Some(variable) = prompt_text_with_placeholder_disappear_skippable(
-            "Enter a variable",
+            if let Some(ref service_name) = service_name {
+                format!("Enter a variable for {service_name} <esc to skip>")
+            } else {
+                String::from("Enter a variable <esc to skip>")
+            }
+            .as_str(),
             "<KEY=VALUE, press esc to finish>",
         )? {
             if variable.is_empty() {

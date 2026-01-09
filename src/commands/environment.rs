@@ -1,25 +1,28 @@
-use std::{collections::BTreeMap, fmt::Display, str::FromStr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Display,
+    str::FromStr,
+    time::Duration,
+};
 
 use crate::{
     consts::TICK_STRING,
-    controllers::{
-        project::{get_project, get_service_ids_in_env},
-        variables::Variable,
-    },
+    controllers::{project::get_project, variables::Variable},
     errors::RailwayError,
     interact_or,
     util::{
         prompt::{
-            PromptService, PromptServiceInstance, fake_select, prompt_confirm_with_default,
-            prompt_options, prompt_options_skippable, prompt_text,
-            prompt_text_with_placeholder_disappear, prompt_variables,
+            PromptServiceInstance, fake_select, prompt_confirm_with_default, prompt_multi_options,
+            prompt_multi_options_with_defaults, prompt_options, prompt_options_skippable,
+            prompt_text, prompt_variables,
         },
         retry::{RetryConfig, retry_with_backoff},
     },
 };
 use anyhow::bail;
+use derive_more::Display as DeriveDisplay;
 use is_terminal::IsTerminal;
-use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
+use strum::{Display, EnumDiscriminants, EnumIter, EnumString, IntoEnumIterator, VariantNames};
 use tokio::task::JoinHandle;
 
 use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
@@ -97,12 +100,6 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 async fn new_environment(args: NewArgs) -> Result<()> {
-    /*
-     * TODO: introduce a prompt: Do you want to configure a service?
-     * TODO: after, prompt for what you wish to configure (gh pr create style, currently Variables and Sources)
-     * TODO: after multi select, select services to configure in a multi-select
-     * TODO: iterate through all services, prompting for the configurable stuff. enter to skip anything (u wont want to configure everything on every service)
-     */
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -112,18 +109,19 @@ async fn new_environment(args: NewArgs) -> Result<()> {
 
     let name = select_name_new(&args, is_terminal)?;
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
-    let service_variables =
-        select_service_variables_new(&args, &project, is_terminal, &duplicate_id)?;
-    let service_sources = select_service_sources_new(&args, &project, is_terminal, &duplicate_id)?;
 
-    // Use background processing when duplicating to avoid timeouts
-    let apply_changes_in_background = duplicate_id.is_some();
+    let changes = if let Some(ref duplicate_id) = duplicate_id {
+        edit_services_select(&args, &project, duplicate_id.clone())?
+    } else {
+        Vec::new()
+    };
+    let apply_in_background = !changes.is_empty();
 
     let vars = mutations::environment_create::Variables {
         project_id: project.id.clone(),
         name,
         source_id: duplicate_id,
-        apply_changes_in_background: Some(apply_changes_in_background),
+        apply_changes_in_background: Some(apply_in_background),
     };
 
     let spinner = indicatif::ProgressBar::new_spinner()
@@ -142,8 +140,9 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     let env_id = response.environment_create.id.clone();
     let env_name = response.environment_create.name.clone();
 
-    if apply_changes_in_background {
+    if apply_in_background {
         // Wait for background duplication to complete
+        spinner.set_message("Waiting for environment to duplicate...");
         let _ = wait_for_environment_creation(&client, &configs, env_id.clone()).await;
     }
 
@@ -154,25 +153,25 @@ async fn new_environment(args: NewArgs) -> Result<()> {
         "created! 🎉".green()
     ));
 
-    let (variables, sources) = tokio::join!(
-        upsert_variables(
-            &configs,
-            client.clone(),
-            project.clone(),
-            service_variables,
-            env_id.clone()
-        ),
-        upsert_sources(
-            &configs,
-            client,
-            project.id.clone(),
-            service_sources,
-            env_id.clone()
-        )
-    );
+    // let (variables, sources) = tokio::join!(
+    //     upsert_variables(
+    //         &configs,
+    //         client.clone(),
+    //         project.clone(),
+    //         service_variables,
+    //         env_id.clone()
+    //     ),
+    //     upsert_sources(
+    //         &configs,
+    //         client,
+    //         project.id.clone(),
+    //         service_sources,
+    //         env_id.clone()
+    //     )
+    // );
 
-    variables?;
-    sources?;
+    // variables?;
+    // sources?;
 
     configs.link_project(
         project_id,
@@ -182,6 +181,240 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+#[derive(Clone, DeriveDisplay, EnumDiscriminants)]
+#[strum_discriminants(derive(Display, EnumIter, VariantNames), name(ChangeOption))]
+/// In order to add a new Change that can be configured, add a variant to this enum and give it it's own type
+/// Implement the ChangeHandler trait for the type
+/// Add that type to the invocation of the register_handlers! macro
+pub enum Change {
+    #[strum_discriminants(strum(serialize = "Variables"))]
+    Variable(Variable),
+    #[strum_discriminants(strum(serialize = "Sources"))]
+    Source(Source),
+}
+
+impl Change {
+    pub fn variant_name(&self) -> String {
+        ChangeOption::from(self)
+            .to_string()
+            .trim_end_matches('s')
+            .to_lowercase()
+    }
+}
+
+/// Trait for handling the parsing of a change
+trait ChangeHandler: Clone {
+    /// Get the command-line args for this change type
+    fn get_args(args: &NewArgs) -> &Vec<String>;
+
+    /// Parse from non-interactive arguments
+    fn parse_non_interactive(args: Vec<String>) -> Vec<(String, Self)>;
+
+    /// Parse interactively for a specific service
+    fn parse_interactive(service_name: &str) -> Result<Vec<Self>>;
+
+    /// Convert to Change enum
+    fn into_change(self) -> Change;
+}
+
+macro_rules! register_handlers {
+    ($($type:ident),* $(,)?) => {
+        impl ChangeOption {
+            fn get_args<'a>(&self, args: &'a NewArgs) -> &'a Vec<String> {
+                match self {
+                    $(ChangeOption::$type => <$type>::get_args(args),)*
+                }
+            }
+
+            fn parse_non_interactive(&self, args: Vec<String>) -> Vec<(String, Change)> {
+                match self {
+                    $(
+                        ChangeOption::$type => {
+                            <$type>::parse_non_interactive(args)
+                                .into_iter()
+                                .map(|(s, item)| (s, item.into_change()))
+                                .collect()
+                        }
+                    )*
+                }
+            }
+
+            fn parse_interactive(&self, service_name: &str) -> Result<Vec<Change>> {
+                match self {
+                    $(
+                        ChangeOption::$type => {
+                            Ok(<$type>::parse_interactive(service_name)?
+                                .into_iter()
+                                .map(|item| item.into_change())
+                                .collect())
+                        }
+                    )*
+                }
+            }
+        }
+    };
+}
+
+// Register all handlers (generates helper functions)
+register_handlers!(Variable, Source);
+
+/// environment id should be the id of the environment being duplicated if being used in new command
+pub fn edit_services_select(
+    args: &NewArgs,
+    project: &queries::project::ProjectProject,
+    environment_id: String,
+) -> Result<Vec<(String, Change)>> {
+    let is_terminal = std::io::stdout().is_terminal();
+
+    // get all options and their respective non-interactive arguments
+    let configure_options = ChangeOption::iter()
+        .map(|opt| (opt, opt.get_args(args)))
+        .collect::<Vec<(ChangeOption, &Vec<String>)>>();
+    // find which have arguments provided non interactively
+    let non_interactive_provided = configure_options
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect::<Vec<&(ChangeOption, &Vec<String>)>>();
+    let selected = match (
+        is_terminal,
+        non_interactive_provided.is_empty(),
+        non_interactive_provided.len() == configure_options.len(),
+    ) {
+        // not a terminal, options provided non-interactively
+        // or: a terminal, but every option available is provided non-interactively
+        (false, false, _) | (_, _, true) => {
+            fake_select(
+                "What do you want to configure?",
+                &non_interactive_provided
+                    .iter()
+                    .map(|(opt, _)| opt.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", "),
+            );
+            non_interactive_provided
+                .iter()
+                .map(|(c, _)| c.to_owned())
+                .collect::<Vec<ChangeOption>>()
+        }
+        // is a terminal, if options have been provided non-interactively have those selected
+        (true, _, _) => prompt_multi_options_with_defaults(
+            "What do you want to configure? <enter to skip>",
+            configure_options
+                .to_vec()
+                .iter()
+                .cloned()
+                .map(|(c, enabled)| (c, !enabled.is_empty()))
+                .collect::<Vec<_>>(),
+        )?,
+        // not a terminal, nothing provided non-interactively, assume that no changes are wanted (early return)
+        (false, true, _) => return Ok(Vec::new()),
+    };
+    // first, get the services that are in the environment
+    // safe to unwrap (environment id provided is either a duplication id or an existing one)
+    let services = &project
+        .environments
+        .edges
+        .iter()
+        .find(|env| env.node.id == environment_id)
+        .unwrap()
+        .node
+        .service_instances
+        .edges;
+    // we now have the options that are wanted to be configured, go through them one by one and select the services
+    let mut changes_final: Vec<(String, Change)> = Vec::new();
+    for change in selected {
+        // find non_interactive argument:
+        let non_interactive_args = non_interactive_provided
+            .iter()
+            .find(|(option, _)| *option == change)
+            .map(|(_, c)| (**c).clone())
+            .unwrap_or_default();
+        // non interactive isnt empty
+        let changes = if !non_interactive_args.is_empty() {
+            // each function needs to handle non interactive arguments
+            // each function is responsible for checking what is provided is valid (e.g a variable is in the right format)
+            // if it isn't valid, it should simply skip that parse - make sure this is known to the user
+            // (see non_interactive_variables fn for skipping)
+            let mut service_lookup: HashMap<&String, &String> = HashMap::new();
+            let parsed = change
+                .parse_non_interactive(non_interactive_args)
+                .iter()
+                // take all non interactive input where the actual input (not service) is valid
+                .filter_map(|(service_input, change)| {
+                    services
+                        .iter()
+                        .find(|service| {
+                            // attempt to find service based on what is provided
+                            (service.node.service_id.to_lowercase() == service_input.to_lowercase())
+                                || (service.node.service_name.to_lowercase()
+                                    == service_input.to_lowercase())
+                        })
+                        .map(|service| {
+                            service_lookup
+                                .insert(&service.node.service_id, &service.node.service_name);
+                            (service.node.service_id.clone(), change.clone())
+                        })
+                        .or_else(|| {
+                            // if can't be found, error and skip
+                            eprintln!("Service {service_input} is not a valid name/id, skipping");
+                            None
+                        })
+                })
+                .collect::<Vec<(String, Change)>>();
+            fake_select(
+                &format!("What services do you want to configure? ({})", change),
+                &service_lookup
+                    .values()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(", "),
+            );
+            // this is for fake selects - we need to group by the service and then print the changes.
+            parsed.chunk_by(|(a, _), (b, _)| a == b).for_each(|chunk| {
+                chunk.iter().for_each(|(service, change)| {
+                    fake_select(
+                        &format!(
+                            "Enter a {} for {}",
+                            change.variant_name(),
+                            service_lookup.get(service).unwrap()
+                        ),
+                        &change.to_string(),
+                    )
+                })
+            });
+            parsed
+        } else if is_terminal {
+            let prompt_services = services
+                .iter()
+                .map(|f| PromptServiceInstance(&f.node))
+                .collect::<Vec<PromptServiceInstance>>();
+            // find
+            let selected_services = prompt_multi_options(
+                &format!("What services do you want to configure? ({})", change),
+                prompt_services.clone(),
+            )?;
+            let mut changes_interactive: Vec<(String, Change)> = Vec::new();
+
+            for service in selected_services {
+                let service = service.0;
+                let parsed = change
+                    .parse_interactive(&service.service_name)?
+                    .into_iter()
+                    .map(|c| (service.service_id.clone(), c));
+                changes_interactive.extend(parsed);
+            }
+            changes_interactive
+        } else {
+            // not a terminal, somehow provided an option non-interactively without any values (clap ensures this doesn't happen)
+            // but we still need to defualt to an empty Vec
+            Vec::new()
+        };
+        changes_final.extend(changes.into_iter());
+    }
+
+    Ok(changes_final)
 }
 
 async fn delete_environment(args: DeleteArgs) -> Result<()> {
@@ -347,470 +580,220 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
     Ok(())
 }
 
-async fn upsert_variables(
-    configs: &Configs,
-    client: reqwest::Client,
-    project: queries::project::ProjectProject,
-    service_variables: Vec<(String, Variable)>,
-    env_id: String,
-) -> Result<(), anyhow::Error> {
-    if service_variables.is_empty() {
-        return Ok(());
-    }
-    let good_vars: Vec<(String, BTreeMap<String, String>)> = service_variables
-        .chunk_by(|a, b| a.0 == b.0) // group by service id
-        .map(|vars| {
-            let service = vars.first().unwrap().0.clone();
-            let variables = vars
-                .iter()
-                .map(|v| (v.1.key.clone(), v.1.value.clone()))
-                .collect::<BTreeMap<_, _>>();
-            (service, variables)
-        })
-        .collect();
-    let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
-    for (service_id, variables) in good_vars {
-        let client = client.clone();
-        let project = project.id.clone();
-        let env_id = env_id.clone();
-        let backboard = configs.get_backboard();
-        tasks.push(tokio::spawn(async move {
-            let vars = mutations::variable_collection_upsert::Variables {
-                project_id: project,
-                environment_id: env_id,
-                service_id,
-                variables,
-                skip_deploys: None,
-            };
-            let _response =
-                post_graphql::<mutations::VariableCollectionUpsert, _>(&client, backboard, vars)
-                    .await?;
-            Ok(())
-        }));
-    }
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Inserting variables...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
-    let r = futures::future::join_all(tasks).await;
-    for r in r {
-        r??;
-    }
-    spinner.finish_and_clear();
-    Ok(())
-}
+// async fn upsert_variables(
+//     configs: &Configs,
+//     client: reqwest::Client,
+//     project: queries::project::ProjectProject,
+//     service_variables: Vec<(String, Variable)>,
+//     env_id: String,
+// ) -> Result<(), anyhow::Error> {
+//     if service_variables.is_empty() {
+//         return Ok(());
+//     }
+//     let good_vars: Vec<(String, BTreeMap<String, String>)> = service_variables
+//         .chunk_by(|a, b| a.0 == b.0) // group by service id
+//         .map(|vars| {
+//             let service = vars.first().unwrap().0.clone();
+//             let variables = vars
+//                 .iter()
+//                 .map(|v| (v.1.key.clone(), v.1.value.clone()))
+//                 .collect::<BTreeMap<_, _>>();
+//             (service, variables)
+//         })
+//         .collect();
+//     let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
+//     for (service_id, variables) in good_vars {
+//         let client = client.clone();
+//         let project = project.id.clone();
+//         let env_id = env_id.clone();
+//         let backboard = configs.get_backboard();
+//         tasks.push(tokio::spawn(async move {
+//             let vars = mutations::variable_collection_upsert::Variables {
+//                 project_id: project,
+//                 environment_id: env_id,
+//                 service_id,
+//                 variables,
+//                 skip_deploys: None,
+//             };
+//             let _response =
+//                 post_graphql::<mutations::VariableCollectionUpsert, _>(&client, backboard, vars)
+//                     .await?;
+//             Ok(())
+//         }));
+//     }
+//     let spinner = indicatif::ProgressBar::new_spinner()
+//         .with_style(
+//             indicatif::ProgressStyle::default_spinner()
+//                 .tick_chars(TICK_STRING)
+//                 .template("{spinner:.green} {msg}")?,
+//         )
+//         .with_message("Inserting variables...");
+//     spinner.enable_steady_tick(Duration::from_millis(100));
+//     let r = futures::future::join_all(tasks).await;
+//     for r in r {
+//         r??;
+//     }
+//     spinner.finish_and_clear();
+//     Ok(())
+// }
 
-async fn upsert_sources(
-    configs: &Configs,
-    client: reqwest::Client,
-    project: String,
-    service_sources: Vec<(String, Source)>,
-    env_id: String,
-) -> Result<(), anyhow::Error> {
-    if service_sources.is_empty() {
-        return Ok(());
-    }
-    let project = get_project(&client, configs, project).await?;
-    let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
-    for (service_id, source) in service_sources {
-        let client = client.clone();
-        let project = project.clone();
-        let env_id = env_id.clone();
-        let backboard = configs.get_backboard();
-        tasks.push(tokio::spawn(async move {
-            /*
-            first check if there is a deployment trigger for the service in the environment
-            if there is, and the change is a github repository (match by enum type), then update the deployment trigger along with the
-            source (via service source and serviceinstanceupdate)
-            if the change is docker and the trigger, delete it
-             */
-            let Some(environment) = project
-                .environments
-                .edges
-                .iter()
-                .find(|a| a.node.id == env_id)
-            else {
-                bail!("Environment couldn't be found, matched {env_id}");
-            };
-            let trigger = environment
-                .node
-                .deployment_triggers
-                .edges
-                .iter()
-                .find(|t| t.node.service_id == Some(service_id.clone()))
-                .map(|t| t.node.id.clone());
+// async fn upsert_sources(
+//     configs: &Configs,
+//     client: reqwest::Client,
+//     project: String,
+//     service_sources: Vec<(String, Source)>,
+//     env_id: String,
+// ) -> Result<(), anyhow::Error> {
+//     if service_sources.is_empty() {
+//         return Ok(());
+//     }
+//     let project = get_project(&client, configs, project).await?;
+//     let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
+//     for (service_id, source) in service_sources {
+//         let client = client.clone();
+//         let project = project.clone();
+//         let env_id = env_id.clone();
+//         let backboard = configs.get_backboard();
+//         tasks.push(tokio::spawn(async move {
+//             /*
+//             first check if there is a deployment trigger for the service in the environment
+//             if there is, and the change is a github repository (match by enum type), then update the deployment trigger along with the
+//             source (via service source and serviceinstanceupdate)
+//             if the change is docker and the trigger, delete it
+//              */
+//             let Some(environment) = project
+//                 .environments
+//                 .edges
+//                 .iter()
+//                 .find(|a| a.node.id == env_id)
+//             else {
+//                 bail!("Environment couldn't be found, matched {env_id}");
+//             };
+//             let trigger = environment
+//                 .node
+//                 .deployment_triggers
+//                 .edges
+//                 .iter()
+//                 .find(|t| t.node.service_id == Some(service_id.clone()))
+//                 .map(|t| t.node.id.clone());
 
-            match source {
-                Source::GitHub {
-                    owner,
-                    repo,
-                    branch,
-                } => {
-                    let repository = format!("{owner}/{repo}");
-                    if let Some(id) = trigger {
-                        // trigger already exists, update
-                        post_graphql::<mutations::DeploymentTriggerUpdate, _>(
-                            &client,
-                            backboard.clone(),
-                            mutations::deployment_trigger_update::Variables {
-                                id,
-                                repository: repository.clone(),
-                                branch,
-                            },
-                        )
-                        .await?;
-                    } else {
-                        // trigger does not exist, so we need to make one
-                        post_graphql::<mutations::DeploymentTriggerCreate, _>(
-                            &client,
-                            backboard.clone(),
-                            mutations::deployment_trigger_create::Variables {
-                                service_id: service_id.clone(),
-                                environment_id: env_id.clone(),
-                                project_id: project.id.clone(),
-                                repository: repository.clone(),
-                                branch,
-                                provider: String::from("github"),
-                            },
-                        )
-                        .await?;
-                    }
-                    post_graphql::<mutations::ServiceInstanceUpdate, _>(
-                        &client,
-                        backboard.clone(),
-                        mutations::service_instance_update::Variables {
-                            service_id,
-                            environment_id: env_id,
-                            source: mutations::service_instance_update::ServiceSourceInput {
-                                image: None,
-                                repo: Some(repository),
-                            },
-                        },
-                    )
-                    .await?;
-                }
-                Source::Docker(image) => {
-                    if let Some(id) = trigger {
-                        // delete old trigger
-                        post_graphql::<mutations::DeploymentTriggerDelete, _>(
-                            &client,
-                            backboard.clone(),
-                            mutations::deployment_trigger_delete::Variables { id },
-                        )
-                        .await?;
-                    }
-                    // update service information to use new source
-                    post_graphql::<mutations::ServiceInstanceUpdate, _>(
-                        &client,
-                        backboard.clone(),
-                        mutations::service_instance_update::Variables {
-                            service_id,
-                            environment_id: env_id,
-                            source: mutations::service_instance_update::ServiceSourceInput {
-                                image: Some(image),
-                                repo: None,
-                            },
-                        },
-                    )
-                    .await?;
-                }
-            }
-            Ok(())
-        }));
-    }
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Updating sources...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
-    let r = futures::future::join_all(tasks).await;
-    for r in r {
-        r??;
-    }
-    spinner.finish_and_clear();
-    Ok(())
-}
+//             match source {
+//                 Source::GitHub {
+//                     owner,
+//                     repo,
+//                     branch,
+//                 } => {
+//                     let repository = format!("{owner}/{repo}");
+//                     if let Some(id) = trigger {
+//                         // trigger already exists, update
+//                         post_graphql::<mutations::DeploymentTriggerUpdate, _>(
+//                             &client,
+//                             backboard.clone(),
+//                             mutations::deployment_trigger_update::Variables {
+//                                 id,
+//                                 repository: repository.clone(),
+//                                 branch,
+//                             },
+//                         )
+//                         .await?;
+//                     } else {
+//                         // trigger does not exist, so we need to make one
+//                         post_graphql::<mutations::DeploymentTriggerCreate, _>(
+//                             &client,
+//                             backboard.clone(),
+//                             mutations::deployment_trigger_create::Variables {
+//                                 service_id: service_id.clone(),
+//                                 environment_id: env_id.clone(),
+//                                 project_id: project.id.clone(),
+//                                 repository: repository.clone(),
+//                                 branch,
+//                                 provider: String::from("github"),
+//                             },
+//                         )
+//                         .await?;
+//                     }
+//                     post_graphql::<mutations::ServiceInstanceUpdate, _>(
+//                         &client,
+//                         backboard.clone(),
+//                         mutations::service_instance_update::Variables {
+//                             service_id,
+//                             environment_id: env_id,
+//                             source: mutations::service_instance_update::ServiceSourceInput {
+//                                 image: None,
+//                                 repo: Some(repository),
+//                             },
+//                         },
+//                     )
+//                     .await?;
+//                 }
+//                 Source::Docker(image) => {
+//                     if let Some(id) = trigger {
+//                         // delete old trigger
+//                         post_graphql::<mutations::DeploymentTriggerDelete, _>(
+//                             &client,
+//                             backboard.clone(),
+//                             mutations::deployment_trigger_delete::Variables { id },
+//                         )
+//                         .await?;
+//                     }
+//                     // update service information to use new source
+//                     post_graphql::<mutations::ServiceInstanceUpdate, _>(
+//                         &client,
+//                         backboard.clone(),
+//                         mutations::service_instance_update::Variables {
+//                             service_id,
+//                             environment_id: env_id,
+//                             source: mutations::service_instance_update::ServiceSourceInput {
+//                                 image: Some(image),
+//                                 repo: None,
+//                             },
+//                         },
+//                     )
+//                     .await?;
+//                 }
+//             }
+//             Ok(())
+//         }));
+//     }
+//     let spinner = indicatif::ProgressBar::new_spinner()
+//         .with_style(
+//             indicatif::ProgressStyle::default_spinner()
+//                 .tick_chars(TICK_STRING)
+//                 .template("{spinner:.green} {msg}")?,
+//         )
+//         .with_message("Updating sources...");
+//     spinner.enable_steady_tick(Duration::from_millis(100));
+//     let r = futures::future::join_all(tasks).await;
+//     for r in r {
+//         r??;
+//     }
+//     spinner.finish_and_clear();
+//     Ok(())
+// }
 
-fn select_service_variables_new(
-    args: &NewArgs,
-    project: &queries::project::ProjectProject,
-    is_terminal: bool,
-    duplicate_id: &Option<String>,
-) -> Result<Vec<(String, Variable)>> {
-    let service_variables = if let Some(ref duplicate_id) = *duplicate_id {
-        let service_ids_in_env = get_service_ids_in_env(project, duplicate_id);
-        let services = project
-            .services
-            .edges
-            .iter()
-            .filter(|s| service_ids_in_env.contains(&s.node.id))
-            .collect::<Vec<_>>();
-        if !args.service_variables.is_empty() {
-            args.service_variables
-                .chunks(2)
-                .filter_map(|chunk| {
-                    // clap ensures that there will always be 2 values whenever the flag is provided
-                    let service = chunk.first().unwrap();
-                    let service_meta = services
-                        .iter()
-                        .find(|s| {
-                            (s.node.id.to_lowercase() == service.to_lowercase())
-                                || (s.node.name.to_lowercase() == service.to_lowercase())
-                        })
-                        .map(|s| (s.node.id.clone(), s.node.name.clone()));
+#[derive(Clone, Debug, EnumDiscriminants, DeriveDisplay)]
+#[strum_discriminants(derive(Display, EnumIter, EnumString), name(SourceTypes))]
+pub enum Source {
+    #[strum_discriminants(strum(
+        to_string = "Docker image",
+        serialize = "docker",
+        serialize = "image"
+    ))]
+    #[display("Docker: {}", _0)]
+    Docker(String),
 
-                    let variable = match chunk.last().unwrap().parse::<Variable>() {
-                        Ok(v) => v,
-                        Err(e) => {
-                            println!("{e:?}");
-                            return None;
-                        }
-                    };
-                    if service_meta.is_none() {
-                        println!(
-                            "{}: Service {} not found (skipping setting variables)",
-                            "Error".red().bold(),
-                            service.blue()
-                        );
-                        return None;
-                    }
-                    service_meta.map(|service_meta| {
-                        fake_select(
-                            "Select a service to set variables for",
-                            service_meta.1.as_str(),
-                        );
-                        fake_select(
-                            "Enter a variable",
-                            format!("{}={}", variable.key, variable.value).as_str(),
-                        );
-                        (
-                            service_meta.0, // id
-                            variable,
-                        )
-                    })
-                })
-                .collect::<Vec<(String, Variable)>>()
-        } else if is_terminal {
-            let mut variables: Vec<(String, Variable)> = Vec::new();
-            let p_services = services
-                .iter()
-                .map(|s| PromptService(&s.node))
-                .collect::<Vec<_>>();
-            let mut used_services: Vec<&PromptService> = Vec::new();
-            loop {
-                let prompt_services: Vec<&PromptService<'_>> = p_services
-                    .iter()
-                    .filter(|p| !used_services.contains(p))
-                    .clone()
-                    .collect();
-                if prompt_services.is_empty() {
-                    break;
-                }
-                let service = prompt_options_skippable(
-                    "Select a service to set variables for <esc to skip>",
-                    prompt_services,
-                )?;
-                if let Some(service) = service {
-                    variables.extend(
-                        prompt_variables()?
-                            .into_iter()
-                            .map(|f| (service.0.id.to_owned(), f))
-                            .collect::<Vec<(String, Variable)>>(),
-                    );
-                    used_services.push(service)
-                } else {
-                    break;
-                }
-            }
-            variables
-        } else {
-            vec![]
-        }
-    } else if !args.service_variables.is_empty() {
-        // if duplicate id is None and service_variables are provided, error
-        bail!("Service variables can only be set when duplicating an environment")
-    } else {
-        vec![]
-    };
-    Ok(service_variables)
-}
-
-#[derive(Clone, EnumIter, Display, EnumString)]
-pub enum SourceTypes {
-    #[strum(to_string = "Docker image", serialize = "docker", serialize = "image")]
-    Docker,
-    #[strum(
+    #[strum_discriminants(strum(
         to_string = "GitHub repo",
         serialize = "github",
         serialize = "git",
         serialize = "gh"
-    )]
-    GitHub,
-}
-
-#[derive(Clone, Debug)]
-enum Source {
-    Docker(String),
+    ))]
+    #[display("GitHub: {}/{}/{}", owner, repo, branch)]
     GitHub {
         owner: String,
         repo: String,
         branch: String,
     },
-}
-
-fn select_service_sources_new(
-    args: &NewArgs,
-    project: &queries::project::ProjectProject,
-    is_terminal: bool,
-    duplicate_id: &Option<String>,
-) -> Result<Vec<(String, Source)>> {
-    let Some(duplicate_id) = duplicate_id else {
-        // no duplicate id, nothing to change
-        return Ok(vec![]);
-    };
-
-    let services = project
-        .environments
-        .edges
-        .iter()
-        .find(|f| f.node.id == *duplicate_id)
-        .map(|f| f.node.service_instances.edges.clone())
-        .unwrap_or_default();
-    if !args.service_sources.is_empty() {
-        Ok(args
-            .service_sources
-            .chunks(3)
-            .filter_map(|chunk| {
-                // clap ensures that there will always be 3 values whenever the flag is provided
-                let service = chunk.first().unwrap();
-                let service_meta = services
-                    .iter()
-                    .find(|s| {
-                        (s.node.id.to_lowercase() == service.to_lowercase())
-                            || (s.node.service_name.to_lowercase() == service.to_lowercase())
-                    })
-                    .map(|s| (s.node.id.clone(), s.node.service_name.clone()));
-                if service_meta.is_none() {
-                    println!(
-                        "{}: Service {} not found (skipping updating source)",
-                        "Error".red().bold(),
-                        service.blue()
-                    );
-                    return None;
-                }
-                let source_type =
-                    match SourceTypes::from_str(chunk.get(1).unwrap().to_lowercase().as_str()) {
-                        Ok(f) => {
-                            fake_select(
-                                "What do you want to change the source to?",
-                                &f.to_string(),
-                            );
-                            f
-                        }
-                        Err(_) => {
-                            eprintln!(
-                                "Invalid platform. Valid platforms are: {}",
-                                SourceTypes::iter()
-                                    .map(|f| f.to_string())
-                                    .collect::<Vec<String>>()
-                                    .join(", ")
-                            );
-                            return None;
-                        }
-                    };
-                let source = match source_type {
-                    SourceTypes::Docker => {
-                        fake_select("Enter a docker image", chunk.last().unwrap());
-                        Some(Source::Docker(chunk.last().unwrap().to_string()))
-                    }
-                    SourceTypes::GitHub => match parse_repo(chunk.last().unwrap().to_string()) {
-                        Ok(source) => Some(source),
-                        Err(e) => {
-                            eprintln!("{:?}", e);
-                            return None;
-                        }
-                    },
-                };
-                source.as_ref()?;
-                service_meta.map(|service_meta| {
-                    fake_select(
-                        "Select a service to change the source for",
-                        service_meta.1.as_str(),
-                    );
-                    (
-                        service_meta.0, // id
-                        source.unwrap(),
-                    )
-                })
-            })
-            .collect::<Vec<(String, Source)>>())
-    } else if is_terminal {
-        let mut sources: Vec<(String, Source)> = Vec::new();
-        let p_services = services
-            .iter()
-            .map(|s| PromptServiceInstance(&s.node))
-            .collect::<Vec<_>>();
-        let mut used_services: Vec<&PromptServiceInstance> = Vec::new();
-        loop {
-            let prompt_services: Vec<&PromptServiceInstance<'_>> = p_services
-                .iter()
-                .filter(|p| !used_services.contains(p))
-                .clone()
-                .collect();
-            if prompt_services.is_empty() {
-                break;
-            }
-            let service = prompt_options_skippable(
-                "Select a service to change the source for <esc to skip>",
-                prompt_services,
-            )?;
-            if let Some(service) = service {
-                let Some(kind) = prompt_options_skippable(
-                    "What do you want to change the source to?",
-                    SourceTypes::iter().collect(),
-                )?
-                else {
-                    continue;
-                };
-                sources.push((
-                    service.0.id.clone(),
-                    match kind {
-                        SourceTypes::GitHub => {
-                            match parse_repo(prompt_text_with_placeholder_disappear(
-                                "Enter a repo",
-                                "<owner>/<repo>/<branch>",
-                            )?) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    eprintln!("{:?}", e);
-                                    continue;
-                                }
-                            }
-                        }
-                        SourceTypes::Docker => {
-                            Source::Docker(prompt_text_with_placeholder_disappear(
-                                "Enter a docker image",
-                                "[optional registry]/<owner>/[repo][:tag]",
-                            )?)
-                        }
-                    },
-                ));
-                used_services.push(service)
-            } else {
-                break;
-            }
-        }
-        Ok(sources)
-    } else {
-        Ok(Vec::new())
-    }
 }
 
 fn parse_repo(repo: String) -> Result<Source> {
@@ -935,5 +918,111 @@ struct Environment<'a>(&'a ProjectProjectEnvironmentsEdgesNode);
 impl Display for Environment<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.name)
+    }
+}
+
+impl ChangeHandler for Variable {
+    fn get_args(args: &NewArgs) -> &Vec<String> {
+        &args.service_variables
+    }
+
+    fn parse_non_interactive(args: Vec<String>) -> Vec<(String, Variable)> {
+        args.chunks(2)
+            .filter_map(|chunk| {
+                // clap ensures that there will always be 2 values whenever the flag is provided
+                // this is unfiltered user input. validation of the service happens in the edit_services_select function
+                let service = chunk.first()?.to_owned();
+
+                let variable = match chunk.last()?.parse::<Variable>() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("{e:?} (skipping)");
+                        return None;
+                    }
+                };
+
+                Some((service, variable))
+            })
+            .collect()
+    }
+
+    fn parse_interactive(service_name: &str) -> Result<Vec<Variable>> {
+        prompt_variables(Some(service_name))
+    }
+
+    fn into_change(self) -> Change {
+        Change::Variable(self)
+    }
+}
+
+impl ChangeHandler for Source {
+    fn get_args(args: &NewArgs) -> &Vec<String> {
+        &args.service_sources
+    }
+
+    fn parse_non_interactive(args: Vec<String>) -> Vec<(String, Source)> {
+        args.chunks(3)
+            .filter_map(|chunk| {
+                // clap ensures that there will always be 3 values whenever the flag is provided
+                let service = chunk.first()?.to_owned();
+
+                let source_type = match SourceTypes::from_str(&chunk.get(1)?.to_lowercase()) {
+                    Ok(f) => {
+                        fake_select("What do you want to change the source to?", &f.to_string());
+                        f
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "Invalid platform. Valid platforms are: {} (skipping)",
+                            SourceTypes::iter()
+                                .map(|f| f.to_string())
+                                .collect::<Vec<String>>()
+                                .join(", ")
+                        );
+                        return None;
+                    }
+                };
+
+                let source = match source_type {
+                    SourceTypes::Docker => {
+                        fake_select("Enter a docker image", chunk.last()?);
+                        Some(Source::Docker(chunk.last()?.to_string()))
+                    }
+                    SourceTypes::GitHub => match parse_repo(chunk.last()?.to_string()) {
+                        Ok(source) => Some(source),
+                        Err(e) => {
+                            eprintln!("{:?} (skipping)", e);
+                            return None;
+                        }
+                    },
+                }?;
+
+                Some((service, source))
+            })
+            .collect()
+    }
+
+    fn parse_interactive(service_name: &str) -> Result<Vec<Source>> {
+        let source_type = prompt_options(
+            &format!("What type of source for {}?", service_name),
+            SourceTypes::iter().collect(),
+        )?;
+
+        let source = match source_type {
+            SourceTypes::Docker => {
+                let image = prompt_text("Enter docker image")?;
+                Source::Docker(image)
+            }
+            SourceTypes::GitHub => {
+                let repo = prompt_text("Enter repo (owner/repo/branch)")?;
+                parse_repo(repo)?
+            }
+        };
+
+        Ok(vec![source])
+    }
+
+    fn into_change(self) -> Change {
+        Change::Source(self)
     }
 }

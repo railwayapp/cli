@@ -1,4 +1,4 @@
-use crate::{commands::queries::RailwayUser, controllers::user::get_user};
+use crate::{commands::queries::RailwayUser, controllers::user::get_user, util::prompt};
 use colored::*;
 
 use super::*;
