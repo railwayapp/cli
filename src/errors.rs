@@ -6,7 +6,7 @@ pub enum RailwayError {
     #[error("Unauthorized. Please login with `railway login`")]
     Unauthorized,
 
-    #[error("Unauthorized")]
+    #[error("Invalid RAILWAY_TOKEN. Please check that your token is valid and has not expired")]
     InvalidRailwayToken,
 
     #[error("Login state is corrupt. Please logout and login back in.")]

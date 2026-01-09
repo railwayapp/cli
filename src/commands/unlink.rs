@@ -10,6 +10,10 @@ pub struct Args {
     /// Unlink a service
     #[clap(short, long)]
     service: bool,
+
+    /// Skip confirmation prompt
+    #[clap(short = 'y', long = "yes")]
+    yes: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -34,8 +38,9 @@ pub async fn command(args: Args) -> Result<()> {
             service.node.name.bold(),
             project.name.bold()
         );
-        let is_interactive_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-        let confirmed = if is_interactive_tty {
+        let confirmed = if args.yes {
+            true
+        } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             prompt_confirm_with_default("Are you sure you want to unlink this service?", true)?
         } else {
             true
@@ -60,7 +65,9 @@ pub async fn command(args: Args) -> Result<()> {
         println!("Linked to {}", project.name.bold());
     }
 
-    let confirmed = if std::io::stdout().is_terminal() {
+    let confirmed = if args.yes {
+        true
+    } else if std::io::stdout().is_terminal() {
         prompt_confirm_with_default("Are you sure you want to unlink this project?", true)?
     } else {
         true

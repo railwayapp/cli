@@ -1,10 +1,12 @@
+use is_terminal::IsTerminal;
+
 use crate::{
     controllers::{
         deployment::{fetch_build_logs, fetch_deploy_logs, stream_build_logs, stream_deploy_logs},
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::logs::print_log,
+    util::{logs::print_log, time::parse_time},
 };
 use anyhow::bail;
 
@@ -16,16 +18,20 @@ use super::{
 #[derive(Parser)]
 #[clap(
     about = "View build or deploy logs from a Railway deployment",
-    long_about = "View build or deploy logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines flag is provided.",
+    long_about = "View build or deploy logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines, --since, or --until flags are provided.",
     after_help = "Examples:
 
   railway logs                                                       # Stream live logs from latest deployment
   railway logs --build 7422c95b-c604-46bc-9de4-b7a43e1fd53d          # Stream build logs from a specific deployment
   railway logs --lines 100                                           # Pull last 100 logs without streaming
+  railway logs --since 1h                                            # View logs from the last hour
+  railway logs --since 30m --until 10m                               # View logs from 30 minutes ago until 10 minutes ago
+  railway logs --since 2024-01-15T10:00:00Z                          # View logs since a specific timestamp
   railway logs --service backend --environment production            # Stream latest deployment logs from a specific service in a specific environment
   railway logs --lines 10 --filter \"@level:error\"                    # View 10 latest error logs
   railway logs --lines 10 --filter \"@level:warn AND rate limit\"      # View 10 latest warning logs related to rate limiting
-  railway logs --json                                                # Get logs in JSON format"
+  railway logs --json                                                # Get logs in JSON format
+  railway logs --latest                                              # Stream logs from the latest deployment (even if failed/building)"
 )]
 pub struct Args {
     /// Service to view logs from (defaults to linked service). Can be service name or service ID
@@ -60,6 +66,18 @@ pub struct Args {
     /// Can be a text search ("error message" or "user signup"), attribute filters (@level:error, @level:warn), or a combination with the operators AND, OR, - (not). See https://docs.railway.com/guides/logs for full syntax.
     #[clap(long, short = 'f')]
     filter: Option<String>,
+
+    /// Always show logs from the latest deployment, even if it failed or is still building
+    #[clap(long)]
+    latest: bool,
+
+    /// Show logs since a specific time (disables streaming). Accepts relative times (e.g., 30s, 5m, 2h, 1d, 1w) or ISO 8601 timestamps (e.g., 2024-01-15T10:30:00Z)
+    #[clap(long, short = 'S', value_name = "TIME")]
+    since: Option<String>,
+
+    /// Show logs until a specific time (disables streaming). Same formats as --since
+    #[clap(long, short = 'U', value_name = "TIME")]
+    until: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -69,8 +87,19 @@ pub async fn command(args: Args) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    // Stream only if no line limit is specified
-    let should_stream = args.lines.is_none();
+    let start_date = args.since.as_ref().map(|s| parse_time(s)).transpose()?;
+    let end_date = args.until.as_ref().map(|s| parse_time(s)).transpose()?;
+
+    if let (Some(s), Some(e)) = (&start_date, &end_date) {
+        if s >= e {
+            bail!("--since time must be before --until time");
+        }
+    }
+
+    let has_time_filter = start_date.is_some() || end_date.is_some();
+
+    // Stream only if no line limit or time filter is specified and running in a terminal
+    let should_stream = args.lines.is_none() && !has_time_filter && std::io::stdout().is_terminal();
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
@@ -121,11 +150,15 @@ pub async fn command(args: Args) -> Result<()> {
         .map(|deployment| deployment.node)
         .collect();
     all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let default_deployment = all_deployments
-        .iter()
-        .find(|d| d.status == DeploymentStatus::SUCCESS)
-        .or_else(|| all_deployments.first())
-        .context("No deployments found")?;
+    let default_deployment = if args.latest {
+        all_deployments.first()
+    } else {
+        all_deployments
+            .iter()
+            .find(|d| d.status == DeploymentStatus::SUCCESS)
+            .or_else(|| all_deployments.first())
+    }
+    .context("No deployments found")?;
 
     let deployment_id = if let Some(deployment_id) = args.deployment_id {
         // Use the provided deployment ID directly
@@ -151,6 +184,8 @@ pub async fn command(args: Args) -> Result<()> {
                 deployment_id.clone(),
                 args.lines.or(Some(500)),
                 args.filter.clone(),
+                start_date,
+                end_date,
                 |log| print_log(log, args.json, false), // Build logs use simple output
             )
             .await?;
@@ -167,6 +202,8 @@ pub async fn command(args: Args) -> Result<()> {
             deployment_id.clone(),
             args.lines.or(Some(500)),
             args.filter.clone(),
+            start_date,
+            end_date,
             |log| print_log(log, args.json, true), // Deploy logs use formatted output
         )
         .await?;

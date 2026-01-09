@@ -8,6 +8,7 @@ use crate::{
     util::retry::RetryConfig,
 };
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use reqwest::Client;
 use std::time::Duration;
@@ -39,12 +40,15 @@ pub async fn fetch_build_logs(
     deployment_id: String,
     limit: Option<i64>,
     filter: Option<String>,
+    start_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
     on_log: impl Fn(queries::build_logs::BuildLogsBuildLogs),
 ) -> Result<()> {
     let vars = queries::build_logs::Variables {
         deployment_id,
         limit,
-        start_date: None,
+        start_date,
+        end_date,
         filter,
     };
 
@@ -67,12 +71,16 @@ pub async fn fetch_deploy_logs(
     deployment_id: String,
     limit: Option<i64>,
     filter: Option<String>,
+    start_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
     on_log: impl Fn(queries::deployment_logs::LogFields),
 ) -> Result<()> {
     let vars = queries::deployment_logs::Variables {
         deployment_id,
         limit,
         filter,
+        start_date,
+        end_date,
     };
 
     let response = post_graphql::<queries::DeploymentLogs, _>(client, backboard, vars).await?;
@@ -96,6 +104,7 @@ pub async fn stream_build_logs(
     let mut last_timestamp: Option<String> = None;
     let mut attempt = 0;
     let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+    let mut received_any_logs = false;
 
     loop {
         attempt += 1;
@@ -122,6 +131,7 @@ pub async fn stream_build_logs(
                         }
                     }
                     last_timestamp = Some(line.timestamp.clone());
+                    received_any_logs = true;
                     on_log(line);
                 }
             }
@@ -131,8 +141,20 @@ pub async fn stream_build_logs(
 
         match result {
             Ok(()) => return Ok(()),
-            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => return Err(e),
+            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => {
+                // If we received some logs before the error, treat as success
+                // (the build likely finished and the stream closed)
+                if received_any_logs {
+                    return Ok(());
+                }
+                return Err(e);
+            }
             Err(_) => {
+                // If we've received logs and then get an error, the build likely completed
+                // and the stream was closed by the server. Treat this as success.
+                if received_any_logs {
+                    return Ok(());
+                }
                 sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
                     .min(LOGS_RETRY_CONFIG.max_delay_ms);
@@ -149,6 +171,7 @@ pub async fn stream_deploy_logs(
     let mut last_timestamp: Option<String> = None;
     let mut attempt = 0;
     let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+    let mut received_any_logs = false;
 
     loop {
         attempt += 1;
@@ -175,6 +198,7 @@ pub async fn stream_deploy_logs(
                         }
                     }
                     last_timestamp = Some(line.timestamp.clone());
+                    received_any_logs = true;
                     on_log(line);
                 }
             }
@@ -184,8 +208,20 @@ pub async fn stream_deploy_logs(
 
         match result {
             Ok(()) => return Ok(()),
-            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => return Err(e),
+            Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => {
+                // If we received some logs before the error, treat as success
+                // (the deployment likely finished and the stream closed)
+                if received_any_logs {
+                    return Ok(());
+                }
+                return Err(e);
+            }
             Err(_) => {
+                // If we've received logs and then get an error, the deployment likely completed
+                // and the stream was closed by the server. Treat this as success.
+                if received_any_logs {
+                    return Ok(());
+                }
                 sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
                     .min(LOGS_RETRY_CONFIG.max_delay_ms);

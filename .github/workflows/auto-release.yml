@@ -1,0 +1,218 @@
+name: Auto Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+# Queue releases - don't cancel, let them aggregate
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  auto-release:
+    name: Auto Release
+    # Only run if PR was merged (not just closed) and has a release label
+    if: |
+      github.event.pull_request.merged == true &&
+      (contains(github.event.pull_request.labels.*.name, 'release/patch') ||
+       contains(github.event.pull_request.labels.*.name, 'release/minor') ||
+       contains(github.event.pull_request.labels.*.name, 'release/major'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      # Debounce - wait for more PRs to potentially merge
+      - name: Wait for batch window
+        run: |
+          echo "Waiting 2 minutes for more PRs to merge..."
+          sleep 120
+
+      # Wait for CI to pass on master
+      - name: Wait for CI on master
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Waiting for CI checks on master..."
+          git fetch origin master
+          MASTER_SHA=$(git rev-parse origin/master)
+          echo "Master SHA: $MASTER_SHA"
+
+          # Wait up to 10 minutes for CI to complete
+          for i in {1..20}; do
+            # Use check-runs API (what GitHub Actions CI uses) instead of status API
+            CHECKS=$(gh api repos/${{ github.repository }}/commits/$MASTER_SHA/check-runs --jq '{
+              total: .total_count,
+              completed: [.check_runs[] | select(.status == "completed")] | length,
+              success: [.check_runs[] | select(.conclusion == "success")] | length,
+              failure: [.check_runs[] | select(.conclusion == "failure")] | length
+            }')
+
+            TOTAL=$(echo "$CHECKS" | jq -r '.total')
+            COMPLETED=$(echo "$CHECKS" | jq -r '.completed')
+            SUCCESS=$(echo "$CHECKS" | jq -r '.success')
+            FAILURE=$(echo "$CHECKS" | jq -r '.failure')
+
+            echo "CI checks: $COMPLETED/$TOTAL completed, $SUCCESS success, $FAILURE failure"
+
+            if [ "$FAILURE" -gt "0" ]; then
+              echo "CI failed, aborting release"
+              exit 1
+            fi
+
+            if [ "$TOTAL" -gt "0" ] && [ "$COMPLETED" -eq "$TOTAL" ]; then
+              echo "All CI checks passed!"
+              break
+            fi
+
+            echo "Waiting for CI... (attempt $i/20)"
+            sleep 30
+          done
+
+      # Check if another release is in progress
+      - name: Check for running releases
+        id: check-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if auto-release or create-release workflow is currently running (excluding this run)
+          AUTO_RUNNING=$(gh api repos/${{ github.repository }}/actions/workflows/auto-release.yml/runs \
+            --jq "[.workflow_runs[] | select(.status == \"in_progress\" and .id != ${{ github.run_id }})] | length")
+
+          CREATE_RUNNING=$(gh api repos/${{ github.repository }}/actions/workflows/create-release.yml/runs \
+            --jq '[.workflow_runs[] | select(.status == "in_progress" or .status == "queued")] | length' 2>/dev/null || echo "0")
+
+          if [ "$AUTO_RUNNING" -gt "0" ] || [ "$CREATE_RUNNING" -gt "0" ]; then
+            echo "Another release is in progress, skipping to avoid conflicts"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Determine bump type from PRs merged since last release
+      - name: Determine release type
+        if: steps.check-release.outputs.skip != 'true'
+        id: release-type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the last release tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          # Clean slate
+          rm -f /tmp/bump_types
+          touch /tmp/bump_types
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous release found, using current PR label only"
+          else
+            echo "Finding PRs merged since $LAST_TAG..."
+            COMMITS_SINCE=$(git log $LAST_TAG..HEAD --oneline | wc -l)
+            echo "Found $COMMITS_SINCE commits since $LAST_TAG"
+
+            # Get PR numbers from merge commits since last tag
+            for pr_num in $(git log $LAST_TAG..HEAD --oneline | grep -oE '#[0-9]+' | tr -d '#' | sort -u); do
+              echo "Checking PR #$pr_num..."
+              LABELS=$(gh pr view $pr_num --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+              for label in $LABELS; do
+                case "$label" in
+                  release/major) echo "Found major label on PR #$pr_num"; echo "major" >> /tmp/bump_types ;;
+                  release/minor) echo "Found minor label on PR #$pr_num"; echo "minor" >> /tmp/bump_types ;;
+                  release/patch) echo "Found patch label on PR #$pr_num"; echo "patch" >> /tmp/bump_types ;;
+                esac
+              done
+            done
+          fi
+
+          # Determine highest bump type
+          if [ -s /tmp/bump_types ]; then
+            echo "Labels found:"
+            cat /tmp/bump_types
+            if grep -q "major" /tmp/bump_types; then
+              BUMP="major"
+            elif grep -q "minor" /tmp/bump_types; then
+              BUMP="minor"
+            else
+              BUMP="patch"
+            fi
+          else
+            # Fall back to the current PR's label
+            echo "No labels from commits, using current PR label"
+            if ${{ contains(github.event.pull_request.labels.*.name, 'release/major') }}; then
+              BUMP="major"
+            elif ${{ contains(github.event.pull_request.labels.*.name, 'release/minor') }}; then
+              BUMP="minor"
+            else
+              BUMP="patch"
+            fi
+          fi
+
+          echo "Determined bump type: $BUMP"
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+
+      # Check if there are actually changes to release
+      - name: Check for unreleased changes
+        if: steps.check-release.outputs.skip != 'true'
+        id: check-changes
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag, proceeding with release"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            CHANGES=$(git log $LAST_TAG..HEAD --oneline | wc -l)
+            if [ "$CHANGES" -gt "0" ]; then
+              echo "Found $CHANGES commits since $LAST_TAG"
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            else
+              echo "No changes since $LAST_TAG"
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      # Run release directly instead of triggering separate workflow
+      - name: Install Rust
+        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-release
+        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
+        run: cargo install cargo-release
+
+      - name: Configure git
+        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version and create tag
+        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
+        id: bump
+        run: |
+          # Get current version
+          CURRENT_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "Current version: $CURRENT_VERSION"
+
+          # Run cargo release (bumps version, updates package.json, commits, tags)
+          cargo release ${{ steps.release-type.outputs.bump }} --no-publish --no-push --no-confirm --execute
+
+          # Get new version
+          NEW_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "New version: $NEW_VERSION"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Push changes and tag
+        if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
+        run: |
+          git pull --rebase origin master
+          git push origin master
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      # Publishing (crates.io, npm, binaries) is handled by release.yml
+      # which triggers on the tag push above

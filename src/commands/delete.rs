@@ -1,0 +1,166 @@
+use std::{fmt::Display, time::Duration};
+
+use anyhow::bail;
+use is_terminal::IsTerminal;
+
+use crate::{
+    consts::TICK_STRING,
+    errors::RailwayError,
+    util::prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    workspace::{Project, Workspace, workspaces},
+};
+
+use super::*;
+
+/// Delete a project
+#[derive(Parser)]
+pub struct Args {
+    /// The project ID or name to delete
+    #[clap(short, long)]
+    project: Option<String>,
+
+    /// Skip confirmation dialog
+    #[clap(short = 'y', long = "yes")]
+    yes: bool,
+}
+
+pub async fn command(args: Args) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let is_terminal = std::io::stdout().is_terminal();
+
+    let all_workspaces = workspaces().await?;
+    let (project_id, project_name) = select_project(args.project, &all_workspaces, is_terminal)?;
+
+    if !args.yes {
+        if !is_terminal {
+            bail!(
+                "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+            );
+        }
+
+        let confirmed = prompt_confirm_with_default(
+            format!(
+                r#"Are you sure you want to delete the project "{}"? This action cannot be undone."#,
+                project_name.red()
+            )
+            .as_str(),
+            false,
+        )?;
+
+        if !confirmed {
+            println!("Deletion cancelled.");
+            return Ok(());
+        }
+    }
+
+    let is_two_factor_enabled = {
+        let vars = queries::two_factor_info::Variables {};
+
+        let info =
+            post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
+                .await?
+                .two_factor_info;
+
+        info.is_verified
+    };
+
+    if is_two_factor_enabled {
+        let token = prompt_text("Enter your 2FA code")?;
+        let vars = mutations::validate_two_factor::Variables { token };
+
+        let valid =
+            post_graphql::<mutations::ValidateTwoFactor, _>(&client, configs.get_backboard(), vars)
+                .await?
+                .two_factor_info_validate;
+
+        if !valid {
+            return Err(RailwayError::InvalidTwoFactorCode.into());
+        }
+    }
+
+    let spinner = indicatif::ProgressBar::new_spinner()
+        .with_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars(TICK_STRING)
+                .template("{spinner:.green} {msg}")?,
+        )
+        .with_message("Deleting project...");
+    spinner.enable_steady_tick(Duration::from_millis(100));
+
+    let vars = mutations::project_delete::Variables {
+        id: project_id.clone(),
+    };
+
+    post_graphql::<mutations::ProjectDelete, _>(&client, &configs.get_backboard(), vars).await?;
+
+    spinner.finish_with_message(format!(
+        "{} {} {}",
+        "Project".green(),
+        project_name.magenta().bold(),
+        "deleted!".green()
+    ));
+
+    Ok(())
+}
+
+fn select_project(
+    project_arg: Option<String>,
+    all_workspaces: &[Workspace],
+    is_terminal: bool,
+) -> Result<(String, String)> {
+    let all_projects: Vec<ProjectWithWorkspace> = all_workspaces
+        .iter()
+        .flat_map(|w| {
+            w.projects()
+                .into_iter()
+                .filter(|p| p.deleted_at().is_none())
+                .map(|p| ProjectWithWorkspace {
+                    project: p,
+                    workspace_name: w.name().to_string(),
+                })
+        })
+        .collect();
+
+    if all_projects.is_empty() {
+        bail!(RailwayError::NoProjects);
+    }
+
+    if let Some(project) = project_arg {
+        let found = all_projects.iter().find(|p| {
+            p.project.id().to_lowercase() == project.to_lowercase()
+                || p.project.name().to_lowercase() == project.to_lowercase()
+        });
+
+        if let Some(p) = found {
+            fake_select("Select the project to delete", &p.to_string());
+            return Ok((p.project.id().to_string(), p.project.name().to_string()));
+        } else {
+            bail!("Project \"{}\" not found", project);
+        }
+    }
+
+    if !is_terminal {
+        bail!(
+            "Project must be specified when not running in a terminal. Use --project <id or name>"
+        );
+    }
+
+    let selected = prompt_options("Select the project to delete", all_projects)?;
+    Ok((
+        selected.project.id().to_string(),
+        selected.project.name().to_string(),
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct ProjectWithWorkspace {
+    project: Project,
+    workspace_name: String,
+}
+
+impl Display for ProjectWithWorkspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.project.name(), self.workspace_name)
+    }
+}

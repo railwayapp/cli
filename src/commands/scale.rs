@@ -335,7 +335,7 @@ impl clap::FromArgMatches for DynamicArgs {
         // Iterate through all provided argument keys.
         // Adjust the static key names if you add any to your Args struct.
         for key in matches.ids() {
-            if key == "json" || Args::FIELD_NAMES_AS_ARRAY.contains(&key.as_str()) {
+            if Args::FIELD_NAMES_AS_ARRAY.contains(&key.as_str()) {
                 continue;
             }
             // If the flag value can be interpreted as a u64, insert it.

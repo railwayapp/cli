@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub async fn get_or_prompt_service(
-    linked_project: LinkedProject,
+    linked_project: Option<LinkedProject>,
     project: ProjectProject,
     service_arg: Option<String>,
 ) -> Result<Option<String>> {
@@ -24,7 +24,7 @@ pub async fn get_or_prompt_service(
         } else {
             bail!("Service not found");
         }
-    } else if let Some(service) = linked_project.service {
+    } else if let Some(service) = linked_project.and_then(|lp| lp.service) {
         // If the user didn't specify a service, but we have a linked service, use that
         Some(service)
     } else {

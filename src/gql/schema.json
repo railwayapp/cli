@@ -33127,6 +33127,30 @@
             {
               "args": [],
               "deprecationReason": null,
+              "description": "All currently active (deployed and running) deployments for this service instance",
+              "isDeprecated": false,
+              "name": "activeDeployments",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "Deployment",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
               "name": "buildCommand",
@@ -33307,7 +33331,7 @@
             {
               "args": [],
               "deprecationReason": null,
-              "description": null,
+              "description": "The most recent deployment for this service instance",
               "isDeprecated": false,
               "name": "latestDeployment",
               "type": {

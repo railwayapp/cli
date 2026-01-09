@@ -41,6 +41,14 @@ pub struct ProjectCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ProjectDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ProjectDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ServiceDomainCreate.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
@@ -127,6 +135,15 @@ pub struct VolumeAttach;
     skip_serializing_none
 )]
 pub struct DeploymentRedeploy;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DeploymentRestart.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct DeploymentRestart;
 
 #[derive(GraphQLQuery)]
 #[graphql(

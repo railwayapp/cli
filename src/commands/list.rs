@@ -1,5 +1,5 @@
 use super::*;
-use crate::workspace::workspaces;
+use crate::workspace::{ProjectWithWorkspace, workspaces};
 
 /// List all projects in your Railway account
 #[derive(Parser)]
@@ -14,17 +14,14 @@ pub async fn command(args: Args) -> Result<()> {
     let linked_project = configs.get_linked_project().await.ok();
 
     let workspaces = workspaces().await?;
-    let mut all_projects = Vec::new();
+    let mut all_projects: Vec<ProjectWithWorkspace> = Vec::new();
 
     for workspace in workspaces {
         if !args.json {
             println!();
             println!("{}", workspace.name().bold());
-        }
 
-        let projects = workspace.projects();
-        if !args.json {
-            for project in &projects {
+            for project in workspace.projects() {
                 let project_name =
                     if Some(project.id()) == linked_project.as_ref().map(|p| p.project.as_str()) {
                         project.name().purple().bold()
@@ -35,7 +32,7 @@ pub async fn command(args: Args) -> Result<()> {
             }
         }
 
-        all_projects.extend(projects);
+        all_projects.extend(workspace.projects_with_workspace());
     }
 
     if args.json {

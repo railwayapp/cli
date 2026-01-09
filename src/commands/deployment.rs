@@ -92,10 +92,16 @@ async fn list_deployments(
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let limit = if limit > 1000 {
-        eprintln!("Warning: limit cannot exceed 1000, using 1000 instead");
+        eprintln!(
+            "{}",
+            "Warning: limit cannot exceed 1000, using 1000 instead".yellow()
+        );
         1000
     } else if limit < 1 {
-        eprintln!("Warning: limit must be at least 1, using 1 instead");
+        eprintln!(
+            "{}",
+            "Warning: limit must be at least 1, using 1 instead".yellow()
+        );
         1
     } else {
         limit
@@ -160,41 +166,42 @@ async fn list_deployments(
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        if deployments.is_empty() {
-            println!("No deployments found");
-            return Ok(());
-        }
+        return Ok(());
+    }
 
-        println!("{}", "Recent Deployments".bold());
+    if deployments.is_empty() {
+        println!("No deployments found");
+        return Ok(());
+    }
 
-        for deployment in deployments {
-            let status_colored = match deployment.status {
-                DeploymentStatus::SUCCESS => format!("{:?}", deployment.status).green(),
-                DeploymentStatus::FAILED | DeploymentStatus::CRASHED => {
-                    format!("{:?}", deployment.status).red()
-                }
-                DeploymentStatus::BUILDING
-                | DeploymentStatus::DEPLOYING
-                | DeploymentStatus::INITIALIZING
-                | DeploymentStatus::WAITING
-                | DeploymentStatus::QUEUED => format!("{:?}", deployment.status).blue(),
-                DeploymentStatus::REMOVED | DeploymentStatus::REMOVING => {
-                    format!("{:?}", deployment.status).dimmed()
-                }
-                _ => format!("{:?}", deployment.status).white(),
-            };
+    println!("{}", "Recent Deployments".bold());
 
-            // Convert UTC time to local timezone
-            let local_time: DateTime<Local> = DateTime::from(deployment.created_at);
-            let created_at = local_time.format("%Y-%m-%d %H:%M:%S %Z");
-            println!(
-                "  {} | {} | {}",
-                deployment.id,
-                status_colored,
-                created_at.to_string().dimmed()
-            );
-        }
+    for deployment in deployments {
+        let status_colored = match deployment.status {
+            DeploymentStatus::SUCCESS => format!("{:?}", deployment.status).green(),
+            DeploymentStatus::FAILED | DeploymentStatus::CRASHED => {
+                format!("{:?}", deployment.status).red()
+            }
+            DeploymentStatus::BUILDING
+            | DeploymentStatus::DEPLOYING
+            | DeploymentStatus::INITIALIZING
+            | DeploymentStatus::WAITING
+            | DeploymentStatus::QUEUED => format!("{:?}", deployment.status).blue(),
+            DeploymentStatus::REMOVED | DeploymentStatus::REMOVING => {
+                format!("{:?}", deployment.status).dimmed()
+            }
+            _ => format!("{:?}", deployment.status).white(),
+        };
+
+        // Convert UTC time to local timezone
+        let local_time: DateTime<Local> = DateTime::from(deployment.created_at);
+        let created_at = local_time.format("%Y-%m-%d %H:%M:%S %Z");
+        println!(
+            "  {} | {} | {}",
+            deployment.id,
+            status_colored,
+            created_at.to_string().dimmed()
+        );
     }
 
     Ok(())

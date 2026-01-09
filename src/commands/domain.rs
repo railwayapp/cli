@@ -71,7 +71,7 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
 
     let domain_count = domains.service_domains.len() + domains.custom_domains.len();
     if domain_count > 0 {
-        return print_existing_domains(&domains);
+        return print_existing_domains(&domains, json);
     }
 
     let spinner = (std::io::stdout().is_terminal() && !json)
@@ -109,7 +109,26 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
     Ok(())
 }
 
-fn print_existing_domains(domains: &DomainsDomains) -> Result<()> {
+fn print_existing_domains(domains: &DomainsDomains, json: bool) -> Result<()> {
+    if json {
+        let all_domains: Vec<String> = domains
+            .service_domains
+            .iter()
+            .map(|d| format!("https://{}", d.domain))
+            .chain(
+                domains
+                    .custom_domains
+                    .iter()
+                    .map(|d| format!("https://{}", d.domain)),
+            )
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "domains": all_domains }))?
+        );
+        return Ok(());
+    }
+
     println!("Domains already exist on the service:");
     let domain_count = domains.service_domains.len() + domains.custom_domains.len();
 

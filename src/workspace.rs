@@ -76,6 +76,20 @@ impl Workspace {
         projects.sort_by_key(|b| std::cmp::Reverse(b.updated_at()));
         projects
     }
+
+    pub fn projects_with_workspace(&self) -> Vec<ProjectWithWorkspace> {
+        let workspace_info = WorkspaceInfo {
+            id: self.id().to_string(),
+            name: self.name().to_string(),
+        };
+        self.projects()
+            .into_iter()
+            .map(|project| ProjectWithWorkspace {
+                workspace: workspace_info.clone(),
+                project,
+            })
+            .collect()
+    }
 }
 
 impl Display for Workspace {
@@ -129,4 +143,17 @@ impl Display for Project {
             Self::External(project) => write!(f, "{}", project.name),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceInfo {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectWithWorkspace {
+    pub workspace: WorkspaceInfo,
+    #[serde(flatten)]
+    pub project: Project,
 }

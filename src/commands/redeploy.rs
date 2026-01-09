@@ -49,51 +49,61 @@ pub async fn command(args: Args) -> Result<()> {
             || anyhow!("The service specified doesn't exist in the current environment"),
         )?;
 
-    if let Some(ref latest) = service_in_env.latest_deployment {
-        if latest.can_redeploy {
-            if !args.bypass {
-                let confirmed = prompt_confirm_with_default(
-                    format!(
-                        "Redeploy the latest deployment from service {} in environment {}?",
-                        service.node.name,
-                        linked_project
-                            .environment_name
-                            .unwrap_or("unknown".to_string())
-                    )
-                    .as_str(),
-                    false,
-                )?;
-
-                if !confirmed {
-                    return Ok(());
-                }
-            }
-            let spinner = indicatif::ProgressBar::new_spinner()
-                .with_style(
-                    indicatif::ProgressStyle::default_spinner()
-                        .tick_chars(TICK_STRING)
-                        .template("{spinner:.green} {msg}")?,
-                )
-                .with_message(format!(
-                    "Redeploying the latest deployment from service {}...",
-                    service.node.name
-                ));
-            spinner.enable_steady_tick(Duration::from_millis(100));
-            post_graphql::<mutations::DeploymentRedeploy, _>(
-                &client,
-                configs.get_backboard(),
-                mutations::deployment_redeploy::Variables {
-                    id: latest.id.clone(),
-                },
-            )
-            .await?;
-            spinner.finish_with_message(format!(
-                "The latest deployment from service {} has been redeployed",
-                service.node.name.green()
-            ));
-        }
-    } else {
+    let Some(ref latest) = service_in_env.latest_deployment else {
         bail!("No deployment found for service")
+    };
+
+    if !latest.can_redeploy {
+        bail!(
+            "The latest deployment for service {} cannot be redeployed. \
+            This may be because it's currently building, deploying, or was removed.",
+            service.node.name
+        );
     }
+
+    if !args.bypass {
+        let confirmed = prompt_confirm_with_default(
+            format!(
+                "Redeploy the latest deployment from service {} in environment {}?",
+                service.node.name,
+                linked_project
+                    .environment_name
+                    .unwrap_or("unknown".to_string())
+            )
+            .as_str(),
+            false,
+        )?;
+
+        if !confirmed {
+            return Ok(());
+        }
+    }
+
+    let spinner = indicatif::ProgressBar::new_spinner()
+        .with_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars(TICK_STRING)
+                .template("{spinner:.green} {msg}")?,
+        )
+        .with_message(format!(
+            "Redeploying the latest deployment from service {}...",
+            service.node.name
+        ));
+    spinner.enable_steady_tick(Duration::from_millis(100));
+
+    post_graphql::<mutations::DeploymentRedeploy, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::deployment_redeploy::Variables {
+            id: latest.id.clone(),
+        },
+    )
+    .await?;
+
+    spinner.finish_with_message(format!(
+        "The latest deployment from service {} has been redeployed",
+        service.node.name.green()
+    ));
+
     Ok(())
 }

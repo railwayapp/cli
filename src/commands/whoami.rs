@@ -1,5 +1,6 @@
-use crate::{commands::queries::RailwayUser, controllers::user::get_user, util::prompt};
+use crate::{commands::queries::RailwayUser, controllers::user::get_user, workspace::workspaces};
 use colored::*;
+use serde::Serialize;
 
 use super::*;
 
@@ -11,23 +12,47 @@ pub struct Args {
     json: bool,
 }
 
+#[derive(Serialize)]
+struct WhoamiJson {
+    name: Option<String>,
+    email: String,
+    workspaces: Vec<WorkspaceJson>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceJson {
+    id: String,
+    name: String,
+}
+
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
     let user: RailwayUser = get_user(&client, &configs).await?;
 
-    print_user(user, args.json);
+    if args.json {
+        let ws = workspaces().await?;
+        let output = WhoamiJson {
+            name: user.name,
+            email: user.email,
+            workspaces: ws
+                .into_iter()
+                .map(|w| WorkspaceJson {
+                    id: w.id().to_string(),
+                    name: w.name().to_string(),
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        print_user(user);
+    }
 
     Ok(())
 }
 
-pub fn print_user(user: RailwayUser, use_json: bool) {
-    if use_json {
-        println!("{}", serde_json::to_string_pretty(&user).unwrap());
-        return;
-    }
-
+pub fn print_user(user: RailwayUser) {
     let email_colored = user.email.bright_magenta().bold();
 
     match user.name {
