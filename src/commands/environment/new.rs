@@ -1,105 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Display,
-    str::FromStr,
-    time::Duration,
-};
+use super::{New as Args, *};
 
-use crate::{
-    consts::TICK_STRING,
-    controllers::{project::get_project, variables::Variable},
-    errors::RailwayError,
-    interact_or,
-    util::{
-        prompt::{
-            PromptServiceInstance, fake_select, prompt_confirm_with_default, prompt_multi_options,
-            prompt_multi_options_with_defaults, prompt_options, prompt_options_skippable,
-            prompt_text, prompt_variables,
-        },
-        retry::{RetryConfig, retry_with_backoff},
-    },
-};
-use anyhow::bail;
-use derive_more::Display as DeriveDisplay;
-use is_terminal::IsTerminal;
-use strum::{Display, EnumDiscriminants, EnumIter, EnumString, IntoEnumIterator, VariantNames};
-use tokio::task::JoinHandle;
-
-use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
-
-/// Create, delete or link an environment
-#[derive(Parser)]
-pub struct Args {
-    /// The environment to link to
-    environment: Option<String>,
-
-    #[clap(subcommand)]
-    command: Option<EnvironmentCommand>,
-}
-
-#[derive(Subcommand)]
-pub enum EnvironmentCommand {
-    /// Create a new environment
-    New(NewArgs),
-
-    /// Delete an environment
-    #[clap(visible_aliases = &["remove", "rm"])]
-    Delete(DeleteArgs),
-}
-
-#[derive(Parser)]
-pub struct NewArgs {
-    /// The name of the environment to create
-    pub name: Option<String>,
-
-    /// The name of the environment to duplicate
-    #[clap(long, short, visible_alias = "copy", visible_short_alias = 'c')]
-    pub duplicate: Option<String>,
-
-    /// Variables to assign in the new environment
-    ///
-    /// Note: This will only work if the environment is being duplicated, and that the service specified is present in the original environment
-    ///
-    /// Examples:
-    ///
-    /// railway environment new foo --duplicate bar --service-variable <service name/service uuid> BACKEND_PORT=3000
-    #[clap(long = "service-variable", short = 'v', number_of_values = 2, value_names = &["SERVICE", "VARIABLE"])]
-    pub service_variables: Vec<String>,
-
-    /// Assign services new sources in the new environment
-    ///
-    /// GitHub repo format: <owner>/<repo>/<branch>
-    ///
-    /// Docker image format: [optional registry url]/<owner>[/repo][:tag]
-    ///
-    /// Examples:
-    ///
-    /// railway environment new foo --duplicate bar --service-source <service name/service uuid> docker ubuntu:latest
-    ///
-    /// railway environment new foo --duplicate bar --service-source <service name/service uuid> github nodejs/node/branch
-    #[clap(long = "service-source", short = 's', number_of_values = 3, value_names = &["SERVICE", "PLATFORM", "SOURCE"])]
-    pub service_sources: Vec<String>,
-}
-
-#[derive(Parser)]
-pub struct DeleteArgs {
-    /// Skip confirmation dialog
-    #[clap(short = 'y', long = "yes")]
-    bypass: bool,
-
-    /// The environment to delete
-    environment: Option<String>,
-}
-
-pub async fn command(args: Args) -> Result<()> {
-    match args.command {
-        Some(EnvironmentCommand::New(args)) => new_environment(args).await,
-        Some(EnvironmentCommand::Delete(args)) => delete_environment(args).await,
-        None => link_environment(args).await,
-    }
-}
-
-async fn new_environment(args: NewArgs) -> Result<()> {
+pub async fn new_environment(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -207,7 +108,7 @@ impl Change {
 /// Trait for handling the parsing of a change
 trait ChangeHandler: Clone {
     /// Get the command-line args for this change type
-    fn get_args(args: &NewArgs) -> &Vec<String>;
+    fn get_args(args: &Args) -> &Vec<String>;
 
     /// Parse from non-interactive arguments
     fn parse_non_interactive(args: Vec<String>) -> Vec<(String, Self)>;
@@ -222,7 +123,7 @@ trait ChangeHandler: Clone {
 macro_rules! register_handlers {
     ($($type:ident),* $(,)?) => {
         impl ChangeOption {
-            fn get_args<'a>(&self, args: &'a NewArgs) -> &'a Vec<String> {
+            fn get_args<'a>(&self, args: &'a Args) -> &'a Vec<String> {
                 match self {
                     $(ChangeOption::$type => <$type>::get_args(args),)*
                 }
@@ -262,7 +163,7 @@ register_handlers!(Variable, Source);
 
 /// environment id should be the id of the environment being duplicated if being used in new command
 pub fn edit_services_select(
-    args: &NewArgs,
+    args: &Args,
     project: &queries::project::ProjectProject,
     environment_id: String,
 ) -> Result<Vec<(String, Change)>> {
@@ -415,169 +316,6 @@ pub fn edit_services_select(
     }
 
     Ok(changes_final)
-}
-
-async fn delete_environment(args: DeleteArgs) -> Result<()> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let is_terminal = std::io::stdout().is_terminal();
-
-    let (id, name) = if let Some(environment) = args.environment {
-        if let Some(env) = project.environments.edges.iter().find(|e| {
-            (e.node.id.to_lowercase() == environment)
-                || (e.node.name.to_lowercase() == environment.to_lowercase())
-        }) {
-            fake_select("Select the environment to delete", &env.node.name);
-            (env.node.id.clone(), env.node.name.clone())
-        } else {
-            bail!(RailwayError::EnvironmentNotFound(environment))
-        }
-    } else if is_terminal {
-        let all_environments = &project.environments.edges;
-        let environments = all_environments
-            .iter()
-            .filter(|env| env.node.can_access)
-            .map(|env| Environment(&env.node))
-            .collect::<Vec<_>>();
-        if environments.is_empty() {
-            if all_environments.is_empty() {
-                bail!("Project has no environments");
-            } else {
-                bail!("All environments in this project are restricted");
-            }
-        }
-        let r = prompt_options("Select the environment to delete", environments)?;
-        (r.0.id.clone(), r.0.name.clone())
-    } else {
-        bail!("Environment must be specified when not running in a terminal");
-    };
-
-    if !args.bypass {
-        let confirmed = prompt_confirm_with_default(
-            format!(
-                r#"Are you sure you want to delete the environment "{}"?"#,
-                name.red()
-            )
-            .as_str(),
-            false,
-        )?;
-
-        if !confirmed {
-            return Ok(());
-        }
-    }
-
-    let is_two_factor_enabled = {
-        let vars = queries::two_factor_info::Variables {};
-
-        let info =
-            post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-                .await?
-                .two_factor_info;
-
-        info.is_verified
-    };
-    if is_two_factor_enabled {
-        let token = prompt_text("Enter your 2FA code")?;
-        let vars = mutations::validate_two_factor::Variables { token };
-
-        let valid =
-            post_graphql::<mutations::ValidateTwoFactor, _>(&client, configs.get_backboard(), vars)
-                .await?
-                .two_factor_info_validate;
-
-        if !valid {
-            return Err(RailwayError::InvalidTwoFactorCode.into());
-        }
-    }
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Deleting environment...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
-    let _r = post_graphql::<mutations::EnvironmentDelete, _>(
-        &client,
-        &configs.get_backboard(),
-        mutations::environment_delete::Variables { id },
-    )
-    .await?;
-    spinner.finish_with_message("Environment deleted!");
-    Ok(())
-}
-
-async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> {
-    let mut configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    if project.deleted_at.is_some() {
-        bail!(RailwayError::ProjectDeleted);
-    }
-
-    let all_environments = &project.environments.edges;
-    let environments = all_environments
-        .iter()
-        .filter(|env| env.node.can_access)
-        .map(|env| Environment(&env.node))
-        .collect::<Vec<_>>();
-
-    if environments.is_empty() {
-        if all_environments.is_empty() {
-            bail!("Project has no environments");
-        } else {
-            bail!("All environments in this project are restricted");
-        }
-    }
-
-    let environment = match args.environment {
-        // If the environment is specified, find it in the list of environments
-        Some(environment) => {
-            let environment = environments
-                .iter()
-                .find(|env| {
-                    env.0.id == environment
-                        || env.0.name.to_lowercase() == environment.to_lowercase()
-                })
-                .context("Environment not found")?;
-            environment.clone()
-        }
-        // If the environment is not specified, prompt the user to select one
-        None => {
-            interact_or!("Environment must be specified when not running in a terminal");
-
-            if environments.len() == 1 {
-                match environments.first() {
-                    // Project has only one environment, so use that one
-                    Some(environment) => environment.clone(),
-                    // Project has no environments, so bail
-                    None => bail!("Project has no environments"),
-                }
-            } else {
-                // Project has multiple environments, so prompt the user to select one
-                prompt_options("Select an environment", environments)?
-            }
-        }
-    };
-
-    let environment_name = environment.0.name.clone();
-    println!("Activated environment {}", environment_name.purple().bold());
-
-    configs.link_project(
-        linked_project.project.clone(),
-        linked_project.name.clone(),
-        environment.0.id.clone(),
-        Some(environment_name),
-    )?;
-    configs.write()?;
-    Ok(())
 }
 
 // async fn upsert_variables(
@@ -813,7 +551,7 @@ fn parse_repo(repo: String) -> Result<Source> {
 }
 
 fn select_duplicate_id_new(
-    args: &NewArgs,
+    args: &Args,
     project: &queries::project::ProjectProject,
     is_terminal: bool,
 ) -> Result<Option<String>, anyhow::Error> {
@@ -847,7 +585,7 @@ fn select_duplicate_id_new(
     Ok(duplicate_id)
 }
 
-fn select_name_new(args: &NewArgs, is_terminal: bool) -> Result<String, anyhow::Error> {
+fn select_name_new(args: &Args, is_terminal: bool) -> Result<String, anyhow::Error> {
     let name = if let Some(name) = args.name.clone() {
         fake_select("Environment name", name.as_str());
         name
@@ -912,17 +650,8 @@ async fn wait_for_environment_creation(
     retry_with_backoff(config, check_status).await
 }
 
-#[derive(Debug, Clone)]
-struct Environment<'a>(&'a ProjectProjectEnvironmentsEdgesNode);
-
-impl Display for Environment<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.name)
-    }
-}
-
 impl ChangeHandler for Variable {
-    fn get_args(args: &NewArgs) -> &Vec<String> {
+    fn get_args(args: &Args) -> &Vec<String> {
         &args.service_variables
     }
 
@@ -956,7 +685,7 @@ impl ChangeHandler for Variable {
 }
 
 impl ChangeHandler for Source {
-    fn get_args(args: &NewArgs) -> &Vec<String> {
+    fn get_args(args: &Args) -> &Vec<String> {
         &args.service_sources
     }
 
