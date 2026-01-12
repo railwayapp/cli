@@ -119,7 +119,6 @@ pub async fn command(args: Args) -> Result<()> {
     }
     match type_of_create {
         CreateKind::Database(databases) => {
-            let mut created = Vec::new();
             for db in databases {
                 if verbose {
                     println!("iterating through databases to add: {:?}", db)
@@ -134,13 +133,9 @@ pub async fn command(args: Args) -> Result<()> {
                     args.json,
                 )
                 .await?;
-                created.push(db.to_slug().to_string());
                 if verbose {
-                    println!("succesfully created {:?}", db)
+                    println!("successfully created {:?}", db)
                 }
-            }
-            if args.json {
-                println!("{}", serde_json::json!({"databases": created}));
             }
         }
         CreateKind::DockerImage {
