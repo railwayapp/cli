@@ -1,4 +1,5 @@
 use colored::*;
+use is_terminal::IsTerminal;
 
 use crate::{
     controllers::project::{
@@ -35,6 +36,7 @@ pub async fn command(args: Args) -> Result<()> {
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let is_terminal = std::io::stdout().is_terminal();
 
     let service_id = args.service.or_else(|| linked_project.service.clone()).ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
     let service = project
@@ -63,22 +65,29 @@ pub async fn command(args: Args) -> Result<()> {
         );
     }
 
-    if !args.bypass {
-        let confirmed = prompt_confirm_with_default(
+    let confirmed = if args.bypass {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
             format!(
                 "Redeploy the latest deployment from service {} in environment {}?",
                 service.node.name,
                 linked_project
                     .environment_name
+                    .clone()
                     .unwrap_or("unknown".to_string())
             )
             .as_str(),
             false,
-        )?;
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
 
-        if !confirmed {
-            return Ok(());
-        }
+    if !confirmed {
+        return Ok(());
     }
 
     let spinner = create_spinner_if(

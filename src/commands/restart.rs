@@ -1,5 +1,6 @@
 use colored::*;
 use futures::StreamExt;
+use is_terminal::IsTerminal;
 
 use crate::{
     controllers::project::{
@@ -8,7 +9,7 @@ use crate::{
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::{progress::create_spinner, prompt::prompt_confirm_with_default},
+    util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
 
 use super::*;
@@ -38,6 +39,7 @@ pub async fn command(args: Args) -> Result<()> {
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let is_terminal = std::io::stdout().is_terminal();
 
     let service_id = args
         .service
@@ -65,8 +67,10 @@ pub async fn command(args: Args) -> Result<()> {
         bail!("No deployment found for service")
     };
 
-    if !args.yes {
-        let confirmed = prompt_confirm_with_default(
+    let confirmed = if args.yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
             format!(
                 "Restart the latest deployment from service {} in environment {}?",
                 service.node.name,
@@ -77,17 +81,24 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .as_str(),
             false,
-        )?;
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
 
-        if !confirmed {
-            return Ok(());
-        }
+    if !confirmed {
+        return Ok(());
     }
 
-    let spinner = create_spinner(format!(
-        "Restarting the latest deployment from service {}...",
-        service.node.name
-    ));
+    let spinner = create_spinner_if(
+        !args.json,
+        format!(
+            "Restarting the latest deployment from service {}...",
+            service.node.name
+        ),
+    );
 
     post_graphql::<mutations::DeploymentRestart, _>(
         &client,
@@ -99,11 +110,11 @@ pub async fn command(args: Args) -> Result<()> {
     .await?;
 
     if args.json {
-        spinner.finish_and_clear();
         println!("{}", serde_json::json!({"id": latest.id}));
         return Ok(());
     }
 
+    let spinner = spinner.unwrap();
     spinner.set_message(format!(
         "Waiting for deployment from service {} to be healthy...",
         service.node.name

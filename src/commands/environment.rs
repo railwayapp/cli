@@ -192,19 +192,25 @@ async fn delete_environment(args: DeleteArgs) -> Result<()> {
         bail!("Environment must be specified when not running in a terminal");
     };
 
-    if !args.bypass {
-        let confirmed = prompt_confirm_with_default(
+    let confirmed = if args.bypass {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
             format!(
                 r#"Are you sure you want to delete the environment "{}"?"#,
                 name.red()
             )
             .as_str(),
             false,
-        )?;
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
 
-        if !confirmed {
-            return Ok(());
-        }
+    if !confirmed {
+        return Ok(());
     }
 
     let is_two_factor_enabled = {
