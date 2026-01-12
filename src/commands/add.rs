@@ -1,19 +1,18 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap};
 use strum::{Display, EnumIs, EnumIter, IntoEnumIterator};
 
 use crate::{
-    consts::TICK_STRING,
     controllers::{
         database::DatabaseType, project::ensure_project_and_environment_exist, variables::Variable,
     },
-    util::prompt::{
-        self, fake_select, prompt_multi_options, prompt_options, prompt_text,
-        prompt_text_with_placeholder_disappear, prompt_text_with_placeholder_if_blank,
+    util::{
+        progress::create_spinner_if,
+        prompt::{
+            self, fake_select, prompt_multi_options, prompt_options, prompt_text,
+            prompt_text_with_placeholder_disappear, prompt_text_with_placeholder_if_blank,
+        },
     },
 };
 
@@ -289,19 +288,7 @@ async fn create_service(
     verbose: bool,
     json: bool,
 ) -> Result<(), anyhow::Error> {
-    let spinner = if !json {
-        let s = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message("Creating service...");
-        s.enable_steady_tick(Duration::from_millis(100));
-        Some(s)
-    } else {
-        None
-    };
+    let spinner = create_spinner_if(!json, "Creating service...".into());
     let source = mutations::service_create::ServiceSourceInput { repo, image };
     let branch = if let Some(repo) = &source.repo {
         if verbose {

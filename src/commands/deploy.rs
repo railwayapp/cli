@@ -2,12 +2,10 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::Duration;
 
 use crate::{
-    consts::TICK_STRING,
     controllers::{project::ensure_project_and_environment_exist, variables::Variable},
-    util::prompt::prompt_text,
+    util::{progress::create_spinner_if, prompt::prompt_text},
 };
 
 use super::*;
@@ -141,24 +139,12 @@ pub async fn fetch_and_create(
         }
     }
 
-    let spinner = if !json {
-        let s = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message(format!("Creating {template}..."));
-        s.enable_steady_tick(Duration::from_millis(100));
-        Some(s)
-    } else {
-        None
-    };
+    let spinner = create_spinner_if(!json, format!("Creating {template}..."));
 
     let mutation_vars = mutations::template_deploy::Variables {
         project_id: linked_project.project.clone(),
         environment_id: linked_project.environment.clone(),
-        template_id: details.template.id,
+        template_id: details.template.id.clone(),
         serialized_config: serde_json::to_value(&config).context("Failed to serialize config")?,
     };
     if verbose {
@@ -167,7 +153,12 @@ pub async fn fetch_and_create(
     post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), mutation_vars)
         .await?;
 
-    if let Some(spinner) = spinner {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"id": details.template.id, "name": details.template.name})
+        );
+    } else if let Some(spinner) = spinner {
         spinner.finish_with_message(format!(
             "🎉 Added {} to project",
             details.template.name.green().bold(),

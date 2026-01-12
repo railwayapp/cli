@@ -1,12 +1,13 @@
-use std::{collections::BTreeMap, fmt::Display, time::Duration};
+use std::{collections::BTreeMap, fmt::Display};
 
 use crate::{
-    consts::TICK_STRING,
+    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     controllers::project::{get_project, get_service_ids_in_env},
     controllers::variables::Variable,
     errors::RailwayError,
     interact_or,
     util::{
+        progress::{create_spinner, create_spinner_if},
         prompt::{
             PromptService, fake_select, prompt_confirm_with_default, prompt_options,
             prompt_options_skippable, prompt_text, prompt_variables,
@@ -113,19 +114,7 @@ async fn new_environment(args: NewArgs) -> Result<()> {
         apply_changes_in_background: Some(apply_changes_in_background),
     };
 
-    let spinner = if !json {
-        let s = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message("Creating environment...");
-        s.enable_steady_tick(Duration::from_millis(100));
-        Some(s)
-    } else {
-        None
-    };
+    let spinner = create_spinner_if(!json, "Creating environment...".into());
 
     let response =
         post_graphql::<mutations::EnvironmentCreate, _>(&client, &configs.get_backboard(), vars)
@@ -230,7 +219,7 @@ async fn delete_environment(args: DeleteArgs) -> Result<()> {
     };
     if is_two_factor_enabled {
         if !is_terminal {
-            bail!("2FA is enabled. This operation requires interactive mode.");
+            bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
         }
         let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
@@ -244,19 +233,7 @@ async fn delete_environment(args: DeleteArgs) -> Result<()> {
             return Err(RailwayError::InvalidTwoFactorCode.into());
         }
     }
-    let spinner = if !args.json {
-        let s = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message("Deleting environment...");
-        s.enable_steady_tick(Duration::from_millis(100));
-        Some(s)
-    } else {
-        None
-    };
+    let spinner = create_spinner_if(!args.json, "Deleting environment...".into());
     let _r = post_graphql::<mutations::EnvironmentDelete, _>(
         &client,
         &configs.get_backboard(),
@@ -390,14 +367,7 @@ async fn upsert_variables(
             Ok(())
         }));
     }
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Inserting variables...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = create_spinner("Inserting variables...".into());
     let r = futures::future::join_all(tasks).await;
     for r in r {
         r??;

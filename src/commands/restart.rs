@@ -1,16 +1,14 @@
 use colored::*;
 use futures::StreamExt;
-use std::time::Duration;
 
 use crate::{
-    consts::TICK_STRING,
     controllers::project::{
         ensure_project_and_environment_exist, find_service_instance, get_project,
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::prompt::prompt_confirm_with_default,
+    util::{progress::create_spinner, prompt::prompt_confirm_with_default},
 };
 
 use super::*;
@@ -86,22 +84,10 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let spinner = if !args.json {
-        let s = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message(format!(
-                "Restarting the latest deployment from service {}...",
-                service.node.name
-            ));
-        s.enable_steady_tick(Duration::from_millis(100));
-        Some(s)
-    } else {
-        None
-    };
+    let spinner = create_spinner(format!(
+        "Restarting the latest deployment from service {}...",
+        service.node.name
+    ));
 
     post_graphql::<mutations::DeploymentRestart, _>(
         &client,
@@ -113,11 +99,11 @@ pub async fn command(args: Args) -> Result<()> {
     .await?;
 
     if args.json {
+        spinner.finish_and_clear();
         println!("{}", serde_json::json!({"id": latest.id}));
         return Ok(());
     }
 
-    let spinner = spinner.unwrap();
     spinner.set_message(format!(
         "Waiting for deployment from service {} to be healthy...",
         service.node.name

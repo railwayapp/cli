@@ -1,17 +1,20 @@
 use super::*;
 use crate::{
-    consts::TICK_STRING,
+    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
     queries::project::{
         ProjectProject, ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode,
     },
-    util::prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    util::{
+        progress::create_spinner,
+        prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    },
 };
 use anyhow::{anyhow, bail};
 use clap::Parser;
 use is_terminal::IsTerminal;
-use std::{fmt::Display, time::Duration};
+use std::fmt::Display;
 
 /// Manage project volumes
 #[derive(Parser)]
@@ -185,7 +188,7 @@ async fn attach(
                 .name
         )
     }
-    let confirm = if yes || json {
+    let confirm = if yes {
         true
     } else if is_terminal {
         prompt_confirm_with_default(
@@ -258,7 +261,7 @@ async fn detach(
         .ok_or(anyhow!(
             "The service the volume is attached to doesn't exist"
         ))?;
-    let confirm = if yes || json {
+    let confirm = if yes {
         true
     } else if is_terminal {
         prompt_confirm_with_default(
@@ -392,7 +395,7 @@ async fn delete(
     let is_terminal = std::io::stdout().is_terminal();
     let volume = select_volume(project, environment.as_str(), volume, is_terminal)?;
 
-    let confirm = if yes || json {
+    let confirm = if yes {
         true
     } else if is_terminal {
         prompt_confirm_with_default(
@@ -422,7 +425,7 @@ async fn delete(
 
         if is_two_factor_enabled {
             if !is_terminal {
-                bail!("2FA is enabled. This operation requires interactive mode.");
+                bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
             }
             let token = prompt_text("Enter your 2FA code")?;
             let vars = mutations::validate_two_factor::Variables { token };
@@ -614,14 +617,7 @@ async fn add(
         project_id: project.id,
     };
     if is_terminal && !json {
-        let spinner = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message("Creating volume..");
-        spinner.enable_steady_tick(Duration::from_millis(100));
+        let spinner = create_spinner("Creating volume...".into());
 
         let details =
             post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
@@ -642,11 +638,12 @@ async fn add(
         println!(
             "{}",
             serde_json::json!({
+                "id": details.volume_create.id,
                 "name": details.volume_create.name
             })
         );
     } else {
-        println!("Creating volume..");
+        println!("Creating volume...");
         let details =
             post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
                 .await?;

@@ -1,12 +1,15 @@
-use std::{fmt::Display, time::Duration};
+use std::fmt::Display;
 
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    consts::TICK_STRING,
+    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    util::{
+        progress::create_spinner_if,
+        prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    },
     workspace::{Project, Workspace, workspaces},
 };
 
@@ -71,7 +74,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     if is_two_factor_enabled {
         if !is_terminal {
-            bail!("2FA is enabled. This operation requires interactive mode.");
+            bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
         }
         let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
@@ -86,19 +89,7 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let spinner = if !args.json {
-        let s = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message("Deleting project...");
-        s.enable_steady_tick(Duration::from_millis(100));
-        Some(s)
-    } else {
-        None
-    };
+    let spinner = create_spinner_if(!args.json, "Deleting project...".into());
 
     let vars = mutations::project_delete::Variables {
         id: project_id.clone(),

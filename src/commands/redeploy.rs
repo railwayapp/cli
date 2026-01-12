@@ -1,13 +1,11 @@
 use colored::*;
-use std::time::Duration;
 
 use crate::{
-    consts::TICK_STRING,
     controllers::project::{
         ensure_project_and_environment_exist, find_service_instance, get_project,
     },
     errors::RailwayError,
-    util::prompt::prompt_confirm_with_default,
+    util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
 
 use super::*;
@@ -83,22 +81,13 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let spinner = if !args.json {
-        let s = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message(format!(
-                "Redeploying the latest deployment from service {}...",
-                service.node.name
-            ));
-        s.enable_steady_tick(Duration::from_millis(100));
-        Some(s)
-    } else {
-        None
-    };
+    let spinner = create_spinner_if(
+        !args.json,
+        format!(
+            "Redeploying the latest deployment from service {}...",
+            service.node.name
+        ),
+    );
 
     let response = post_graphql::<mutations::DeploymentRedeploy, _>(
         &client,

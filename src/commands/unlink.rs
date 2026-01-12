@@ -33,6 +33,8 @@ pub async fn command(args: Args) -> Result<()> {
         .iter()
         .find(|service| Some(service.node.id.clone()) == linked_project.service);
 
+    let is_terminal = std::io::stdout().is_terminal();
+
     if args.service {
         let Some(service) = linked_service else {
             bail!("No linked service");
@@ -44,12 +46,14 @@ pub async fn command(args: Args) -> Result<()> {
                 project.name.bold()
             );
         }
-        let confirmed = if args.yes || args.json {
+        let confirmed = if args.yes {
             true
-        } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        } else if is_terminal {
             prompt_confirm_with_default("Are you sure you want to unlink this service?", true)?
         } else {
-            true
+            bail!(
+                "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+            );
         };
 
         if !confirmed {
@@ -76,12 +80,14 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let confirmed = if args.yes || args.json {
+    let confirmed = if args.yes {
         true
-    } else if std::io::stdout().is_terminal() {
+    } else if is_terminal {
         prompt_confirm_with_default("Are you sure you want to unlink this project?", true)?
     } else {
-        true
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
     };
 
     if !confirmed {
