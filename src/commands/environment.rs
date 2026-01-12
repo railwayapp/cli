@@ -28,6 +28,10 @@ pub struct Args {
 
     #[clap(subcommand)]
     command: Option<EnvironmentCommand>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -58,6 +62,10 @@ pub struct NewArgs {
     /// railway environment new foo --duplicate bar --service-variable <service name/service uuid> BACKEND_PORT=3000
     #[clap(long = "service-variable", short = 'v', number_of_values = 2, value_names = &["SERVICE", "VARIABLE"])]
     pub service_variables: Vec<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    pub json: bool,
 }
 
 #[derive(Parser)]
@@ -68,13 +76,17 @@ pub struct DeleteArgs {
 
     /// The environment to delete
     environment: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
-        Some(EnvironmentCommand::New(args)) => new_environment(args).await,
-        Some(EnvironmentCommand::Delete(args)) => delete_environment(args).await,
-        None => link_environment(args).await,
+        Some(EnvironmentCommand::New(sub_args)) => new_environment(sub_args).await,
+        Some(EnvironmentCommand::Delete(sub_args)) => delete_environment(sub_args).await,
+        None => link_environment(args.environment, args.json).await,
     }
 }
 
@@ -85,6 +97,7 @@ async fn new_environment(args: NewArgs) -> Result<()> {
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
     let project_id = project.id.clone();
     let is_terminal = std::io::stdout().is_terminal();
+    let json = args.json;
 
     let name = select_name_new(&args, is_terminal)?;
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
@@ -100,14 +113,19 @@ async fn new_environment(args: NewArgs) -> Result<()> {
         apply_changes_in_background: Some(apply_changes_in_background),
     };
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Creating environment...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = if !json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message("Creating environment...");
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
 
     let response =
         post_graphql::<mutations::EnvironmentCreate, _>(&client, &configs.get_backboard(), vars)
@@ -121,15 +139,19 @@ async fn new_environment(args: NewArgs) -> Result<()> {
         let _ = wait_for_environment_creation(&client, &configs, env_id.clone()).await;
     }
 
-    spinner.finish_with_message(format!(
-        "{} {} {}",
-        "Environment".green(),
-        env_name.magenta().bold(),
-        "created! 🎉".green()
-    ));
+    if json {
+        println!("{}", serde_json::json!({"id": env_id, "name": env_name}));
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "{} {} {}",
+            "Environment".green(),
+            env_name.magenta().bold(),
+            "created! 🎉".green()
+        ));
+    }
     if !service_variables.is_empty() {
         upsert_variables(&configs, client, project, service_variables, env_id.clone()).await?;
-    } else {
+    } else if !json {
         println!();
     }
 
@@ -207,6 +229,9 @@ async fn delete_environment(args: DeleteArgs) -> Result<()> {
         info.is_verified
     };
     if is_two_factor_enabled {
+        if !is_terminal {
+            bail!("2FA is enabled. This operation requires interactive mode.");
+        }
         let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
 
@@ -219,25 +244,37 @@ async fn delete_environment(args: DeleteArgs) -> Result<()> {
             return Err(RailwayError::InvalidTwoFactorCode.into());
         }
     }
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Deleting environment...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = if !args.json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message("Deleting environment...");
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
     let _r = post_graphql::<mutations::EnvironmentDelete, _>(
         &client,
         &configs.get_backboard(),
-        mutations::environment_delete::Variables { id },
+        mutations::environment_delete::Variables { id: id.clone() },
     )
     .await?;
-    spinner.finish_with_message("Environment deleted!");
+    if args.json {
+        println!("{}", serde_json::json!({"id": id}));
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message("Environment deleted!");
+    }
     Ok(())
 }
 
-async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> {
+async fn link_environment(
+    environment_arg: Option<String>,
+    json: bool,
+) -> std::result::Result<(), anyhow::Error> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -263,7 +300,7 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         }
     }
 
-    let environment = match args.environment {
+    let environment = match environment_arg {
         // If the environment is specified, find it in the list of environments
         Some(environment) => {
             let environment = environments
@@ -293,13 +330,22 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         }
     };
 
+    let environment_id = environment.0.id.clone();
     let environment_name = environment.0.name.clone();
-    println!("Activated environment {}", environment_name.purple().bold());
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"id": environment_id, "name": environment_name})
+        );
+    } else {
+        println!("Activated environment {}", environment_name.purple().bold());
+    }
 
     configs.link_project(
         linked_project.project.clone(),
         linked_project.name.clone(),
-        environment.0.id.clone(),
+        environment_id,
         Some(environment_name),
     )?;
     configs.write()?;

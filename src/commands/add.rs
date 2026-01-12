@@ -48,6 +48,10 @@ pub struct Args {
     /// Verbose logging
     #[clap(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     verbose: Option<bool>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -116,6 +120,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
     match type_of_create {
         CreateKind::Database(databases) => {
+            let mut created = Vec::new();
             for db in databases {
                 if verbose {
                     println!("iterating through databases to add: {:?}", db)
@@ -127,11 +132,16 @@ pub async fn command(args: Args) -> Result<()> {
                     &linked_project,
                     &HashMap::new(),
                     verbose,
+                    args.json,
                 )
                 .await?;
+                created.push(db.to_slug().to_string());
                 if verbose {
                     println!("succesfully created {:?}", db)
                 }
+            }
+            if args.json {
+                println!("{}", serde_json::json!({"databases": created}));
             }
         }
         CreateKind::DockerImage {
@@ -148,6 +158,7 @@ pub async fn command(args: Args) -> Result<()> {
                 Some(image),
                 variables,
                 verbose,
+                args.json,
             )
             .await?;
         }
@@ -165,6 +176,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 variables,
                 verbose,
+                args.json,
             )
             .await?;
         }
@@ -178,6 +190,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 variables,
                 verbose,
+                args.json,
             )
             .await?;
         }
@@ -274,15 +287,21 @@ async fn create_service(
     image: Option<String>,
     variables: Variables,
     verbose: bool,
+    json: bool,
 ) -> Result<(), anyhow::Error> {
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Creating service...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = if !json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message("Creating service...");
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
     let source = mutations::service_create::ServiceSourceInput { repo, image };
     let branch = if let Some(repo) = &source.repo {
         if verbose {
@@ -316,12 +335,19 @@ async fn create_service(
     }
     let s =
         post_graphql::<mutations::ServiceCreate, _>(client, &configs.get_backboard(), vars).await?;
-    configs.link_service(s.service_create.id)?;
+    configs.link_service(s.service_create.id.clone())?;
     configs.write()?;
-    spinner.finish_with_message(format!(
-        "Successfully created the service \"{}\" and linked to it",
-        s.service_create.name.blue()
-    ));
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"id": s.service_create.id, "name": s.service_create.name})
+        );
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "Successfully created the service \"{}\" and linked to it",
+            s.service_create.name.blue()
+        ));
+    }
     Ok(())
 }
 

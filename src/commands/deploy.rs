@@ -63,6 +63,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &linked_project,
                 &variables,
                 false,
+                false,
             )
             .await?;
         } else {
@@ -73,6 +74,7 @@ pub async fn command(args: Args) -> Result<()> {
                 template,
                 &linked_project,
                 &variables,
+                false,
                 false,
             )
             .await?;
@@ -91,6 +93,7 @@ pub async fn fetch_and_create(
     linked_project: &LinkedProject,
     vars: &HashMap<String, String>,
     verbose: bool,
+    json: bool,
 ) -> Result<(), anyhow::Error> {
     if verbose {
         println!("fetching details for template")
@@ -138,17 +141,21 @@ pub async fn fetch_and_create(
         }
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message(format!("Creating {template}..."));
+    let spinner = if !json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message(format!("Creating {template}..."));
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
 
-    spinner.enable_steady_tick(Duration::from_millis(100));
-
-    let vars = mutations::template_deploy::Variables {
+    let mutation_vars = mutations::template_deploy::Variables {
         project_id: linked_project.project.clone(),
         environment_id: linked_project.environment.clone(),
         template_id: details.template.id,
@@ -157,12 +164,15 @@ pub async fn fetch_and_create(
     if verbose {
         println!("deploying template");
     }
-    post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), vars).await?;
+    post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), mutation_vars)
+        .await?;
 
-    spinner.finish_with_message(format!(
-        "🎉 Added {} to project",
-        details.template.name.green().bold(),
-    ));
+    if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "🎉 Added {} to project",
+            details.template.name.green().bold(),
+        ));
+    }
     if verbose {
         println!("template deployed");
     }

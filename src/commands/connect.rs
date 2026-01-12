@@ -1,4 +1,5 @@
 use anyhow::bail;
+use is_terminal::IsTerminal;
 use std::{collections::BTreeMap, fmt::Display};
 use tokio::process::Command;
 use url::Url;
@@ -44,24 +45,24 @@ pub async fn command(args: Args) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let service = args
-        .service_name
-        .clone()
-        .map(|name| get_service(&project, name))
-        .unwrap_or_else(|| {
-            let nodes_to_prompt = project
-                .services
-                .edges
-                .iter()
-                .map(|s| s.node.clone())
-                .collect::<Vec<ProjectProjectServicesEdgesNode>>();
+    let service = if let Some(name) = args.service_name.clone() {
+        get_service(&project, name)?
+    } else if std::io::stdout().is_terminal() {
+        let nodes_to_prompt = project
+            .services
+            .edges
+            .iter()
+            .map(|s| s.node.clone())
+            .collect::<Vec<ProjectProjectServicesEdgesNode>>();
 
-            if nodes_to_prompt.is_empty() {
-                return Err(RailwayError::ProjectHasNoServices.into());
-            }
+        if nodes_to_prompt.is_empty() {
+            return Err(RailwayError::ProjectHasNoServices.into());
+        }
 
-            prompt_select("Select service", nodes_to_prompt).context("No service selected")
-        })?;
+        prompt_select("Select service", nodes_to_prompt).context("No service selected")?
+    } else {
+        bail!("Service name must be specified in non-interactive mode");
+    };
 
     let environment_id = get_matched_environment(&project, environment)?.id;
     let service_id = service.id.clone();

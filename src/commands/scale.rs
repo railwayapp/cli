@@ -33,6 +33,10 @@ pub struct Args {
     /// The environment the service is in (defaults to linked environment)
     #[clap(long, short)]
     environment: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -63,11 +67,24 @@ pub async fn command(args: Args) -> Result<()> {
         },
     );
     if new_config.is_empty() {
-        println!("No changes made");
+        if !args.json {
+            println!("No changes made");
+        }
         return Ok(());
     }
     let region_data = merge_config(existing, new_config);
-    update_regions_and_redeploy(configs, client, linked_project, region_data).await?;
+    update_regions_and_redeploy(
+        configs,
+        client,
+        linked_project,
+        region_data.clone(),
+        args.json,
+    )
+    .await?;
+
+    if args.json {
+        println!("{}", serde_json::json!({"regions": region_data}));
+    }
 
     Ok(())
 }
@@ -176,15 +193,21 @@ async fn update_regions_and_redeploy(
     client: reqwest::Client,
     linked_project: LinkedProject,
     region_data: Value,
+    json: bool,
 ) -> Result<(), anyhow::Error> {
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Updating regions...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = if !json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message("Updating regions...");
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
     post_graphql::<mutations::UpdateRegions, _>(
         &client,
         configs.get_backboard(),
@@ -195,15 +218,22 @@ async fn update_regions_and_redeploy(
         },
     )
     .await?;
-    spinner.finish_with_message("Regions updated");
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Redeploying...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    if let Some(s) = &spinner {
+        s.finish_with_message("Regions updated");
+    }
+    let spinner2 = if !json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message("Redeploying...");
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
     post_graphql::<mutations::ServiceInstanceDeploy, _>(
         &client,
         configs.get_backboard(),
@@ -213,7 +243,9 @@ async fn update_regions_and_redeploy(
         },
     )
     .await?;
-    spinner.finish_with_message("Redeployed");
+    if let Some(s) = spinner2 {
+        s.finish_with_message("Redeployed");
+    }
     Ok(())
 }
 

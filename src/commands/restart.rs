@@ -26,6 +26,10 @@ pub struct Args {
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     yes: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -82,17 +86,22 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message(format!(
-            "Restarting the latest deployment from service {}...",
-            service.node.name
-        ));
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = if !args.json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message(format!(
+                "Restarting the latest deployment from service {}...",
+                service.node.name
+            ));
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
 
     post_graphql::<mutations::DeploymentRestart, _>(
         &client,
@@ -103,6 +112,12 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
 
+    if args.json {
+        println!("{}", serde_json::json!({"id": latest.id}));
+        return Ok(());
+    }
+
+    let spinner = spinner.unwrap();
     spinner.set_message(format!(
         "Waiting for deployment from service {} to be healthy...",
         service.node.name

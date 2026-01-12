@@ -17,6 +17,10 @@ pub struct Args {
     /// Workspace ID or name
     #[clap(short, long)]
     workspace: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -55,28 +59,38 @@ pub async fn command(args: Args) -> Result<()> {
     configs.link_project(
         project_create.id.clone(),
         Some(project_create.name.clone()),
-        environment.id,
-        Some(environment.name),
+        environment.id.clone(),
+        Some(environment.name.clone()),
     )?;
     configs.write()?;
 
-    println!(
-        "\n{} {} on {}",
-        "Created project".green().bold(),
-        project_create.name.bold(),
-        workspace,
-    );
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "id": project_create.id,
+                "name": project_create.name
+            })
+        );
+    } else {
+        println!(
+            "\n{} {} on {}",
+            "Created project".green().bold(),
+            project_create.name.bold(),
+            workspace,
+        );
 
-    println!(
-        "{}",
-        format!(
-            "https://{}/project/{}",
-            configs.get_host(),
-            project_create.id
-        )
-        .bold()
-        .underline()
-    );
+        println!(
+            "{}",
+            format!(
+                "https://{}/project/{}",
+                configs.get_host(),
+                project_create.id
+            )
+            .bold()
+            .underline()
+        );
+    }
     Ok(())
 }
 

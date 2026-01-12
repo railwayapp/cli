@@ -23,6 +23,10 @@ pub struct Args {
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     bypass: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -79,19 +83,24 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message(format!(
-            "Redeploying the latest deployment from service {}...",
-            service.node.name
-        ));
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = if !args.json {
+        let s = indicatif::ProgressBar::new_spinner()
+            .with_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars(TICK_STRING)
+                    .template("{spinner:.green} {msg}")?,
+            )
+            .with_message(format!(
+                "Redeploying the latest deployment from service {}...",
+                service.node.name
+            ));
+        s.enable_steady_tick(Duration::from_millis(100));
+        Some(s)
+    } else {
+        None
+    };
 
-    post_graphql::<mutations::DeploymentRedeploy, _>(
+    let response = post_graphql::<mutations::DeploymentRedeploy, _>(
         &client,
         configs.get_backboard(),
         mutations::deployment_redeploy::Variables {
@@ -100,10 +109,17 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
 
-    spinner.finish_with_message(format!(
-        "The latest deployment from service {} has been redeployed",
-        service.node.name.green()
-    ));
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({"id": response.deployment_redeploy.id})
+        );
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "The latest deployment from service {} has been redeployed",
+            service.node.name.green()
+        ));
+    }
 
     Ok(())
 }
