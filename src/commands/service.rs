@@ -29,6 +29,15 @@ enum Commands {
 
     /// Show deployment status for services
     Status(StatusArgs),
+
+    /// View logs from a service
+    Logs(crate::commands::logs::Args),
+
+    /// Restart the latest deployment of a service
+    Restart(crate::commands::restart::Args),
+
+    /// Scale a service across regions
+    Scale(crate::commands::scale::Args),
 }
 
 #[derive(Parser)]
@@ -81,6 +90,11 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Some(Commands::Link(link_args)) => link_command(link_args).await,
         Some(Commands::Status(status_args)) => status_command(status_args).await,
+        Some(Commands::Logs(logs_args)) => crate::commands::logs::command(logs_args).await,
+        Some(Commands::Restart(restart_args)) => {
+            crate::commands::restart::command(restart_args).await
+        }
+        Some(Commands::Scale(scale_args)) => crate::commands::scale::command(scale_args).await,
         None => unreachable!(),
     }
 }

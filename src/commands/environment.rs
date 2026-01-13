@@ -32,12 +32,25 @@ pub struct Args {
 
 #[derive(Subcommand)]
 pub enum EnvironmentCommand {
+    /// Link an environment to the current project
+    Link(LinkArgs),
+
     /// Create a new environment
     New(NewArgs),
 
     /// Delete an environment
     #[clap(visible_aliases = &["remove", "rm"])]
     Delete(DeleteArgs),
+}
+
+#[derive(Parser)]
+pub struct LinkArgs {
+    /// The environment to link to
+    environment: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 #[derive(Parser)]
@@ -72,9 +85,13 @@ pub struct DeleteArgs {
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
-        Some(EnvironmentCommand::New(args)) => new_environment(args).await,
-        Some(EnvironmentCommand::Delete(args)) => delete_environment(args).await,
-        None => link_environment(args).await,
+        Some(EnvironmentCommand::Link(link_args)) => {
+            link_environment(link_args.environment, link_args.json).await
+        }
+        Some(EnvironmentCommand::New(new_args)) => new_environment(new_args).await,
+        Some(EnvironmentCommand::Delete(delete_args)) => delete_environment(delete_args).await,
+        // Legacy: `railway environment <name>` without subcommand
+        None => link_environment(args.environment, false).await,
     }
 }
 
@@ -237,7 +254,10 @@ async fn delete_environment(args: DeleteArgs) -> Result<()> {
     Ok(())
 }
 
-async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> {
+async fn link_environment(
+    environment_arg: Option<String>,
+    json: bool,
+) -> std::result::Result<(), anyhow::Error> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -263,7 +283,7 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         }
     }
 
-    let environment = match args.environment {
+    let environment = match environment_arg {
         // If the environment is specified, find it in the list of environments
         Some(environment) => {
             let environment = environments
@@ -293,13 +313,22 @@ async fn link_environment(args: Args) -> std::result::Result<(), anyhow::Error> 
         }
     };
 
+    let environment_id = environment.0.id.clone();
     let environment_name = environment.0.name.clone();
-    println!("Activated environment {}", environment_name.purple().bold());
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"id": environment_id, "name": environment_name})
+        );
+    } else {
+        println!("Activated environment {}", environment_name.purple().bold());
+    }
 
     configs.link_project(
         linked_project.project.clone(),
         linked_project.name.clone(),
-        environment.0.id.clone(),
+        environment_id,
         Some(environment_name),
     )?;
     configs.write()?;

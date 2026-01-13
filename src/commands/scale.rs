@@ -290,8 +290,10 @@ fn get_existing_config(
 
 /// This function generates flags that are appended to the command at runtime.
 pub fn get_dynamic_args(cmd: Command) -> Command {
-    if !std::env::args().any(|f| f.eq_ignore_ascii_case("scale")) {
-        // if the command has nothing to do with railway scale, dont make the web request.
+    // Check for both "scale" (root command) and "service" (when used as `service scale`)
+    if !std::env::args()
+        .any(|f| f.eq_ignore_ascii_case("scale") || f.eq_ignore_ascii_case("service"))
+    {
         return cmd;
     }
     block_on(async move {
