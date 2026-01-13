@@ -217,7 +217,7 @@ pub fn edit_services_select(
             // each function needs to handle non interactive arguments
             // each function is responsible for checking what is provided is valid (e.g a variable is in the right format)
             // if it isn't valid, it should simply skip that parse - make sure this is known to the user
-            // (see non_interactive_variables fn for skipping)
+            // (see non interactive implementation of ChangeHandler for Variable for skipping)
             let mut service_lookup: HashMap<&String, &String> = HashMap::new();
             let parsed = change
                 .parse_non_interactive(non_interactive_args)

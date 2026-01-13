@@ -309,6 +309,7 @@ pub fn get_dynamic_args(cmd: Command) -> Command {
         let region_strings = regions
             .regions
             .iter()
+            .filter(|r| r.railway_metal.unwrap_or_default())
             .map(|r| r.name.to_string())
             .collect::<Vec<String>>();
 
