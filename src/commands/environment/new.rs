@@ -87,11 +87,11 @@ impl Change {
 
 /// Trait for handling the parsing of a change
 trait ChangeHandler: Clone {
-    /// Get the command-line args for this change type
-    fn get_args(args: &Args) -> &Vec<String>;
+    /// Get the command-line args for this change type (if fixed amount of values, should be chunked)
+    fn get_args(args: &Args) -> Vec<Vec<String>>;
 
     /// Parse from non-interactive arguments
-    fn parse_non_interactive(args: Vec<String>) -> Vec<(String, Self)>;
+    fn parse_non_interactive(args: Vec<Vec<String>>) -> Vec<(String, Self)>;
 
     /// Parse interactively for a specific service
     fn parse_interactive(service_name: &str) -> Result<Vec<Self>>;
@@ -103,13 +103,17 @@ trait ChangeHandler: Clone {
 macro_rules! register_handlers {
     ($($type:ident),* $(,)?) => {
         impl ChangeOption {
-            fn get_args<'a>(&self, args: &'a Args) -> &'a Vec<String> {
+            fn get_args(&self, args: &Args) -> Vec<Vec<String>> {
                 match self {
                     $(ChangeOption::$type => <$type>::get_args(args),)*
                 }
             }
 
-            fn parse_non_interactive(&self, args: Vec<String>) -> Vec<(String, Change)> {
+            fn parse_non_interactive(&self, args: Vec<Vec<String>>) -> Vec<(String, Change)> {
+                if args.is_empty() || args.iter().all(|v| v.is_empty()) {
+                    return Vec::new();
+                }
+
                 match self {
                     $(
                         ChangeOption::$type => {
@@ -152,12 +156,12 @@ pub fn edit_services_select(
     // get all options and their respective non-interactive arguments
     let configure_options = ChangeOption::iter()
         .map(|opt| (opt, opt.get_args(args)))
-        .collect::<Vec<(ChangeOption, &Vec<String>)>>();
+        .collect::<Vec<(ChangeOption, Vec<Vec<String>>)>>();
     // find which have arguments provided non interactively
     let non_interactive_provided = configure_options
         .iter()
         .filter(|(_, v)| !v.is_empty())
-        .collect::<Vec<&(ChangeOption, &Vec<String>)>>();
+        .collect::<Vec<&(ChangeOption, Vec<Vec<String>>)>>();
     let selected = match (
         is_terminal,
         non_interactive_provided.is_empty(),
@@ -185,8 +189,7 @@ pub fn edit_services_select(
             configure_options
                 .to_vec()
                 .iter()
-                .cloned()
-                .map(|(c, enabled)| (c, !enabled.is_empty()))
+                .map(|(c, enabled)| (*c, !enabled.is_empty()))
                 .collect::<Vec<_>>(),
         )?,
         // not a terminal, nothing provided non-interactively, assume that no changes are wanted (early return)
@@ -210,7 +213,7 @@ pub fn edit_services_select(
         let non_interactive_args = non_interactive_provided
             .iter()
             .find(|(option, _)| *option == change)
-            .map(|(_, c)| (**c).clone())
+            .map(|(_, c)| (*c).clone())
             .unwrap_or_default();
         // non interactive isnt empty
         let changes = if !non_interactive_args.is_empty() {
@@ -630,13 +633,17 @@ async fn wait_for_environment_creation(
     retry_with_backoff(config, check_status).await
 }
 
+fn chunk(v: &[String], chunks: usize) -> Vec<Vec<String>> {
+    v.chunks(chunks).map(|c| c.to_vec()).collect()
+}
+
 impl ChangeHandler for Variable {
-    fn get_args(args: &Args) -> &Vec<String> {
-        &args.service_variables
+    fn get_args(args: &Args) -> Vec<Vec<String>> {
+        chunk(&args.service_variables, 2)
     }
 
-    fn parse_non_interactive(args: Vec<String>) -> Vec<(String, Variable)> {
-        args.chunks(2)
+    fn parse_non_interactive(args: Vec<Vec<String>>) -> Vec<(String, Variable)> {
+        args.iter()
             .filter_map(|chunk| {
                 // clap ensures that there will always be 2 values whenever the flag is provided
                 // this is unfiltered user input. validation of the service happens in the edit_services_select function
@@ -665,21 +672,18 @@ impl ChangeHandler for Variable {
 }
 
 impl ChangeHandler for Source {
-    fn get_args(args: &Args) -> &Vec<String> {
-        &args.service_sources
+    fn get_args(args: &Args) -> Vec<Vec<String>> {
+        chunk(&args.service_sources, 3)
     }
 
-    fn parse_non_interactive(args: Vec<String>) -> Vec<(String, Source)> {
-        args.chunks(3)
+    fn parse_non_interactive(args: Vec<Vec<String>>) -> Vec<(String, Source)> {
+        args.iter()
             .filter_map(|chunk| {
                 // clap ensures that there will always be 3 values whenever the flag is provided
                 let service = chunk.first()?.to_owned();
 
                 let source_type = match SourceTypes::from_str(&chunk.get(1)?.to_lowercase()) {
-                    Ok(f) => {
-                        fake_select("What do you want to change the source to?", &f.to_string());
-                        f
-                    }
+                    Ok(f) => f,
                     Err(_) => {
                         eprintln!(
                             "Invalid platform. Valid platforms are: {} (skipping)",
@@ -693,10 +697,7 @@ impl ChangeHandler for Source {
                 };
 
                 let source = match source_type {
-                    SourceTypes::Docker => {
-                        fake_select("Enter a docker image", chunk.last()?);
-                        Some(Source::Docker(chunk.last()?.to_string()))
-                    }
+                    SourceTypes::Docker => Some(Source::Docker(chunk.last()?.to_string())),
                     SourceTypes::GitHub => match parse_repo(chunk.last()?.to_string()) {
                         Ok(source) => Some(source),
                         Err(e) => {
