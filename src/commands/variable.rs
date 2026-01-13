@@ -2,11 +2,9 @@ use super::*;
 use crate::{
     consts::TICK_STRING,
     controllers::{
-        environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project},
+        project::resolve_service_context,
         variables::{Variable, get_service_variables},
     },
-    errors::RailwayError,
     table::Table,
 };
 use anyhow::bail;
@@ -166,39 +164,14 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 async fn list_variables(args: ListArgs) -> Result<()> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let environment = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
-
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-
-    let environment_id = get_matched_environment(&project, environment)?.id;
-    let service_id = match (args.service, linked_project.service) {
-        (Some(service_arg), _) => services
-            .iter()
-            .find(|service| service.node.name == service_arg || service.node.id == service_arg)
-            .with_context(|| format!("Service '{service_arg}' not found"))?
-            .node
-            .id
-            .to_owned(),
-        (_, Some(linked_service)) => linked_service,
-        _ => bail!(RailwayError::NoServiceLinked),
-    };
+    let ctx = resolve_service_context(args.service, args.environment).await?;
 
     let variables = get_service_variables(
-        &client,
-        &configs,
-        project.id,
-        environment_id,
-        service_id.clone(),
+        &ctx.client,
+        &ctx.configs,
+        ctx.project.id.clone(),
+        ctx.environment_id,
+        ctx.service_id,
     )
     .await?;
 
@@ -219,16 +192,7 @@ async fn list_variables(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    let table = Table::new(
-        services
-            .iter()
-            .find(|s| s.node.id == service_id)
-            .unwrap()
-            .node
-            .name
-            .clone(),
-        variables,
-    );
+    let table = Table::new(ctx.service_name, variables);
     table.print()?;
 
     Ok(())
@@ -256,34 +220,7 @@ async fn set_variable(args: SetArgs) -> Result<()> {
 }
 
 async fn delete_variable(args: DeleteArgs) -> Result<()> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let environment = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
-
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-
-    let environment_id = get_matched_environment(&project, environment)?.id;
-    let service_id = match (args.service, linked_project.service.clone()) {
-        (Some(service_arg), _) => Some(
-            services
-                .iter()
-                .find(|service| service.node.name == service_arg || service.node.id == service_arg)
-                .with_context(|| format!("Service '{service_arg}' not found"))?
-                .node
-                .id
-                .to_owned(),
-        ),
-        (_, Some(linked_service)) => Some(linked_service),
-        _ => None,
-    };
+    let ctx = resolve_service_context(args.service, args.environment).await?;
 
     let spinner = indicatif::ProgressBar::new_spinner()
         .with_style(
@@ -299,13 +236,14 @@ async fn delete_variable(args: DeleteArgs) -> Result<()> {
     }
 
     let vars = mutations::variable_delete::Variables {
-        project_id: linked_project.project.clone(),
-        environment_id,
+        project_id: ctx.project_id,
+        environment_id: ctx.environment_id,
         name: args.key.clone(),
-        service_id,
+        service_id: Some(ctx.service_id),
     };
 
-    post_graphql::<mutations::VariableDelete, _>(&client, configs.get_backboard(), vars).await?;
+    post_graphql::<mutations::VariableDelete, _>(&ctx.client, ctx.configs.get_backboard(), vars)
+        .await?;
 
     if args.json {
         println!("{}", serde_json::json!({"key": args.key, "deleted": true}));
@@ -333,28 +271,7 @@ async fn set_variables_internal(
     skip_deploys: bool,
     json: bool,
 ) -> Result<()> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let env = environment.unwrap_or(linked_project.environment.clone());
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-    let environment_id = get_matched_environment(&project, env)?.id;
-
-    let service_id = match (service, linked_project.service) {
-        (Some(service_arg), _) => services
-            .iter()
-            .find(|s| s.node.name == service_arg || s.node.id == service_arg)
-            .with_context(|| format!("Service '{service_arg}' not found"))?
-            .node
-            .id
-            .to_owned(),
-        (_, Some(linked_service)) => linked_service,
-        _ => bail!(RailwayError::NoServiceLinked),
-    };
+    let ctx = resolve_service_context(service, environment).await?;
 
     let fmt_variables = variables
         .iter()
@@ -376,15 +293,19 @@ async fn set_variables_internal(
     }
 
     let vars = mutations::variable_collection_upsert::Variables {
-        project_id: linked_project.project,
-        environment_id,
-        service_id,
+        project_id: ctx.project_id,
+        environment_id: ctx.environment_id,
+        service_id: ctx.service_id,
         variables: variables.into_iter().map(|v| (v.key, v.value)).collect(),
         skip_deploys: skip_deploys.then_some(true),
     };
 
-    post_graphql::<mutations::VariableCollectionUpsert, _>(&client, configs.get_backboard(), vars)
-        .await?;
+    post_graphql::<mutations::VariableCollectionUpsert, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        vars,
+    )
+    .await?;
 
     if json {
         println!("{}", serde_json::json!({"set": fmt_variables}));

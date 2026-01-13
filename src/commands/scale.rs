@@ -293,10 +293,15 @@ fn get_existing_config(
 
 /// This function generates flags that are appended to the command at runtime.
 pub fn get_dynamic_args(cmd: Command) -> Command {
-    // Check for both "scale" (root command) and "service" (when used as `service scale`)
-    if !std::env::args()
-        .any(|f| f.eq_ignore_ascii_case("scale") || f.eq_ignore_ascii_case("service"))
-    {
+    // Check if scale is the actual subcommand (not just anywhere in args)
+    // Handles: `railway scale` and `railway service scale`
+    let args: Vec<String> = std::env::args().collect();
+    let is_scale = args.len() >= 2
+        && (args[1].eq_ignore_ascii_case("scale")
+            || (args.len() >= 3
+                && args[1].eq_ignore_ascii_case("service")
+                && args[2].eq_ignore_ascii_case("scale")));
+    if !is_scale {
         return cmd;
     }
     block_on(async move {
