@@ -67,17 +67,41 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     }
     let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
     if let Some(errors) = res.errors {
-        if errors[0].message.to_lowercase().contains("not authorized") {
+        let error = &errors[0];
+        if error.message.to_lowercase().contains("not authorized") {
             // Handle unauthorized errors in a custom way
             Err(RailwayError::Unauthorized)
+        } else if error.message == "Two Factor Authentication Required" {
+            // Extract workspace name from extensions if available
+            let workspace_name = error
+                .extensions
+                .as_ref()
+                .and_then(|ext| ext.get("workspaceName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("this workspace")
+                .to_string();
+            let security_url = get_security_url();
+            Err(RailwayError::TwoFactorEnforcementRequired(
+                workspace_name,
+                security_url,
+            ))
         } else {
-            Err(RailwayError::GraphQLError(errors[0].message.clone()))
+            Err(RailwayError::GraphQLError(error.message.clone()))
         }
     } else if let Some(data) = res.data {
         Ok(data)
     } else {
         Err(RailwayError::MissingResponseData)
     }
+}
+
+fn get_security_url() -> String {
+    let host = match Configs::get_environment_id() {
+        Environment::Production => "railway.com",
+        Environment::Staging => "railway-staging.com",
+        Environment::Dev => "railway-develop.com",
+    };
+    format!("https://{}/account/security", host)
 }
 
 /// Like post_graphql, but removes null values from the variables object before sending.
@@ -110,10 +134,25 @@ pub async fn post_graphql_skip_none<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     }
     let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
     if let Some(errors) = res.errors {
-        if errors[0].message.to_lowercase().contains("not authorized") {
+        let error = &errors[0];
+        if error.message.to_lowercase().contains("not authorized") {
             Err(RailwayError::Unauthorized)
+        } else if error.message == "Two Factor Authentication Required" {
+            // Extract workspace name from extensions if available
+            let workspace_name = error
+                .extensions
+                .as_ref()
+                .and_then(|ext| ext.get("workspaceName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("this workspace")
+                .to_string();
+            let security_url = get_security_url();
+            Err(RailwayError::TwoFactorEnforcementRequired(
+                workspace_name,
+                security_url,
+            ))
         } else {
-            Err(RailwayError::GraphQLError(errors[0].message.clone()))
+            Err(RailwayError::GraphQLError(error.message.clone()))
         }
     } else if let Some(data) = res.data {
         Ok(data)

@@ -67,6 +67,10 @@ pub struct Args {
     #[clap(long)]
     /// Verbose output
     verbose: bool,
+
+    #[clap(long)]
+    /// Output logs in JSON format (implies CI mode behavior)
+    json: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -124,7 +128,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let service = get_or_prompt_service(linked_project, project, args.service).await?;
 
-    let spinner = if std::io::stdout().is_terminal() {
+    let spinner = if std::io::stdout().is_terminal() && !args.json {
         let spinner = ProgressBar::new_spinner()
             .with_style(
                 ProgressStyle::default_spinner()
@@ -134,8 +138,10 @@ pub async fn command(args: Args) -> Result<()> {
             .with_message("Indexing".to_string());
         spinner.enable_steady_tick(Duration::from_millis(100));
         Some(spinner)
-    } else {
+    } else if !args.json {
         println!("Indexing...");
+        None
+    } else {
         None
     };
 
@@ -179,7 +185,7 @@ pub async fn command(args: Args) -> Result<()> {
         if let Some(spinner) = spinner {
             spinner.finish_with_message("Indexed");
         }
-        if std::io::stdout().is_terminal() {
+        if std::io::stdout().is_terminal() && !args.json {
             let pg = ProgressBar::new(walked.len() as u64)
                 .with_style(
                     ProgressStyle::default_bar()
@@ -239,7 +245,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     let builder = client.post(url);
-    let spinner = if std::io::stdout().is_terminal() {
+    let spinner = if std::io::stdout().is_terminal() && !args.json {
         let spinner = ProgressBar::new_spinner()
             .with_style(
                 ProgressStyle::default_spinner()
@@ -249,8 +255,10 @@ pub async fn command(args: Args) -> Result<()> {
             .with_message("Uploading");
         spinner.enable_steady_tick(Duration::from_millis(100));
         Some(spinner)
-    } else {
+    } else if !args.json {
         println!("Uploading...");
+        None
+    } else {
         None
     };
 
@@ -295,14 +303,22 @@ pub async fn command(args: Args) -> Result<()> {
 
     let deployment_id = body.deployment_id;
 
-    println!("  {}: {}", "Build Logs".green().bold(), body.logs_url);
+    if !args.json {
+        println!("  {}: {}", "Build Logs".green().bold(), body.logs_url);
+    }
 
     if args.detach {
+        if args.json {
+            println!(
+                "{}",
+                serde_json::json!({"deploymentId": deployment_id, "logsUrl": body.logs_url})
+            );
+        }
         return Ok(());
     }
 
-    let ci_mode = Configs::env_is_ci() || args.ci;
-    if ci_mode {
+    let ci_mode = Configs::env_is_ci() || args.ci || args.json;
+    if ci_mode && !args.json {
         println!("{}", "CI mode enabled".green().bold());
     }
 
@@ -319,10 +335,18 @@ pub async fn command(args: Args) -> Result<()> {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let build_deployment_id = deployment_id.clone();
+    let json_mode = args.json;
+    let ci_flag = args.ci;
     let mut tasks = vec![tokio::task::spawn(async move {
         if let Err(e) = stream_build_logs(build_deployment_id, None, |log| {
-            println!("{}", log.message);
-            if args.ci && log.message.starts_with("No changed files matched patterns") {
+            let should_exit =
+                ci_flag && log.message.starts_with("No changed files matched patterns");
+            if json_mode {
+                print_log(log, true, false);
+            } else {
+                println!("{}", log.message);
+            }
+            if should_exit {
                 std::process::exit(0);
             }
         })
@@ -359,14 +383,21 @@ pub async fn command(args: Args) -> Result<()> {
     tokio::task::spawn(async move {
         while let Some(Ok(res)) = stream.next().await {
             if let Some(errors) = res.errors {
-                eprintln!(
-                    "Failed to get deploy status: {}",
-                    errors
-                        .iter()
-                        .map(|err| err.to_string())
-                        .collect::<Vec<String>>()
-                        .join("; ")
-                );
+                if json_mode {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"error": errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")})
+                    );
+                } else {
+                    eprintln!(
+                        "Failed to get deploy status: {}",
+                        errors
+                            .iter()
+                            .map(|err| err.to_string())
+                            .collect::<Vec<String>>()
+                            .join("; ")
+                    );
+                }
                 if ci_mode {
                     std::process::exit(1);
                 }
@@ -374,17 +405,29 @@ pub async fn command(args: Args) -> Result<()> {
             if let Some(data) = res.data {
                 match data.deployment.status {
                     DeploymentStatus::SUCCESS => {
-                        println!("{}", "Deploy complete".green().bold());
+                        if json_mode {
+                            println!("{}", serde_json::json!({"status": "success"}));
+                        } else {
+                            println!("{}", "Deploy complete".green().bold());
+                        }
                         if ci_mode {
                             std::process::exit(0);
                         }
                     }
                     DeploymentStatus::FAILED => {
-                        println!("{}", "Deploy failed".red().bold());
+                        if json_mode {
+                            println!("{}", serde_json::json!({"status": "failed"}));
+                        } else {
+                            println!("{}", "Deploy failed".red().bold());
+                        }
                         std::process::exit(1);
                     }
                     DeploymentStatus::CRASHED => {
-                        println!("{}", "Deploy crashed".red().bold());
+                        if json_mode {
+                            println!("{}", serde_json::json!({"status": "crashed"}));
+                        } else {
+                            println!("{}", "Deploy crashed".red().bold());
+                        }
                         std::process::exit(1);
                     }
                     _ => {}

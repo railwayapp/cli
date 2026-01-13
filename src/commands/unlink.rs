@@ -14,6 +14,10 @@ pub struct Args {
     /// Skip confirmation prompt
     #[clap(short = 'y', long = "yes")]
     yes: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -29,21 +33,27 @@ pub async fn command(args: Args) -> Result<()> {
         .iter()
         .find(|service| Some(service.node.id.clone()) == linked_project.service);
 
+    let is_terminal = std::io::stdout().is_terminal();
+
     if args.service {
         let Some(service) = linked_service else {
             bail!("No linked service");
         };
-        println!(
-            "Linked to {} on {}",
-            service.node.name.bold(),
-            project.name.bold()
-        );
+        if !args.json {
+            println!(
+                "Linked to {} on {}",
+                service.node.name.bold(),
+                project.name.bold()
+            );
+        }
         let confirmed = if args.yes {
             true
-        } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        } else if is_terminal {
             prompt_confirm_with_default("Are you sure you want to unlink this service?", true)?
         } else {
-            true
+            bail!(
+                "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+            );
         };
 
         if !confirmed {
@@ -52,25 +62,32 @@ pub async fn command(args: Args) -> Result<()> {
 
         configs.unlink_service()?;
         configs.write()?;
+        if args.json {
+            println!("{}", serde_json::json!({"success": true}));
+        }
         return Ok(());
     }
 
-    if let Some(service) = linked_service {
-        println!(
-            "Linked to {} on {}",
-            service.node.name.bold(),
-            project.name.bold()
-        );
-    } else {
-        println!("Linked to {}", project.name.bold());
+    if !args.json {
+        if let Some(service) = linked_service {
+            println!(
+                "Linked to {} on {}",
+                service.node.name.bold(),
+                project.name.bold()
+            );
+        } else {
+            println!("Linked to {}", project.name.bold());
+        }
     }
 
     let confirmed = if args.yes {
         true
-    } else if std::io::stdout().is_terminal() {
+    } else if is_terminal {
         prompt_confirm_with_default("Are you sure you want to unlink this project?", true)?
     } else {
-        true
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
     };
 
     if !confirmed {
@@ -79,5 +96,8 @@ pub async fn command(args: Args) -> Result<()> {
 
     configs.unlink_project();
     configs.write()?;
+    if args.json {
+        println!("{}", serde_json::json!({"success": true}));
+    }
     Ok(())
 }

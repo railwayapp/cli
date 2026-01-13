@@ -17,6 +17,14 @@ pub fn create_spinner(message: String) -> ProgressBar {
     spinner
 }
 
+pub fn create_spinner_if(show: bool, message: String) -> Option<ProgressBar> {
+    if show {
+        Some(create_spinner(message))
+    } else {
+        None
+    }
+}
+
 pub fn fail_spinner(spinner: &mut ProgressBar, message: String) {
     spinner.set_style(
         ProgressStyle::default_spinner()

@@ -1,12 +1,15 @@
-use std::{fmt::Display, time::Duration};
+use std::fmt::Display;
 
 use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    consts::TICK_STRING,
+    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    util::{
+        progress::create_spinner_if,
+        prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    },
     workspace::{Project, Workspace, workspaces},
 };
 
@@ -22,6 +25,10 @@ pub struct Args {
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     yes: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -66,6 +73,9 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     if is_two_factor_enabled {
+        if !is_terminal {
+            bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
+        }
         let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
 
@@ -79,14 +89,7 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Deleting project...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = create_spinner_if(!args.json, "Deleting project...".into());
 
     let vars = mutations::project_delete::Variables {
         id: project_id.clone(),
@@ -94,12 +97,16 @@ pub async fn command(args: Args) -> Result<()> {
 
     post_graphql::<mutations::ProjectDelete, _>(&client, &configs.get_backboard(), vars).await?;
 
-    spinner.finish_with_message(format!(
-        "{} {} {}",
-        "Project".green(),
-        project_name.magenta().bold(),
-        "deleted!".green()
-    ));
+    if args.json {
+        println!("{}", serde_json::json!({"id": project_id}));
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "{} {} {}",
+            "Project".green(),
+            project_name.magenta().bold(),
+            "deleted!".green()
+        ));
+    }
 
     Ok(())
 }
