@@ -22,6 +22,16 @@ const LOGS_RETRY_CONFIG: RetryConfig = RetryConfig {
     on_retry: None,
 };
 
+pub struct FetchLogsParams<'a> {
+    pub client: &'a Client,
+    pub backboard: &'a str,
+    pub deployment_id: String,
+    pub limit: Option<i64>,
+    pub filter: Option<String>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+}
+
 // Helper to handle the API's off-by-one bug where it returns limit+1 logs
 fn take_last_n_logs<T>(mut logs: Vec<T>, limit: Option<i64>) -> Vec<T> {
     if let Some(l) = limit {
@@ -35,28 +45,23 @@ fn take_last_n_logs<T>(mut logs: Vec<T>, limit: Option<i64>) -> Vec<T> {
 }
 
 pub async fn fetch_build_logs(
-    client: &Client,
-    backboard: &str,
-    deployment_id: String,
-    limit: Option<i64>,
-    filter: Option<String>,
-    start_date: Option<DateTime<Utc>>,
-    end_date: Option<DateTime<Utc>>,
+    params: FetchLogsParams<'_>,
     on_log: impl Fn(queries::build_logs::BuildLogsBuildLogs),
 ) -> Result<()> {
     let vars = queries::build_logs::Variables {
-        deployment_id,
-        limit,
-        start_date,
-        end_date,
-        filter,
+        deployment_id: params.deployment_id,
+        limit: params.limit,
+        start_date: params.start_date,
+        end_date: params.end_date,
+        filter: params.filter,
     };
 
-    let response = post_graphql::<queries::BuildLogs, _>(client, backboard, vars).await?;
+    let response =
+        post_graphql::<queries::BuildLogs, _>(params.client, params.backboard, vars).await?;
 
     // Take only the requested number of logs from the end (the API has a bug and returns limit+1)
     let logs = response.build_logs;
-    let logs_to_process = take_last_n_logs(logs, limit);
+    let logs_to_process = take_last_n_logs(logs, params.limit);
 
     for log in logs_to_process {
         on_log(log);
@@ -66,28 +71,23 @@ pub async fn fetch_build_logs(
 }
 
 pub async fn fetch_deploy_logs(
-    client: &Client,
-    backboard: &str,
-    deployment_id: String,
-    limit: Option<i64>,
-    filter: Option<String>,
-    start_date: Option<DateTime<Utc>>,
-    end_date: Option<DateTime<Utc>>,
+    params: FetchLogsParams<'_>,
     on_log: impl Fn(queries::deployment_logs::LogFields),
 ) -> Result<()> {
     let vars = queries::deployment_logs::Variables {
-        deployment_id,
-        limit,
-        filter,
-        start_date,
-        end_date,
+        deployment_id: params.deployment_id,
+        limit: params.limit,
+        filter: params.filter,
+        start_date: params.start_date,
+        end_date: params.end_date,
     };
 
-    let response = post_graphql::<queries::DeploymentLogs, _>(client, backboard, vars).await?;
+    let response =
+        post_graphql::<queries::DeploymentLogs, _>(params.client, params.backboard, vars).await?;
 
     // Take only the requested number of logs from the end (the API has a bug and returns limit+1)
     let logs = response.deployment_logs;
-    let logs_to_process = take_last_n_logs(logs, limit);
+    let logs_to_process = take_last_n_logs(logs, params.limit);
 
     for log in logs_to_process {
         on_log(log);

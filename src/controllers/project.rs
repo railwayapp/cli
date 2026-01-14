@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
+use anyhow::{Context, Result, bail};
 use reqwest::Client;
 
 use crate::{
     LinkedProject,
-    client::post_graphql,
+    client::{GQLClient, post_graphql},
     commands::{
         Configs,
         queries::{
@@ -17,7 +18,6 @@ use crate::{
     },
     errors::RailwayError,
 };
-use anyhow::{Result, bail};
 
 use super::environment::get_matched_environment;
 
@@ -129,4 +129,62 @@ pub fn find_service_instance<'a>(
                 .find(|si| si.node.service_id == service_id)
                 .map(|si| &si.node)
         })
+}
+
+/// Resolved context for service operations (variables, etc.)
+pub struct ServiceContext {
+    pub client: Client,
+    pub configs: Configs,
+    pub project: ProjectProject,
+    pub project_id: String,
+    pub environment_id: String,
+    pub service_id: String,
+    pub service_name: String,
+}
+
+/// Resolves project, environment, and service from args and linked project.
+/// Returns a ServiceContext with all resolved IDs.
+pub async fn resolve_service_context(
+    service_arg: Option<String>,
+    environment_arg: Option<String>,
+) -> Result<ServiceContext> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let linked_project = configs.get_linked_project().await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    let env = environment_arg.unwrap_or(linked_project.environment.clone());
+    let environment_id = get_matched_environment(&project, env)?.id;
+
+    let services = &project.services.edges;
+    let (service_id, service_name) = match (service_arg, linked_project.service) {
+        (Some(service_arg), _) => {
+            let service = services
+                .iter()
+                .find(|s| s.node.name == service_arg || s.node.id == service_arg)
+                .with_context(|| format!("Service '{service_arg}' not found"))?;
+            (service.node.id.clone(), service.node.name.clone())
+        }
+        (_, Some(linked_service)) => {
+            let name = services
+                .iter()
+                .find(|s| s.node.id == linked_service)
+                .map(|s| s.node.name.clone())
+                .unwrap_or_else(|| linked_service.clone());
+            (linked_service, name)
+        }
+        _ => bail!(RailwayError::NoServiceLinked),
+    };
+
+    Ok(ServiceContext {
+        client,
+        configs,
+        project,
+        project_id: linked_project.project,
+        environment_id,
+        service_id,
+        service_name,
+    })
 }

@@ -43,6 +43,7 @@ commands!(
     logout,
     logs,
     open,
+    project,
     run(local),
     service,
     shell,
@@ -52,7 +53,7 @@ commands!(
     unlink,
     up,
     upgrade,
-    variables,
+    variable(variables, vars, var),
     whoami,
     volume,
     redeploy,
@@ -159,4 +160,185 @@ async fn main() -> Result<()> {
     handle_update_task(check_updates_handle).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
+        let mut full_args = vec!["railway"];
+        full_args.extend(args);
+        build_args().try_get_matches_from(full_args)
+    }
+
+    fn assert_parses(args: &[&str]) {
+        assert!(
+            parse(args).is_ok(),
+            "Command should parse: railway {}",
+            args.join(" ")
+        );
+    }
+
+    fn assert_subcommand(args: &[&str], expected: &str) {
+        let matches = parse(args).unwrap_or_else(|_| panic!("Failed to parse: {:?}", args));
+        assert_eq!(
+            matches.subcommand_name(),
+            Some(expected),
+            "Expected subcommand '{}' for args {:?}",
+            expected,
+            args
+        );
+    }
+
+    mod backwards_compat {
+        use super::*;
+
+        #[test]
+        fn root_commands_exist() {
+            assert_subcommand(&["logs"], "logs");
+            assert_subcommand(&["list"], "list");
+            assert_subcommand(&["delete"], "delete");
+            assert_subcommand(&["restart"], "restart");
+            assert_subcommand(&["scale"], "scale");
+            assert_subcommand(&["link"], "link");
+            assert_subcommand(&["up"], "up");
+            assert_subcommand(&["redeploy"], "redeploy");
+        }
+
+        #[test]
+        fn variable_aliases() {
+            assert_subcommand(&["variable"], "variable");
+            assert_subcommand(&["variables"], "variable");
+            assert_subcommand(&["vars"], "variable");
+            assert_subcommand(&["var"], "variable");
+        }
+
+        #[test]
+        fn variable_legacy_flags() {
+            assert_parses(&["variable", "--set", "KEY=value"]);
+            assert_parses(&["variable", "--set", "KEY=value", "--set", "KEY2=value2"]);
+            assert_parses(&["variable", "-s", "myservice"]);
+            assert_parses(&["variable", "-e", "production"]);
+            assert_parses(&["variable", "--kv"]);
+            assert_parses(&["variable", "--json"]);
+            assert_parses(&["variable", "--skip-deploys", "--set", "KEY=value"]);
+            assert_parses(&["variables", "--set", "KEY=value"]); // via alias
+        }
+
+        #[test]
+        fn environment_implicit_link() {
+            assert_parses(&["environment", "production"]); // legacy positional
+            assert_parses(&["env", "production"]); // alias
+        }
+
+        #[test]
+        fn service_implicit_link() {
+            assert_parses(&["service"]); // prompts for link
+            assert_parses(&["service", "myservice"]); // legacy positional link
+        }
+
+        #[test]
+        fn functions_aliases() {
+            assert_subcommand(&["functions", "list"], "functions");
+            assert_subcommand(&["function", "list"], "functions");
+            assert_subcommand(&["func", "list"], "functions");
+            assert_subcommand(&["fn", "list"], "functions");
+            assert_subcommand(&["funcs", "list"], "functions");
+            assert_subcommand(&["fns", "list"], "functions");
+        }
+
+        #[test]
+        fn dev_run_aliases() {
+            assert_subcommand(&["dev"], "dev");
+            assert_subcommand(&["develop"], "dev");
+            assert_subcommand(&["run"], "run");
+            assert_subcommand(&["local"], "run");
+        }
+
+        #[test]
+        fn variable_set_from_stdin_legacy() {
+            assert_parses(&["variable", "--set-from-stdin", "MY_KEY"]);
+            assert_parses(&["variable", "--set-from-stdin", "KEY", "-s", "myservice"]);
+            assert_parses(&["variable", "--set-from-stdin", "KEY", "--skip-deploys"]);
+            assert_parses(&["variables", "--set-from-stdin", "KEY"]);
+        }
+
+        #[test]
+        fn variable_list_kv_format() {
+            assert_parses(&["variable", "--kv"]);
+            assert_parses(&["variable", "-k"]);
+            assert_parses(&["variables", "--kv"]);
+        }
+    }
+
+    mod new_commands {
+        use super::*;
+
+        #[test]
+        fn variable_subcommands() {
+            assert_parses(&["variable", "list"]);
+            assert_parses(&["variable", "list", "-s", "myservice"]);
+            assert_parses(&["variable", "list", "--json"]);
+            assert_parses(&["variable", "set", "KEY=value"]);
+            assert_parses(&["variable", "set", "KEY=value", "KEY2=value2"]); // multiple
+            assert_parses(&["variable", "set", "A=1", "B=2", "C=3", "--skip-deploys"]);
+            assert_parses(&["variable", "set", "KEY", "--stdin"]);
+            assert_parses(&["variable", "set", "KEY=value", "--skip-deploys"]);
+            assert_parses(&["variable", "delete", "KEY"]);
+            assert_parses(&["variable", "rm", "KEY"]); // alias
+            assert_parses(&["variable", "delete", "KEY", "--json"]);
+        }
+
+        #[test]
+        fn environment_link_subcommand() {
+            assert_parses(&["environment", "link"]);
+            assert_parses(&["environment", "link", "production"]);
+            assert_parses(&["environment", "link", "--json"]);
+        }
+
+        #[test]
+        fn service_subcommands() {
+            assert_parses(&["service", "link"]);
+            assert_parses(&["service", "status"]);
+            assert_parses(&["service", "status", "--all"]);
+            assert_parses(&["service", "status", "--json"]);
+            assert_parses(&["service", "logs"]);
+            assert_parses(&["service", "logs", "-s", "myservice"]);
+            assert_parses(&["service", "redeploy"]);
+            assert_parses(&["service", "redeploy", "-s", "myservice"]);
+            assert_parses(&["service", "restart"]);
+            assert_parses(&["service", "scale"]);
+        }
+
+        #[test]
+        fn project_subcommands() {
+            assert_parses(&["project", "list"]);
+            assert_parses(&["project", "ls"]); // alias
+            assert_parses(&["project", "list", "--json"]);
+            assert_parses(&["project", "link"]);
+            assert_parses(&["project", "delete"]);
+            assert_parses(&["project", "rm"]); // alias
+            assert_parses(&["project", "delete", "-y"]);
+        }
+
+        #[test]
+        fn variable_list_aliases() {
+            assert_parses(&["variable", "ls"]);
+            assert_parses(&["variable", "ls", "--kv"]);
+            assert_parses(&["variable", "ls", "-s", "myservice"]);
+        }
+
+        #[test]
+        fn variable_delete_remove_alias() {
+            assert_parses(&["variable", "remove", "KEY"]);
+        }
+
+        #[test]
+        fn variable_set_stdin_key_only() {
+            assert_parses(&["variable", "set", "KEY", "--stdin"]);
+            assert_parses(&["variable", "set", "MY_VAR", "--stdin", "-s", "myservice"]);
+            assert_parses(&["variable", "set", "SECRET", "--stdin", "--skip-deploys"]);
+        }
+    }
 }
