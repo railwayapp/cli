@@ -1,0 +1,6 @@
+query WorkflowStatus($workflowId: String!) {
+  workflowStatus(workflowId: $workflowId) {
+    status
+    error
+  }
+}
