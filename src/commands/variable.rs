@@ -1,15 +1,14 @@
 use super::*;
 use crate::{
-    consts::TICK_STRING,
     controllers::{
         project::resolve_service_context,
         variables::{Variable, get_service_variables},
     },
     table::Table,
+    util::progress::create_spinner_if,
 };
 use anyhow::bail;
 use std::io::{IsTerminal, Read};
-use std::time::Duration;
 
 /// Manage environment variables for a service
 #[derive(Parser)]
@@ -82,8 +81,9 @@ struct ListArgs {
 
 #[derive(Parser)]
 struct SetArgs {
-    /// Variable key (with --stdin) or KEY=VALUE format
-    key_or_pair: String,
+    /// Variable(s) in KEY=VALUE format, or just KEY when using --stdin
+    #[clap(required = true)]
+    variables: Vec<String>,
 
     /// The service to set the variable for
     #[clap(short, long)]
@@ -93,7 +93,7 @@ struct SetArgs {
     #[clap(short, long)]
     environment: Option<String>,
 
-    /// Read the value from stdin instead of the command line
+    /// Read the value from stdin instead of the command line (only with single KEY)
     #[clap(long)]
     stdin: bool,
 
@@ -125,7 +125,6 @@ struct DeleteArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    // If a subcommand is provided, use it
     if let Some(cmd) = args.command {
         return match cmd {
             Commands::List(list_args) => list_variables(list_args).await,
@@ -199,23 +198,30 @@ async fn list_variables(args: ListArgs) -> Result<()> {
 }
 
 async fn set_variable(args: SetArgs) -> Result<()> {
-    let variable = if args.stdin {
-        if args.key_or_pair.contains('=') {
+    let variables = if args.stdin {
+        if args.variables.len() != 1 {
+            bail!("--stdin requires exactly one KEY argument");
+        }
+        let key = &args.variables[0];
+        if key.contains('=') {
             bail!(
                 "Cannot use --stdin with KEY=VALUE format. Use: railway variable set KEY --stdin"
             );
         }
         let value = read_value_from_stdin()?;
-        Variable {
-            key: args.key_or_pair,
+        vec![Variable {
+            key: key.clone(),
             value,
-        }
+        }]
     } else {
-        args.key_or_pair.parse::<Variable>()?
+        args.variables
+            .iter()
+            .map(|s| s.parse::<Variable>())
+            .collect::<Result<Vec<_>, _>>()?
     };
 
     set_variables_internal(
-        vec![variable],
+        variables,
         args.service,
         args.environment,
         args.skip_deploys,
@@ -227,18 +233,7 @@ async fn set_variable(args: SetArgs) -> Result<()> {
 async fn delete_variable(args: DeleteArgs) -> Result<()> {
     let ctx = resolve_service_context(args.service, args.environment).await?;
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")
-                .expect("Failed to set spinner template"),
-        )
-        .with_message(format!("Deleting {}...", args.key.bold()));
-
-    if !args.json {
-        spinner.enable_steady_tick(Duration::from_millis(100));
-    }
+    let spinner = create_spinner_if(!args.json, format!("Deleting {}...", args.key.bold()));
 
     let vars = mutations::variable_delete::Variables {
         project_id: ctx.project_id,
@@ -250,10 +245,10 @@ async fn delete_variable(args: DeleteArgs) -> Result<()> {
     post_graphql::<mutations::VariableDelete, _>(&ctx.client, ctx.configs.get_backboard(), vars)
         .await?;
 
-    if args.json {
-        println!("{}", serde_json::json!({"key": args.key, "deleted": true}));
+    if let Some(sp) = spinner {
+        sp.finish_with_message(format!("Deleted variable {}", args.key.bold()));
     } else {
-        spinner.finish_with_message(format!("Deleted variable {}", args.key.bold()));
+        println!("{}", serde_json::json!({"key": args.key, "deleted": true}));
     }
 
     Ok(())
@@ -284,18 +279,7 @@ async fn set_variables_internal(
         .collect::<Vec<String>>()
         .join(", ");
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")
-                .expect("Failed to set spinner template"),
-        )
-        .with_message(format!("Setting {fmt_variables}..."));
-
-    if !json {
-        spinner.enable_steady_tick(Duration::from_millis(100));
-    }
+    let spinner = create_spinner_if(!json, format!("Setting {fmt_variables}..."));
 
     let vars = mutations::variable_collection_upsert::Variables {
         project_id: ctx.project_id,
@@ -312,10 +296,10 @@ async fn set_variables_internal(
     )
     .await?;
 
-    if json {
-        println!("{}", serde_json::json!({"set": fmt_variables}));
+    if let Some(sp) = spinner {
+        sp.finish_with_message(format!("Set variables {fmt_variables}"));
     } else {
-        spinner.finish_with_message(format!("Set variables {fmt_variables}"));
+        println!("{}", serde_json::json!({"set": fmt_variables}));
     }
 
     Ok(())

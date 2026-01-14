@@ -121,11 +121,14 @@ async fn link_command(args: LinkArgs) -> Result<()> {
         .map(|s| PromptService(&s.node))
         .collect();
 
-    if let Some(service) = args.service {
+    if let Some(service_arg) = args.service {
         let service = services
             .iter()
-            .find(|s| s.0.id == service || s.0.name == service)
-            .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
+            .find(|s| {
+                s.0.id.eq_ignore_ascii_case(&service_arg)
+                    || s.0.name.eq_ignore_ascii_case(&service_arg)
+            })
+            .ok_or_else(|| RailwayError::ServiceNotFound(service_arg))?;
 
         configs.link_service(service.0.id.clone())?;
         configs.write()?;

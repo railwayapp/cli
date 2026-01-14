@@ -281,6 +281,8 @@ mod cli_tests {
             assert_parses(&["variable", "list", "-s", "myservice"]);
             assert_parses(&["variable", "list", "--json"]);
             assert_parses(&["variable", "set", "KEY=value"]);
+            assert_parses(&["variable", "set", "KEY=value", "KEY2=value2"]); // multiple
+            assert_parses(&["variable", "set", "A=1", "B=2", "C=3", "--skip-deploys"]);
             assert_parses(&["variable", "set", "KEY", "--stdin"]);
             assert_parses(&["variable", "set", "KEY=value", "--skip-deploys"]);
             assert_parses(&["variable", "delete", "KEY"]);
