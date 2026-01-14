@@ -119,18 +119,22 @@ pub async fn command(args: Args) -> Result<()> {
     }
     match type_of_create {
         CreateKind::Database(databases) => {
+            let is_single_db = databases.len() == 1;
             for db in databases {
                 if verbose {
                     println!("iterating through databases to add: {:?}", db)
                 }
                 deploy::fetch_and_create(
                     &client,
-                    &configs,
+                    &mut configs,
                     db.to_slug().to_string(),
                     &linked_project,
                     &HashMap::new(),
                     verbose,
                     args.json,
+                    deploy::FetchAndCreateOptions {
+                        should_link: is_single_db,
+                    },
                 )
                 .await?;
                 if verbose {
