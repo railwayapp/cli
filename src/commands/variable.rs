@@ -273,13 +273,14 @@ async fn set_variables_internal(
 ) -> Result<()> {
     let ctx = resolve_service_context(service, environment).await?;
 
-    let fmt_variables = variables
+    let keys: Vec<String> = variables.iter().map(|v| v.key.clone()).collect();
+    let fmt_keys = keys
         .iter()
-        .map(|k| k.key.bold().to_string())
-        .collect::<Vec<String>>()
+        .map(|k| k.bold().to_string())
+        .collect::<Vec<_>>()
         .join(", ");
 
-    let spinner = create_spinner_if(!json, format!("Setting {fmt_variables}..."));
+    let spinner = create_spinner_if(!json, format!("Setting {fmt_keys}..."));
 
     let vars = mutations::variable_collection_upsert::Variables {
         project_id: ctx.project_id,
@@ -297,9 +298,9 @@ async fn set_variables_internal(
     .await?;
 
     if let Some(sp) = spinner {
-        sp.finish_with_message(format!("Set variables {fmt_variables}"));
+        sp.finish_with_message(format!("Set variables {fmt_keys}"));
     } else {
-        println!("{}", serde_json::json!({"set": fmt_variables}));
+        println!("{}", serde_json::json!({"keys": keys, "set": true}));
     }
 
     Ok(())
