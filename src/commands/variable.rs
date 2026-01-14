@@ -82,8 +82,8 @@ struct ListArgs {
 
 #[derive(Parser)]
 struct SetArgs {
-    /// Variable in KEY=VALUE format
-    variable: Variable,
+    /// Variable key (with --stdin) or KEY=VALUE format
+    key_or_pair: String,
 
     /// The service to set the variable for
     #[clap(short, long)]
@@ -200,13 +200,18 @@ async fn list_variables(args: ListArgs) -> Result<()> {
 
 async fn set_variable(args: SetArgs) -> Result<()> {
     let variable = if args.stdin {
+        if args.key_or_pair.contains('=') {
+            bail!(
+                "Cannot use --stdin with KEY=VALUE format. Use: railway variable set KEY --stdin"
+            );
+        }
         let value = read_value_from_stdin()?;
         Variable {
-            key: args.variable.key,
+            key: args.key_or_pair,
             value,
         }
     } else {
-        args.variable
+        args.key_or_pair.parse::<Variable>()?
     };
 
     set_variables_internal(

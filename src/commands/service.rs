@@ -1,4 +1,3 @@
-use anyhow::bail;
 use serde::Serialize;
 
 use crate::{
@@ -7,7 +6,7 @@ use crate::{
         project::{ensure_project_and_environment_exist, get_project, get_service_ids_in_env},
     },
     errors::RailwayError,
-    util::prompt::{PromptService, fake_select, prompt_options},
+    util::prompt::{PromptService, prompt_options},
 };
 
 use super::*;
@@ -32,6 +31,9 @@ enum Commands {
 
     /// View logs from a service
     Logs(crate::commands::logs::Args),
+
+    /// Redeploy the latest deployment of a service
+    Redeploy(crate::commands::redeploy::Args),
 
     /// Restart the latest deployment of a service
     Restart(crate::commands::restart::Args),
@@ -91,6 +93,9 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Commands::Link(link_args)) => link_command(link_args).await,
         Some(Commands::Status(status_args)) => status_command(status_args).await,
         Some(Commands::Logs(logs_args)) => crate::commands::logs::command(logs_args).await,
+        Some(Commands::Redeploy(redeploy_args)) => {
+            crate::commands::redeploy::command(redeploy_args).await
+        }
         Some(Commands::Restart(restart_args)) => {
             crate::commands::restart::command(restart_args).await
         }
@@ -133,32 +138,10 @@ async fn link_command(args: LinkArgs) -> Result<()> {
         return Ok(());
     }
 
-    let service = if !services.is_empty() {
-        Some(if let Some(service) = args.service {
-            let service_norm = services.iter().find(|s| {
-                (s.0.name.to_lowercase() == service.to_lowercase())
-                    || (s.0.id.to_lowercase() == service.to_lowercase())
-            });
-            if let Some(service) = service_norm {
-                fake_select("Select a service", &service.0.name);
-                service.clone()
-            } else {
-                return Err(RailwayError::ServiceNotFound(service).into());
-            }
-        } else {
-            prompt_options("Select a service", services)?
-        })
-    } else {
-        None
-    };
-
-    if let Some(service) = service {
-        configs.link_service(service.0.id.clone())?;
-        configs.write()?;
-        println!("Linked service {}", service.0.name.green())
-    } else {
-        bail!("No service found");
-    }
+    let service = prompt_options("Select a service", services)?;
+    configs.link_service(service.0.id.clone())?;
+    configs.write()?;
+    println!("Linked service {}", service.0.name.green());
     Ok(())
 }
 

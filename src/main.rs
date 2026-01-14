@@ -255,6 +255,21 @@ mod cli_tests {
             assert_subcommand(&["run"], "run");
             assert_subcommand(&["local"], "run");
         }
+
+        #[test]
+        fn variable_set_from_stdin_legacy() {
+            assert_parses(&["variable", "--set-from-stdin", "MY_KEY"]);
+            assert_parses(&["variable", "--set-from-stdin", "KEY", "-s", "myservice"]);
+            assert_parses(&["variable", "--set-from-stdin", "KEY", "--skip-deploys"]);
+            assert_parses(&["variables", "--set-from-stdin", "KEY"]);
+        }
+
+        #[test]
+        fn variable_list_kv_format() {
+            assert_parses(&["variable", "--kv"]);
+            assert_parses(&["variable", "-k"]);
+            assert_parses(&["variables", "--kv"]);
+        }
     }
 
     mod new_commands {
@@ -266,7 +281,7 @@ mod cli_tests {
             assert_parses(&["variable", "list", "-s", "myservice"]);
             assert_parses(&["variable", "list", "--json"]);
             assert_parses(&["variable", "set", "KEY=value"]);
-            assert_parses(&["variable", "set", "KEY=value", "--stdin"]);
+            assert_parses(&["variable", "set", "KEY", "--stdin"]);
             assert_parses(&["variable", "set", "KEY=value", "--skip-deploys"]);
             assert_parses(&["variable", "delete", "KEY"]);
             assert_parses(&["variable", "rm", "KEY"]); // alias
@@ -288,6 +303,8 @@ mod cli_tests {
             assert_parses(&["service", "status", "--json"]);
             assert_parses(&["service", "logs"]);
             assert_parses(&["service", "logs", "-s", "myservice"]);
+            assert_parses(&["service", "redeploy"]);
+            assert_parses(&["service", "redeploy", "-s", "myservice"]);
             assert_parses(&["service", "restart"]);
             assert_parses(&["service", "scale"]);
         }
@@ -301,6 +318,25 @@ mod cli_tests {
             assert_parses(&["project", "delete"]);
             assert_parses(&["project", "rm"]); // alias
             assert_parses(&["project", "delete", "-y"]);
+        }
+
+        #[test]
+        fn variable_list_aliases() {
+            assert_parses(&["variable", "ls"]);
+            assert_parses(&["variable", "ls", "--kv"]);
+            assert_parses(&["variable", "ls", "-s", "myservice"]);
+        }
+
+        #[test]
+        fn variable_delete_remove_alias() {
+            assert_parses(&["variable", "remove", "KEY"]);
+        }
+
+        #[test]
+        fn variable_set_stdin_key_only() {
+            assert_parses(&["variable", "set", "KEY", "--stdin"]);
+            assert_parses(&["variable", "set", "MY_VAR", "--stdin", "-s", "myservice"]);
+            assert_parses(&["variable", "set", "SECRET", "--stdin", "--skip-deploys"]);
         }
     }
 }
