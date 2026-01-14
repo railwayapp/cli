@@ -91,7 +91,6 @@ pub async fn command(args: Args) -> Result<()> {
 /// Options for fetch_and_create
 #[derive(Default)]
 pub struct FetchAndCreateOptions {
-    pub detach: bool,
     pub should_link: bool,
 }
 
@@ -187,14 +186,12 @@ pub async fn fetch_and_create(
     )
     .await?;
 
-    // Wait for workflow to complete (unless detached)
-    if !options.detach {
-        if let Some(workflow_id) = response.template_deploy_v2.workflow_id {
-            if verbose {
-                println!("waiting for workflow {workflow_id} to complete");
-            }
-            wait_for_workflow(client, configs, workflow_id, &template_name).await?;
+    // Wait for workflow to complete
+    if let Some(workflow_id) = response.template_deploy_v2.workflow_id {
+        if verbose {
+            println!("waiting for workflow {workflow_id} to complete");
         }
+        wait_for_workflow(client, configs, workflow_id, &template_name).await?;
     }
 
     // Find the newly created service

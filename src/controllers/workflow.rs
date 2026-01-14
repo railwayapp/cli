@@ -14,9 +14,7 @@ pub async fn wait_for_workflow(
     workflow_id: String,
     display_name: &str,
 ) -> Result<()> {
-    let client = client.clone();
     let backboard = configs.get_backboard();
-    let display_name = display_name.to_string();
 
     retry_with_backoff(
         RetryConfig {
@@ -29,7 +27,7 @@ pub async fn wait_for_workflow(
         || {
             let client = client.clone();
             let backboard = backboard.clone();
-            let display_name = display_name.clone();
+            let display_name = display_name.to_string();
             let workflow_id = workflow_id.clone();
             async move {
                 let result = post_graphql::<queries::WorkflowStatus, _>(
@@ -54,7 +52,7 @@ pub async fn wait_for_workflow(
                         bail!("Failed to add {display_name}")
                     }
                     WorkflowStatus::Running | WorkflowStatus::Other(_) => {
-                        bail!("still deploying")
+                        bail!("Timed out waiting for {display_name} to finish deploying")
                     }
                 }
             }

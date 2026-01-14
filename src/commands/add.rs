@@ -133,7 +133,6 @@ pub async fn command(args: Args) -> Result<()> {
                     verbose,
                     args.json,
                     deploy::FetchAndCreateOptions {
-                        detach: false,
                         should_link: is_single_db,
                     },
                 )
