@@ -124,9 +124,7 @@ async fn link_command(args: LinkArgs) -> Result<()> {
     let service = if let Some(name) = args.service {
         services
             .into_iter()
-            .find(|s| {
-                s.0.id.eq_ignore_ascii_case(&name) || s.0.name.eq_ignore_ascii_case(&name)
-            })
+            .find(|s| s.0.id.eq_ignore_ascii_case(&name) || s.0.name.eq_ignore_ascii_case(&name))
             .ok_or_else(|| RailwayError::ServiceNotFound(name))?
     } else if services.is_empty() {
         bail!("No services found")
