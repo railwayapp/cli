@@ -9,6 +9,7 @@ use fs2::FileExt;
 use tokio::sync::mpsc;
 
 use crate::controllers::config::ServiceInstance;
+use crate::util::progress::create_spinner;
 
 use super::code_runner::{COLORS, LogLine, ProcessManager, print_log_line};
 use super::compose::PortType;
@@ -349,19 +350,38 @@ impl DevSession {
     }
 
     pub async fn shutdown(&mut self) {
-        println!("{}", "Stopping services...".dimmed());
+        // Absorb additional Ctrl+C presses during shutdown to prevent abrupt termination
+        let signal_guard = tokio::spawn(async {
+            loop {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    break;
+                }
+            }
+        });
 
-        self.process_manager.lock().await.shutdown().await;
         if self.code_count > 0 {
-            println!(
-                " {} Stopped {} code service{}",
+            let spinner = create_spinner(format!(
+                "Stopping {} code service{}...",
+                self.code_count,
+                if self.code_count == 1 { "" } else { "s" }
+            ));
+            self.process_manager.lock().await.shutdown().await;
+            spinner.finish_with_message(format!(
+                "{} Stopped {} code service{}",
                 "✓".green(),
                 self.code_count,
                 if self.code_count == 1 { "" } else { "s" }
-            );
+            ));
+        } else {
+            self.process_manager.lock().await.shutdown().await;
         }
 
         if self.has_image_services {
+            let spinner = create_spinner(format!(
+                "Stopping {} image service{}...",
+                self.image_count,
+                if self.image_count == 1 { "" } else { "s" }
+            ));
             let _ = tokio::process::Command::new("docker")
                 .args([
                     "compose",
@@ -373,16 +393,18 @@ impl DevSession {
                 .stderr(std::process::Stdio::null())
                 .status()
                 .await;
-            println!(
-                " {} Stopped {} image service{}",
+            spinner.finish_with_message(format!(
+                "{} Stopped {} image service{}",
                 "✓".green(),
                 self.image_count,
                 if self.image_count == 1 { "" } else { "s" }
-            );
+            ));
         }
 
         println!();
         println!("{}", "All services stopped".green());
+
+        signal_guard.abort();
     }
 }
 
