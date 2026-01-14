@@ -121,27 +121,19 @@ async fn link_command(args: LinkArgs) -> Result<()> {
         .map(|s| PromptService(&s.node))
         .collect();
 
-    if let Some(service_arg) = args.service {
-        let service = services
-            .iter()
+    let service = if let Some(name) = args.service {
+        services
+            .into_iter()
             .find(|s| {
-                s.0.id.eq_ignore_ascii_case(&service_arg)
-                    || s.0.name.eq_ignore_ascii_case(&service_arg)
+                s.0.id.eq_ignore_ascii_case(&name) || s.0.name.eq_ignore_ascii_case(&name)
             })
-            .ok_or_else(|| RailwayError::ServiceNotFound(service_arg))?;
+            .ok_or_else(|| RailwayError::ServiceNotFound(name))?
+    } else if services.is_empty() {
+        bail!("No services found")
+    } else {
+        prompt_options("Select a service", services)?
+    };
 
-        configs.link_service(service.0.id.clone())?;
-        configs.write()?;
-        println!("Linked service {}", service.0.name.green());
-        return Ok(());
-    }
-
-    if services.is_empty() {
-        println!("No services found");
-        return Ok(());
-    }
-
-    let service = prompt_options("Select a service", services)?;
     configs.link_service(service.0.id.clone())?;
     configs.write()?;
     println!("Linked service {}", service.0.name.green());
