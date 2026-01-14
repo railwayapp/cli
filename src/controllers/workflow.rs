@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
+use thiserror::Error;
 
 use crate::{
     client::post_graphql,
@@ -6,17 +7,25 @@ use crate::{
     util::retry::{RetryConfig, retry_with_backoff},
 };
 
+#[derive(Debug, Error)]
+pub enum WorkflowError {
+    #[error("workflow failed: {0}")]
+    Failed(String),
+    #[error("workflow not found")]
+    NotFound,
+    #[error("workflow timed out")]
+    Timeout,
+}
+
 /// Waits for a workflow to complete by polling workflowStatus.
-/// Returns Ok(()) on success, or an error with a user-friendly message on failure.
 pub async fn wait_for_workflow(
     client: &reqwest::Client,
     configs: &Configs,
     workflow_id: String,
-    display_name: &str,
-) -> Result<()> {
+) -> Result<(), WorkflowError> {
     let backboard = configs.get_backboard();
 
-    retry_with_backoff(
+    let result = retry_with_backoff(
         RetryConfig {
             max_attempts: 120, // ~2 minutes with 1s intervals
             initial_delay_ms: 1000,
@@ -27,7 +36,6 @@ pub async fn wait_for_workflow(
         || {
             let client = client.clone();
             let backboard = backboard.clone();
-            let display_name = display_name.to_string();
             let workflow_id = workflow_id.clone();
             async move {
                 let result = post_graphql::<queries::WorkflowStatus, _>(
@@ -46,17 +54,20 @@ pub async fn wait_for_workflow(
                             .error
                             .filter(|e| !e.is_empty())
                             .unwrap_or_else(|| "Unknown error".to_string());
-                        bail!("Failed to add {display_name}: {error_msg}")
+                        Err(WorkflowError::Failed(error_msg).into())
                     }
-                    WorkflowStatus::NotFound => {
-                        bail!("Failed to add {display_name}")
-                    }
+                    WorkflowStatus::NotFound => Err(WorkflowError::NotFound.into()),
                     WorkflowStatus::Running | WorkflowStatus::Other(_) => {
-                        bail!("Timed out waiting for {display_name} to finish deploying")
+                        Err(WorkflowError::Timeout.into())
                     }
                 }
             }
         },
     )
-    .await
+    .await;
+
+    result.map_err(|e| {
+        e.downcast::<WorkflowError>()
+            .unwrap_or_else(|e| WorkflowError::Failed(e.to_string()))
+    })
 }

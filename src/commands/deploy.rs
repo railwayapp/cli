@@ -7,7 +7,7 @@ use crate::{
     controllers::{
         project::{ensure_project_and_environment_exist, get_project},
         variables::Variable,
-        workflow::wait_for_workflow,
+        workflow::{wait_for_workflow, WorkflowError},
     },
     util::{progress::create_spinner_if, prompt::prompt_text},
 };
@@ -191,7 +191,13 @@ pub async fn fetch_and_create(
         if verbose {
             println!("waiting for workflow {workflow_id} to complete");
         }
-        wait_for_workflow(client, configs, workflow_id, &template_name).await?;
+        wait_for_workflow(client, configs, workflow_id)
+            .await
+            .map_err(|e| match e {
+                WorkflowError::Failed(msg) => anyhow::anyhow!("Failed to add {template_name}: {msg}"),
+                WorkflowError::NotFound => anyhow::anyhow!("Failed to add {template_name}"),
+                WorkflowError::Timeout => anyhow::anyhow!("Timed out waiting for {template_name} to finish deploying"),
+            })?;
     }
 
     // Find the newly created service
