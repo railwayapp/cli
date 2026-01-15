@@ -7,9 +7,9 @@ use ratatui::{
 };
 
 use super::app::{Selection, Tab, TuiApp};
-use super::log_store::{LogEntry, StoredLogLine};
+use super::log_store::LogRef;
 
-pub fn convert_color(c: colored::Color) -> Color {
+fn convert_color(c: colored::Color) -> Color {
     match c {
         colored::Color::Black => Color::Black,
         colored::Color::Red => Color::Red,
@@ -96,18 +96,8 @@ fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
     app.set_visible_height(visible_height);
 
     let logs: Vec<LogRef> = match app.current_tab {
-        Tab::Local => app
-            .log_store
-            .local_logs
-            .iter()
-            .map(LogRef::Entry)
-            .collect(),
-        Tab::Image => app
-            .log_store
-            .image_logs
-            .iter()
-            .map(LogRef::Entry)
-            .collect(),
+        Tab::Local => app.log_store.local_logs.iter().map(LogRef::Entry).collect(),
+        Tab::Image => app.log_store.image_logs.iter().map(LogRef::Entry).collect(),
         Tab::Service(idx) => app
             .log_store
             .services
@@ -152,8 +142,13 @@ fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
             .map(|s| convert_color(s.color))
             .unwrap_or_else(|| convert_color(log_color));
 
-        let line =
-            render_log_line(service_name, service_color, message, vis_row, &app.selection);
+        let line = render_log_line(
+            service_name,
+            service_color,
+            message,
+            vis_row,
+            &app.selection,
+        );
         lines.push(line);
     }
 
@@ -178,12 +173,14 @@ fn render_log_line<'a>(
     selection: &Option<Selection>,
 ) -> Line<'a> {
     let prefix = format!("[{}] ", service_name);
+    let prefix_len = prefix.chars().count();
     let full_line = format!("{}{}", prefix, message);
 
     if let Some(sel) = selection {
         let chars: Vec<char> = full_line.chars().collect();
         let mut spans = Vec::new();
         let mut current_span = String::new();
+        let mut span_start = 0;
         let mut in_selection = false;
 
         for (col, ch) in chars.iter().enumerate() {
@@ -194,7 +191,7 @@ fn render_log_line<'a>(
                 if !current_span.is_empty() {
                     let style = if in_selection {
                         Style::default().bg(Color::White).fg(Color::Black)
-                    } else if col <= prefix.len() {
+                    } else if span_start < prefix_len {
                         Style::default().fg(service_color)
                     } else {
                         Style::default()
@@ -202,6 +199,7 @@ fn render_log_line<'a>(
                     spans.push(Span::styled(std::mem::take(&mut current_span), style));
                 }
                 in_selection = is_selected;
+                span_start = col;
             }
             current_span.push(*ch);
         }
@@ -210,6 +208,8 @@ fn render_log_line<'a>(
         if !current_span.is_empty() {
             let style = if in_selection {
                 Style::default().bg(Color::White).fg(Color::Black)
+            } else if span_start < prefix_len {
+                Style::default().fg(service_color)
             } else {
                 Style::default()
             };
@@ -232,6 +232,7 @@ fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: Rect) {
         Tab::Service(idx) => app.services.get(idx).into_iter().collect(),
     };
 
+    // Limit to 2 services to fit within the fixed 3-line info pane height
     let lines: Vec<Line> = services_to_show
         .iter()
         .take(2)
@@ -297,7 +298,7 @@ fn render_help_bar(app: &TuiApp, frame: &mut Frame, area: Rect) {
         Span::raw(" quit"),
     ];
 
-    // Show copied feedback
+    // Show copy feedback
     if let Some(instant) = app.copied_feedback {
         if instant.elapsed().as_secs() < 2 {
             help_text.push(Span::styled(
@@ -305,13 +306,15 @@ fn render_help_bar(app: &TuiApp, frame: &mut Frame, area: Rect) {
                 Style::default().fg(Color::Green),
             ));
         }
+    } else if let Some(instant) = app.copy_failed {
+        if instant.elapsed().as_secs() < 2 {
+            help_text.push(Span::styled(
+                "  [Copy failed]",
+                Style::default().fg(Color::Red),
+            ));
+        }
     }
 
     let paragraph = Paragraph::new(Line::from(help_text));
     frame.render_widget(paragraph, area);
-}
-
-enum LogRef<'a> {
-    Entry(&'a LogEntry),
-    Service(usize, &'a StoredLogLine),
 }

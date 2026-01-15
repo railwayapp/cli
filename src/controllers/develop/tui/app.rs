@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use colored::Color;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use super::log_store::{LogStore, StoredLogLine};
+use super::log_store::{LogRef, LogStore, StoredLogLine};
 use crate::controllers::develop::LogLine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +83,7 @@ pub struct TuiApp {
     pub selection: Option<Selection>,
     pub selecting: bool,
     pub copied_feedback: Option<std::time::Instant>,
+    pub copy_failed: Option<std::time::Instant>,
     pub needs_clear: bool,
     service_name_to_idx: HashMap<String, usize>,
     visible_height: usize,
@@ -123,6 +124,7 @@ impl TuiApp {
             selection: None,
             selecting: false,
             copied_feedback: None,
+            copy_failed: None,
             needs_clear: false,
             service_name_to_idx,
             visible_height: 20,
@@ -325,10 +327,10 @@ impl TuiApp {
             return;
         }
 
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            if clipboard.set_text(&text).is_ok() {
-                self.copied_feedback = Some(std::time::Instant::now());
-            }
+        let now = std::time::Instant::now();
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+            Ok(()) => self.copied_feedback = Some(now),
+            Err(_) => self.copy_failed = Some(now),
         }
         self.selection = None;
     }
@@ -552,9 +554,4 @@ impl TuiApp {
         let total = self.current_log_count();
         self.scroll_offset = total.saturating_sub(self.visible_height);
     }
-}
-
-enum LogRef<'a> {
-    Entry(&'a super::log_store::LogEntry),
-    Service(usize, &'a StoredLogLine),
 }

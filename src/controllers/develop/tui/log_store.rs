@@ -46,6 +46,12 @@ pub struct LogStore {
     pub image_logs: VecDeque<LogEntry>,
 }
 
+/// Reference to a log entry, used for unified iteration over different log sources
+pub enum LogRef<'a> {
+    Entry(&'a LogEntry),
+    Service(usize, &'a StoredLogLine),
+}
+
 impl LogStore {
     pub fn new(service_count: usize) -> Self {
         Self {
