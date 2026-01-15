@@ -6,6 +6,7 @@ const MAX_LINES: usize = 100_000;
 
 #[derive(Debug, Clone)]
 pub struct StoredLogLine {
+    pub service_name: String,
     pub message: String,
     pub color: Color,
 }
@@ -43,6 +44,27 @@ pub struct LogStore {
     pub services: Vec<ServiceLogBuffer>,
     pub local_logs: VecDeque<LogEntry>,
     pub image_logs: VecDeque<LogEntry>,
+}
+
+/// Reference to a log entry, used for unified iteration over different log sources
+pub enum LogRef<'a> {
+    Entry(&'a LogEntry),
+    Service(usize, &'a StoredLogLine),
+}
+
+impl<'a> LogRef<'a> {
+    /// Returns (service_idx, service_name, message, color)
+    pub fn parts(&self) -> (usize, &str, &str, Color) {
+        match self {
+            LogRef::Entry(e) => (
+                e.service_idx,
+                &e.line.service_name,
+                &e.line.message,
+                e.line.color,
+            ),
+            LogRef::Service(idx, line) => (*idx, &line.service_name, &line.message, line.color),
+        }
+    }
 }
 
 impl LogStore {
