@@ -1,13 +1,12 @@
 use colored::*;
-use std::time::Duration;
+use is_terminal::IsTerminal;
 
 use crate::{
-    consts::TICK_STRING,
     controllers::project::{
         ensure_project_and_environment_exist, find_service_instance, get_project,
     },
     errors::RailwayError,
-    util::prompt::prompt_confirm_with_default,
+    util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
 
 use super::*;
@@ -23,6 +22,10 @@ pub struct Args {
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     bypass: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -33,6 +36,7 @@ pub async fn command(args: Args) -> Result<()> {
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let is_terminal = std::io::stdout().is_terminal();
 
     let service_id = args.service.or_else(|| linked_project.service.clone()).ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
     let service = project
@@ -61,37 +65,40 @@ pub async fn command(args: Args) -> Result<()> {
         );
     }
 
-    if !args.bypass {
-        let confirmed = prompt_confirm_with_default(
+    let confirmed = if args.bypass {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
             format!(
                 "Redeploy the latest deployment from service {} in environment {}?",
                 service.node.name,
                 linked_project
                     .environment_name
+                    .clone()
                     .unwrap_or("unknown".to_string())
             )
             .as_str(),
             false,
-        )?;
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
 
-        if !confirmed {
-            return Ok(());
-        }
+    if !confirmed {
+        return Ok(());
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message(format!(
+    let spinner = create_spinner_if(
+        !args.json,
+        format!(
             "Redeploying the latest deployment from service {}...",
             service.node.name
-        ));
-    spinner.enable_steady_tick(Duration::from_millis(100));
+        ),
+    );
 
-    post_graphql::<mutations::DeploymentRedeploy, _>(
+    let response = post_graphql::<mutations::DeploymentRedeploy, _>(
         &client,
         configs.get_backboard(),
         mutations::deployment_redeploy::Variables {
@@ -100,10 +107,17 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
 
-    spinner.finish_with_message(format!(
-        "The latest deployment from service {} has been redeployed",
-        service.node.name.green()
-    ));
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({"id": response.deployment_redeploy.id})
+        );
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "The latest deployment from service {} has been redeployed",
+            service.node.name.green()
+        ));
+    }
 
     Ok(())
 }

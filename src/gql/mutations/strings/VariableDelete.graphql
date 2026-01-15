@@ -1,0 +1,5 @@
+mutation VariableDelete($projectId: String!, $environmentId: String!, $name: String!, $serviceId: String) {
+  variableDelete(
+    input: {projectId: $projectId, environmentId: $environmentId, name: $name, serviceId: $serviceId}
+  )
+}

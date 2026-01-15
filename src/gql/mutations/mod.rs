@@ -157,6 +157,15 @@ pub struct VariableCollectionUpsert;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VariableDelete.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VariableDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ServiceCreate.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none

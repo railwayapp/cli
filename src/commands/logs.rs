@@ -2,7 +2,10 @@ use is_terminal::IsTerminal;
 
 use crate::{
     controllers::{
-        deployment::{fetch_build_logs, fetch_deploy_logs, stream_build_logs, stream_deploy_logs},
+        deployment::{
+            FetchLogsParams, fetch_build_logs, fetch_deploy_logs, stream_build_logs,
+            stream_deploy_logs,
+        },
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
@@ -179,32 +182,36 @@ pub async fn command(args: Args) -> Result<()> {
             .await?;
         } else {
             fetch_build_logs(
-                &client,
-                &configs.get_backboard(),
-                deployment_id.clone(),
-                args.lines.or(Some(500)),
-                args.filter.clone(),
-                start_date,
-                end_date,
-                |log| print_log(log, args.json, false), // Build logs use simple output
+                FetchLogsParams {
+                    client: &client,
+                    backboard: &configs.get_backboard(),
+                    deployment_id: deployment_id.clone(),
+                    limit: args.lines.or(Some(500)),
+                    filter: args.filter.clone(),
+                    start_date,
+                    end_date,
+                },
+                |log| print_log(log, args.json, false),
             )
             .await?;
         }
     } else if should_stream {
         stream_deploy_logs(deployment_id.clone(), args.filter.clone(), |log| {
-            print_log(log, args.json, true) // Deploy logs use formatted output
+            print_log(log, args.json, true)
         })
         .await?;
     } else {
         fetch_deploy_logs(
-            &client,
-            &configs.get_backboard(),
-            deployment_id.clone(),
-            args.lines.or(Some(500)),
-            args.filter.clone(),
-            start_date,
-            end_date,
-            |log| print_log(log, args.json, true), // Deploy logs use formatted output
+            FetchLogsParams {
+                client: &client,
+                backboard: &configs.get_backboard(),
+                deployment_id: deployment_id.clone(),
+                limit: args.lines.or(Some(500)),
+                filter: args.filter.clone(),
+                start_date,
+                end_date,
+            },
+            |log| print_log(log, args.json, true),
         )
         .await?;
     }

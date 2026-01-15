@@ -1,13 +1,15 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
-    consts::TICK_STRING,
-    controllers::{project::ensure_project_and_environment_exist, variables::Variable},
-    util::prompt::prompt_text,
+    controllers::{
+        project::{ensure_project_and_environment_exist, get_project},
+        variables::Variable,
+        workflow::{WorkflowError, wait_for_workflow},
+    },
+    util::{progress::create_spinner_if, prompt::prompt_text},
 };
 
 use super::*;
@@ -30,7 +32,7 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let configs = Configs::new()?;
+    let mut configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -58,22 +60,26 @@ pub async fn command(args: Args) -> Result<()> {
         if std::io::stdout().is_terminal() {
             fetch_and_create(
                 &client,
-                &configs,
+                &mut configs,
                 template.clone(),
                 &linked_project,
                 &variables,
                 false,
+                false,
+                FetchAndCreateOptions::default(),
             )
             .await?;
         } else {
             println!("Creating {template}...");
             fetch_and_create(
                 &client,
-                &configs,
+                &mut configs,
                 template,
                 &linked_project,
                 &variables,
                 false,
+                false,
+                FetchAndCreateOptions::default(),
             )
             .await?;
         }
@@ -82,15 +88,25 @@ pub async fn command(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Options for fetch_and_create
+#[derive(Default)]
+pub struct FetchAndCreateOptions {
+    pub should_link: bool,
+}
+
 /// fetch database details via `TemplateDetail`
 /// create database via `TemplateDeploy`
+/// optionally wait for completion and link the new service
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_and_create(
     client: &reqwest::Client,
-    configs: &Configs,
+    configs: &mut Configs,
     template: String,
     linked_project: &LinkedProject,
     vars: &HashMap<String, String>,
     verbose: bool,
+    json: bool,
+    options: FetchAndCreateOptions,
 ) -> Result<(), anyhow::Error> {
     if verbose {
         println!("fetching details for template")
@@ -104,6 +120,8 @@ pub async fn fetch_and_create(
     )
     .await?;
 
+    let template_name = details.template.name.clone();
+
     let mut config = DeserializedTemplateConfig::deserialize(
         &details.template.serialized_config.unwrap_or_default(),
     )?;
@@ -112,6 +130,18 @@ pub async fn fetch_and_create(
     if verbose {
         println!("Project and environment in config exist");
     }
+
+    // Get current services before the mutation
+    let old_service_ids: HashSet<String> = {
+        let project = get_project(client, configs, linked_project.project.clone()).await?;
+        project
+            .services
+            .edges
+            .iter()
+            .map(|s| s.node.id.clone())
+            .collect()
+    };
+
     for s in &mut config.services.values_mut() {
         for (key, variable) in &mut s.variables {
             let value = if let Some(value) = vars.get(&format!("{}.{key}", s.name)) {
@@ -138,31 +168,83 @@ pub async fn fetch_and_create(
         }
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message(format!("Creating {template}..."));
+    let spinner = create_spinner_if(!json, format!("Adding {template_name}..."));
 
-    spinner.enable_steady_tick(Duration::from_millis(100));
-
-    let vars = mutations::template_deploy::Variables {
+    let mutation_vars = mutations::template_deploy::Variables {
         project_id: linked_project.project.clone(),
         environment_id: linked_project.environment.clone(),
-        template_id: details.template.id,
+        template_id: details.template.id.clone(),
         serialized_config: serde_json::to_value(&config).context("Failed to serialize config")?,
     };
     if verbose {
         println!("deploying template");
     }
-    post_graphql::<mutations::TemplateDeploy, _>(client, configs.get_backboard(), vars).await?;
+    let response = post_graphql::<mutations::TemplateDeploy, _>(
+        client,
+        configs.get_backboard(),
+        mutation_vars,
+    )
+    .await?;
 
-    spinner.finish_with_message(format!(
-        "🎉 Added {} to project",
-        details.template.name.green().bold(),
-    ));
+    // Wait for workflow to complete
+    if let Some(workflow_id) = response.template_deploy_v2.workflow_id {
+        if verbose {
+            println!("waiting for workflow {workflow_id} to complete");
+        }
+        wait_for_workflow(client, configs, workflow_id)
+            .await
+            .map_err(|e| match e {
+                WorkflowError::Failed(msg) => {
+                    anyhow::anyhow!("Failed to add {template_name}: {msg}")
+                }
+                WorkflowError::NotFound => anyhow::anyhow!("Failed to add {template_name}"),
+                WorkflowError::Timeout => {
+                    anyhow::anyhow!("Timed out waiting for {template_name} to finish deploying")
+                }
+            })?;
+    }
+
+    // Find the newly created service
+    let updated_project = get_project(client, configs, linked_project.project.clone()).await?;
+    let new_service = updated_project
+        .services
+        .edges
+        .iter()
+        .find(|s| !old_service_ids.contains(&s.node.id));
+
+    // Auto-link if should_link is true and no service is currently linked
+    if options.should_link && linked_project.service.is_none() {
+        if let Some(service) = new_service {
+            configs.link_service(service.node.id.clone())?;
+            configs.write()?;
+            if verbose {
+                println!("linked to service {}", service.node.name);
+            }
+        }
+    }
+
+    if json {
+        let output = if let Some(service) = new_service {
+            serde_json::json!({
+                "templateId": details.template.id,
+                "templateName": details.template.name,
+                "serviceId": service.node.id,
+                "serviceName": service.node.name,
+            })
+        } else {
+            serde_json::json!({
+                "templateId": details.template.id,
+                "templateName": details.template.name,
+            })
+        };
+        println!("{}", output);
+    } else if let Some(spinner) = spinner {
+        let mut msg = format!("🎉 Added {} to project", template_name.green().bold());
+        if options.should_link && linked_project.service.is_none() && new_service.is_some() {
+            msg.push_str(" and linked");
+        }
+        spinner.finish_with_message(msg);
+    }
     if verbose {
         println!("template deployed");
     }

@@ -1,16 +1,15 @@
 use colored::*;
 use futures::StreamExt;
-use std::time::Duration;
+use is_terminal::IsTerminal;
 
 use crate::{
-    consts::TICK_STRING,
     controllers::project::{
         ensure_project_and_environment_exist, find_service_instance, get_project,
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::prompt::prompt_confirm_with_default,
+    util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
 
 use super::*;
@@ -26,6 +25,10 @@ pub struct Args {
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     yes: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -36,6 +39,7 @@ pub async fn command(args: Args) -> Result<()> {
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let is_terminal = std::io::stdout().is_terminal();
 
     let service_id = args
         .service
@@ -63,8 +67,10 @@ pub async fn command(args: Args) -> Result<()> {
         bail!("No deployment found for service")
     };
 
-    if !args.yes {
-        let confirmed = prompt_confirm_with_default(
+    let confirmed = if args.yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
             format!(
                 "Restart the latest deployment from service {} in environment {}?",
                 service.node.name,
@@ -75,24 +81,24 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .as_str(),
             false,
-        )?;
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
 
-        if !confirmed {
-            return Ok(());
-        }
+    if !confirmed {
+        return Ok(());
     }
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message(format!(
+    let spinner = create_spinner_if(
+        !args.json,
+        format!(
             "Restarting the latest deployment from service {}...",
             service.node.name
-        ));
-    spinner.enable_steady_tick(Duration::from_millis(100));
+        ),
+    );
 
     post_graphql::<mutations::DeploymentRestart, _>(
         &client,
@@ -103,6 +109,12 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
 
+    if args.json {
+        println!("{}", serde_json::json!({"id": latest.id}));
+        return Ok(());
+    }
+
+    let spinner = spinner.unwrap();
     spinner.set_message(format!(
         "Waiting for deployment from service {} to be healthy...",
         service.node.name

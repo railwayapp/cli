@@ -59,12 +59,18 @@ fn render_tabs(app: &TuiApp, frame: &mut Frame, area: Rect) {
     if app.show_local_tab() {
         titles.push(Line::from("Local"));
     }
+    for service in &app.services {
+        if !service.is_docker {
+            titles.push(Line::from(service.name.clone()));
+        }
+    }
     if app.show_image_tab() {
         titles.push(Line::from("Image"));
     }
-
     for service in &app.services {
-        titles.push(Line::from(service.name.clone()));
+        if service.is_docker {
+            titles.push(Line::from(service.name.clone()));
+        }
     }
 
     let selected = app.tab_index();

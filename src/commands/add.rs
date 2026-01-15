@@ -1,19 +1,18 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap};
 use strum::{Display, EnumIs, EnumIter, IntoEnumIterator};
 
 use crate::{
-    consts::TICK_STRING,
     controllers::{
         database::DatabaseType, project::ensure_project_and_environment_exist, variables::Variable,
     },
-    util::prompt::{
-        self, fake_select, prompt_multi_options, prompt_options, prompt_text,
-        prompt_text_with_placeholder_disappear, prompt_text_with_placeholder_if_blank,
+    util::{
+        progress::create_spinner_if,
+        prompt::{
+            self, fake_select, prompt_multi_options, prompt_options, prompt_text,
+            prompt_text_with_placeholder_disappear, prompt_text_with_placeholder_if_blank,
+        },
     },
 };
 
@@ -48,6 +47,10 @@ pub struct Args {
     /// Verbose logging
     #[clap(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     verbose: Option<bool>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -116,21 +119,26 @@ pub async fn command(args: Args) -> Result<()> {
     }
     match type_of_create {
         CreateKind::Database(databases) => {
+            let is_single_db = databases.len() == 1;
             for db in databases {
                 if verbose {
                     println!("iterating through databases to add: {:?}", db)
                 }
                 deploy::fetch_and_create(
                     &client,
-                    &configs,
+                    &mut configs,
                     db.to_slug().to_string(),
                     &linked_project,
                     &HashMap::new(),
                     verbose,
+                    args.json,
+                    deploy::FetchAndCreateOptions {
+                        should_link: is_single_db,
+                    },
                 )
                 .await?;
                 if verbose {
-                    println!("succesfully created {:?}", db)
+                    println!("successfully created {:?}", db)
                 }
             }
         }
@@ -148,6 +156,7 @@ pub async fn command(args: Args) -> Result<()> {
                 Some(image),
                 variables,
                 verbose,
+                args.json,
             )
             .await?;
         }
@@ -165,6 +174,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 variables,
                 verbose,
+                args.json,
             )
             .await?;
         }
@@ -178,6 +188,7 @@ pub async fn command(args: Args) -> Result<()> {
                 None,
                 variables,
                 verbose,
+                args.json,
             )
             .await?;
         }
@@ -274,15 +285,9 @@ async fn create_service(
     image: Option<String>,
     variables: Variables,
     verbose: bool,
+    json: bool,
 ) -> Result<(), anyhow::Error> {
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Creating service...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = create_spinner_if(!json, "Creating service...".into());
     let source = mutations::service_create::ServiceSourceInput { repo, image };
     let branch = if let Some(repo) = &source.repo {
         if verbose {
@@ -316,12 +321,19 @@ async fn create_service(
     }
     let s =
         post_graphql::<mutations::ServiceCreate, _>(client, &configs.get_backboard(), vars).await?;
-    configs.link_service(s.service_create.id)?;
+    configs.link_service(s.service_create.id.clone())?;
     configs.write()?;
-    spinner.finish_with_message(format!(
-        "Successfully created the service \"{}\" and linked to it",
-        s.service_create.name.blue()
-    ));
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"id": s.service_create.id, "name": s.service_create.name})
+        );
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "Successfully created the service \"{}\" and linked to it",
+            s.service_create.name.blue()
+        ));
+    }
     Ok(())
 }
 

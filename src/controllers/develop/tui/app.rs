@@ -450,6 +450,11 @@ impl TuiApp {
             idx -= 1;
         }
 
+        if idx < self.code_count {
+            return Some(Tab::Service(idx));
+        }
+        idx -= self.code_count;
+
         if self.show_image_tab() {
             if idx == 0 {
                 return Some(Tab::Image);
@@ -457,8 +462,9 @@ impl TuiApp {
             idx -= 1;
         }
 
-        if idx < self.services.len() {
-            Some(Tab::Service(idx))
+        let image_service_idx = self.code_count + idx;
+        if image_service_idx < self.services.len() {
+            Some(Tab::Service(image_service_idx))
         } else {
             None
         }
@@ -500,24 +506,32 @@ impl TuiApp {
     }
 
     pub fn tab_index(&self) -> usize {
-        let mut idx = 0;
-
         match self.current_tab {
-            Tab::Local => idx,
+            Tab::Local => 0,
+            Tab::Service(i) if i < self.code_count => {
+                let mut idx = i;
+                if self.show_local_tab() {
+                    idx += 1;
+                }
+                idx
+            }
             Tab::Image => {
+                let mut idx = self.code_count;
                 if self.show_local_tab() {
                     idx += 1;
                 }
                 idx
             }
             Tab::Service(i) => {
+                let mut idx = i - self.code_count;
                 if self.show_local_tab() {
                     idx += 1;
                 }
+                idx += self.code_count;
                 if self.show_image_tab() {
                     idx += 1;
                 }
-                idx + i
+                idx
             }
         }
     }
