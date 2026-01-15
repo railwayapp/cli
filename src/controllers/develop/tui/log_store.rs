@@ -6,6 +6,7 @@ const MAX_LINES: usize = 100_000;
 
 #[derive(Debug, Clone)]
 pub struct StoredLogLine {
+    pub service_name: String,
     pub message: String,
     pub color: Color,
 }

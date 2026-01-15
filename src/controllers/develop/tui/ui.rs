@@ -1,15 +1,15 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Tabs},
+    widgets::{Block, Borders, Paragraph, Tabs},
 };
 
-use super::app::{Tab, TuiApp};
-use super::log_store::LogEntry;
+use super::app::{Selection, Tab, TuiApp};
+use super::log_store::{LogEntry, StoredLogLine};
 
-fn convert_color(c: colored::Color) -> Color {
+pub fn convert_color(c: colored::Color) -> Color {
     match c {
         colored::Color::Black => Color::Black,
         colored::Color::Red => Color::Red,
@@ -32,24 +32,28 @@ fn convert_color(c: colored::Color) -> Color {
 }
 
 pub fn render(app: &mut TuiApp, frame: &mut Frame) {
+    let info_height = if app.show_info { 3 } else { 0 };
+
     let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(5),
-        Constraint::Length(1),
+        Constraint::Length(1),           // Tab bar
+        Constraint::Min(1),              // Log area
+        Constraint::Length(info_height), // Info pane
+        Constraint::Length(1),           // Help bar
     ])
     .split(frame.area());
 
-    let visible_height = chunks[1].height.saturating_sub(2) as usize;
-    app.set_visible_height(visible_height);
+    // Store log area bounds for mouse handling
+    app.set_log_area(chunks[1].y, chunks[1].height);
 
     render_tabs(app, frame, chunks[0]);
     render_logs(app, frame, chunks[1]);
-    render_info_pane(app, frame, chunks[2]);
+    if app.show_info {
+        render_info_pane(app, frame, chunks[2]);
+    }
     render_help_bar(app, frame, chunks[3]);
 }
 
-fn render_tabs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
+fn render_tabs(app: &TuiApp, frame: &mut Frame, area: Rect) {
     let mut titles: Vec<Line> = Vec::new();
 
     if app.show_local_tab() {
@@ -65,6 +69,12 @@ fn render_tabs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
 
     let selected = app.tab_index();
 
+    let follow_indicator = if app.follow_mode {
+        Span::styled(" [FOLLOW]", Style::default().fg(Color::Green))
+    } else {
+        Span::styled(" [PAUSED]", Style::default().fg(Color::Yellow))
+    };
+
     let tabs = Tabs::new(titles)
         .select(selected)
         .style(Style::default().fg(Color::Gray))
@@ -75,118 +85,147 @@ fn render_tabs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
         )
         .divider("|");
 
-    frame.render_widget(tabs, area);
+    let tab_chunks = Layout::horizontal([Constraint::Min(10), Constraint::Length(10)]).split(area);
+
+    frame.render_widget(tabs, tab_chunks[0]);
+    frame.render_widget(Paragraph::new(Line::from(follow_indicator)), tab_chunks[1]);
 }
 
-fn render_logs(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
-    let visible_height = area.height.saturating_sub(2) as usize;
-    let total_logs = app.current_log_count();
+fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
+    let visible_height = area.height as usize;
+    app.set_visible_height(visible_height);
 
-    let start = if app.follow_mode {
-        total_logs.saturating_sub(visible_height)
-    } else {
-        app.scroll_offset
-    };
-
-    let lines: Vec<Line> = match app.current_tab {
-        Tab::Local => render_log_entries(
-            &app.log_store.local_logs,
-            &app.services,
-            start,
-            visible_height,
-        ),
-        Tab::Image => render_log_entries(
-            &app.log_store.image_logs,
-            &app.services,
-            start,
-            visible_height,
-        ),
-        Tab::Service(idx) => {
-            if let Some(service) = app.services.get(idx) {
-                if let Some(buffer) = app.log_store.services.get(idx) {
-                    buffer
-                        .lines
-                        .iter()
-                        .skip(start)
-                        .take(visible_height)
-                        .map(|log| {
-                            let prefix = Span::styled(
-                                format!("[{}] ", service.name),
-                                Style::default().fg(convert_color(log.color)),
-                            );
-                            let content = Span::raw(&log.message);
-                            Line::from(vec![prefix, content])
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![]
-            }
-        }
-    };
-
-    let title = match app.current_tab {
-        Tab::Local => "Local Services",
-        Tab::Image => "Image Services",
+    let logs: Vec<LogRef> = match app.current_tab {
+        Tab::Local => app
+            .log_store
+            .local_logs
+            .iter()
+            .map(LogRef::Entry)
+            .collect(),
+        Tab::Image => app
+            .log_store
+            .image_logs
+            .iter()
+            .map(LogRef::Entry)
+            .collect(),
         Tab::Service(idx) => app
+            .log_store
             .services
             .get(idx)
-            .map(|s| s.name.as_str())
-            .unwrap_or("Service"),
+            .map(|buf| {
+                buf.lines
+                    .iter()
+                    .map(|line| LogRef::Service(idx, line))
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
 
-    let scroll_indicator = if total_logs > 0 {
-        let pos = if app.follow_mode {
-            total_logs
-        } else {
-            start + visible_height.min(total_logs)
-        };
-        format!(" [{}/{}]", pos, total_logs)
+    let total = logs.len();
+    let start_idx = if app.follow_mode {
+        total.saturating_sub(visible_height)
     } else {
-        String::new()
+        app.scroll_offset.min(total.saturating_sub(visible_height))
     };
 
-    let follow_indicator = if app.follow_mode { " [FOLLOW]" } else { "" };
+    let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
+
+    for (vis_row, log_idx) in (start_idx..total).enumerate().take(visible_height) {
+        let (service_idx, service_name, message, log_color) = match &logs[log_idx] {
+            LogRef::Entry(e) => (
+                e.service_idx,
+                e.line.service_name.as_str(),
+                e.line.message.as_str(),
+                e.line.color,
+            ),
+            LogRef::Service(idx, line) => (
+                *idx,
+                line.service_name.as_str(),
+                line.message.as_str(),
+                line.color,
+            ),
+        };
+
+        let service_color = app
+            .services
+            .get(service_idx)
+            .map(|s| convert_color(s.color))
+            .unwrap_or_else(|| convert_color(log_color));
+
+        let line =
+            render_log_line(service_name, service_color, message, vis_row, &app.selection);
+        lines.push(line);
+    }
+
+    // Fill remaining space
+    while lines.len() < visible_height {
+        lines.push(Line::from(""));
+    }
 
     let block = Block::default()
-        .title(format!("{}{}{}", title, scroll_indicator, follow_indicator))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .borders(Borders::NONE)
+        .style(Style::default());
 
     let paragraph = Paragraph::new(lines).block(block);
-    // Clear prevents stale logs from previous tab rendering through
-    frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
 }
 
-fn render_log_entries(
-    logs: &std::collections::VecDeque<LogEntry>,
-    services: &[super::app::ServiceInfo],
-    start: usize,
-    count: usize,
-) -> Vec<Line<'static>> {
-    logs.iter()
-        .skip(start)
-        .take(count)
-        .map(|entry| {
-            let service_name = services
-                .get(entry.service_idx)
-                .map(|s| s.name.as_str())
-                .unwrap_or("unknown");
+fn render_log_line<'a>(
+    service_name: &str,
+    service_color: Color,
+    message: &str,
+    vis_row: usize,
+    selection: &Option<Selection>,
+) -> Line<'a> {
+    let prefix = format!("[{}] ", service_name);
+    let full_line = format!("{}{}", prefix, message);
 
-            let prefix = Span::styled(
-                format!("[{}] ", service_name),
-                Style::default().fg(convert_color(entry.line.color)),
-            );
-            let content = Span::raw(entry.line.message.clone());
-            Line::from(vec![prefix, content])
-        })
-        .collect()
+    if let Some(sel) = selection {
+        let chars: Vec<char> = full_line.chars().collect();
+        let mut spans = Vec::new();
+        let mut current_span = String::new();
+        let mut in_selection = false;
+
+        for (col, ch) in chars.iter().enumerate() {
+            let is_selected = sel.contains(vis_row, col);
+
+            if is_selected != in_selection {
+                // Flush current span
+                if !current_span.is_empty() {
+                    let style = if in_selection {
+                        Style::default().bg(Color::White).fg(Color::Black)
+                    } else if col <= prefix.len() {
+                        Style::default().fg(service_color)
+                    } else {
+                        Style::default()
+                    };
+                    spans.push(Span::styled(std::mem::take(&mut current_span), style));
+                }
+                in_selection = is_selected;
+            }
+            current_span.push(*ch);
+        }
+
+        // Flush final span
+        if !current_span.is_empty() {
+            let style = if in_selection {
+                Style::default().bg(Color::White).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            spans.push(Span::styled(current_span, style));
+        }
+
+        Line::from(spans)
+    } else {
+        Line::from(vec![
+            Span::styled(prefix, Style::default().fg(service_color)),
+            Span::raw(message.to_string()),
+        ])
+    }
 }
 
-fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
+fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: Rect) {
     let services_to_show: Vec<&super::app::ServiceInfo> = match app.current_tab {
         Tab::Local => app.services.iter().filter(|s| !s.is_docker).collect(),
         Tab::Image => app.services.iter().filter(|s| s.is_docker).collect(),
@@ -195,6 +234,7 @@ fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect
 
     let lines: Vec<Line> = services_to_show
         .iter()
+        .take(2)
         .map(|svc| {
             let mut spans = vec![Span::styled(
                 format!("{}: ", svc.name),
@@ -230,31 +270,25 @@ fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect
         })
         .collect();
 
-    let title = match app.current_tab {
-        Tab::Local => "Local Services",
-        Tab::Image => "Image Services",
-        Tab::Service(_) => "Service Info",
-    };
-
     let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .border_style(Style::default().fg(Color::DarkGray));
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
-fn render_help_bar(_app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect) {
-    let help_text = vec![
+fn render_help_bar(app: &TuiApp, frame: &mut Frame, area: Rect) {
+    let mut help_text = vec![
         Span::styled("1-9", Style::default().fg(Color::Yellow)),
         Span::raw(" tab  "),
-        Span::styled("Tab", Style::default().fg(Color::Yellow)),
-        Span::raw(" cycle  "),
         Span::styled("j/k", Style::default().fg(Color::Yellow)),
         Span::raw(" scroll  "),
-        Span::styled("g/G", Style::default().fg(Color::Yellow)),
-        Span::raw(" top/bottom  "),
+        Span::styled("drag", Style::default().fg(Color::Yellow)),
+        Span::raw(" copy  "),
+        Span::styled("i", Style::default().fg(Color::Yellow)),
+        Span::raw(if app.show_info { " hide" } else { " info" }),
+        Span::raw("  "),
         Span::styled("f", Style::default().fg(Color::Yellow)),
         Span::raw(" follow  "),
         Span::styled("r", Style::default().fg(Color::Yellow)),
@@ -263,6 +297,21 @@ fn render_help_bar(_app: &TuiApp, frame: &mut Frame, area: ratatui::layout::Rect
         Span::raw(" quit"),
     ];
 
+    // Show copied feedback
+    if let Some(instant) = app.copied_feedback {
+        if instant.elapsed().as_secs() < 2 {
+            help_text.push(Span::styled(
+                "  [Copied!]",
+                Style::default().fg(Color::Green),
+            ));
+        }
+    }
+
     let paragraph = Paragraph::new(Line::from(help_text));
     frame.render_widget(paragraph, area);
+}
+
+enum LogRef<'a> {
+    Entry(&'a LogEntry),
+    Service(usize, &'a StoredLogLine),
 }
