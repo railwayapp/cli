@@ -54,23 +54,6 @@ impl Selection {
             (self.end, self.start)
         }
     }
-
-    pub fn contains(&self, row: usize, col: usize) -> bool {
-        let ((sr, sc), (er, ec)) = self.normalized();
-        if row < sr || row > er {
-            return false;
-        }
-        if row == sr && row == er {
-            return col >= sc && col <= ec;
-        }
-        if row == sr {
-            return col >= sc;
-        }
-        if row == er {
-            return col <= ec;
-        }
-        true
-    }
 }
 
 pub struct TuiApp {
@@ -127,11 +110,11 @@ impl TuiApp {
             copy_failed: None,
             needs_clear: false,
             service_name_to_idx,
-            visible_height: 20,
+            visible_height: 0,
             code_count,
             image_count,
-            log_area_top: 1,
-            log_area_height: 20,
+            log_area_top: 0,
+            log_area_height: 0,
         }
     }
 
@@ -338,31 +321,60 @@ impl TuiApp {
     fn get_selected_text(&self, sel: &Selection) -> String {
         let ((sr, sc), (er, ec)) = sel.normalized();
         let visible_height = self.log_area_height as usize;
+        let total = self.current_log_count();
 
-        let logs = self.current_logs();
-        let total = logs.len();
-        let start_idx = if self.follow_mode {
+        let view_start = if self.follow_mode {
             total.saturating_sub(visible_height)
         } else {
             self.scroll_offset
         };
 
+        // Only collect logs in the selected range
+        let log_start = view_start + sr;
+        let log_end = (view_start + er + 1).min(total);
+        let selected_rows = er - sr + 1;
+
+        let logs: Vec<LogRef<'_>> = match self.current_tab {
+            Tab::Local => self
+                .log_store
+                .local_logs
+                .iter()
+                .skip(log_start)
+                .take(selected_rows)
+                .map(LogRef::Entry)
+                .collect(),
+            Tab::Image => self
+                .log_store
+                .image_logs
+                .iter()
+                .skip(log_start)
+                .take(selected_rows)
+                .map(LogRef::Entry)
+                .collect(),
+            Tab::Service(idx) => self
+                .log_store
+                .services
+                .get(idx)
+                .map(|buf| {
+                    buf.lines
+                        .iter()
+                        .skip(log_start)
+                        .take(selected_rows)
+                        .map(|line| LogRef::Service(idx, line))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+
         let mut result = String::new();
-        for (vis_row, log_idx) in (start_idx..total).enumerate() {
-            if vis_row > er {
+        for (i, log_ref) in logs.iter().enumerate() {
+            let vis_row = sr + i;
+            if vis_row > er || view_start + vis_row >= log_end {
                 break;
             }
-            if vis_row < sr {
-                continue;
-            }
 
-            let (service_name, message) = match &logs[log_idx] {
-                LogRef::Entry(e) => (e.line.service_name.as_str(), e.line.message.as_str()),
-                LogRef::Service(_idx, line) => (line.service_name.as_str(), line.message.as_str()),
-            };
-
+            let (_, service_name, message, _) = log_ref.parts();
             let full_line = format!("[{}] {}", service_name, message);
-
             let line_chars: Vec<char> = full_line.chars().collect();
             let line_len = line_chars.len();
 
@@ -386,34 +398,6 @@ impl TuiApp {
         }
 
         result
-    }
-
-    fn current_logs(&self) -> Vec<LogRef<'_>> {
-        match self.current_tab {
-            Tab::Local => self
-                .log_store
-                .local_logs
-                .iter()
-                .map(LogRef::Entry)
-                .collect(),
-            Tab::Image => self
-                .log_store
-                .image_logs
-                .iter()
-                .map(LogRef::Entry)
-                .collect(),
-            Tab::Service(idx) => self
-                .log_store
-                .services
-                .get(idx)
-                .map(|buf| {
-                    buf.lines
-                        .iter()
-                        .map(|line| LogRef::Service(idx, line))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }
     }
 
     fn exit_follow_mode(&mut self) {

@@ -52,6 +52,21 @@ pub enum LogRef<'a> {
     Service(usize, &'a StoredLogLine),
 }
 
+impl<'a> LogRef<'a> {
+    /// Returns (service_idx, service_name, message, color)
+    pub fn parts(&self) -> (usize, &str, &str, Color) {
+        match self {
+            LogRef::Entry(e) => (
+                e.service_idx,
+                &e.line.service_name,
+                &e.line.message,
+                e.line.color,
+            ),
+            LogRef::Service(idx, line) => (*idx, &line.service_name, &line.message, line.color),
+        }
+    }
+}
+
 impl LogStore {
     pub fn new(service_count: usize) -> Self {
         Self {

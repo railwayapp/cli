@@ -101,9 +101,32 @@ fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
     let visible_height = area.height as usize;
     app.set_visible_height(visible_height);
 
+    // Get total count without collecting all logs
+    let total = app.current_log_count();
+    let start_idx = if app.follow_mode {
+        total.saturating_sub(visible_height)
+    } else {
+        app.scroll_offset.min(total.saturating_sub(visible_height))
+    };
+
+    // Only collect visible logs
     let logs: Vec<LogRef> = match app.current_tab {
-        Tab::Local => app.log_store.local_logs.iter().map(LogRef::Entry).collect(),
-        Tab::Image => app.log_store.image_logs.iter().map(LogRef::Entry).collect(),
+        Tab::Local => app
+            .log_store
+            .local_logs
+            .iter()
+            .skip(start_idx)
+            .take(visible_height)
+            .map(LogRef::Entry)
+            .collect(),
+        Tab::Image => app
+            .log_store
+            .image_logs
+            .iter()
+            .skip(start_idx)
+            .take(visible_height)
+            .map(LogRef::Entry)
+            .collect(),
         Tab::Service(idx) => app
             .log_store
             .services
@@ -111,37 +134,18 @@ fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
             .map(|buf| {
                 buf.lines
                     .iter()
+                    .skip(start_idx)
+                    .take(visible_height)
                     .map(|line| LogRef::Service(idx, line))
                     .collect()
             })
             .unwrap_or_default(),
     };
 
-    let total = logs.len();
-    let start_idx = if app.follow_mode {
-        total.saturating_sub(visible_height)
-    } else {
-        app.scroll_offset.min(total.saturating_sub(visible_height))
-    };
-
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
-    for (vis_row, log_idx) in (start_idx..total).enumerate().take(visible_height) {
-        let (service_idx, service_name, message, log_color) = match &logs[log_idx] {
-            LogRef::Entry(e) => (
-                e.service_idx,
-                e.line.service_name.as_str(),
-                e.line.message.as_str(),
-                e.line.color,
-            ),
-            LogRef::Service(idx, line) => (
-                *idx,
-                line.service_name.as_str(),
-                line.message.as_str(),
-                line.color,
-            ),
-        };
-
+    for (vis_row, log_ref) in logs.iter().enumerate() {
+        let (service_idx, service_name, message, log_color) = log_ref.parts();
         let service_color = app
             .services
             .get(service_idx)
@@ -180,55 +184,79 @@ fn render_log_line<'a>(
 ) -> Line<'a> {
     let prefix = format!("[{}] ", service_name);
     let prefix_len = prefix.chars().count();
-    let full_line = format!("{}{}", prefix, message);
 
-    if let Some(sel) = selection {
-        let chars: Vec<char> = full_line.chars().collect();
-        let mut spans = Vec::new();
-        let mut current_span = String::new();
-        let mut span_start = 0;
-        let mut in_selection = false;
-
-        for (col, ch) in chars.iter().enumerate() {
-            let is_selected = sel.contains(vis_row, col);
-
-            if is_selected != in_selection {
-                // Flush current span
-                if !current_span.is_empty() {
-                    let style = if in_selection {
-                        Style::default().bg(Color::White).fg(Color::Black)
-                    } else if span_start < prefix_len {
-                        Style::default().fg(service_color)
-                    } else {
-                        Style::default()
-                    };
-                    spans.push(Span::styled(std::mem::take(&mut current_span), style));
-                }
-                in_selection = is_selected;
-                span_start = col;
-            }
-            current_span.push(*ch);
-        }
-
-        // Flush final span
-        if !current_span.is_empty() {
-            let style = if in_selection {
-                Style::default().bg(Color::White).fg(Color::Black)
-            } else if span_start < prefix_len {
-                Style::default().fg(service_color)
-            } else {
-                Style::default()
-            };
-            spans.push(Span::styled(current_span, style));
-        }
-
-        Line::from(spans)
-    } else {
-        Line::from(vec![
+    let Some(sel) = selection else {
+        return Line::from(vec![
             Span::styled(prefix, Style::default().fg(service_color)),
             Span::raw(message.to_string()),
-        ])
+        ]);
+    };
+
+    let ((start_row, start_col), (end_row, end_col)) = sel.normalized();
+
+    // Row not in selection at all
+    if vis_row < start_row || vis_row > end_row {
+        return Line::from(vec![
+            Span::styled(prefix, Style::default().fg(service_color)),
+            Span::raw(message.to_string()),
+        ]);
     }
+
+    let full_line = format!("{}{}", prefix, message);
+    let chars: Vec<char> = full_line.chars().collect();
+    let line_len = chars.len();
+
+    // Calculate selection bounds for this row
+    let sel_start = if vis_row == start_row { start_col } else { 0 };
+    let sel_end = if vis_row == end_row {
+        (end_col + 1).min(line_len)
+    } else {
+        line_len
+    };
+
+    // Build spans: [before selection] [selection] [after selection]
+    let mut spans = Vec::new();
+
+    if sel_start > 0 {
+        let text: String = chars[..sel_start.min(line_len)].iter().collect();
+        let style = if sel_start <= prefix_len {
+            Style::default().fg(service_color)
+        } else {
+            Style::default()
+        };
+        // Split if spans both prefix and message
+        if sel_start > prefix_len {
+            let prefix_text: String = chars[..prefix_len].iter().collect();
+            let msg_text: String = chars[prefix_len..sel_start].iter().collect();
+            spans.push(Span::styled(
+                prefix_text,
+                Style::default().fg(service_color),
+            ));
+            spans.push(Span::raw(msg_text));
+        } else {
+            spans.push(Span::styled(text, style));
+        }
+    }
+
+    if sel_start < line_len && sel_end > sel_start {
+        let text: String = chars[sel_start..sel_end.min(line_len)].iter().collect();
+        spans.push(Span::styled(
+            text,
+            Style::default().bg(Color::White).fg(Color::Black),
+        ));
+    }
+
+    if sel_end < line_len {
+        let text: String = chars[sel_end..].iter().collect();
+        let style = if sel_end < prefix_len {
+            Style::default().fg(service_color)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(text, style));
+    }
+
+    Line::from(spans)
 }
 
 fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: Rect) {
