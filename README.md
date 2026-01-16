@@ -111,7 +111,7 @@ See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING
 
 ## Documentation
 
-[View the full documentation](https://docs.railway.com)
+[View the full documentation](https://docs.railway.com/reference/cli-api)
 
 ## Feedback
 

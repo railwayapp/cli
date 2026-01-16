@@ -10,3 +10,4 @@ pub mod service;
 pub mod terminal;
 pub mod user;
 pub mod variables;
+pub mod workflow;

@@ -1,11 +1,11 @@
-use super::{Args, Environment, *};
+use super::{Environment, *};
 use crate::{
     Configs, GQLClient, controllers::project::get_project, interact_or,
     util::prompt::prompt_options,
 };
 use anyhow::{Result, bail};
 
-pub async fn link_environment(args: Args) -> Result<()> {
+pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
@@ -31,7 +31,7 @@ pub async fn link_environment(args: Args) -> Result<()> {
         }
     }
 
-    let environment = match args.environment {
+    let environment = match environment_arg {
         // If the environment is specified, find it in the list of environments
         Some(environment) => {
             let environment = environments
@@ -62,14 +62,29 @@ pub async fn link_environment(args: Args) -> Result<()> {
     };
 
     let environment_name = environment.0.name.clone();
-    println!("Activated environment {}", environment_name.purple().bold());
+    let environment_id = environment.0.id.clone();
 
     configs.link_project(
         linked_project.project.clone(),
         linked_project.name.clone(),
-        environment.0.id.clone(),
-        Some(environment_name),
+        environment_id.clone(),
+        Some(environment_name.clone()),
     )?;
     configs.write()?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "environment": {
+                    "id": environment_id,
+                    "name": environment_name
+                }
+            })
+        );
+    } else {
+        println!("Activated environment {}", environment_name.purple().bold());
+    }
+
     Ok(())
 }

@@ -1,7 +1,6 @@
-use std::{fmt::Display, time::Duration};
+use std::fmt::Display;
 
 use crate::{
-    consts::TICK_STRING,
     controllers::project::get_project,
     errors::RailwayError,
     util::{
@@ -30,12 +29,26 @@ pub struct Args {
 
     #[clap(subcommand)]
     command: Option<Commands>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    pub json: bool,
 }
 
 structstruck::strike! {
     #[strikethrough[derive(Parser)]]
     #[allow(clippy::large_enum_variant)]
     enum Commands {
+        /// Link an environment to the current project
+        Link(pub struct {
+            /// The environment to link to
+            pub environment: Option<String>,
+
+            /// Output in JSON format
+            #[clap(long)]
+            pub json: bool,
+        }),
+
         /// Create a new environment
         New(pub struct {
             /// The name of the environment to create
@@ -47,6 +60,10 @@ structstruck::strike! {
 
             #[clap(flatten)]
             pub config: EnvironmentConfigOptions,
+
+            /// Output in JSON format
+            #[clap(long)]
+            pub json: bool,
         }),
 
         /// Delete an environment
@@ -57,6 +74,10 @@ structstruck::strike! {
 
             /// The environment to delete
             pub environment: Option<String>,
+
+            /// Output in JSON format
+            #[clap(long)]
+            pub json: bool,
         })
 
     }
@@ -109,9 +130,13 @@ impl EnvironmentConfigOptions {
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
+        Some(Commands::Link(link_args)) => {
+            link::link_environment(link_args.environment, link_args.json).await
+        }
         Some(Commands::New(args)) => new::new_environment(args).await,
         Some(Commands::Delete(args)) => delete::delete_environment(args).await,
-        None => link::link_environment(args).await,
+        // Legacy: `railway environment <name>` without subcommand
+        None => link::link_environment(args.environment, args.json).await,
     }
 }
 

@@ -1,7 +1,10 @@
 use strum::IntoEnumIterator;
 
 use super::{New as Args, changes::Change, *};
-use crate::controllers::config::{self, EnvironmentConfig, PatchEntry};
+use crate::{
+    controllers::config::{self, EnvironmentConfig, PatchEntry},
+    util::progress::create_spinner_if,
+};
 
 pub async fn new_environment(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
@@ -10,6 +13,7 @@ pub async fn new_environment(args: Args) -> Result<()> {
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
     let project_id = project.id.clone();
     let is_terminal = std::io::stdout().is_terminal();
+    let json = args.json;
 
     let name = select_name_new(&args, is_terminal)?;
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
@@ -29,14 +33,7 @@ pub async fn new_environment(args: Args) -> Result<()> {
         apply_changes_in_background: duplicate_id.as_ref().map(|_| true),
     };
 
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Creating environment...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = create_spinner_if(!json, "Creating environment...".into());
 
     let response =
         post_graphql::<mutations::EnvironmentCreate, _>(&client, &configs.get_backboard(), vars)
@@ -47,22 +44,30 @@ pub async fn new_environment(args: Args) -> Result<()> {
 
     if duplicate_id.is_some() {
         // Wait for background duplication to complete before applying config changes
-        spinner.set_message("Waiting for environment to duplicate...");
+        if let Some(ref s) = spinner {
+            s.set_message("Waiting for environment to duplicate...");
+        }
         let _ = wait_for_environment_creation(&client, &configs, env_id.clone()).await;
     }
 
     // Apply config changes if any
     if has_config_changes {
-        spinner.set_message("Applying configuration...");
+        if let Some(ref s) = spinner {
+            s.set_message("Applying configuration...");
+        }
         apply_environment_config(&client, &configs, &env_id, env_config).await?;
     }
 
-    spinner.finish_with_message(format!(
-        "{} {} {}",
-        "Environment".green(),
-        env_name.magenta().bold(),
-        "created!".green()
-    ));
+    if json {
+        println!("{}", serde_json::json!({"id": env_id, "name": env_name}));
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "{} {} {}",
+            "Environment".green(),
+            env_name.magenta().bold(),
+            "created!".green()
+        ));
+    }
 
     configs.link_project(
         project_id,

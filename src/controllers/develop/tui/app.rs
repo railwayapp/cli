@@ -1,7 +1,9 @@
-use colored::Color;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use std::collections::HashMap;
 
-use super::log_store::{LogStore, StoredLogLine};
+use colored::Color;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+use super::log_store::{LogRef, LogStore, StoredLogLine};
 use crate::controllers::develop::LogLine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,16 +40,40 @@ pub struct ServiceInfo {
     pub process_index: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    pub start: (usize, usize), // (row, col) in visible log area
+    pub end: (usize, usize),
+}
+
+impl Selection {
+    pub fn normalized(&self) -> ((usize, usize), (usize, usize)) {
+        if self.start <= self.end {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+}
+
 pub struct TuiApp {
     pub current_tab: Tab,
     pub scroll_offset: usize,
     pub follow_mode: bool,
+    pub show_info: bool,
     pub log_store: LogStore,
     pub services: Vec<ServiceInfo>,
-    service_name_to_idx: std::collections::HashMap<String, usize>,
+    pub selection: Option<Selection>,
+    pub selecting: bool,
+    pub copied_feedback: Option<std::time::Instant>,
+    pub copy_failed: Option<std::time::Instant>,
+    pub needs_clear: bool,
+    service_name_to_idx: HashMap<String, usize>,
     visible_height: usize,
     code_count: usize,
     image_count: usize,
+    log_area_top: u16,
+    log_area_height: u16,
 }
 
 impl TuiApp {
@@ -75,12 +101,20 @@ impl TuiApp {
             current_tab: initial_tab,
             scroll_offset: 0,
             follow_mode: true,
+            show_info: true,
             log_store: LogStore::new(services.len()),
             services,
+            selection: None,
+            selecting: false,
+            copied_feedback: None,
+            copy_failed: None,
+            needs_clear: false,
             service_name_to_idx,
-            visible_height: 20,
+            visible_height: 0,
             code_count,
             image_count,
+            log_area_top: 0,
+            log_area_height: 0,
         }
     }
 
@@ -96,6 +130,11 @@ impl TuiApp {
         self.visible_height = height;
     }
 
+    pub fn set_log_area(&mut self, top: u16, height: u16) {
+        self.log_area_top = top;
+        self.log_area_height = height;
+    }
+
     pub fn push_log(&mut self, log: LogLine, is_docker: bool) {
         let service_idx = self
             .service_name_to_idx
@@ -104,6 +143,7 @@ impl TuiApp {
             .unwrap_or(0);
 
         let stored = StoredLogLine {
+            service_name: log.service_name,
             message: log.message,
             color: log.color,
         };
@@ -115,11 +155,19 @@ impl TuiApp {
         }
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> TuiAction {
+    /// Returns (action, tab_changed)
+    pub fn handle_key(&mut self, key: KeyEvent) -> (TuiAction, bool) {
+        let prev_tab = self.current_tab;
+
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return TuiAction::Quit,
+            KeyCode::Char('q') | KeyCode::Esc => return (TuiAction::Quit, false),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return TuiAction::Quit;
+                return (TuiAction::Quit, false);
+            }
+
+            // Copy selection
+            KeyCode::Char('y') => {
+                self.copy_selection();
             }
 
             // Restart
@@ -129,7 +177,12 @@ impl TuiApp {
                     Tab::Image => RestartRequest::Image,
                     Tab::Service(idx) => RestartRequest::Service(idx),
                 };
-                return TuiAction::Restart(request);
+                return (TuiAction::Restart(request), false);
+            }
+
+            // Toggle info pane
+            KeyCode::Char('i') => {
+                self.show_info = !self.show_info;
             }
 
             // Tab selection by number
@@ -155,16 +208,18 @@ impl TuiApp {
 
             // Scrolling
             KeyCode::Char('j') | KeyCode::Down => {
-                self.exit_follow_mode();
-                self.scroll_down(1);
+                if !self.follow_mode {
+                    self.scroll_down(1);
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.exit_follow_mode();
                 self.scroll_up(1);
             }
             KeyCode::PageDown => {
-                self.exit_follow_mode();
-                self.scroll_down(20);
+                if !self.follow_mode {
+                    self.scroll_down(20);
+                }
             }
             KeyCode::PageUp => {
                 self.exit_follow_mode();
@@ -182,6 +237,7 @@ impl TuiApp {
             // Follow mode toggle
             KeyCode::Char('f') => {
                 self.follow_mode = !self.follow_mode;
+                self.needs_clear = true;
                 if self.follow_mode {
                     self.scroll_to_bottom();
                 }
@@ -189,21 +245,159 @@ impl TuiApp {
 
             _ => {}
         }
-        TuiAction::None
+
+        let tab_changed = self.current_tab != prev_tab;
+        (TuiAction::None, tab_changed)
     }
 
     pub fn handle_mouse(&mut self, event: MouseEvent) {
+        let row = event.row;
+        let col = event.column;
+
         match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Check if click is in log area
+                if row >= self.log_area_top && row < self.log_area_top + self.log_area_height {
+                    let log_row = (row - self.log_area_top) as usize;
+                    self.selection = Some(Selection {
+                        start: (log_row, col as usize),
+                        end: (log_row, col as usize),
+                    });
+                    self.selecting = true;
+                } else {
+                    self.selection = None;
+                    self.selecting = false;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.selecting => {
+                if row >= self.log_area_top && row < self.log_area_top + self.log_area_height {
+                    let log_row = (row - self.log_area_top) as usize;
+                    if let Some(sel) = &mut self.selection {
+                        sel.end = (log_row, col as usize);
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.selecting = false;
+                // Auto-copy if selection is non-trivial
+                if let Some(sel) = &self.selection {
+                    if sel.start != sel.end {
+                        self.copy_selection();
+                    } else {
+                        self.selection = None;
+                    }
+                }
+            }
             MouseEventKind::ScrollDown => {
-                self.exit_follow_mode();
-                self.scroll_down(1);
+                // Don't exit follow mode when scrolling down - it's a no-op at bottom
+                if !self.follow_mode {
+                    self.scroll_down(3);
+                }
             }
             MouseEventKind::ScrollUp => {
                 self.exit_follow_mode();
-                self.scroll_up(1);
+                self.scroll_up(3);
             }
             _ => {}
         }
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(sel) = &self.selection else { return };
+
+        let text = self.get_selected_text(sel);
+        if text.is_empty() {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+            Ok(()) => self.copied_feedback = Some(now),
+            Err(_) => self.copy_failed = Some(now),
+        }
+        self.selection = None;
+    }
+
+    fn get_selected_text(&self, sel: &Selection) -> String {
+        let ((sr, sc), (er, ec)) = sel.normalized();
+        let visible_height = self.log_area_height as usize;
+        let total = self.current_log_count();
+
+        let view_start = if self.follow_mode {
+            total.saturating_sub(visible_height)
+        } else {
+            self.scroll_offset
+        };
+
+        // Only collect logs in the selected range
+        let log_start = view_start + sr;
+        let log_end = (view_start + er + 1).min(total);
+        let selected_rows = er - sr + 1;
+
+        let logs: Vec<LogRef<'_>> = match self.current_tab {
+            Tab::Local => self
+                .log_store
+                .local_logs
+                .iter()
+                .skip(log_start)
+                .take(selected_rows)
+                .map(LogRef::Entry)
+                .collect(),
+            Tab::Image => self
+                .log_store
+                .image_logs
+                .iter()
+                .skip(log_start)
+                .take(selected_rows)
+                .map(LogRef::Entry)
+                .collect(),
+            Tab::Service(idx) => self
+                .log_store
+                .services
+                .get(idx)
+                .map(|buf| {
+                    buf.lines
+                        .iter()
+                        .skip(log_start)
+                        .take(selected_rows)
+                        .map(|line| LogRef::Service(idx, line))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+
+        let mut result = String::new();
+        for (i, log_ref) in logs.iter().enumerate() {
+            let vis_row = sr + i;
+            if vis_row > er || view_start + vis_row >= log_end {
+                break;
+            }
+
+            let (_, service_name, message, _) = log_ref.parts();
+            let full_line = format!("[{}] {}", service_name, message);
+            let line_chars: Vec<char> = full_line.chars().collect();
+            let line_len = line_chars.len();
+
+            let col_start = if vis_row == sr { sc } else { 0 };
+            let col_end = if vis_row == er {
+                ec.min(line_len.saturating_sub(1))
+            } else {
+                line_len.saturating_sub(1)
+            };
+
+            if col_start <= col_end && col_start < line_len {
+                let selected: String = line_chars[col_start..=col_end.min(line_len - 1)]
+                    .iter()
+                    .collect();
+                result.push_str(&selected);
+            }
+
+            if vis_row < er {
+                result.push('\n');
+            }
+        }
+
+        result
     }
 
     fn exit_follow_mode(&mut self) {
@@ -211,14 +405,19 @@ impl TuiApp {
             let total = self.current_log_count();
             self.scroll_offset = total.saturating_sub(self.visible_height);
             self.follow_mode = false;
+            self.needs_clear = true;
         }
     }
 
     fn select_tab(&mut self, visual_idx: usize) {
         let tab = self.visual_to_tab(visual_idx);
         if let Some(t) = tab {
+            if self.current_tab != t {
+                self.needs_clear = true;
+            }
             self.current_tab = t;
             self.scroll_offset = 0;
+            self.selection = None;
             if self.follow_mode {
                 self.scroll_to_bottom();
             }
@@ -235,6 +434,11 @@ impl TuiApp {
             idx -= 1;
         }
 
+        if idx < self.code_count {
+            return Some(Tab::Service(idx));
+        }
+        idx -= self.code_count;
+
         if self.show_image_tab() {
             if idx == 0 {
                 return Some(Tab::Image);
@@ -242,8 +446,9 @@ impl TuiApp {
             idx -= 1;
         }
 
-        if idx < self.services.len() {
-            Some(Tab::Service(idx))
+        let image_service_idx = self.code_count + idx;
+        if image_service_idx < self.services.len() {
+            Some(Tab::Service(image_service_idx))
         } else {
             None
         }
@@ -285,24 +490,32 @@ impl TuiApp {
     }
 
     pub fn tab_index(&self) -> usize {
-        let mut idx = 0;
-
         match self.current_tab {
-            Tab::Local => idx,
+            Tab::Local => 0,
+            Tab::Service(i) if i < self.code_count => {
+                let mut idx = i;
+                if self.show_local_tab() {
+                    idx += 1;
+                }
+                idx
+            }
             Tab::Image => {
+                let mut idx = self.code_count;
                 if self.show_local_tab() {
                     idx += 1;
                 }
                 idx
             }
             Tab::Service(i) => {
+                let mut idx = i - self.code_count;
                 if self.show_local_tab() {
                     idx += 1;
                 }
+                idx += self.code_count;
                 if self.show_image_tab() {
                     idx += 1;
                 }
-                idx + i
+                idx
             }
         }
     }
@@ -316,8 +529,15 @@ impl TuiApp {
     }
 
     fn scroll_down(&mut self, amount: usize) {
-        let max_scroll = self.current_log_count().saturating_sub(1);
+        let total = self.current_log_count();
+        let max_scroll = total.saturating_sub(self.visible_height);
         self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
+
+        // Auto-enable follow mode when scrolled to bottom
+        if self.scroll_offset >= max_scroll && !self.follow_mode {
+            self.follow_mode = true;
+            self.needs_clear = true;
+        }
     }
 
     fn scroll_up(&mut self, amount: usize) {
@@ -329,6 +549,7 @@ impl TuiApp {
     }
 
     fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.current_log_count().saturating_sub(1);
+        let total = self.current_log_count();
+        self.scroll_offset = total.saturating_sub(self.visible_height);
     }
 }

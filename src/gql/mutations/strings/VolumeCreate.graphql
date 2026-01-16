@@ -2,6 +2,7 @@ mutation VolumeCreate($projectId: String!, $environmentId: String!, $serviceId: 
   volumeCreate(
     input: {projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, mountPath: $mountPath}
   ) {
+    id
     name
   }
 }

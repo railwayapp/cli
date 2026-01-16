@@ -76,6 +76,9 @@ pub enum RailwayError {
     #[error("2FA code is incorrect. Please try again.")]
     InvalidTwoFactorCode,
 
+    #[error("Two-factor authentication is required for workspace \"{0}\".\nEnable 2FA at: {1}")]
+    TwoFactorEnforcementRequired(String, String),
+
     #[error("Could not find a variable to connect to the service with. Looking for \"{0}\".")]
     ConnectionVariableNotFound(String),
 

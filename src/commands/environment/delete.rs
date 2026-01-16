@@ -1,8 +1,12 @@
 use super::{Delete as Args, *};
 use crate::{
     Configs, GQLClient,
+    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     controllers::project::get_project,
-    util::prompt::{prompt_confirm_with_default, prompt_options},
+    util::{
+        progress::create_spinner_if,
+        prompt::{prompt_confirm_with_default, prompt_options},
+    },
 };
 use anyhow::{Result, bail};
 use is_terminal::IsTerminal;
@@ -45,19 +49,25 @@ pub async fn delete_environment(args: Args) -> Result<()> {
         bail!("Environment must be specified when not running in a terminal");
     };
 
-    if !args.bypass {
-        let confirmed = prompt_confirm_with_default(
+    let confirmed = if args.bypass {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
             format!(
                 r#"Are you sure you want to delete the environment "{}"?"#,
-                name.as_str().red()
+                name.red()
             )
             .as_str(),
             false,
-        )?;
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
 
-        if !confirmed {
-            return Ok(());
-        }
+    if !confirmed {
+        return Ok(());
     }
 
     let is_two_factor_enabled = {
@@ -71,6 +81,9 @@ pub async fn delete_environment(args: Args) -> Result<()> {
         info.is_verified
     };
     if is_two_factor_enabled {
+        if !is_terminal {
+            bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
+        }
         let token = prompt_text("Enter your 2FA code")?;
         let vars = mutations::validate_two_factor::Variables { token };
 
@@ -83,20 +96,17 @@ pub async fn delete_environment(args: Args) -> Result<()> {
             return Err(RailwayError::InvalidTwoFactorCode.into());
         }
     }
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Deleting environment...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = create_spinner_if(!args.json, "Deleting environment...".into());
     let _r = post_graphql::<mutations::EnvironmentDelete, _>(
         &client,
         &configs.get_backboard(),
-        mutations::environment_delete::Variables { id },
+        mutations::environment_delete::Variables { id: id.clone() },
     )
     .await?;
-    spinner.finish_with_message("Environment deleted!");
+    if args.json {
+        println!("{}", serde_json::json!({"id": id}));
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message("Environment deleted!");
+    }
     Ok(())
 }

@@ -1,10 +1,10 @@
 use crate::{
-    consts::TICK_STRING,
     controllers::{
         environment::get_matched_environment,
         project::find_service_instance,
         regions::{convert_hashmap_to_map, merge_config, prompt_for_regions},
     },
+    util::progress::create_spinner_if,
 };
 use anyhow::bail;
 use clap::{Arg, Command, Parser};
@@ -12,10 +12,11 @@ use futures::executor::block_on;
 use is_terminal::IsTerminal;
 use json_dotpath::DotPaths as _;
 use serde_json::{Map, Value, json};
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 use struct_field_names_as_array::FieldNamesAsArray;
 
 use super::*;
+
 /// Dynamic flags workaround
 /// Unfortunately, we aren't able to use the Parser derive macro when working with dynamic flags,
 /// meaning we have to implement most of the traits for the Args struct manually.
@@ -33,6 +34,10 @@ pub struct Args {
     /// The environment the service is in (defaults to linked environment)
     #[clap(long, short)]
     environment: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -64,12 +69,26 @@ pub async fn command(args: Args) -> Result<()> {
         },
     );
     if new_config.is_empty() {
-        println!("No changes made");
+        if !args.json {
+            println!("No changes made");
+        }
         return Ok(());
     }
     let region_data = merge_config(existing, new_config);
     let environment_id = get_matched_environment(&project, environment)?.id;
-    update_regions_and_redeploy(configs, client, &environment_id, &service_id, region_data).await?;
+    update_regions_and_redeploy(
+        configs,
+        client,
+        &environment_id,
+        &service_id,
+        region_data.clone(),
+        args.json,
+    )
+    .await?;
+
+    if args.json {
+        println!("{}", serde_json::json!({"regions": region_data}));
+    }
 
     Ok(())
 }
@@ -80,15 +99,9 @@ async fn update_regions_and_redeploy(
     environment_id: &str,
     service_id: &str,
     region_data: Value,
+    json: bool,
 ) -> Result<(), anyhow::Error> {
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Updating regions...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    let spinner = create_spinner_if(!json, "Updating regions...".into());
     post_graphql::<mutations::UpdateRegions, _>(
         &client,
         configs.get_backboard(),
@@ -99,15 +112,10 @@ async fn update_regions_and_redeploy(
         },
     )
     .await?;
-    spinner.finish_with_message("Regions updated");
-    let spinner = indicatif::ProgressBar::new_spinner()
-        .with_style(
-            indicatif::ProgressStyle::default_spinner()
-                .tick_chars(TICK_STRING)
-                .template("{spinner:.green} {msg}")?,
-        )
-        .with_message("Redeploying...");
-    spinner.enable_steady_tick(Duration::from_millis(100));
+    if let Some(s) = &spinner {
+        s.finish_with_message("Regions updated");
+    }
+    let spinner2 = create_spinner_if(!json, "Redeploying...".into());
     post_graphql::<mutations::ServiceInstanceDeploy, _>(
         &client,
         configs.get_backboard(),
@@ -117,7 +125,9 @@ async fn update_regions_and_redeploy(
         },
     )
     .await?;
-    spinner.finish_with_message("Redeployed");
+    if let Some(s) = spinner2 {
+        s.finish_with_message("Redeployed");
+    }
     Ok(())
 }
 
@@ -186,8 +196,15 @@ fn get_existing_config(
 
 /// This function generates flags that are appended to the command at runtime.
 pub fn get_dynamic_args(cmd: Command) -> Command {
-    if !std::env::args().any(|f| f.eq_ignore_ascii_case("scale")) {
-        // if the command has nothing to do with railway scale, dont make the web request.
+    // Check if scale is the actual subcommand (not just anywhere in args)
+    // Handles: `railway scale` and `railway service scale`
+    let args: Vec<String> = std::env::args().collect();
+    let is_scale = args.len() >= 2
+        && (args[1].eq_ignore_ascii_case("scale")
+            || (args.len() >= 3
+                && args[1].eq_ignore_ascii_case("service")
+                && args[2].eq_ignore_ascii_case("scale")));
+    if !is_scale {
         return cmd;
     }
     block_on(async move {

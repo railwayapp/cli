@@ -27,6 +27,7 @@ pub mod login;
 pub mod logout;
 pub mod logs;
 pub mod open;
+pub mod project;
 pub mod redeploy;
 pub mod restart;
 pub mod run;
@@ -39,7 +40,7 @@ pub mod status;
 pub mod unlink;
 pub mod up;
 pub mod upgrade;
-pub mod variables;
+pub mod variable;
 pub mod volume;
 pub mod whoami;
 

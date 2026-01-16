@@ -1,17 +1,20 @@
 use super::*;
 use crate::{
-    consts::TICK_STRING,
+    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
     queries::project::{
         ProjectProject, ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode,
     },
-    util::prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    util::{
+        progress::create_spinner,
+        prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+    },
 };
 use anyhow::{anyhow, bail};
 use clap::Parser;
 use is_terminal::IsTerminal;
-use std::{fmt::Display, time::Duration};
+use std::fmt::Display;
 
 /// Manage project volumes
 #[derive(Parser)]
@@ -44,6 +47,10 @@ structstruck::strike! {
             /// The mount path of the volume
             #[clap(long, short)]
             mount_path: Option<String>,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
         }),
 
         /// Delete a volume
@@ -51,7 +58,15 @@ structstruck::strike! {
         Delete(struct {
             /// The ID/name of the volume you wish to delete
             #[clap(long, short)]
-            volume: Option<String>
+            volume: Option<String>,
+
+            /// Skip confirmation dialog
+            #[clap(short = 'y', long = "yes")]
+            yes: bool,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
         }),
 
         /// Update a volume
@@ -69,20 +84,39 @@ structstruck::strike! {
             #[clap(long, short)]
             name: Option<String>,
 
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
         }),
 
         /// Detach a volume from a service
         Detach(struct {
             /// The ID/name of the volume you wish to detach
             #[clap(long, short)]
-            volume: Option<String>
+            volume: Option<String>,
+
+            /// Skip confirmation dialog
+            #[clap(short = 'y', long = "yes")]
+            yes: bool,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
         })
 
         /// Attach a volume to a service
         Attach(struct {
             /// The ID/name of the volume you wish to attach
             #[clap(long, short)]
-            volume: Option<String>
+            volume: Option<String>,
+
+            /// Skip confirmation dialog
+            #[clap(short = 'y', long = "yes")]
+            yes: bool,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
         })
     }
 }
@@ -102,12 +136,16 @@ pub async fn command(args: Args) -> Result<()> {
         .unwrap_or(linked_project.environment.clone());
 
     match args.command {
-        Commands::Add(a) => add(service, environment, a.mount_path, project).await?,
+        Commands::Add(a) => add(service, environment, a.mount_path, project, a.json).await?,
         Commands::List(l) => list(environment, project, l.json).await?,
-        Commands::Delete(d) => delete(environment, d.volume, project).await?,
-        Commands::Update(u) => update(environment, u.volume, u.mount_path, u.name, project).await?,
-        Commands::Detach(d) => detach(environment, d.volume, project).await?,
-        Commands::Attach(a) => attach(environment, a.volume, service, project).await?,
+        Commands::Delete(d) => delete(environment, d.volume, project, d.yes, d.json).await?,
+        Commands::Update(u) => {
+            update(environment, u.volume, u.mount_path, u.name, project, u.json).await?
+        }
+        Commands::Detach(d) => detach(environment, d.volume, project, d.yes, d.json).await?,
+        Commands::Attach(a) => {
+            attach(environment, a.volume, service, project, a.yes, a.json).await?
+        }
     }
 
     Ok(())
@@ -118,10 +156,13 @@ async fn attach(
     volume: Option<String>,
     service: Option<String>,
     project: ProjectProject,
+    yes: bool,
+    json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let volume = select_volume(project.clone(), environment.as_str(), volume)?.0;
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(project.clone(), environment.as_str(), volume, is_terminal)?.0;
     let service = service.ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
     let service_name = &project
         .services
@@ -147,14 +188,22 @@ async fn attach(
                 .name
         )
     }
-    let confirm = prompt_confirm_with_default(
-        format!(
-            "Are you sure you want to attach the volume {} to service {}?",
-            volume.volume.name, service_name
-        )
-        .as_str(),
-        false,
-    )?;
+    let confirm = if yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
+            format!(
+                "Are you sure you want to attach the volume {} to service {}?",
+                volume.volume.name, service_name
+            )
+            .as_str(),
+            false,
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
     if confirm {
         let p = post_graphql::<mutations::VolumeAttach, _>(
             &client,
@@ -168,11 +217,15 @@ async fn attach(
         .await?;
 
         if p.volume_instance_update {
-            println!(
-                "Volume \"{}\" attached to service \"{}\"",
-                volume.volume.name.blue(),
-                service_name.blue()
-            );
+            if json {
+                println!("{}", serde_json::json!({"success": true}));
+            } else {
+                println!(
+                    "Volume \"{}\" attached to service \"{}\"",
+                    volume.volume.name.blue(),
+                    service_name.blue()
+                );
+            }
         } else {
             bail!("Failed to attach volume");
         }
@@ -185,10 +238,13 @@ async fn detach(
     environment: String,
     volume: Option<String>,
     project: ProjectProject,
+    yes: bool,
+    json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let volume = select_volume(project.clone(), environment.as_str(), volume)?.0;
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(project.clone(), environment.as_str(), volume, is_terminal)?.0;
 
     if volume.service_id.is_none() {
         bail!(
@@ -205,14 +261,22 @@ async fn detach(
         .ok_or(anyhow!(
             "The service the volume is attached to doesn't exist"
         ))?;
-    let confirm = prompt_confirm_with_default(
-        format!(
-            "Are you sure you want to detach the volume {} from service {}?",
-            volume.volume.name, service.node.name
-        )
-        .as_str(),
-        false,
-    )?;
+    let confirm = if yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
+            format!(
+                "Are you sure you want to detach the volume {} from service {}?",
+                volume.volume.name, service.node.name
+            )
+            .as_str(),
+            false,
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
     if confirm {
         let p = post_graphql::<mutations::VolumeDetach, _>(
             &client,
@@ -224,11 +288,15 @@ async fn detach(
         )
         .await?;
         if p.volume_instance_update {
-            println!(
-                "Volume \"{}\" detached from service \"{}\"",
-                volume.volume.name.blue(),
-                service.node.name.blue()
-            );
+            if json {
+                println!("{}", serde_json::json!({"success": true}));
+            } else {
+                println!(
+                    "Volume \"{}\" detached from service \"{}\"",
+                    volume.volume.name.blue(),
+                    service.node.name.blue()
+                );
+            }
         } else {
             bail!("Failed to detach volume");
         }
@@ -243,10 +311,12 @@ async fn update(
     mount_path: Option<String>,
     name: Option<String>,
     project: ProjectProject,
+    json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let volume = select_volume(project, environment.as_str(), volume)?;
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(project, environment.as_str(), volume, is_terminal)?;
 
     if mount_path.is_none() && name.is_none() {
         bail!(
@@ -254,7 +324,7 @@ async fn update(
         );
     }
 
-    if let Some(mount_path) = mount_path {
+    if let Some(ref mount_path) = mount_path {
         if !mount_path.starts_with('/') {
             bail!("All mount paths must start with /")
         }
@@ -270,14 +340,16 @@ async fn update(
         )
         .await?;
 
-        println!(
-            "Successfully updated the mount path of volume \"{}\" to \"{}\"",
-            volume.0.volume.name.blue(),
-            mount_path.purple()
-        );
+        if !json {
+            println!(
+                "Successfully updated the mount path of volume \"{}\" to \"{}\"",
+                volume.0.volume.name.blue(),
+                mount_path.purple()
+            );
+        }
     }
 
-    if let Some(name) = name {
+    if let Some(ref name) = name {
         post_graphql::<mutations::VolumeNameUpdate, _>(
             &client,
             configs.get_backboard(),
@@ -288,10 +360,23 @@ async fn update(
         )
         .await?;
 
+        if !json {
+            println!(
+                "Successfully updated the name of volume \"{}\" to \"{}\"",
+                volume.0.volume.name.blue(),
+                name.purple()
+            );
+        }
+    }
+
+    if json {
         println!(
-            "Successfully updated the name of volume \"{}\" to \"{}\"",
-            volume.0.volume.name.blue(),
-            name.purple()
+            "{}",
+            serde_json::json!({
+                "id": volume.0.volume.id,
+                "name": name.unwrap_or(volume.0.volume.name.clone()),
+                "mountPath": mount_path.unwrap_or(volume.0.mount_path.clone())
+            })
         );
     }
 
@@ -302,19 +387,30 @@ async fn delete(
     environment: String,
     volume: Option<String>,
     project: ProjectProject,
+    yes: bool,
+    json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let volume = select_volume(project, environment.as_str(), volume)?;
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(project, environment.as_str(), volume, is_terminal)?;
 
-    let confirm = prompt_confirm_with_default(
-        format!(
-            r#"Are you sure you want to delete the volume "{}"?"#,
-            volume.0.volume.name
-        )
-        .as_str(),
-        false,
-    )?;
+    let confirm = if yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
+            format!(
+                r#"Are you sure you want to delete the volume "{}"?"#,
+                volume.0.volume.name
+            )
+            .as_str(),
+            false,
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
     if confirm {
         let is_two_factor_enabled = {
             let vars = queries::two_factor_info::Variables {};
@@ -328,6 +424,9 @@ async fn delete(
         };
 
         if is_two_factor_enabled {
+            if !is_terminal {
+                bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
+            }
             let token = prompt_text("Enter your 2FA code")?;
             let vars = mutations::validate_two_factor::Variables { token };
 
@@ -347,11 +446,17 @@ async fn delete(
         let p = post_graphql::<mutations::VolumeDelete, _>(
             &client,
             configs.get_backboard(),
-            mutations::volume_delete::Variables { id: volume_id },
+            mutations::volume_delete::Variables {
+                id: volume_id.clone(),
+            },
         )
         .await?;
         if p.volume_delete {
-            println!("Volume \"{}\" deleted", volume.0.volume.name.blue());
+            if json {
+                println!("{}", serde_json::json!({"id": volume_id}));
+            } else {
+                println!("Volume \"{}\" deleted", volume.0.volume.name.blue());
+            }
         } else {
             bail!("Failed to delete volume");
         }
@@ -449,19 +554,25 @@ async fn add(
     environment: String,
     mount: Option<String>,
     project: ProjectProject,
+    json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
+    let is_terminal = std::io::stdout().is_terminal();
     let service = service.ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
     let mount = if let Some(mount) = mount {
         if mount.starts_with('/') {
-            fake_select("Enter the mount path of the volume", mount.as_str());
+            if !json {
+                fake_select("Enter the mount path of the volume", mount.as_str());
+            }
             mount
         } else {
             bail!("Mount path must start with a `/`")
         }
-    } else {
+    } else if is_terminal {
         prompt_text("Enter the mount path of the volume")?
+    } else {
+        bail!("Mount path must be specified via --mount-path in non-interactive mode");
     };
 
     let service_name = project
@@ -505,15 +616,8 @@ async fn add(
         mount_path: mount.clone(),
         project_id: project.id,
     };
-    if std::io::stdout().is_terminal() {
-        let spinner = indicatif::ProgressBar::new_spinner()
-            .with_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars(TICK_STRING)
-                    .template("{spinner:.green} {msg}")?,
-            )
-            .with_message("Creating volume..");
-        spinner.enable_steady_tick(Duration::from_millis(100));
+    if is_terminal && !json {
+        let spinner = create_spinner("Creating volume...".into());
 
         let details =
             post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
@@ -526,8 +630,20 @@ async fn add(
             environment_name.blue(),
             mount.cyan().bold()
         ));
+    } else if json {
+        let details =
+            post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
+                .await?;
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "id": details.volume_create.id,
+                "name": details.volume_create.name
+            })
+        );
     } else {
-        println!("Creating volume..");
+        println!("Creating volume...");
         let details =
             post_graphql::<mutations::VolumeCreate, _>(&client, configs.get_backboard(), volume)
                 .await?;
@@ -548,6 +664,7 @@ fn select_volume(
     project: ProjectProject,
     environment: &str,
     volume: Option<String>,
+    is_terminal: bool,
 ) -> Result<Volume, anyhow::Error> {
     let env = project
         .environments
@@ -573,10 +690,11 @@ fn select_volume(
         } else {
             return Err(RailwayError::VolumeNotFound(vol).into());
         }
-    } else {
-        // prompt
+    } else if is_terminal {
         let volume = prompt_options("Select a volume", volumes)?;
         volume.clone()
+    } else {
+        bail!("Volume must be specified via --volume in non-interactive mode");
     };
     Ok(volume)
 }
