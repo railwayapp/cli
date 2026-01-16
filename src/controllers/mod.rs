@@ -5,6 +5,7 @@ pub mod develop;
 pub mod environment;
 pub mod local_override;
 pub mod project;
+pub mod regions;
 pub mod service;
 pub mod terminal;
 pub mod user;

@@ -1,18 +1,18 @@
 use crate::{
     consts::TICK_STRING,
-    controllers::{environment::get_matched_environment, project::find_service_instance},
-    util::prompt::{
-        prompt_select_with_cancel, prompt_u64_with_placeholder_and_validation_and_cancel,
+    controllers::{
+        environment::get_matched_environment,
+        project::find_service_instance,
+        regions::{convert_hashmap_to_map, merge_config, prompt_for_regions},
     },
 };
 use anyhow::bail;
 use clap::{Arg, Command, Parser};
-use country_emoji::flag;
 use futures::executor::block_on;
 use is_terminal::IsTerminal;
 use json_dotpath::DotPaths as _;
 use serde_json::{Map, Value, json};
-use std::{cmp::Ordering, collections::HashMap, fmt::Display, time::Duration};
+use std::{collections::HashMap, time::Duration};
 use struct_field_names_as_array::FieldNamesAsArray;
 
 use super::*;
@@ -52,8 +52,9 @@ pub async fn command(args: Args) -> Result<()> {
         .environment
         .clone()
         .unwrap_or(linked_project.environment.clone());
-    let existing = get_existing_config(&args, &linked_project, project, environment)?;
-    let new_config = convert_hashmap_into_map(
+    let (existing, service_id) =
+        get_existing_config(&args, &linked_project, &project, &environment)?;
+    let new_config = convert_hashmap_to_map(
         if args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
             prompt_for_regions(&configs, &client, &existing).await?
         } else if args.dynamic.0.is_empty() {
@@ -67,114 +68,17 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
     let region_data = merge_config(existing, new_config);
-    update_regions_and_redeploy(configs, client, linked_project, region_data).await?;
+    let environment_id = get_matched_environment(&project, environment)?.id;
+    update_regions_and_redeploy(configs, client, &environment_id, &service_id, region_data).await?;
 
     Ok(())
-}
-
-async fn prompt_for_regions(
-    configs: &Configs,
-    client: &reqwest::Client,
-    existing: &Value,
-) -> Result<HashMap<String, u64>> {
-    let mut updated: HashMap<String, u64> = HashMap::new();
-    let mut regions = post_graphql::<queries::Regions, _>(
-        client,
-        configs.get_backboard(),
-        queries::regions::Variables,
-    )
-    .await
-    .expect("couldn't get regions");
-    loop {
-        let get_replicas_amount = |name: String| {
-            let before = if let Some(num) = existing.get(name.clone()) {
-                num.get("numReplicas").unwrap().as_u64().unwrap() // fine to unwrap, API only returns ones that have a replica
-            } else {
-                0
-            };
-            let after = if let Some(new_value) = updated.get(&name) {
-                *new_value
-            } else {
-                before
-            };
-            (before, after)
-        };
-        regions.regions.sort_by(|a, b| {
-            get_replicas_amount(b.name.clone())
-                .1
-                .cmp(&get_replicas_amount(a.name.clone()).1)
-        });
-        let regions = regions
-            .regions
-            .iter()
-            .filter(|r| r.railway_metal.unwrap_or_default())
-            .map(|f| {
-                PromptRegion(
-                    f.clone(),
-                    format!(
-                        "{} {}{}{}",
-                        flag(&f.country).unwrap_or_default(),
-                        f.location,
-                        if f.railway_metal.unwrap_or_default() {
-                            " (METAL)".bold().purple().to_string()
-                        } else {
-                            String::new()
-                        },
-                        {
-                            let (before, after) = get_replicas_amount(f.name.clone());
-                            let amount = format!(
-                                " ({} replica{})",
-                                after,
-                                if after == 1 { "" } else { "s" }
-                            );
-                            match after.cmp(&before) {
-                                Ordering::Equal if after == 0 => String::new().normal(),
-                                Ordering::Equal => amount.yellow(),
-                                Ordering::Greater => amount.green(),
-                                Ordering::Less => amount.red(),
-                            }
-                            .to_string()
-                        }
-                    ),
-                )
-            })
-            .collect::<Vec<PromptRegion>>();
-        let p = prompt_select_with_cancel("Select a region <esc to finish>", regions)?;
-        if let Some(region) = p {
-            let amount_before = if let Some(updated) = updated.get(&region.0.name) {
-                *updated
-            } else if let Some(previous) = existing.as_object().unwrap().get(&region.0.name) {
-                previous.get("numReplicas").unwrap().as_u64().unwrap()
-            } else {
-                0
-            };
-            let prompted = prompt_u64_with_placeholder_and_validation_and_cancel(
-                format!(
-                    "Enter the amount of replicas for {} <esc to go back>",
-                    region.0.name.clone()
-                )
-                .as_str(),
-                amount_before.to_string().as_str(),
-            )?;
-            if let Some(prompted) = prompted {
-                let parse: u64 = prompted.parse()?;
-                updated.insert(region.0.name.clone(), parse);
-            } else {
-                // esc pressed when entering number, go back to selecting regions
-                continue;
-            }
-        } else {
-            // they pressed esc to cancel
-            break;
-        }
-    }
-    Ok(updated.clone())
 }
 
 async fn update_regions_and_redeploy(
     configs: Configs,
     client: reqwest::Client,
-    linked_project: LinkedProject,
+    environment_id: &str,
+    service_id: &str,
     region_data: Value,
 ) -> Result<(), anyhow::Error> {
     let spinner = indicatif::ProgressBar::new_spinner()
@@ -189,8 +93,8 @@ async fn update_regions_and_redeploy(
         &client,
         configs.get_backboard(),
         mutations::update_regions::Variables {
-            environment_id: linked_project.environment.clone(),
-            service_id: linked_project.service.clone().unwrap(),
+            environment_id: environment_id.to_string(),
+            service_id: service_id.to_string(),
             multi_region_config: region_data,
         },
     )
@@ -208,8 +112,8 @@ async fn update_regions_and_redeploy(
         &client,
         configs.get_backboard(),
         mutations::service_instance_deploy::Variables {
-            environment_id: linked_project.environment,
-            service_id: linked_project.service.unwrap(),
+            environment_id: environment_id.to_string(),
+            service_id: service_id.to_string(),
         },
     )
     .await?;
@@ -217,62 +121,50 @@ async fn update_regions_and_redeploy(
     Ok(())
 }
 
-fn merge_config(existing: Value, new_config: Map<String, Value>) -> Value {
-    let mut map = match existing {
-        Value::Object(object) => object,
-        _ => unreachable!(), // will always be a map
-    };
-    map.extend(new_config);
-    Value::Object(map)
-}
-
-fn convert_hashmap_into_map(map: HashMap<String, u64>) -> Map<String, Value> {
-    map.iter().fold(Map::new(), |mut map, (key, val)| {
-        map.insert(
-            key.clone(),
-            if *val == 0 {
-                Value::Null // this is how the dashboard does it
-            } else {
-                json!({ "numReplicas": val })
-            },
-        );
-        map
-    })
-}
-
+/// Returns (existing_config, service_id)
 fn get_existing_config(
     args: &Args,
     linked_project: &LinkedProject,
-    project: queries::project::ProjectProject,
-    environment: String,
-) -> Result<Value> {
-    let environment_id = get_matched_environment(&project, environment)?.id;
-    let service_input: &String = args.service.as_ref().unwrap_or(linked_project.service.as_ref().expect("No service linked. Please either specify a service with the --service flag or link one with `railway service`"));
-    let service_meta = if let Some(service) = project.services.edges.iter().find(|p| {
+    project: &queries::project::ProjectProject,
+    environment: &str,
+) -> Result<(Value, String)> {
+    let environment_id = get_matched_environment(project, environment.to_string())?.id;
+    let service_input = match args.service.as_ref() {
+        Some(s) => s,
+        None => linked_project.service.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No service linked. Please either specify a service with the --service flag or link one with `railway service`")
+        })?,
+    };
+
+    let service = project.services.edges.iter().find(|p| {
         (p.node.id == *service_input)
             || (p.node.name.to_lowercase() == service_input.to_lowercase())
-    }) {
-        // check that service exists in that environment
-        let instance = find_service_instance(&project, &environment_id, &service.node.id);
-        if let Some(instance) = instance {
-            if let Some(latest) = &instance.latest_deployment {
-                if let Some(meta) = &latest.meta {
-                    let deploy = meta
-                        .dot_get::<Value>("serviceManifest.deploy")?
-                        .expect("Very old deployment, please redeploy");
-                    if let Some(c) = deploy.dot_get::<Value>("multiRegionConfig")? {
-                        Some(c)
-                    } else if let Some(region) = deploy.dot_get::<Value>("region")? {
-                        // old deployments only have numReplicas and a region field...
-                        let mut map = Map::new();
-                        let replicas = deploy.dot_get::<Value>("numReplicas")?.unwrap_or(json!(1));
-                        map.insert(region.to_string(), json!({ "numReplicas": replicas }));
-                        Some(json!({
-                            "multiRegionConfig": map
-                        }))
-                    } else {
-                        None
-                    }
+    });
+
+    let Some(service) = service else {
+        bail!("Service '{}' not found in project", service_input);
+    };
+
+    let service_id = service.node.id.clone();
+
+    // check that service exists in that environment
+    let instance = find_service_instance(project, &environment_id, &service_id);
+    let service_meta = if let Some(instance) = instance {
+        if let Some(latest) = &instance.latest_deployment {
+            if let Some(meta) = &latest.meta {
+                let deploy = meta
+                    .dot_get::<Value>("serviceManifest.deploy")?
+                    .expect("Very old deployment, please redeploy");
+                if let Some(c) = deploy.dot_get::<Value>("multiRegionConfig")? {
+                    Some(c)
+                } else if let Some(region) = deploy.dot_get::<Value>("region")? {
+                    // old deployments only have numReplicas and a region field...
+                    let mut map = Map::new();
+                    let replicas = deploy.dot_get::<Value>("numReplicas")?.unwrap_or(json!(1));
+                    map.insert(region.to_string(), json!({ "numReplicas": replicas }));
+                    Some(json!({
+                        "multiRegionConfig": map
+                    }))
                 } else {
                     None
                 }
@@ -280,12 +172,16 @@ fn get_existing_config(
                 None
             }
         } else {
-            bail!("Service not found in the environment")
+            None
         }
     } else {
-        None
+        bail!("Service not found in the environment")
     };
-    Ok(service_meta.unwrap_or(Value::Object(Map::new())))
+
+    Ok((
+        service_meta.unwrap_or(Value::Object(Map::new())),
+        service_id,
+    ))
 }
 
 /// This function generates flags that are appended to the command at runtime.
@@ -375,14 +271,5 @@ impl clap::CommandFactory for DynamicArgs {
     fn command_for_update<'b>() -> clap::Command {
         let __clap_app = clap::Command::new("railwayapp");
         <DynamicArgs as clap::Args>::augment_args_for_update(__clap_app)
-    }
-}
-
-/// Formatting done manually
-pub struct PromptRegion(pub queries::regions::RegionsRegions, pub String);
-
-impl Display for PromptRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.1)
     }
 }

@@ -3,6 +3,9 @@ use strum::{Display, EnumIter};
 
 pub use crate::controllers::config::PatchEntry;
 
+pub mod builder;
+pub mod healthcheck;
+pub mod regions;
 pub mod restart_policy;
 pub mod source;
 pub mod variable;
@@ -12,6 +15,9 @@ pub mod variable;
 pub enum Change {
     Variables,
     Sources,
+    Builder,
+    Healthcheck,
+    Regions,
     RestartPolicy,
 }
 
@@ -30,5 +36,8 @@ macro_rules! register_handlers {
 register_handlers!(
     Variables => variable,
     Sources => source,
+    Builder => builder,
+    Healthcheck => healthcheck,
+    Regions => regions,
     RestartPolicy => restart_policy,
 );
