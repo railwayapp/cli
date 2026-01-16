@@ -1,4 +1,8 @@
-use super::{New as Args, *};
+use super::{
+    New as Args,
+    changes::{Change, ChangeOption},
+    *,
+};
 
 pub async fn new_environment(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
@@ -64,87 +68,6 @@ pub async fn new_environment(args: Args) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, DeriveDisplay, EnumDiscriminants)]
-#[strum_discriminants(derive(Display, EnumIter, VariantNames), name(ChangeOption))]
-/// In order to add a new Change that can be configured, add a variant to this enum and give it it's own type
-/// Implement the ChangeHandler trait for the type
-/// Add that type to the invocation of the register_handlers! macro
-pub enum Change {
-    #[strum_discriminants(strum(serialize = "Variables"))]
-    Variable(Variable),
-    #[strum_discriminants(strum(serialize = "Sources"))]
-    Source(Source),
-}
-
-impl Change {
-    pub fn variant_name(&self) -> String {
-        ChangeOption::from(self)
-            .to_string()
-            .trim_end_matches('s')
-            .to_lowercase()
-    }
-}
-
-/// Trait for handling the parsing of a change
-trait ChangeHandler: Clone {
-    /// Get the command-line args for this change type (if fixed amount of values, should be chunked)
-    fn get_args(args: &Args) -> Vec<Vec<String>>;
-
-    /// Parse from non-interactive arguments
-    fn parse_non_interactive(args: Vec<Vec<String>>) -> Vec<(String, Self)>;
-
-    /// Parse interactively for a specific service
-    fn parse_interactive(service_name: &str) -> Result<Vec<Self>>;
-
-    /// Convert to Change enum
-    fn into_change(self) -> Change;
-}
-
-macro_rules! register_handlers {
-    ($($type:ident),* $(,)?) => {
-        impl ChangeOption {
-            fn get_args(&self, args: &Args) -> Vec<Vec<String>> {
-                match self {
-                    $(ChangeOption::$type => <$type>::get_args(args),)*
-                }
-            }
-
-            fn parse_non_interactive(&self, args: Vec<Vec<String>>) -> Vec<(String, Change)> {
-                if args.is_empty() || args.iter().all(|v| v.is_empty()) {
-                    return Vec::new();
-                }
-
-                match self {
-                    $(
-                        ChangeOption::$type => {
-                            <$type>::parse_non_interactive(args)
-                                .into_iter()
-                                .map(|(s, item)| (s, item.into_change()))
-                                .collect()
-                        }
-                    )*
-                }
-            }
-
-            fn parse_interactive(&self, service_name: &str) -> Result<Vec<Change>> {
-                match self {
-                    $(
-                        ChangeOption::$type => {
-                            Ok(<$type>::parse_interactive(service_name)?
-                                .into_iter()
-                                .map(|item| item.into_change())
-                                .collect())
-                        }
-                    )*
-                }
-            }
-        }
-    };
-}
-
-// Register all handlers (generates helper functions)
-register_handlers!(Variable, Source);
-
 /// environment id should be the id of the environment being duplicated if being used in new command
 pub fn edit_services_select(
     args: &Args,
@@ -155,7 +78,7 @@ pub fn edit_services_select(
 
     // get all options and their respective non-interactive arguments
     let configure_options = ChangeOption::iter()
-        .map(|opt| (opt, opt.get_args(args)))
+        .map(|opt| (opt, opt.get_args(&args.config)))
         .collect::<Vec<(ChangeOption, Vec<Vec<String>>)>>();
     // find which have arguments provided non interactively
     let non_interactive_provided = configure_options
@@ -492,47 +415,6 @@ pub fn edit_services_select(
 //     Ok(())
 // }
 
-#[derive(Clone, Debug, EnumDiscriminants, DeriveDisplay)]
-#[strum_discriminants(derive(Display, EnumIter, EnumString), name(SourceTypes))]
-pub enum Source {
-    #[strum_discriminants(strum(
-        to_string = "Docker image",
-        serialize = "docker",
-        serialize = "image"
-    ))]
-    #[display("Docker: {}", _0)]
-    Docker(String),
-
-    #[strum_discriminants(strum(
-        to_string = "GitHub repo",
-        serialize = "github",
-        serialize = "git",
-        serialize = "gh"
-    ))]
-    #[display("GitHub: {}/{}/{}", owner, repo, branch)]
-    GitHub {
-        owner: String,
-        repo: String,
-        branch: String,
-    },
-}
-
-fn parse_repo(repo: String) -> Result<Source> {
-    let s = repo
-        .splitn(3, '/')
-        .filter(|&s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect::<Vec<String>>();
-    match s.len() {
-        3 => Ok(Source::GitHub {
-            owner: s.first().unwrap().to_string(),
-            repo: s.get(1).unwrap().to_string(),
-            branch: s.get(2).unwrap().to_string(),
-        }),
-        _ => anyhow::bail!("malformed repo: <owner>/<repo>/<branch>"),
-    }
-}
-
 fn select_duplicate_id_new(
     args: &Args,
     project: &queries::project::ProjectProject,
@@ -631,108 +513,4 @@ async fn wait_for_environment_creation(
     };
 
     retry_with_backoff(config, check_status).await
-}
-
-fn chunk(v: &[String], chunks: usize) -> Vec<Vec<String>> {
-    v.chunks(chunks).map(|c| c.to_vec()).collect()
-}
-
-impl ChangeHandler for Variable {
-    fn get_args(args: &Args) -> Vec<Vec<String>> {
-        chunk(&args.service_variables, 2)
-    }
-
-    fn parse_non_interactive(args: Vec<Vec<String>>) -> Vec<(String, Variable)> {
-        args.iter()
-            .filter_map(|chunk| {
-                // clap ensures that there will always be 2 values whenever the flag is provided
-                // this is unfiltered user input. validation of the service happens in the edit_services_select function
-                let service = chunk.first()?.to_owned();
-
-                let variable = match chunk.last()?.parse::<Variable>() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("{e:?} (skipping)");
-                        return None;
-                    }
-                };
-
-                Some((service, variable))
-            })
-            .collect()
-    }
-
-    fn parse_interactive(service_name: &str) -> Result<Vec<Variable>> {
-        prompt_variables(Some(service_name))
-    }
-
-    fn into_change(self) -> Change {
-        Change::Variable(self)
-    }
-}
-
-impl ChangeHandler for Source {
-    fn get_args(args: &Args) -> Vec<Vec<String>> {
-        chunk(&args.service_sources, 3)
-    }
-
-    fn parse_non_interactive(args: Vec<Vec<String>>) -> Vec<(String, Source)> {
-        args.iter()
-            .filter_map(|chunk| {
-                // clap ensures that there will always be 3 values whenever the flag is provided
-                let service = chunk.first()?.to_owned();
-
-                let source_type = match SourceTypes::from_str(&chunk.get(1)?.to_lowercase()) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        eprintln!(
-                            "Invalid platform. Valid platforms are: {} (skipping)",
-                            SourceTypes::iter()
-                                .map(|f| f.to_string())
-                                .collect::<Vec<String>>()
-                                .join(", ")
-                        );
-                        return None;
-                    }
-                };
-
-                let source = match source_type {
-                    SourceTypes::Docker => Some(Source::Docker(chunk.last()?.to_string())),
-                    SourceTypes::GitHub => match parse_repo(chunk.last()?.to_string()) {
-                        Ok(source) => Some(source),
-                        Err(e) => {
-                            eprintln!("{:?} (skipping)", e);
-                            return None;
-                        }
-                    },
-                }?;
-
-                Some((service, source))
-            })
-            .collect()
-    }
-
-    fn parse_interactive(service_name: &str) -> Result<Vec<Source>> {
-        let source_type = prompt_options(
-            &format!("What type of source for {}?", service_name),
-            SourceTypes::iter().collect(),
-        )?;
-
-        let source = match source_type {
-            SourceTypes::Docker => {
-                let image = prompt_text("Enter docker image")?;
-                Source::Docker(image)
-            }
-            SourceTypes::GitHub => {
-                let repo = prompt_text("Enter repo (owner/repo/branch)")?;
-                parse_repo(repo)?
-            }
-        };
-
-        Ok(vec![source])
-    }
-
-    fn into_change(self) -> Change {
-        Change::Source(self)
-    }
 }
