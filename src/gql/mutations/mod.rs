@@ -4,7 +4,10 @@ type EnvironmentVariables = std::collections::BTreeMap<String, String>;
 type JSON = serde_json::Value;
 use chrono::{DateTime as DateTimeType, Utc};
 
+use crate::controllers;
+
 pub type DateTime = DateTimeType<Utc>;
+type EnvironmentConfig = controllers::config::EnvironmentConfig;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -226,38 +229,11 @@ pub struct FunctionUpdate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/ServiceInstanceUpdate.graphql",
+    query_path = "src/gql/mutations/strings/EnvironmentPatchCommit.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
-pub struct ServiceInstanceUpdate;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/DeploymentTriggerUpdate.graphql",
-    response_derives = "Debug, Serialize, Clone",
-    skip_serializing_none
-)]
-pub struct DeploymentTriggerUpdate;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/DeploymentTriggerDelete.graphql",
-    response_derives = "Debug, Serialize, Clone",
-    skip_serializing_none
-)]
-pub struct DeploymentTriggerDelete;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/DeploymentTriggerCreate.graphql",
-    response_derives = "Debug, Serialize, Clone",
-    skip_serializing_none
-)]
-pub struct DeploymentTriggerCreate;
+pub struct EnvironmentPatchCommit;
 
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

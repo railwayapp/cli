@@ -1,7 +1,0 @@
-mutation DeploymentTriggerCreate($serviceId: String!, $environmentId: String!, $projectId: String!, $repository: String!, $branch: String!, $provider: String!) {
-  deploymentTriggerCreate(
-    input: {serviceId: $serviceId, projectId: $projectId, environmentId: $environmentId, repository: $repository, branch: $branch, provider: $provider}
-  ) {
-    id
-  }
-}

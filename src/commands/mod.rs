@@ -1,6 +1,6 @@
 pub(super) use crate::{client::*, config::*, gql::*};
 pub(super) use anyhow::{Context, Result, bail};
-pub(super) use clap::{Parser, Subcommand};
+pub(super) use clap::Parser;
 pub(super) use colored::Colorize;
 
 pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {

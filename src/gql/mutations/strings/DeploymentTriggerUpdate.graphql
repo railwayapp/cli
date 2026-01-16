@@ -1,8 +1,0 @@
-mutation DeploymentTriggerUpdate($id: String!, $repository: String!, $branch: String!) {
-  deploymentTriggerUpdate(
-    id: $id
-    input: {repository: $repository, branch: $branch}
-  ) {
-    id
-  }
-}

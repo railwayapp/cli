@@ -1,5 +1,8 @@
-use super::{Args, Environment, interact_or, *};
-use crate::{Configs, GQLClient, controllers::project::get_project};
+use super::{Args, Environment, *};
+use crate::{
+    Configs, GQLClient, controllers::project::get_project, interact_or,
+    util::prompt::prompt_options,
+};
 use anyhow::{Result, bail};
 
 pub async fn link_environment(args: Args) -> Result<()> {

@@ -1,111 +1,84 @@
-use super::*;
-use crate::util::prompt::{prompt_options, prompt_text};
-use std::str::FromStr as _;
-use strum::{EnumDiscriminants, EnumString, IntoEnumIterator};
+use super::PatchEntry;
+use crate::util::prompt::{
+    prompt_options_skippable, prompt_text_with_placeholder_disappear_skippable,
+};
+use anyhow::Result;
+use colored::Colorize;
+use strum::{Display, EnumIter, IntoEnumIterator};
 
-#[derive(Clone, Debug, EnumDiscriminants, DeriveDisplay)]
-#[strum_discriminants(derive(Display, EnumIter, EnumString), name(SourceTypes))]
-pub enum Source {
-    #[strum_discriminants(strum(
-        to_string = "Docker image",
-        serialize = "docker",
-        serialize = "image"
-    ))]
-    #[display("Docker: {}", _0)]
-    Docker(String),
-
-    #[strum_discriminants(strum(
-        to_string = "GitHub repo",
-        serialize = "github",
-        serialize = "git",
-        serialize = "gh"
-    ))]
-    #[display("GitHub: {}/{}/{}", owner, repo, branch)]
-    GitHub {
-        owner: String,
-        repo: String,
-        branch: String,
-    },
+#[derive(Clone, Copy, Display, EnumIter)]
+pub enum SourceType {
+    #[strum(serialize = "Docker image")]
+    Docker,
+    #[strum(serialize = "GitHub repo")]
+    GitHub,
 }
 
-fn parse_repo(repo: String) -> Result<Source> {
-    let s = repo
-        .splitn(3, '/')
-        .filter(|&s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect::<Vec<String>>();
-    match s.len() {
-        3 => Ok(Source::GitHub {
-            owner: s.first().unwrap().to_string(),
-            repo: s.get(1).unwrap().to_string(),
-            branch: s.get(2).unwrap().to_string(),
-        }),
-        _ => anyhow::bail!("malformed repo: <owner>/<repo>/<branch>"),
-    }
-}
+pub fn parse_interactive(service_id: &str, service_name: &str) -> Result<Vec<PatchEntry>> {
+    let Some(source_type) = prompt_options_skippable(
+        &format!("What type of source for {service_name}? <esc to skip>"),
+        SourceType::iter().collect(),
+    )?
+    else {
+        return Ok(vec![]);
+    };
 
-impl ChangeHandler for Source {
-    fn get_args(args: &EnvironmentConfigOptions) -> Vec<Vec<String>> {
-        chunk(&args.service_sources, 3)
-    }
+    let path = format!("services.{}.source", service_id);
 
-    fn parse_non_interactive(args: Vec<Vec<String>>) -> Vec<(String, Source)> {
-        args.iter()
-            .filter_map(|chunk| {
-                // clap ensures that there will always be 3 values whenever the flag is provided
-                let service = chunk.first()?.to_owned();
+    let result = match source_type {
+        SourceType::Docker => loop {
+            let Some(image) = prompt_text_with_placeholder_disappear_skippable(
+                "Enter docker image <esc to skip>",
+                "<image:tag>",
+            )?
+            else {
+                return Ok(vec![]);
+            };
 
-                let source_type = match SourceTypes::from_str(&chunk.get(1)?.to_lowercase()) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        eprintln!(
-                            "Invalid platform. Valid platforms are: {} (skipping)",
-                            SourceTypes::iter()
-                                .map(|f| f.to_string())
-                                .collect::<Vec<String>>()
-                                .join(", ")
-                        );
-                        return None;
-                    }
-                };
-
-                let source = match source_type {
-                    SourceTypes::Docker => Some(Source::Docker(chunk.last()?.to_string())),
-                    SourceTypes::GitHub => match parse_repo(chunk.last()?.to_string()) {
-                        Ok(source) => Some(source),
-                        Err(e) => {
-                            eprintln!("{:?} (skipping)", e);
-                            return None;
-                        }
-                    },
-                }?;
-
-                Some((service, source))
-            })
-            .collect()
-    }
-
-    fn parse_interactive(service_name: &str) -> Result<Vec<Source>> {
-        let source_type = prompt_options(
-            &format!("What type of source for {}?", service_name),
-            SourceTypes::iter().collect(),
-        )?;
-
-        let source = match source_type {
-            SourceTypes::Docker => {
-                let image = prompt_text("Enter docker image")?;
-                Source::Docker(image)
+            if image.is_empty() {
+                eprintln!("{} Docker image cannot be empty", "Warn".yellow());
+                continue;
             }
-            SourceTypes::GitHub => {
-                let repo = prompt_text("Enter repo (owner/repo/branch)")?;
-                parse_repo(repo)?
+
+            break (
+                path,
+                serde_json::json!({
+                    "image": image,
+                }),
+            );
+        },
+        SourceType::GitHub => loop {
+            let Some(repo) = prompt_text_with_placeholder_disappear_skippable(
+                "Enter repo <esc to skip>",
+                "<owner/repo/branch>",
+            )?
+            else {
+                return Ok(vec![]);
+            };
+
+            if repo.is_empty() {
+                eprintln!("{} Repo cannot be empty", "Warn".yellow());
+                continue;
             }
-        };
 
-        Ok(vec![source])
-    }
+            let parts: Vec<&str> = repo.splitn(3, '/').collect();
+            if parts.len() != 3 {
+                eprintln!(
+                    "{} Malformed repo: expected owner/repo/branch",
+                    "Warn".yellow()
+                );
+                continue;
+            }
 
-    fn into_change(self) -> Change {
-        Change::Source(self)
-    }
+            break (
+                path,
+                serde_json::json!({
+                    "repo": format!("{}/{}", parts[0], parts[1]),
+                    "branch": parts[2],
+                }),
+            );
+        },
+    };
+
+    Ok(vec![result])
 }

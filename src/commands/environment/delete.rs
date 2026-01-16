@@ -1,7 +1,8 @@
 use super::{Delete as Args, *};
 use crate::{
-    Configs, GQLClient, controllers::project::get_project,
-    util::prompt::prompt_confirm_with_default,
+    Configs, GQLClient,
+    controllers::project::get_project,
+    util::prompt::{prompt_confirm_with_default, prompt_options},
 };
 use anyhow::{Result, bail};
 use is_terminal::IsTerminal;
@@ -48,7 +49,7 @@ pub async fn delete_environment(args: Args) -> Result<()> {
         let confirmed = prompt_confirm_with_default(
             format!(
                 r#"Are you sure you want to delete the environment "{}"?"#,
-                name.red()
+                name.as_str().red()
             )
             .as_str(),
             false,
