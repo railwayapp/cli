@@ -3,11 +3,13 @@ use strum::{Display, EnumIter};
 
 pub use crate::controllers::config::PatchEntry;
 
+pub mod build_command;
 pub mod builder;
 pub mod healthcheck;
 pub mod regions;
 pub mod restart_policy;
 pub mod source;
+pub mod start_command;
 pub mod variable;
 
 #[derive(Clone, Copy, Display, EnumIter)]
@@ -16,6 +18,8 @@ pub enum Change {
     Variables,
     Sources,
     Builder,
+    BuildCommand,
+    StartCommand,
     Healthcheck,
     Regions,
     RestartPolicy,
@@ -37,6 +41,8 @@ register_handlers!(
     Variables => variable,
     Sources => source,
     Builder => builder,
+    BuildCommand => build_command,
+    StartCommand => start_command,
     Healthcheck => healthcheck,
     Regions => regions,
     RestartPolicy => restart_policy,

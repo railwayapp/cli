@@ -49,8 +49,8 @@ impl std::fmt::Display for ExpectedType {
 /// - Stripping leading/trailing dots
 /// - Collapsing consecutive dots
 ///
-/// Returns the parsed JSON value, or an error if the path is invalid or value doesn't match type.
-pub fn parse_service_value(path: &str, value: &str) -> Result<serde_json::Value> {
+/// Returns (normalized_path, parsed_value), or an error if the path is invalid or value doesn't match type.
+pub fn parse_service_value(path: &str, value: &str) -> Result<(String, serde_json::Value)> {
     let normalized = normalize_path(path);
     let root_schema = schema_for!(ServiceInstance);
     let root = Schema::Object(root_schema.schema.clone());
@@ -58,7 +58,8 @@ pub fn parse_service_value(path: &str, value: &str) -> Result<serde_json::Value>
     let segments: Vec<&str> = normalized.split('.').collect();
     let expected_type = get_expected_type(&root_schema, &root, &segments, &normalized)?;
 
-    parse_value_as_type(value, &expected_type, &normalized)
+    let parsed_value = parse_value_as_type(value, &expected_type, &normalized)?;
+    Ok((normalized, parsed_value))
 }
 
 /// Normalize a dot-path by stripping leading/trailing dots and collapsing consecutive dots
@@ -474,21 +475,21 @@ mod tests {
     #[test]
     fn test_parse_service_value_string() {
         // String fields should accept strings
-        let result = parse_service_value("source.image", "nginx:latest").unwrap();
-        assert_eq!(result, serde_json::json!("nginx:latest"));
+        let (_, value) = parse_service_value("source.image", "nginx:latest").unwrap();
+        assert_eq!(value, serde_json::json!("nginx:latest"));
 
-        let result = parse_service_value("deploy.startCommand", "npm start").unwrap();
-        assert_eq!(result, serde_json::json!("npm start"));
+        let (_, value) = parse_service_value("deploy.startCommand", "npm start").unwrap();
+        assert_eq!(value, serde_json::json!("npm start"));
     }
 
     #[test]
     fn test_parse_service_value_integer() {
         // Integer fields should parse numbers
-        let result = parse_service_value("deploy.numReplicas", "3").unwrap();
-        assert_eq!(result, serde_json::json!(3));
+        let (_, value) = parse_service_value("deploy.numReplicas", "3").unwrap();
+        assert_eq!(value, serde_json::json!(3));
 
-        let result = parse_service_value("deploy.healthcheckTimeout", "30").unwrap();
-        assert_eq!(result, serde_json::json!(30));
+        let (_, value) = parse_service_value("deploy.healthcheckTimeout", "30").unwrap();
+        assert_eq!(value, serde_json::json!(30));
 
         // Should reject non-integers
         let result = parse_service_value("deploy.numReplicas", "not-a-number");
@@ -498,11 +499,11 @@ mod tests {
     #[test]
     fn test_parse_service_value_boolean() {
         // Boolean fields
-        let result = parse_service_value("isDeleted", "true").unwrap();
-        assert_eq!(result, serde_json::json!(true));
+        let (_, value) = parse_service_value("isDeleted", "true").unwrap();
+        assert_eq!(value, serde_json::json!(true));
 
-        let result = parse_service_value("isDeleted", "false").unwrap();
-        assert_eq!(result, serde_json::json!(false));
+        let (_, value) = parse_service_value("isDeleted", "false").unwrap();
+        assert_eq!(value, serde_json::json!(false));
 
         // Should reject non-booleans
         let result = parse_service_value("isDeleted", "not-a-bool");
@@ -512,24 +513,26 @@ mod tests {
     #[test]
     fn test_parse_service_value_array() {
         // Array fields (like watch_patterns) - JSON syntax
-        let result = parse_service_value("build.watchPatterns", r#"["src/**", "lib/**"]"#).unwrap();
-        assert_eq!(result, serde_json::json!(["src/**", "lib/**"]));
+        let (_, value) =
+            parse_service_value("build.watchPatterns", r#"["src/**", "lib/**"]"#).unwrap();
+        assert_eq!(value, serde_json::json!(["src/**", "lib/**"]));
 
         // Comma-separated syntax
-        let result = parse_service_value("build.watchPatterns", "src/**,lib/**").unwrap();
-        assert_eq!(result, serde_json::json!(["src/**", "lib/**"]));
+        let (_, value) = parse_service_value("build.watchPatterns", "src/**,lib/**").unwrap();
+        assert_eq!(value, serde_json::json!(["src/**", "lib/**"]));
 
         // Comma-separated with spaces
-        let result = parse_service_value("build.watchPatterns", "src/**, lib/**, test/**").unwrap();
-        assert_eq!(result, serde_json::json!(["src/**", "lib/**", "test/**"]));
+        let (_, value) =
+            parse_service_value("build.watchPatterns", "src/**, lib/**, test/**").unwrap();
+        assert_eq!(value, serde_json::json!(["src/**", "lib/**", "test/**"]));
 
         // Single value (no comma) becomes single-element array
-        let result = parse_service_value("build.watchPatterns", "src/**").unwrap();
-        assert_eq!(result, serde_json::json!(["src/**"]));
+        let (_, value) = parse_service_value("build.watchPatterns", "src/**").unwrap();
+        assert_eq!(value, serde_json::json!(["src/**"]));
 
         // Empty elements are filtered out
-        let result = parse_service_value("build.watchPatterns", "src/**,,lib/**").unwrap();
-        assert_eq!(result, serde_json::json!(["src/**", "lib/**"]));
+        let (_, value) = parse_service_value("build.watchPatterns", "src/**,,lib/**").unwrap();
+        assert_eq!(value, serde_json::json!(["src/**", "lib/**"]));
     }
 
     #[test]
@@ -618,16 +621,24 @@ mod tests {
     #[test]
     fn test_parse_service_value_with_path_normalization() {
         // Leading dot should work
-        let result = parse_service_value(".deploy.numReplicas", "3").unwrap();
-        assert_eq!(result, serde_json::json!(3));
+        let (path, value) = parse_service_value(".deploy.numReplicas", "3").unwrap();
+        assert_eq!(path, "deploy.numReplicas");
+        assert_eq!(value, serde_json::json!(3));
 
         // Trailing dot should work
-        let result = parse_service_value("deploy.numReplicas.", "3").unwrap();
-        assert_eq!(result, serde_json::json!(3));
+        let (path, value) = parse_service_value("deploy.numReplicas.", "3").unwrap();
+        assert_eq!(path, "deploy.numReplicas");
+        assert_eq!(value, serde_json::json!(3));
 
         // Multiple dots should work
-        let result = parse_service_value("deploy..numReplicas", "3").unwrap();
-        assert_eq!(result, serde_json::json!(3));
+        let (path, value) = parse_service_value("deploy..numReplicas", "3").unwrap();
+        assert_eq!(path, "deploy.numReplicas");
+        assert_eq!(value, serde_json::json!(3));
+
+        // Leading dot + double dots + trailing dot (user-reported issue)
+        let (path, value) = parse_service_value(".deploy..sleepApplication.", "yes").unwrap();
+        assert_eq!(path, "deploy.sleepApplication");
+        assert_eq!(value, serde_json::json!(true));
     }
 
     #[test]
@@ -669,13 +680,15 @@ mod tests {
     #[test]
     fn test_multi_region_config_path() {
         // multiRegionConfig uses BTreeMap with arbitrary region keys
-        let result =
+        let (path, value) =
             parse_service_value("deploy.multiRegionConfig.us-west2.numReplicas", "3").unwrap();
-        assert_eq!(result, serde_json::json!(3));
+        assert_eq!(path, "deploy.multiRegionConfig.us-west2.numReplicas");
+        assert_eq!(value, serde_json::json!(3));
 
         // Any region key should work (additionalProperties)
-        let result =
+        let (path, value) =
             parse_service_value("deploy.multiRegionConfig.eu-central1.numReplicas", "5").unwrap();
-        assert_eq!(result, serde_json::json!(5));
+        assert_eq!(path, "deploy.multiRegionConfig.eu-central1.numReplicas");
+        assert_eq!(value, serde_json::json!(5));
     }
 }

@@ -131,23 +131,6 @@ pub fn prompt_multi_options<T: Display>(message: &str, options: Vec<T>) -> Resul
         .context("Failed to prompt for multi options")
 }
 
-pub fn prompt_multi_options_with_defaults<T: Display + Clone>(
-    message: &str,
-    options: Vec<(T, bool)>,
-) -> Result<Vec<T>> {
-    let opts = options.iter().map(|(t, _)| t.clone()).collect::<Vec<T>>();
-    let default_indicies = options
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, (_, enabled))| if *enabled { Some(idx) } else { None })
-        .collect::<Vec<usize>>();
-    inquire::MultiSelect::new(message, opts)
-        .with_render_config(Configs::get_render_config())
-        .with_default(&default_indicies)
-        .prompt()
-        .context("Failed to prompt for multi options")
-}
-
 pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
     inquire::Select::new(message, options)
         .with_render_config(Configs::get_render_config())

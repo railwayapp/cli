@@ -135,17 +135,18 @@ fn parse_non_interactive_configs(
         let service_id = &service.node.service_id;
 
         // Validate path and parse value according to schema-defined type
-        let json_value = config::parse_service_value(path, value)?;
+        // Returns normalized path (fixes leading/trailing/double dots)
+        let (normalized_path, json_value) = config::parse_service_value(path, value)?;
 
         // Track what's being configured for display
         // For "variables.X.value" -> show "variables"
         // For "deploy.startCommand" -> show "startCommand"
         // For "source.image" -> show "image"
-        let display_field = get_config_display_field(path);
+        let display_field = get_config_display_field(&normalized_path);
         configured_fields.insert(display_field);
 
         // Build full path with service ID
-        let full_path = format!("services.{}.{}", service_id, path);
+        let full_path = format!("services.{}.{}", service_id, normalized_path);
         entries.push((full_path, json_value));
     }
 
