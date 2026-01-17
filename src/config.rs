@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     client::{GQLClient, post_graphql},
     commands::queries,
+    consts,
     errors::RailwayError,
 };
 
@@ -112,11 +113,11 @@ impl Configs {
     }
 
     pub fn get_railway_token() -> Option<String> {
-        std::env::var("RAILWAY_TOKEN").ok()
+        std::env::var(consts::RAILWAY_TOKEN_ENV).ok()
     }
 
     pub fn get_railway_api_token() -> Option<String> {
-        std::env::var("RAILWAY_API_TOKEN").ok()
+        std::env::var(consts::RAILWAY_API_TOKEN_ENV).ok()
     }
 
     pub fn env_is_ci() -> bool {

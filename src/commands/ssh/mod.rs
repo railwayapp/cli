@@ -3,10 +3,9 @@ use clap::Parser;
 use indicatif::ProgressBar;
 
 use crate::{
-    client::GQLClient,
+    client::{auth_failure_error, GQLClient},
     config::Configs,
     controllers::terminal::{self, TerminalClient},
-    errors::RailwayError,
     util::progress::{create_spinner, fail_spinner},
 };
 
@@ -188,7 +187,7 @@ async fn create_client(
     ) {
         (Some(token), _) => AuthKind::Bearer(token),
         (None, Some(token)) => AuthKind::ProjectAccessToken(token),
-        (None, None) => return Err(RailwayError::Unauthorized.into()),
+        (None, None) => return Err(auth_failure_error().into()),
     };
 
     let ws_url = format!("wss://{}", configs.get_relay_host_path());

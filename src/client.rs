@@ -6,7 +6,12 @@ use reqwest::{
     header::{HeaderMap, HeaderValue},
 };
 
-use crate::{commands::Environment, config::Configs, consts, errors::RailwayError};
+use crate::{
+    commands::Environment,
+    config::Configs,
+    consts::{self, RAILWAY_API_TOKEN_ENV, RAILWAY_TOKEN_ENV},
+    errors::RailwayError,
+};
 use anyhow::Result;
 
 use graphql_client::Response as GraphQLResponse;
@@ -68,9 +73,13 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
     if let Some(errors) = res.errors {
         let error = &errors[0];
-        if error.message.to_lowercase().contains("not authorized") {
+        if error.message.to_lowercase().contains("project token not found") {
+            Err(RailwayError::InvalidRailwayToken(
+                RAILWAY_TOKEN_ENV.to_string(),
+            ))
+        } else if error.message.to_lowercase().contains("not authorized") {
             // Handle unauthorized errors in a custom way
-            Err(RailwayError::Unauthorized)
+            Err(auth_failure_error())
         } else if error.message == "Two Factor Authentication Required" {
             // Extract workspace name from extensions if available
             let workspace_name = error
@@ -104,6 +113,22 @@ fn get_security_url() -> String {
     format!("https://{}/account/security", host)
 }
 
+pub(crate) fn auth_failure_error() -> RailwayError {
+    if Configs::get_railway_token().is_some() {
+        RailwayError::UnauthorizedToken(RAILWAY_TOKEN_ENV.to_string())
+    } else if Configs::get_railway_api_token().is_some() {
+        RailwayError::UnauthorizedToken(RAILWAY_API_TOKEN_ENV.to_string())
+    } else if Configs::new()
+        .ok()
+        .and_then(|configs| configs.get_railway_auth_token())
+        .is_some()
+    {
+        RailwayError::UnauthorizedLogin
+    } else {
+        RailwayError::Unauthorized
+    }
+}
+
 /// Like post_graphql, but removes null values from the variables object before sending.
 ///
 /// This is needed because graphql-client 0.14.0 has a bug where skip_serializing_none
@@ -135,8 +160,12 @@ pub async fn post_graphql_skip_none<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
     if let Some(errors) = res.errors {
         let error = &errors[0];
-        if error.message.to_lowercase().contains("not authorized") {
-            Err(RailwayError::Unauthorized)
+        if error.message.to_lowercase().contains("project token not found") {
+            Err(RailwayError::InvalidRailwayToken(
+                RAILWAY_TOKEN_ENV.to_string(),
+            ))
+        } else if error.message.to_lowercase().contains("not authorized") {
+            Err(auth_failure_error())
         } else if error.message == "Two Factor Authentication Required" {
             // Extract workspace name from extensions if available
             let workspace_name = error
