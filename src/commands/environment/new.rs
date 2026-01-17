@@ -2,7 +2,9 @@ use strum::IntoEnumIterator;
 
 use super::{New as Args, changes::Change, *};
 use crate::{
-    controllers::config::{self, EnvironmentConfig, PatchEntry},
+    controllers::config::{
+        self, EnvironmentConfig, PatchEntry, environment::fetch_environment_config,
+    },
     util::progress::create_spinner_if,
 };
 
@@ -19,7 +21,7 @@ pub async fn new_environment(args: Args) -> Result<()> {
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
 
     let env_config = if let Some(ref duplicate_id) = duplicate_id {
-        edit_services_select(&args, &project, duplicate_id.clone())?
+        edit_services_select(&args, &client, &configs, &project, duplicate_id.clone()).await?
     } else {
         EnvironmentConfig::default()
     };
@@ -81,8 +83,10 @@ pub async fn new_environment(args: Args) -> Result<()> {
 
 /// Collects service configuration changes either interactively or from CLI flags.
 /// Returns an EnvironmentConfig with only the changed fields set.
-pub fn edit_services_select(
+pub async fn edit_services_select(
     args: &Args,
+    client: &reqwest::Client,
+    configs: &Configs,
     project: &queries::project::ProjectProject,
     environment_id: String,
 ) -> Result<EnvironmentConfig> {
@@ -103,7 +107,7 @@ pub fn edit_services_select(
     }
 
     // Interactive flow
-    parse_interactive_configs(project, &environment_id)
+    parse_interactive_configs(client, configs, project, &environment_id).await
 }
 
 /// Parse --service-config flags into EnvironmentConfig
@@ -179,11 +183,19 @@ fn get_config_display_field(path: &str) -> String {
 }
 
 /// Interactive flow for collecting service configurations
-fn parse_interactive_configs(
+async fn parse_interactive_configs(
+    client: &reqwest::Client,
+    configs: &Configs,
     project: &queries::project::ProjectProject,
     environment_id: &str,
 ) -> Result<EnvironmentConfig> {
     let services = get_environment_services(project, environment_id)?;
+
+    // Fetch existing environment config for placeholders
+    let existing_config = fetch_environment_config(client, configs, environment_id, false)
+        .await
+        .map(|r| r.config)
+        .ok();
 
     // Step 1: Select what to configure
     let selected_changes = prompt_multi_options(
@@ -214,7 +226,12 @@ fn parse_interactive_configs(
             let service_id = &service.0.service_id;
             let service_name = &service.0.service_name;
 
-            let entries = change.parse_interactive(service_id, service_name)?;
+            // Look up existing service config for placeholders
+            let existing_service = existing_config
+                .as_ref()
+                .and_then(|c| c.services.get(service_id));
+
+            let entries = change.parse_interactive(service_id, service_name, existing_service)?;
             all_entries.extend(entries);
         }
     }

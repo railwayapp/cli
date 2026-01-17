@@ -32,6 +32,19 @@ pub fn prompt_options_skippable<T: Display>(message: &str, options: Vec<T>) -> R
         .context("Failed to prompt for options")
 }
 
+pub fn prompt_options_skippable_with_default<T: Display>(
+    message: &str,
+    options: Vec<T>,
+    default_index: usize,
+) -> Result<Option<T>> {
+    let select = inquire::Select::new(message, options);
+    select
+        .with_render_config(Configs::get_render_config())
+        .with_starting_cursor(default_index)
+        .prompt_skippable()
+        .context("Failed to prompt for options")
+}
+
 pub fn prompt_text(message: &str) -> Result<String> {
     let select = inquire::Text::new(message);
     select

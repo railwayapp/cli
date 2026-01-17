@@ -5,13 +5,20 @@ use crate::{
     GQLClient,
     config::Configs,
     consts::TICK_STRING,
-    controllers::regions::{convert_hashmap_to_map, fetch_regions, prompt_for_regions_with_data},
+    controllers::{
+        config::environment::ServiceInstance,
+        regions::{convert_hashmap_to_map, fetch_regions, prompt_for_regions_with_data},
+    },
 };
 use anyhow::Result;
 use futures::executor::block_on;
 use serde_json::Value;
 
-pub fn parse_interactive(service_id: &str, _service_name: &str) -> Result<Vec<PatchEntry>> {
+pub fn parse_interactive(
+    service_id: &str,
+    _service_name: &str,
+    existing: Option<&ServiceInstance>,
+) -> Result<Vec<PatchEntry>> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
@@ -31,11 +38,15 @@ pub fn parse_interactive(service_id: &str, _service_name: &str) -> Result<Vec<Pa
     // Clear spinner before prompting
     spinner.finish_and_clear();
 
-    // Start with empty existing config since this is a new environment
-    let existing = Value::Object(serde_json::Map::new());
+    // Extract existing multi-region config if available, otherwise use empty
+    let existing_config = existing
+        .and_then(|e| e.deploy.as_ref())
+        .and_then(|d| d.multi_region_config.as_ref())
+        .map(|config| serde_json::to_value(config).unwrap_or(Value::Object(serde_json::Map::new())))
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
     // Prompt for regions (sync, no spinner)
-    let updated = prompt_for_regions_with_data(regions, &existing)?;
+    let updated = prompt_for_regions_with_data(regions, &existing_config)?;
 
     if updated.is_empty() {
         return Ok(vec![]);

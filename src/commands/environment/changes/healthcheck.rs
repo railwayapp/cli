@@ -1,16 +1,26 @@
 use super::PatchEntry;
+use crate::controllers::config::environment::ServiceInstance;
 use crate::util::prompt::prompt_text_with_placeholder_disappear_skippable;
 use anyhow::Result;
 use colored::Colorize;
 
-pub fn parse_interactive(service_id: &str, _service_name: &str) -> Result<Vec<PatchEntry>> {
+pub fn parse_interactive(
+    service_id: &str,
+    _service_name: &str,
+    existing: Option<&ServiceInstance>,
+) -> Result<Vec<PatchEntry>> {
+    let existing_deploy = existing.and_then(|e| e.deploy.as_ref());
+    let existing_healthcheck_path = existing_deploy.and_then(|d| d.healthcheck_path.as_deref());
+    let existing_healthcheck_timeout = existing_deploy.and_then(|d| d.healthcheck_timeout);
+
     let mut entries: Vec<PatchEntry> = Vec::new();
     let base_path = format!("services.{}.deploy", service_id);
 
     // Health check path
+    let path_placeholder = existing_healthcheck_path.unwrap_or("/health");
     let Some(path) = prompt_text_with_placeholder_disappear_skippable(
         "Health check endpoint <esc to skip>",
-        "/health",
+        path_placeholder,
     )?
     else {
         return Ok(vec![]);
@@ -26,10 +36,13 @@ pub fn parse_interactive(service_id: &str, _service_name: &str) -> Result<Vec<Pa
     ));
 
     // Health check timeout (only prompt if path was provided)
+    let timeout_placeholder = existing_healthcheck_timeout
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "300".to_string());
     loop {
         let Some(timeout_str) = prompt_text_with_placeholder_disappear_skippable(
             "Health check timeout in seconds <esc to skip>",
-            "300",
+            &timeout_placeholder,
         )?
         else {
             // User pressed esc, exit without setting timeout

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use strum::{Display, EnumIter};
 
-pub use crate::controllers::config::PatchEntry;
+pub use crate::controllers::config::{PatchEntry, ServiceInstance};
 
 pub mod build_command;
 pub mod builder;
@@ -28,9 +28,14 @@ pub enum Change {
 macro_rules! register_handlers {
     ($($variant:ident => $module:ident),* $(,)?) => {
         impl Change {
-            pub fn parse_interactive(&self, service_id: &str, service_name: &str) -> Result<Vec<PatchEntry>> {
+            pub fn parse_interactive(
+                &self,
+                service_id: &str,
+                service_name: &str,
+                existing: Option<&ServiceInstance>,
+            ) -> Result<Vec<PatchEntry>> {
                 match self {
-                    $(Change::$variant => $module::parse_interactive(service_id, service_name),)*
+                    $(Change::$variant => $module::parse_interactive(service_id, service_name, existing),)*
                 }
             }
         }

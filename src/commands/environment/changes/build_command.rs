@@ -1,11 +1,21 @@
 use super::PatchEntry;
+use crate::controllers::config::environment::ServiceInstance;
 use crate::util::prompt::prompt_text_with_placeholder_disappear_skippable;
 use anyhow::Result;
 
-pub fn parse_interactive(service_id: &str, service_name: &str) -> Result<Vec<PatchEntry>> {
+pub fn parse_interactive(
+    service_id: &str,
+    service_name: &str,
+    existing: Option<&ServiceInstance>,
+) -> Result<Vec<PatchEntry>> {
+    let existing_build_command = existing
+        .and_then(|e| e.build.as_ref())
+        .and_then(|b| b.build_command.as_deref());
+    let placeholder = existing_build_command.unwrap_or("npm run build");
+
     let Some(build_command) = prompt_text_with_placeholder_disappear_skippable(
         &format!("Build command for {service_name}? <esc to skip>"),
-        "npm run build",
+        placeholder,
     )?
     else {
         return Ok(vec![]);

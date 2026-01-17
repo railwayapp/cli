@@ -1,11 +1,21 @@
 use super::PatchEntry;
+use crate::controllers::config::environment::ServiceInstance;
 use crate::util::prompt::prompt_text_with_placeholder_disappear_skippable;
 use anyhow::Result;
 
-pub fn parse_interactive(service_id: &str, service_name: &str) -> Result<Vec<PatchEntry>> {
+pub fn parse_interactive(
+    service_id: &str,
+    service_name: &str,
+    existing: Option<&ServiceInstance>,
+) -> Result<Vec<PatchEntry>> {
+    let existing_start_command = existing
+        .and_then(|e| e.deploy.as_ref())
+        .and_then(|d| d.start_command.as_deref());
+    let placeholder = existing_start_command.unwrap_or("npm start");
+
     let Some(start_command) = prompt_text_with_placeholder_disappear_skippable(
         &format!("Start command for {service_name}? <esc to skip>"),
-        "npm start",
+        placeholder,
     )?
     else {
         return Ok(vec![]);
