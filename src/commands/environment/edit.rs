@@ -9,7 +9,9 @@ use crate::{
         project::get_project,
     },
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_text_with_placeholder_disappear_skippable},
+    util::prompt::{
+        fake_select, prompt_confirm_with_default, prompt_text_with_placeholder_disappear_skippable,
+    },
 };
 
 use super::new::{
@@ -75,8 +77,21 @@ pub async fn edit_environment(args: Args) -> Result<()> {
     )
     .await?;
 
-    // If --stage flag, don't commit
-    if args.stage {
+    // Determine whether to stage only or apply now
+    // --stage flag means stage only, --message flag implies apply now
+    let should_stage_only = if args.stage {
+        fake_select("Apply changes now?", "No");
+        true
+    } else if args.message.is_some() {
+        fake_select("Apply changes now?", "Yes");
+        false
+    } else if is_interactive {
+        !prompt_confirm_with_default("Apply changes now?", true)?
+    } else {
+        false
+    };
+
+    if should_stage_only {
         if json {
             println!(
                 "{}",
@@ -100,6 +115,7 @@ pub async fn edit_environment(args: Args) -> Result<()> {
 
     // Get commit message: from --message flag, or prompt interactively (only if input wasn't from stdin)
     let commit_message = if let Some(msg) = args.message.clone() {
+        fake_select("Commit message", &msg);
         Some(msg)
     } else if is_interactive {
         prompt_text_with_placeholder_disappear_skippable(
@@ -161,7 +177,8 @@ fn resolve_environment(
     if let Some(ref env_input) = args.environment {
         // Find environment by name or ID
         let env = project.environments.edges.iter().find(|e| {
-            e.node.name.to_lowercase() == env_input.to_lowercase() || e.node.id == *env_input
+            e.node.name.to_lowercase() == env_input.to_lowercase()
+                || e.node.id.to_lowercase() == *env_input.to_lowercase()
         });
 
         if let Some(env) = env {
@@ -209,7 +226,7 @@ async fn get_edit_config(
 
     // Priority 3: Interactive prompts (terminal only)
     if std::io::stdout().is_terminal() {
-        return parse_interactive_configs(client, configs, project, environment_id).await;
+        return parse_interactive_configs(client, configs, project, environment_id, None).await;
     }
 
     // No input available

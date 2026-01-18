@@ -107,7 +107,7 @@ pub async fn edit_services_select(
     }
 
     // Interactive flow
-    parse_interactive_configs(client, configs, project, &environment_id).await
+    parse_interactive_configs(client, configs, project, &environment_id, None).await
 }
 
 /// Parse --service-config flags into EnvironmentConfig
@@ -183,19 +183,24 @@ fn get_config_display_field(path: &str) -> String {
 }
 
 /// Interactive flow for collecting service configurations
+/// If `existing_config` is None, fetches the current environment config
 pub async fn parse_interactive_configs(
     client: &reqwest::Client,
     configs: &Configs,
     project: &queries::project::ProjectProject,
     environment_id: &str,
+    existing_config: Option<EnvironmentConfig>,
 ) -> Result<EnvironmentConfig> {
     let services = get_environment_services(project, environment_id)?;
 
-    // Fetch existing environment config for placeholders
-    let existing_config = fetch_environment_config(client, configs, environment_id, false)
-        .await
-        .map(|r| r.config)
-        .ok();
+    // Use provided config or fetch existing environment config for placeholders
+    let existing_config = match existing_config {
+        Some(config) => Some(config),
+        None => fetch_environment_config(client, configs, environment_id, false)
+            .await
+            .map(|r| r.config)
+            .ok(),
+    };
 
     // Step 1: Select what to configure
     let selected_changes = prompt_multi_options(
