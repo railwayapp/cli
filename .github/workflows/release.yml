@@ -80,12 +80,15 @@ jobs:
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            rustflags: -C target-feature=+crt-static
 
           - target: i686-pc-windows-msvc
             os: windows-latest
+            rustflags: -C target-feature=+crt-static
 
           - target: x86_64-pc-windows-gnu
             os: windows-latest
+            rustflags: -C target-feature=+crt-static
 
           - target: aarch64-pc-windows-msvc
             os: windows-latest
@@ -94,16 +97,26 @@ jobs:
           - target: i686-pc-windows-gnu
             os: ubuntu-latest
             use-cross: true
+            rustflags: -C target-feature=+crt-static
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Setup cargo-wix
+        continue-on-error: true
+        if: matrix.os == 'windows-latest'
+        run: cargo install cargo-wix
+        env:
+          # cargo-wix does not require static crt
+          RUSTFLAGS: ""
 
       - name: Build release binary
         uses: actions-rs/cargo@v1
@@ -111,6 +124,14 @@ jobs:
           command: build
           args: --release --locked --target ${{ matrix.target }}
           use-cross: ${{ matrix.use-cross || matrix.os == 'ubuntu-latest' }}
+    
+      - name: Build windows installer
+        continue-on-error: true
+        if: matrix.os == 'windows.latest'
+        run: >
+          cargo wix -v --nocapture
+          --target ${{ matrix.target }}
+          --output railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.msi
 
       - name: Upload docker artifact
         if: ${{ matrix.docker-artifact }}
@@ -162,6 +183,15 @@ jobs:
         shell: bash
         run: |
           gh release upload "${{ needs.create-release.outputs.railway_version }}" railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}*
+
+      - name: Upload windows installers
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload "${{ needs.create-release.outputs.railway_version }}" "railway-${{ needs.create-release.outputs.railway_version }}-${{ matrix.target }}.msi"
 
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
