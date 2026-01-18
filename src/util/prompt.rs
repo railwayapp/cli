@@ -12,6 +12,7 @@ use std::{
 use crate::{
     commands::{Configs, queries::project::ProjectProjectServicesEdgesNode},
     controllers::variables::Variable,
+    queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
 };
 use anyhow::{Context, Result};
 
@@ -27,6 +28,19 @@ pub fn prompt_options_skippable<T: Display>(message: &str, options: Vec<T>) -> R
     let select = inquire::Select::new(message, options);
     select
         .with_render_config(Configs::get_render_config())
+        .prompt_skippable()
+        .context("Failed to prompt for options")
+}
+
+pub fn prompt_options_skippable_with_default<T: Display>(
+    message: &str,
+    options: Vec<T>,
+    default_index: usize,
+) -> Result<Option<T>> {
+    let select = inquire::Select::new(message, options);
+    select
+        .with_render_config(Configs::get_render_config())
+        .with_starting_cursor(default_index)
         .prompt_skippable()
         .context("Failed to prompt for options")
 }
@@ -148,11 +162,16 @@ pub fn fake_select(message: &str, selected: &str) {
     println!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
-pub fn prompt_variables() -> Result<Vec<Variable>> {
+pub fn prompt_variables(service_name: Option<&str>) -> Result<Vec<Variable>> {
     let mut variables: Vec<Variable> = Vec::new();
     loop {
         if let Some(variable) = prompt_text_with_placeholder_disappear_skippable(
-            "Enter a variable",
+            if let Some(ref service_name) = service_name {
+                format!("Enter a variable for {service_name} <esc to skip>")
+            } else {
+                String::from("Enter a variable <esc to skip>")
+            }
+            .as_str(),
             "<KEY=VALUE, press esc to finish>",
         )? {
             if variable.is_empty() {
@@ -174,6 +193,17 @@ pub struct PromptService<'a>(pub &'a ProjectProjectServicesEdgesNode);
 impl Display for PromptService<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptServiceInstance<'a>(
+    pub &'a ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
+);
+
+impl Display for PromptServiceInstance<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.service_name)
     }
 }
 

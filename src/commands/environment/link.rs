@@ -1,0 +1,90 @@
+use super::{Environment, *};
+use crate::{
+    Configs, GQLClient, controllers::project::get_project, interact_or,
+    util::prompt::prompt_options,
+};
+use anyhow::{Result, bail};
+
+pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Result<()> {
+    let mut configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let linked_project = configs.get_linked_project().await?;
+
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    if project.deleted_at.is_some() {
+        bail!(RailwayError::ProjectDeleted);
+    }
+
+    let all_environments = &project.environments.edges;
+    let environments = all_environments
+        .iter()
+        .filter(|env| env.node.can_access)
+        .map(|env| Environment(&env.node))
+        .collect::<Vec<_>>();
+
+    if environments.is_empty() {
+        if all_environments.is_empty() {
+            bail!("Project has no environments");
+        } else {
+            bail!("All environments in this project are restricted");
+        }
+    }
+
+    let environment = match environment_arg {
+        // If the environment is specified, find it in the list of environments
+        Some(environment) => {
+            let environment = environments
+                .iter()
+                .find(|env| {
+                    env.0.id == environment
+                        || env.0.name.to_lowercase() == environment.to_lowercase()
+                })
+                .context("Environment not found")?;
+            environment.clone()
+        }
+        // If the environment is not specified, prompt the user to select one
+        None => {
+            interact_or!("Environment must be specified when not running in a terminal");
+
+            if environments.len() == 1 {
+                match environments.first() {
+                    // Project has only one environment, so use that one
+                    Some(environment) => environment.clone(),
+                    // Project has no environments, so bail
+                    None => bail!("Project has no environments"),
+                }
+            } else {
+                // Project has multiple environments, so prompt the user to select one
+                prompt_options("Select an environment", environments)?
+            }
+        }
+    };
+
+    let environment_name = environment.0.name.clone();
+    let environment_id = environment.0.id.clone();
+
+    configs.link_project(
+        linked_project.project.clone(),
+        linked_project.name.clone(),
+        environment_id.clone(),
+        Some(environment_name.clone()),
+    )?;
+    configs.write()?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "environment": {
+                    "id": environment_id,
+                    "name": environment_name
+                }
+            })
+        );
+    } else {
+        println!("Activated environment {}", environment_name.purple().bold());
+    }
+
+    Ok(())
+}
