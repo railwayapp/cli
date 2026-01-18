@@ -164,6 +164,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "LOGIN_WITH_RAILWAY"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "MAGIC_CONFIG"
             },
             {
@@ -229,6 +235,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "COMPARE_CLICKHOUSE_METRICS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "CTRD_IMAGE_STORE_ROLLOUT"
             },
             {
@@ -265,6 +277,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "TWO_FACTOR_ENFORCEMENT_ROLLOUT"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "UPDATED_VM_QUERIES"
             },
             {
@@ -285,6 +303,29 @@
           "interfaces": null,
           "kind": "ENUM",
           "name": "ActivePlatformFlag",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "LWW_CANVAS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "PLACEHOLDER"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "ActiveProjectFeatureFlag",
           "possibleTypes": null
         },
         {
@@ -8080,6 +8121,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "has2FAEnforcement",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "hasBAA",
               "type": {
                 "kind": "NON_NULL",
@@ -8216,6 +8273,22 @@
                       "ofType": null
                     }
                   }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "redactedDueTo2FAPending",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
                 }
               }
             },
@@ -12096,6 +12169,16 @@
                       "ofType": null
                     }
                   }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Merge the input patch into the existing staged patch.",
+                  "name": "merge",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Boolean",
+                    "ofType": null
+                  }
                 }
               ],
               "deprecationReason": null,
@@ -13441,6 +13524,68 @@
               "description": "Deletes a project.",
               "isDeprecated": false,
               "name": "projectDelete",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "input",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "INPUT_OBJECT",
+                      "name": "ProjectFeatureFlagToggleInput",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Add a feature flag for a project",
+              "isDeprecated": false,
+              "name": "projectFeatureFlagAdd",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "input",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "INPUT_OBJECT",
+                      "name": "ProjectFeatureFlagToggleInput",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Remove a feature flag for a project",
+              "isDeprecated": false,
+              "name": "projectFeatureFlagRemove",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
@@ -16331,6 +16476,51 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "enabled",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "Boolean",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "workspaceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Enable or disable 2FA enforcement for a workspace",
+              "isDeprecated": false,
+              "name": "workspaceTwoFactorEnforcementUpdate",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "id",
                   "type": {
                     "kind": "NON_NULL",
@@ -18922,6 +19112,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "COMPARE_CLICKHOUSE_METRICS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "CTRD_IMAGE_STORE_ROLLOUT"
             },
             {
@@ -18953,6 +19149,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "SPLIT_USAGE_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "TWO_FACTOR_ENFORCEMENT_ROLLOUT"
             },
             {
               "deprecationReason": null,
@@ -20805,10 +21007,30 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "isEphemeral",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Boolean",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "last",
                   "type": {
                     "kind": "SCALAR",
                     "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "sort",
+                  "type": {
+                    "kind": "ENUM",
+                    "name": "SortOrder",
                     "ofType": null
                   }
                 }
@@ -20837,6 +21059,30 @@
                 "kind": "SCALAR",
                 "name": "DateTime",
                 "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "featureFlags",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "ENUM",
+                      "name": "ActiveProjectFeatureFlag",
+                      "ofType": null
+                    }
+                  }
+                }
               }
             },
             {
@@ -21966,6 +22212,45 @@
           "interfaces": [],
           "kind": "OBJECT",
           "name": "ProjectEnvironmentsConnectionEdge",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": null,
+          "inputFields": [
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "flag",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "ActiveProjectFeatureFlag",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "projectId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "interfaces": null,
+          "kind": "INPUT_OBJECT",
+          "name": "ProjectFeatureFlagToggleInput",
           "possibleTypes": null
         },
         {
@@ -33485,6 +33770,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "service",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "Service",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "serviceId",
               "type": {
                 "kind": "NON_NULL",
@@ -38737,6 +39038,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "hasPasskeys",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "id",
               "type": {
                 "kind": "NON_NULL",
@@ -42222,6 +42539,22 @@
             {
               "args": [],
               "deprecationReason": null,
+              "description": "Whether 2FA enforcement is enabled for this workspace.",
+              "isDeprecated": false,
+              "name": "has2FAEnforcement",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
               "name": "hasSAML",
@@ -42441,6 +42774,22 @@
                 "ofType": {
                   "kind": "OBJECT",
                   "name": "WorkspaceProjectsConnection",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Whether the current user's access is redacted due to pending 2FA requirement. Returns true if the user is a workspace member, workspace has 2FA enforcement enabled, and the current user needs to enable 2FA.",
+              "isDeprecated": false,
+              "name": "redactedDueTo2FAPending",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
                   "ofType": null
                 }
               }

@@ -111,7 +111,7 @@ pub async fn edit_services_select(
 }
 
 /// Parse --service-config flags into EnvironmentConfig
-fn parse_non_interactive_configs(
+pub fn parse_non_interactive_configs(
     service_configs: &[String],
     project: &queries::project::ProjectProject,
     environment_id: &str,
@@ -183,7 +183,7 @@ fn get_config_display_field(path: &str) -> String {
 }
 
 /// Interactive flow for collecting service configurations
-async fn parse_interactive_configs(
+pub async fn parse_interactive_configs(
     client: &reqwest::Client,
     configs: &Configs,
     project: &queries::project::ProjectProject,
@@ -240,7 +240,7 @@ async fn parse_interactive_configs(
 }
 
 /// Get service instances for an environment
-fn get_environment_services<'a>(
+pub fn get_environment_services<'a>(
     project: &'a queries::project::ProjectProject,
     environment_id: &str,
 ) -> Result<&'a Vec<queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges>> {

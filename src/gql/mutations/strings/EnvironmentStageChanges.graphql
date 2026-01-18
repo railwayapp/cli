@@ -1,0 +1,6 @@
+mutation EnvironmentStageChanges($environmentId: String!, $input: EnvironmentConfig!, $merge: Boolean) {
+  environmentStageChanges(environmentId: $environmentId, input: $input, merge: $merge) {
+    id
+    status
+  }
+}

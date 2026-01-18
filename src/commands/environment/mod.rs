@@ -18,6 +18,7 @@ use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
 
 mod changes;
 mod delete;
+mod edit;
 mod link;
 mod new;
 
@@ -78,6 +79,28 @@ structstruck::strike! {
             /// Output in JSON format
             #[clap(long)]
             pub json: bool,
+        }),
+
+        /// Edit an environment's configuration
+        Edit(pub struct {
+            /// The environment to edit (defaults to linked environment)
+            #[clap(long, short)]
+            pub environment: Option<String>,
+
+            #[clap(flatten)]
+            pub config: EnvironmentConfigOptions,
+
+            /// Commit message for the changes
+            #[clap(long, short)]
+            pub message: Option<String>,
+
+            /// Stage changes without committing
+            #[clap(long)]
+            pub stage: bool,
+
+            /// Output in JSON format
+            #[clap(long)]
+            pub json: bool,
         })
 
     }
@@ -96,10 +119,12 @@ pub struct EnvironmentConfigOptions {
     #[clap(long = "service-config", short = 's', number_of_values = 3, action = clap::ArgAction::Append, value_names = &["SERVICE", "PATH", "VALUE"])]
     pub service_configs: Vec<String>,
 
+    /// DEPRECATED: Use --service-config
+    ///
     /// Set a variable on a service (shorthand for --service-config <SERVICE> variables.<KEY>.value <VALUE>)
     ///
     /// Format: --service-variable <SERVICE> <KEY>=<VALUE>
-    #[clap(long = "service-variable", short = 'v', number_of_values = 2, action = clap::ArgAction::Append, value_names = &["SERVICE", "KEY=VALUE"])]
+    #[clap(hide = true, long = "service-variable", short = 'v', number_of_values = 2, action = clap::ArgAction::Append, value_names = &["SERVICE", "KEY=VALUE"])]
     pub service_variables: Vec<String>,
 }
 
@@ -135,6 +160,7 @@ pub async fn command(args: Args) -> Result<()> {
         }
         Some(Commands::New(args)) => new::new_environment(args).await,
         Some(Commands::Delete(args)) => delete::delete_environment(args).await,
+        Some(Commands::Edit(args)) => edit::edit_environment(args).await,
         // Legacy: `railway environment <name>` without subcommand
         None => link::link_environment(args.environment, args.json).await,
     }
