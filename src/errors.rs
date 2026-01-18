@@ -6,8 +6,18 @@ pub enum RailwayError {
     #[error("Unauthorized. Please login with `railway login`")]
     Unauthorized,
 
-    #[error("Invalid RAILWAY_TOKEN. Please check that your token is valid and has not expired")]
-    InvalidRailwayToken,
+    #[error(
+        "Unauthorized. Please check that your {0} is valid and has access to the resource you're trying to use."
+    )]
+    UnauthorizedToken(String),
+
+    #[error("Unauthorized. Please run `railway login` again.")]
+    UnauthorizedLogin,
+
+    #[error(
+        "Invalid {0}. Please check that it is valid and has access to the resource you're trying to use."
+    )]
+    InvalidRailwayToken(String),
 
     #[error("Login state is corrupt. Please logout and login back in.")]
     InvalidHeader(#[from] InvalidHeaderValue),

@@ -1,7 +1,10 @@
 use std::{net::SocketAddr, time::Duration};
 
 use crate::{
-    consts::TICK_STRING, controllers::user::get_user, errors::RailwayError, interact_or,
+    consts::{RAILWAY_API_TOKEN_ENV, RAILWAY_TOKEN_ENV, TICK_STRING},
+    controllers::user::get_user,
+    errors::RailwayError,
+    interact_or,
     util::prompt::prompt_confirm_with_default_with_cancel,
 };
 
@@ -29,17 +32,24 @@ pub async fn command(args: Args) -> Result<()> {
 
     let mut configs = Configs::new()?;
 
-    if Configs::get_railway_api_token().is_some() {
+    let token_name = if Configs::get_railway_token().is_some() {
+        Some(RAILWAY_TOKEN_ENV)
+    } else if Configs::get_railway_api_token().is_some() {
+        Some(RAILWAY_API_TOKEN_ENV)
+    } else {
+        None
+    };
+
+    if let Some(token_name) = token_name {
         if let Ok(client) = GQLClient::new_authorized(&configs) {
             match get_user(&client, &configs).await {
                 Ok(user) => {
-                    println!("{} found", "RAILWAY_TOKEN".bold());
+                    println!("{} found", token_name.bold());
                     print_user(user);
                     return Ok(());
                 }
                 Err(_e) => {
-                    println!("Found invalid {}", "RAILWAY_TOKEN".bold());
-                    return Err(RailwayError::InvalidRailwayToken.into());
+                    return Err(RailwayError::InvalidRailwayToken(token_name.to_string()).into());
                 }
             }
         }
