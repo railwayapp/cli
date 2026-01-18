@@ -73,7 +73,11 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
     if let Some(errors) = res.errors {
         let error = &errors[0];
-        if error.message.to_lowercase().contains("project token not found") {
+        if error
+            .message
+            .to_lowercase()
+            .contains("project token not found")
+        {
             Err(RailwayError::InvalidRailwayToken(
                 RAILWAY_TOKEN_ENV.to_string(),
             ))
@@ -160,7 +164,11 @@ pub async fn post_graphql_skip_none<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
     if let Some(errors) = res.errors {
         let error = &errors[0];
-        if error.message.to_lowercase().contains("project token not found") {
+        if error
+            .message
+            .to_lowercase()
+            .contains("project token not found")
+        {
             Err(RailwayError::InvalidRailwayToken(
                 RAILWAY_TOKEN_ENV.to_string(),
             ))

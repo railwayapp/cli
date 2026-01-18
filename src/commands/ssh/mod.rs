@@ -3,7 +3,7 @@ use clap::Parser;
 use indicatif::ProgressBar;
 
 use crate::{
-    client::{auth_failure_error, GQLClient},
+    client::{GQLClient, auth_failure_error},
     config::Configs,
     controllers::terminal::{self, TerminalClient},
     util::progress::{create_spinner, fail_spinner},
