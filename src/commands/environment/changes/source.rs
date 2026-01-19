@@ -16,35 +16,6 @@ pub enum SourceType {
     GitHub,
 }
 
-#[derive(Clone, Copy, Display, EnumIter, PartialEq)]
-pub enum AutoUpdateType {
-    #[strum(serialize = "Disabled")]
-    Disabled,
-    #[strum(serialize = "Patch versions only")]
-    Patch,
-    #[strum(serialize = "Minor versions")]
-    Minor,
-}
-
-impl AutoUpdateType {
-    fn to_api_value(self) -> &'static str {
-        match self {
-            AutoUpdateType::Disabled => "disabled",
-            AutoUpdateType::Patch => "patch",
-            AutoUpdateType::Minor => "minor",
-        }
-    }
-
-    fn from_api_value(value: &str) -> Option<Self> {
-        match value {
-            "disabled" => Some(Self::Disabled),
-            "patch" => Some(Self::Patch),
-            "minor" => Some(Self::Minor),
-            _ => None,
-        }
-    }
-}
-
 pub fn parse_interactive(
     service_id: &str,
     service_name: &str,
@@ -57,10 +28,6 @@ pub fn parse_interactive(
     let existing_branch = existing_source.and_then(|s| s.branch.as_deref());
     let existing_root_dir = existing_source.and_then(|s| s.root_directory.as_deref());
     let existing_check_suites = existing_source.and_then(|s| s.check_suites);
-    let existing_auto_update = existing_source
-        .and_then(|s| s.auto_updates.as_ref())
-        .and_then(|a| a.r#type.as_deref())
-        .and_then(AutoUpdateType::from_api_value);
 
     // Determine default source type based on existing config
     let default_source_index = if existing_image.is_some() {
@@ -106,23 +73,6 @@ pub fn parse_interactive(
             };
 
             entries.push((format!("{}.image", base_path), serde_json::json!(image)));
-
-            // Auto-updates (Docker only)
-            let auto_update_options: Vec<AutoUpdateType> = AutoUpdateType::iter().collect();
-            let auto_update_default = existing_auto_update
-                .and_then(|a| auto_update_options.iter().position(|o| *o == a))
-                .unwrap_or(0);
-
-            if let Some(auto_update) = prompt_options_skippable_with_default(
-                "Auto-update policy <esc to skip>",
-                auto_update_options,
-                auto_update_default,
-            )? {
-                entries.push((
-                    format!("{}.autoUpdates.type", base_path),
-                    serde_json::json!(auto_update.to_api_value()),
-                ));
-            }
         }
         SourceType::GitHub => {
             // GitHub repo (required)
