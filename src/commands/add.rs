@@ -256,7 +256,7 @@ fn prompt_variables(variables: Vec<Variable>) -> Result<Option<BTreeMap<String, 
     }
     if variables.is_empty() {
         return Ok(Some(
-            prompt::prompt_variables()?
+            prompt::prompt_variables(None)?
                 .into_iter()
                 .map(|v| (v.key, v.value))
                 .collect(),

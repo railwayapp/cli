@@ -4,7 +4,10 @@ type EnvironmentVariables = std::collections::BTreeMap<String, String>;
 type JSON = serde_json::Value;
 use chrono::{DateTime as DateTimeType, Utc};
 
+use crate::controllers;
+
 pub type DateTime = DateTimeType<Utc>;
+type EnvironmentConfig = controllers::config::EnvironmentConfig;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -231,6 +234,33 @@ pub struct EnvironmentDelete;
     skip_serializing_none
 )]
 pub struct FunctionUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnvironmentPatchCommit.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnvironmentPatchCommit;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnvironmentStageChanges.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnvironmentStageChanges;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnvironmentPatchCommitStaged.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnvironmentPatchCommitStaged;
 
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

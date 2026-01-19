@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::Result;
 use reqwest::Client;
+use std::fmt::Display;
 use std::{collections::BTreeMap, str::FromStr};
 
 pub async fn get_service_variables(
@@ -40,7 +41,7 @@ pub async fn get_service_variables(
     Ok(variables)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Variable {
     pub key: String,
     pub value: String,
@@ -57,5 +58,11 @@ impl FromStr for Variable {
             key: s[0].to_string(),
             value: s[1].to_string(),
         })
+    }
+}
+
+impl Display for Variable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}={}", self.key, self.value)
     }
 }
