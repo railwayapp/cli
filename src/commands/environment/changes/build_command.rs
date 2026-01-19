@@ -11,7 +11,7 @@ pub fn parse_interactive(
     let existing_build_command = existing
         .and_then(|e| e.build.as_ref())
         .and_then(|b| b.build_command.as_deref());
-    let placeholder = existing_build_command.unwrap_or("npm run build");
+    let placeholder = existing_build_command.unwrap_or("None");
 
     let Some(build_command) = prompt_text_with_placeholder_disappear_skippable(
         &format!("Build command for {service_name}? <esc to skip>"),

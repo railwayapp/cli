@@ -11,6 +11,7 @@ pub mod restart_policy;
 pub mod source;
 pub mod start_command;
 pub mod variable;
+pub mod watch_patterns;
 
 #[derive(Clone, Copy, Display, EnumIter)]
 #[strum(serialize_all = "title_case")]
@@ -23,6 +24,7 @@ pub enum Change {
     Healthcheck,
     Regions,
     RestartPolicy,
+    WatchPatterns,
 }
 
 macro_rules! register_handlers {
@@ -51,4 +53,5 @@ register_handlers!(
     Healthcheck => healthcheck,
     Regions => regions,
     RestartPolicy => restart_policy,
+    WatchPatterns => watch_patterns,
 );

@@ -202,40 +202,40 @@ pub async fn parse_interactive_configs(
             .ok(),
     };
 
-    // Step 1: Select what to configure
-    let selected_changes = prompt_multi_options(
-        "What do you want to configure? <enter to skip>",
-        Change::iter().collect(),
+    // Step 1: Select which services to configure
+    let prompt_services = services
+        .iter()
+        .map(|s| PromptServiceInstance(&s.node))
+        .collect::<Vec<_>>();
+
+    let selected_services = prompt_multi_options(
+        "What services do you want to configure? <enter to skip>",
+        prompt_services,
     )?;
 
-    if selected_changes.is_empty() {
+    if selected_services.is_empty() {
         return Ok(EnvironmentConfig::default());
     }
 
     let mut all_entries: Vec<PatchEntry> = Vec::new();
 
-    // Step 2: For each change type, select services and collect config
-    for change in selected_changes {
-        let prompt_services = services
-            .iter()
-            .map(|s| PromptServiceInstance(&s.node))
-            .collect::<Vec<_>>();
+    // Step 2: For each service, select what to configure and collect config
+    for service in selected_services {
+        let service_id = &service.0.service_id;
+        let service_name = &service.0.service_name;
 
-        let selected_services = prompt_multi_options(
-            &format!("What services do you want to configure? ({})", change),
-            prompt_services,
+        // Look up existing service config for placeholders
+        let existing_service = existing_config
+            .as_ref()
+            .and_then(|c| c.services.get(service_id));
+
+        let selected_changes = prompt_multi_options(
+            &format!("What do you want to configure for {}?", service_name),
+            Change::iter().collect(),
         )?;
 
-        // Step 3: For each service, parse the change interactively
-        for service in selected_services {
-            let service_id = &service.0.service_id;
-            let service_name = &service.0.service_name;
-
-            // Look up existing service config for placeholders
-            let existing_service = existing_config
-                .as_ref()
-                .and_then(|c| c.services.get(service_id));
-
+        // Step 3: For each change type, parse interactively
+        for change in selected_changes {
             let entries = change.parse_interactive(service_id, service_name, existing_service)?;
             all_entries.extend(entries);
         }

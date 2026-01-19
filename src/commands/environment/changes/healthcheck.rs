@@ -17,7 +17,7 @@ pub fn parse_interactive(
     let base_path = format!("services.{}.deploy", service_id);
 
     // Health check path
-    let path_placeholder = existing_healthcheck_path.unwrap_or("/health");
+    let path_placeholder = existing_healthcheck_path.unwrap_or("None");
     let Some(path) = prompt_text_with_placeholder_disappear_skippable(
         "Health check endpoint <esc to skip>",
         path_placeholder,

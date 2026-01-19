@@ -9,9 +9,7 @@ use crate::{
         project::get_project,
     },
     errors::RailwayError,
-    util::prompt::{
-        fake_select, prompt_confirm_with_default, prompt_text_with_placeholder_disappear_skippable,
-    },
+    util::prompt::{fake_select, prompt_confirm_with_default},
 };
 
 use super::new::{
@@ -113,19 +111,10 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    // Get commit message: from --message flag, or prompt interactively (only if input wasn't from stdin)
-    let commit_message = if let Some(msg) = args.message.clone() {
-        fake_select("Commit message", &msg);
-        Some(msg)
-    } else if is_interactive {
-        prompt_text_with_placeholder_disappear_skippable(
-            "Commit message <esc to skip>",
-            "optional",
-        )?
-        .filter(|s| !s.is_empty())
-    } else {
-        None
-    };
+    let commit_message = args
+        .message
+        .clone()
+        .inspect(|msg| fake_select("Commit message", msg));
 
     // Commit the staged changes
     let commit_vars = mutations::environment_patch_commit_staged::Variables {

@@ -11,7 +11,7 @@ pub fn parse_interactive(
     let existing_start_command = existing
         .and_then(|e| e.deploy.as_ref())
         .and_then(|d| d.start_command.as_deref());
-    let placeholder = existing_start_command.unwrap_or("npm start");
+    let placeholder = existing_start_command.unwrap_or("None");
 
     let Some(start_command) = prompt_text_with_placeholder_disappear_skippable(
         &format!("Start command for {service_name}? <esc to skip>"),

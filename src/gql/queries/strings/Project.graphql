@@ -13,16 +13,6 @@ query Project($id: String!) {
           name
           canAccess
           deletedAt
-          deploymentTriggers {
-            edges {
-              node {
-                branch
-                id
-                repository
-                serviceId
-              }
-            }
-          }
           serviceInstances {
             edges {
               node {
