@@ -55,31 +55,41 @@ pub async fn command(args: Args) -> Result<()> {
                     .get(id.as_str())
                     .copied()
                     .unwrap_or(id.as_str());
-                let var_count = service.variables.len();
-                let volume_count = service.volume_mounts.len();
 
-                let mut details = vec![];
-                if var_count > 0 {
-                    details.push(format!("{} vars", var_count));
-                }
-                if volume_count > 0 {
-                    details.push(format!("{} volumes", volume_count));
-                }
-                if service.is_image_based() {
-                    if let Some(ref source) = service.source {
-                        if let Some(ref image) = source.image {
-                            details.push(format!("image: {}", image));
-                        }
+                println!("\n{}", name.cyan().bold());
+
+                // Image
+                if let Some(ref source) = service.source {
+                    if let Some(ref image) = source.image {
+                        println!("  {} {}", "image:".dimmed(), image);
                     }
                 }
 
-                let detail_str = if details.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", details.join(", "))
-                };
+                // Build command
+                if let Some(ref build) = service.build {
+                    if let Some(ref cmd) = build.build_command {
+                        println!("  {} {}", "build:".dimmed(), cmd);
+                    }
+                }
 
-                println!("  {} {}{}", "•".dimmed(), name.cyan(), detail_str.dimmed());
+                // Start command
+                if let Some(ref deploy) = service.deploy {
+                    if let Some(ref cmd) = deploy.start_command {
+                        println!("  {} {}", "start:".dimmed(), cmd);
+                    }
+                }
+
+                // Variables
+                if !service.variables.is_empty() {
+                    println!("  {} {}", "variables:".dimmed(), service.variables.len());
+                }
+
+                // Volume mounts
+                for mount in service.volume_mounts.values() {
+                    if let Some(ref path) = mount.mount_path {
+                        println!("  {} {}", "volume:".dimmed(), path);
+                    }
+                }
             }
         }
 
