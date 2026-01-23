@@ -17,6 +17,7 @@ use is_terminal::IsTerminal;
 use super::{queries::project::ProjectProjectEnvironmentsEdgesNode, *};
 
 mod changes;
+mod config;
 mod delete;
 mod edit;
 mod link;
@@ -101,6 +102,17 @@ structstruck::strike! {
             /// Output in JSON format
             #[clap(long)]
             pub json: bool,
+        }),
+
+        /// Show environment configuration
+        Config(pub struct {
+            /// Environment to show config for (defaults to linked)
+            #[clap(long, short)]
+            pub environment: Option<String>,
+
+            /// Output in JSON format
+            #[clap(long)]
+            pub json: bool,
         })
 
     }
@@ -161,6 +173,7 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Commands::New(args)) => new::new_environment(args).await,
         Some(Commands::Delete(args)) => delete::delete_environment(args).await,
         Some(Commands::Edit(args)) => edit::edit_environment(args).await,
+        Some(Commands::Config(args)) => config::command(args).await,
         // Legacy: `railway environment <name>` without subcommand
         None => link::link_environment(args.environment, args.json).await,
     }
