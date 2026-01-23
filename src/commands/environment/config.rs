@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::{Config as Args, *};
 use crate::controllers::{config::environment::fetch_environment_config, project::get_project};
 
@@ -18,6 +20,14 @@ pub async fn command(args: Args) -> Result<()> {
         .find(|e| e.node.id == environment_id)
         .map(|e| e.node.name.clone())
         .unwrap_or_else(|| environment_id.clone());
+
+    // Build service ID -> name map
+    let service_names: HashMap<&str, &str> = project
+        .services
+        .edges
+        .iter()
+        .map(|s| (s.node.id.as_str(), s.node.name.as_str()))
+        .collect();
 
     let response = fetch_environment_config(&client, &configs, &environment_id, true).await?;
     let config = response.config;
@@ -41,6 +51,10 @@ pub async fn command(args: Args) -> Result<()> {
         if !active_services.is_empty() {
             println!("\n{}", "Services".bold());
             for (id, service) in &active_services {
+                let name = service_names
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or(id.as_str());
                 let var_count = service.variables.len();
                 let volume_count = service.volume_mounts.len();
 
@@ -65,7 +79,7 @@ pub async fn command(args: Args) -> Result<()> {
                     format!(" ({})", details.join(", "))
                 };
 
-                println!("  {} {}{}", "•".dimmed(), id, detail_str.dimmed());
+                println!("  {} {}{}", "•".dimmed(), name.cyan(), detail_str.dimmed());
             }
         }
 
@@ -86,24 +100,21 @@ pub async fn command(args: Args) -> Result<()> {
             .collect();
 
         if !active_volumes.is_empty() {
-            println!("\n{}", "Volumes".bold());
-            for (id, volume) in &active_volumes {
-                let mut details = vec![];
-                if let Some(size_mb) = volume.size_mb {
-                    details.push(format!("{} MB", size_mb));
-                }
-                if let Some(ref region) = volume.region {
-                    details.push(region.clone());
-                }
-
-                let detail_str = if details.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", details.join(", "))
-                };
-
-                println!("  {} {}{}", "•".dimmed(), id, detail_str.dimmed());
-            }
+            let regions: Vec<_> = active_volumes
+                .iter()
+                .filter_map(|(_, v)| v.region.as_ref())
+                .collect();
+            let region_str = if regions.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", regions.first().unwrap())
+            };
+            println!(
+                "\n{} {}{}",
+                "Volumes:".bold(),
+                active_volumes.len(),
+                region_str.dimmed()
+            );
         }
 
         // Private networking
