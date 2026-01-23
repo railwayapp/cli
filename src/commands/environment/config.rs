@@ -1,7 +1,8 @@
-use std::collections::HashMap;
-
 use super::{Config as Args, *};
-use crate::controllers::{config::environment::fetch_environment_config, project::get_project};
+use crate::controllers::{
+    config::environment::fetch_environment_config,
+    project::get_project,
+};
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
@@ -12,13 +13,14 @@ pub async fn command(args: Args) -> Result<()> {
     // Resolve environment: --environment flag, or linked environment
     let environment_id = resolve_environment(&args, &project, &linked_project, args.json)?;
 
-    // Build service ID -> name map
-    let service_names: HashMap<&str, &str> = project
-        .services
+    // Get environment name for display
+    let environment_name = project
+        .environments
         .edges
         .iter()
-        .map(|s| (s.node.id.as_str(), s.node.name.as_str()))
-        .collect();
+        .find(|e| e.node.id == environment_id)
+        .map(|e| e.node.name.clone())
+        .unwrap_or_else(|| environment_id.clone());
 
     let response = fetch_environment_config(&client, &configs, &environment_id, true).await?;
     let config = response.config;
@@ -26,6 +28,12 @@ pub async fn command(args: Args) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&config)?);
     } else {
+        println!(
+            "{} {}",
+            "Environment:".dimmed(),
+            environment_name.magenta().bold()
+        );
+
         // Services
         let active_services: Vec<_> = config
             .services
@@ -36,80 +44,31 @@ pub async fn command(args: Args) -> Result<()> {
         if !active_services.is_empty() {
             println!("\n{}", "Services".bold());
             for (id, service) in &active_services {
-                let name = service_names
-                    .get(id.as_str())
-                    .copied()
-                    .unwrap_or(id.as_str());
+                let var_count = service.variables.len();
+                let volume_count = service.volume_mounts.len();
 
-                println!("\n{}", name.cyan().bold());
-
-                // Source: image or repo/root directory
-                if let Some(ref source) = service.source {
-                    if let Some(ref image) = source.image {
-                        println!("  {} {}", "image:".dimmed(), image);
-                    }
-                    if let Some(ref root) = source.root_directory {
-                        println!("  {} {}", "root:".dimmed(), root);
-                    }
+                let mut details = vec![];
+                if var_count > 0 {
+                    details.push(format!("{} vars", var_count));
                 }
-
-                // Builder
-                if let Some(ref build) = service.build {
-                    if let Some(ref builder) = build.builder {
-                        println!("  {} {}", "builder:".dimmed(), builder.to_lowercase());
-                    }
-                    if let Some(ref cmd) = build.build_command {
-                        println!("  {} {}", "build cmd:".dimmed(), cmd);
-                    }
+                if volume_count > 0 {
+                    details.push(format!("{} volumes", volume_count));
                 }
-
-                // Deploy config
-                if let Some(ref deploy) = service.deploy {
-                    if let Some(ref cmd) = deploy.start_command {
-                        println!("  {} {}", "start cmd:".dimmed(), cmd);
-                    }
-                    if let Some(replicas) = deploy.num_replicas {
-                        if replicas != 1 {
-                            println!("  {} {}", "replicas:".dimmed(), replicas);
-                        }
-                    }
-                    if let Some(ref regions) = deploy.multi_region_config {
-                        let region_list: Vec<_> = regions.keys().collect();
-                        if !region_list.is_empty() {
-                            println!(
-                                "  {} {}",
-                                "regions:".dimmed(),
-                                region_list
-                                    .iter()
-                                    .map(|s| s.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
+                if service.is_image_based() {
+                    if let Some(ref source) = service.source {
+                        if let Some(ref image) = source.image {
+                            details.push(format!("image: {}", image));
                         }
                     }
                 }
 
-                // Domains
-                if let Some(ref networking) = service.networking {
-                    for domain in networking.service_domains.keys() {
-                        println!("  {} {}", "domain:".dimmed(), domain);
-                    }
-                    for domain in networking.custom_domains.keys() {
-                        println!("  {} {}", "domain:".dimmed(), domain);
-                    }
-                }
+                let detail_str = if details.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", details.join(", "))
+                };
 
-                // Variables
-                if !service.variables.is_empty() {
-                    println!("  {} {}", "variables:".dimmed(), service.variables.len());
-                }
-
-                // Volume mounts
-                for mount in service.volume_mounts.values() {
-                    if let Some(ref path) = mount.mount_path {
-                        println!("  {} {}", "volume:".dimmed(), path);
-                    }
-                }
+                println!("  {} {}{}", "•".dimmed(), id, detail_str.dimmed());
             }
         }
 
@@ -130,21 +89,24 @@ pub async fn command(args: Args) -> Result<()> {
             .collect();
 
         if !active_volumes.is_empty() {
-            let regions: Vec<_> = active_volumes
-                .iter()
-                .filter_map(|(_, v)| v.region.as_ref())
-                .collect();
-            let region_str = if regions.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", regions.first().unwrap())
-            };
-            println!(
-                "\n{} {}{}",
-                "Volumes:".bold(),
-                active_volumes.len(),
-                region_str.dimmed()
-            );
+            println!("\n{}", "Volumes".bold());
+            for (id, volume) in &active_volumes {
+                let mut details = vec![];
+                if let Some(size_mb) = volume.size_mb {
+                    details.push(format!("{} MB", size_mb));
+                }
+                if let Some(ref region) = volume.region {
+                    details.push(region.clone());
+                }
+
+                let detail_str = if details.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", details.join(", "))
+                };
+
+                println!("  {} {}{}", "•".dimmed(), id, detail_str.dimmed());
+            }
         }
 
         // Private networking
