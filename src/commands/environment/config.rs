@@ -58,24 +58,59 @@ pub async fn command(args: Args) -> Result<()> {
 
                 println!("\n{}", name.cyan().bold());
 
-                // Image
+                // Source: image or repo/root directory
                 if let Some(ref source) = service.source {
                     if let Some(ref image) = source.image {
                         println!("  {} {}", "image:".dimmed(), image);
                     }
-                }
-
-                // Build command
-                if let Some(ref build) = service.build {
-                    if let Some(ref cmd) = build.build_command {
-                        println!("  {} {}", "build:".dimmed(), cmd);
+                    if let Some(ref root) = source.root_directory {
+                        println!("  {} {}", "root:".dimmed(), root);
                     }
                 }
 
-                // Start command
+                // Builder
+                if let Some(ref build) = service.build {
+                    if let Some(ref builder) = build.builder {
+                        println!("  {} {}", "builder:".dimmed(), builder.to_lowercase());
+                    }
+                    if let Some(ref cmd) = build.build_command {
+                        println!("  {} {}", "build cmd:".dimmed(), cmd);
+                    }
+                }
+
+                // Deploy config
                 if let Some(ref deploy) = service.deploy {
                     if let Some(ref cmd) = deploy.start_command {
-                        println!("  {} {}", "start:".dimmed(), cmd);
+                        println!("  {} {}", "start cmd:".dimmed(), cmd);
+                    }
+                    if let Some(replicas) = deploy.num_replicas {
+                        if replicas != 1 {
+                            println!("  {} {}", "replicas:".dimmed(), replicas);
+                        }
+                    }
+                    if let Some(ref regions) = deploy.multi_region_config {
+                        let region_list: Vec<_> = regions.keys().collect();
+                        if !region_list.is_empty() {
+                            println!(
+                                "  {} {}",
+                                "regions:".dimmed(),
+                                region_list
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                        }
+                    }
+                }
+
+                // Domains
+                if let Some(ref networking) = service.networking {
+                    for domain in networking.service_domains.keys() {
+                        println!("  {} {}", "domain:".dimmed(), domain);
+                    }
+                    for domain in networking.custom_domains.keys() {
+                        println!("  {} {}", "domain:".dimmed(), domain);
                     }
                 }
 
