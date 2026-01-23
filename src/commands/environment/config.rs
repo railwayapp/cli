@@ -1,8 +1,5 @@
 use super::{Config as Args, *};
-use crate::controllers::{
-    config::environment::fetch_environment_config,
-    project::get_project,
-};
+use crate::controllers::{config::environment::fetch_environment_config, project::get_project};
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
