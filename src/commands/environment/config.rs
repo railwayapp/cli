@@ -12,15 +12,6 @@ pub async fn command(args: Args) -> Result<()> {
     // Resolve environment: --environment flag, or linked environment
     let environment_id = resolve_environment(&args, &project, &linked_project, args.json)?;
 
-    // Get environment name for display
-    let environment_name = project
-        .environments
-        .edges
-        .iter()
-        .find(|e| e.node.id == environment_id)
-        .map(|e| e.node.name.clone())
-        .unwrap_or_else(|| environment_id.clone());
-
     // Build service ID -> name map
     let service_names: HashMap<&str, &str> = project
         .services
