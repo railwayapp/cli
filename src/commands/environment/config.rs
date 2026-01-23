@@ -35,12 +35,6 @@ pub async fn command(args: Args) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&config)?);
     } else {
-        println!(
-            "{} {}",
-            "Environment:".dimmed(),
-            environment_name.magenta().bold()
-        );
-
         // Services
         let active_services: Vec<_> = config
             .services
