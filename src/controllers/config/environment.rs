@@ -19,7 +19,7 @@ pub struct EnvironmentConfig {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub services: BTreeMap<String, ServiceInstance>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub shared_variables: BTreeMap<String, Variable>,
+    pub shared_variables: BTreeMap<String, Option<Variable>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub volumes: BTreeMap<String, VolumeInstance>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -34,7 +34,7 @@ pub struct ServiceInstance {
     pub source: Option<ServiceSource>,
     pub networking: Option<ServiceNetworking>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub variables: BTreeMap<String, Variable>,
+    pub variables: BTreeMap<String, Option<Variable>>,
     pub deploy: Option<DeployConfig>,
     pub build: Option<BuildConfig>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
