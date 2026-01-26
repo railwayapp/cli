@@ -186,6 +186,11 @@ fn select_environment(
         fake_select("Select an environment", &env.name);
         env
     } else {
+        if !std::io::stdout().is_terminal() {
+            bail!(
+                "--environment required in non-interactive mode (multiple environments available)"
+            );
+        }
         prompt_options("Select an environment", project.environments.clone())?
     };
     Ok(environment)
@@ -271,10 +276,16 @@ fn prompt_workspaces(workspaces: Vec<Workspace>) -> Result<Workspace> {
         fake_select("Select a workspace", workspaces[0].name());
         return Ok(workspaces[0].clone());
     }
+    if !std::io::stdout().is_terminal() {
+        bail!("--workspace required in non-interactive mode (multiple workspaces available)");
+    }
     prompt_options("Select a workspace", workspaces)
 }
 
 fn prompt_workspace_projects(projects: Vec<Project>) -> Result<Project, anyhow::Error> {
+    if !std::io::stdout().is_terminal() {
+        bail!("--project required in non-interactive mode");
+    }
     prompt_options("Select a project", projects)
 }
 

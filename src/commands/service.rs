@@ -1,3 +1,5 @@
+use anyhow::bail;
+use is_terminal::IsTerminal;
 use serde::Serialize;
 
 use crate::{
@@ -129,6 +131,9 @@ async fn link_command(args: LinkArgs) -> Result<()> {
     } else if services.is_empty() {
         bail!("No services found")
     } else {
+        if !std::io::stdout().is_terminal() {
+            bail!("Service name required in non-interactive mode. Usage: railway service <name>");
+        }
         prompt_options("Select a service", services)?
     };
 

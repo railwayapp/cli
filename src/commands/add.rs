@@ -87,6 +87,15 @@ pub async fn command(args: Args) -> Result<()> {
             variables: prompt_variables(args.variables)?,
         }
     } else {
+        if !std::io::stdout().is_terminal() {
+            bail!(
+                "Service type required in non-interactive mode. Use one of:\n  \
+                 --database <type>  Add a database (postgres, mysql, redis, mongo)\n  \
+                 --service          Create an empty service\n  \
+                 --repo <repo>      Create a service from a GitHub repo\n  \
+                 --image <image>    Create a service from a Docker image"
+            );
+        }
         let need = prompt_options("What do you need?", CreateKind::iter().collect())?;
         match need {
             CreateKind::Database(_) => CreateKind::Database(prompt_database()?),
