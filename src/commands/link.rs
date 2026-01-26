@@ -187,7 +187,9 @@ fn select_environment(
         env
     } else {
         if !std::io::stdout().is_terminal() {
-            bail!("--environment required in non-interactive mode (multiple environments available)");
+            bail!(
+                "--environment required in non-interactive mode (multiple environments available)"
+            );
         }
         prompt_options("Select an environment", project.environments.clone())?
     };

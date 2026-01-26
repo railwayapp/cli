@@ -61,7 +61,9 @@ pub async fn command(args: Args) -> Result<()> {
 
         prompt_select("Select service", nodes_to_prompt).context("No service selected")?
     } else {
-        bail!("Service name required in non-interactive mode. Usage: railway connect <service-name>");
+        bail!(
+            "Service name required in non-interactive mode. Usage: railway connect <service-name>"
+        );
     };
 
     let environment_id = get_matched_environment(&project, environment)?.id;
