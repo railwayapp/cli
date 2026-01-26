@@ -6,12 +6,10 @@
 }:
 
 let
-  rust = with pkgs;
-    rust-bin.stable.latest.minimal;
   basePkgs = with pkgs;
     [
       cmake
-      rust
+      rustup
       act
       cargo-zigbuild
       cargo-release

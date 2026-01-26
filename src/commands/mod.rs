@@ -45,3 +45,4 @@ pub mod volume;
 pub mod whoami;
 
 pub mod check_updates;
+pub mod metrics;
