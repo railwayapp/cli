@@ -77,6 +77,10 @@ structstruck::strike! {
             /// The environment to delete
             pub environment: Option<String>,
 
+            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+            #[clap(long = "2fa-code")]
+            pub two_factor_code: Option<String>,
+
             /// Output in JSON format
             #[clap(long)]
             pub json: bool,

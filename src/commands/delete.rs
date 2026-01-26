@@ -4,7 +4,6 @@ use anyhow::bail;
 use is_terminal::IsTerminal;
 
 use crate::{
-    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     errors::RailwayError,
     util::{
         progress::create_spinner_if,
@@ -25,6 +24,10 @@ pub struct Args {
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     yes: bool,
+
+    /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+    #[clap(long = "2fa-code")]
+    two_factor_code: Option<String>,
 
     /// Output in JSON format
     #[clap(long)]
@@ -73,10 +76,15 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     if is_two_factor_enabled {
-        if !is_terminal {
-            bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
-        }
-        let token = prompt_text("Enter your 2FA code")?;
+        let token = if let Some(code) = args.two_factor_code {
+            code
+        } else if is_terminal {
+            prompt_text("Enter your 2FA code")?
+        } else {
+            bail!(
+                "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
+            );
+        };
         let vars = mutations::validate_two_factor::Variables { token };
 
         let valid =
