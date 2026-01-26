@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
     queries::project::{
@@ -443,9 +444,7 @@ async fn delete(
             } else if is_terminal {
                 prompt_text("Enter your 2FA code")?
             } else {
-                bail!(
-                    "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
-                );
+                bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
             };
             let vars = mutations::validate_two_factor::Variables { token };
 

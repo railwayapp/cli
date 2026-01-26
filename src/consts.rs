@@ -8,4 +8,4 @@ pub const RAILWAY_API_TOKEN_ENV: &str = "RAILWAY_API_TOKEN";
 pub const TICK_STRING: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ";
 pub const NON_INTERACTIVE_FAILURE: &str = "This command is only available in interactive mode";
 pub const TWO_FACTOR_REQUIRES_INTERACTIVE: &str =
-    "2FA is enabled. This operation requires interactive mode.";
+    "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode.";
