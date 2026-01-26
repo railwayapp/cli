@@ -59,6 +59,7 @@ commands!(
     redeploy,
     restart,
     scale,
+    metrics,
     check_updates,
     functions(function, func, fn, funcs, fns)
 );
@@ -204,6 +205,7 @@ mod cli_tests {
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
+            assert_subcommand(&["metrics"], "metrics");
         }
 
         #[test]
@@ -339,6 +341,21 @@ mod cli_tests {
             assert_parses(&["variable", "set", "KEY", "--stdin"]);
             assert_parses(&["variable", "set", "MY_VAR", "--stdin", "-s", "myservice"]);
             assert_parses(&["variable", "set", "SECRET", "--stdin", "--skip-deploys"]);
+        }
+
+        #[test]
+        fn metrics_command_flags() {
+            assert_parses(&["metrics"]);
+            assert_parses(&["metrics", "--service", "myservice"]);
+            assert_parses(&["metrics", "-s", "myservice"]);
+            assert_parses(&["metrics", "--time", "1h"]);
+            assert_parses(&["metrics", "--time", "6h"]);
+            assert_parses(&["metrics", "--time", "1d"]);
+            assert_parses(&["metrics", "--time", "7d"]);
+            assert_parses(&["metrics", "--raw"]);
+            assert_parses(&["metrics", "--watch"]);
+            assert_parses(&["metrics", "-w"]);
+            assert_parses(&["metrics", "-s", "myservice", "--time", "1h", "--raw"]);
         }
     }
 }
