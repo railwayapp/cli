@@ -75,6 +75,7 @@ pub async fn run(
         environment_id,
         service_id,
         start_date,
+        project,
     )
     .await?;
     app.update_metrics(metrics);
@@ -83,23 +84,33 @@ pub async fn run(
         terminal.draw(|f| ui::render(&mut app, f))?;
 
         tokio::select! {
+            biased;
+            
+            Some(Ok(event)) = events.next() => {
+                if let Event::Key(key) = event {
+                    if app.handle_key(key) {
+                        break;
+                    }
+                }
+            }
             _ = refresh_interval.tick() => {
                 let start_date = super::parse_time_range(time_range)?;
-                if let Ok(metrics) = super::fetch_metrics(
+                match super::fetch_metrics(
                     client,
                     configs,
                     project_id,
                     environment_id,
                     service_id,
                     start_date,
+                    project,
                 ).await {
-                    app.update_metrics(metrics);
-                }
-            }
-            Some(Ok(event)) = events.next() => {
-                if let Event::Key(key) = event {
-                    if app.handle_key(key) {
-                        break;
+                    Ok(metrics) => {
+                        app.update_metrics(metrics);
+                        app.last_refresh = Some(chrono::Utc::now());
+                        app.last_error = None;
+                    }
+                    Err(e) => {
+                        app.last_error = Some(format!("{}", e));
                     }
                 }
             }
