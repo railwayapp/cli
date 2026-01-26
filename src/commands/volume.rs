@@ -142,7 +142,15 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Add(a) => add(service, environment, a.mount_path, project, a.json).await?,
         Commands::List(l) => list(environment, project, l.json).await?,
         Commands::Delete(d) => {
-            delete(environment, d.volume, project, d.yes, d.two_factor_code, d.json).await?
+            delete(
+                environment,
+                d.volume,
+                project,
+                d.yes,
+                d.two_factor_code,
+                d.json,
+            )
+            .await?
         }
         Commands::Update(u) => {
             update(environment, u.volume, u.mount_path, u.name, project, u.json).await?
