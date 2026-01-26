@@ -1,6 +1,5 @@
 use super::*;
 use crate::{
-    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     controllers::project::{ensure_project_and_environment_exist, get_project},
     errors::RailwayError,
     queries::project::{
@@ -63,6 +62,10 @@ structstruck::strike! {
             /// Skip confirmation dialog
             #[clap(short = 'y', long = "yes")]
             yes: bool,
+
+            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+            #[clap(long = "2fa-code")]
+            two_factor_code: Option<String>,
 
             /// Output in JSON format
             #[clap(long)]
@@ -138,7 +141,17 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::Add(a) => add(service, environment, a.mount_path, project, a.json).await?,
         Commands::List(l) => list(environment, project, l.json).await?,
-        Commands::Delete(d) => delete(environment, d.volume, project, d.yes, d.json).await?,
+        Commands::Delete(d) => {
+            delete(
+                environment,
+                d.volume,
+                project,
+                d.yes,
+                d.two_factor_code,
+                d.json,
+            )
+            .await?
+        }
         Commands::Update(u) => {
             update(environment, u.volume, u.mount_path, u.name, project, u.json).await?
         }
@@ -388,6 +401,7 @@ async fn delete(
     volume: Option<String>,
     project: ProjectProject,
     yes: bool,
+    two_factor_code: Option<String>,
     json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
@@ -424,10 +438,15 @@ async fn delete(
         };
 
         if is_two_factor_enabled {
-            if !is_terminal {
-                bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
-            }
-            let token = prompt_text("Enter your 2FA code")?;
+            let token = if let Some(code) = two_factor_code {
+                code
+            } else if is_terminal {
+                prompt_text("Enter your 2FA code")?
+            } else {
+                bail!(
+                    "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
+                );
+            };
             let vars = mutations::validate_two_factor::Variables { token };
 
             let valid = post_graphql::<mutations::ValidateTwoFactor, _>(

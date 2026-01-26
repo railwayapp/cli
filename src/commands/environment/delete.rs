@@ -1,11 +1,10 @@
 use super::{Delete as Args, *};
 use crate::{
     Configs, GQLClient,
-    consts::TWO_FACTOR_REQUIRES_INTERACTIVE,
     controllers::project::get_project,
     util::{
         progress::create_spinner_if,
-        prompt::{prompt_confirm_with_default, prompt_options},
+        prompt::{prompt_confirm_with_default, prompt_options, prompt_text},
     },
 };
 use anyhow::{Result, bail};
@@ -81,10 +80,15 @@ pub async fn delete_environment(args: Args) -> Result<()> {
         info.is_verified
     };
     if is_two_factor_enabled {
-        if !is_terminal {
-            bail!(TWO_FACTOR_REQUIRES_INTERACTIVE);
-        }
-        let token = prompt_text("Enter your 2FA code")?;
+        let token = if let Some(code) = args.two_factor_code {
+            code
+        } else if is_terminal {
+            prompt_text("Enter your 2FA code")?
+        } else {
+            bail!(
+                "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
+            );
+        };
         let vars = mutations::validate_two_factor::Variables { token };
 
         let valid =
