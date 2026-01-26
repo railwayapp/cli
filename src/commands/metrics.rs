@@ -36,6 +36,8 @@ pub async fn command(args: Args) -> Result<()> {
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
+    // Only filter by service if explicitly requested via --service flag
+    // When no --service is provided, fetch metrics for ALL services in the project
     let service_id = if let Some(ref service_arg) = args.service {
         let service = project
             .services
@@ -48,7 +50,8 @@ pub async fn command(args: Args) -> Result<()> {
             .context(format!("Service '{}' not found", service_arg))?;
         Some(service.node.id.clone())
     } else {
-        linked_project.service.clone()
+        // Don't filter - show all services
+        None
     };
 
     let start_date = crate::controllers::metrics::parse_time_range(&args.time)?;
@@ -60,6 +63,7 @@ pub async fn command(args: Args) -> Result<()> {
         &linked_project.environment,
         service_id.as_deref(),
         start_date,
+        &project,
     )
     .await?;
 

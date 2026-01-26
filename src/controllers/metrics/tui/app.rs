@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::super::MetricsData;
@@ -7,6 +8,8 @@ pub struct MetricsApp {
     pub metrics: Vec<MetricsData>,
     pub selected_service: usize,
     pub time_range: String,
+    pub last_refresh: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
 }
 
 impl MetricsApp {
@@ -16,6 +19,8 @@ impl MetricsApp {
             metrics: Vec::new(),
             selected_service: 0,
             time_range,
+            last_refresh: None,
+            last_error: None,
         }
     }
 

@@ -25,13 +25,35 @@ pub fn render(app: &mut MetricsApp, frame: &mut Frame) {
 }
 
 fn render_header(app: &MetricsApp, frame: &mut Frame, area: Rect) {
-    let title = format!(
-        " Service Metrics │ Time Range: {} │ Refreshing every 5s ",
-        app.time_range
+    let refresh_text = if let Some(last) = app.last_refresh {
+        format!("Updated: {}s ago", (chrono::Utc::now() - last).num_seconds())
+    } else {
+        "Refreshing...".to_string()
+    };
+
+    let title_text = format!(
+        " Service Metrics │ {} │ {} ",
+        app.time_range, refresh_text
     );
 
-    let paragraph = Paragraph::new(title)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    // Build spans with error display if present
+    let spans = if let Some(ref error) = app.last_error {
+        let error_msg = if error.len() > 30 {
+            format!(" ⚠ {}...", &error[..27])
+        } else {
+            format!(" ⚠ {}", error)
+        };
+        vec![
+            Span::styled(title_text, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(error_msg, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        ]
+    } else {
+        vec![
+            Span::styled(title_text, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]
+    };
+
+    let paragraph = Paragraph::new(Line::from(spans))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -167,6 +189,7 @@ fn render_details(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         "CPU",
         &metrics.cpu_usage.iter().map(|s| s.value).collect::<Vec<_>>(),
         Color::Green,
+        |v| format!("{:.1}%", v * 100.0),
     );
 
     render_sparkline_widget(
@@ -179,6 +202,7 @@ fn render_details(app: &MetricsApp, frame: &mut Frame, area: Rect) {
             .map(|s| s.value)
             .collect::<Vec<_>>(),
         Color::Blue,
+        |v| format!("{:.2} GB", v),
     );
 
     render_sparkline_widget(
@@ -191,6 +215,11 @@ fn render_details(app: &MetricsApp, frame: &mut Frame, area: Rect) {
             .map(|s| s.value)
             .collect::<Vec<_>>(),
         Color::Yellow,
+        |v| if v >= 1.0 {
+            format!("{:.2} GB", v)
+        } else {
+            format!("{:.0} MB", v * 1024.0)
+        },
     );
 
     render_sparkline_widget(
@@ -203,6 +232,11 @@ fn render_details(app: &MetricsApp, frame: &mut Frame, area: Rect) {
             .map(|s| s.value)
             .collect::<Vec<_>>(),
         Color::Magenta,
+        |v| if v >= 1.0 {
+            format!("{:.2} GB", v)
+        } else {
+            format!("{:.0} MB", v * 1024.0)
+        },
     );
 }
 
@@ -212,6 +246,7 @@ fn render_sparkline_widget(
     label: &str,
     data: &[f64],
     color: Color,
+    formatter: impl Fn(f64) -> String,
 ) {
     if data.is_empty() {
         let paragraph = Paragraph::new(format!("{}: No data", label))
@@ -225,7 +260,7 @@ fn render_sparkline_widget(
     let scaled: Vec<u64> = data.iter().map(|v| (v * scale) as u64).collect();
 
     let last_val = data.last().unwrap_or(&0.0);
-    let title = format!("{}: {:.2}", label, last_val);
+    let title = format!("{}: {}", label, formatter(*last_val));
 
     let sparkline = Sparkline::default()
         .block(Block::default().title(title))

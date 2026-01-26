@@ -23,6 +23,7 @@ pub struct MetricsData {
     pub network_rx_gb: Vec<MetricSample>,
     pub network_tx_gb: Vec<MetricSample>,
     pub service_id: Option<String>,
+    pub service_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,6 +57,7 @@ pub async fn fetch_metrics(
     environment_id: &str,
     service_id: Option<&str>,
     start_date: DateTime<Utc>,
+    project: &ProjectProject,
 ) -> Result<Vec<MetricsData>> {
     let measurements = vec![
         MetricMeasurement::CPU_USAGE,
@@ -87,6 +89,14 @@ pub async fn fetch_metrics(
     for result in response.metrics {
         let service_id = result.tags.service_id.clone();
         let key = service_id.clone().unwrap_or_else(|| "unknown".to_string());
+        let service_name = service_id.as_ref().and_then(|sid| {
+            project
+                .services
+                .edges
+                .iter()
+                .find(|s| &s.node.id == sid)
+                .map(|s| s.node.name.clone())
+        });
 
         let entry = metrics_by_service.entry(key).or_insert_with(|| MetricsData {
             cpu_usage: Vec::new(),
@@ -94,6 +104,7 @@ pub async fn fetch_metrics(
             network_rx_gb: Vec::new(),
             network_tx_gb: Vec::new(),
             service_id: service_id.clone(),
+            service_name: service_name.clone(),
         });
 
         let samples: Vec<MetricSample> = result
@@ -114,10 +125,17 @@ pub async fn fetch_metrics(
         }
     }
 
-    Ok(metrics_by_service.into_values().collect())
+    let mut metrics: Vec<MetricsData> = metrics_by_service.into_values().collect();
+    metrics.sort_by(|a, b| {
+        let a_name = a.service_name.as_deref().unwrap_or("");
+        let b_name = b.service_name.as_deref().unwrap_or("");
+        a_name.to_lowercase().cmp(&b_name.to_lowercase())
+    });
+
+    Ok(metrics)
 }
 
-pub fn print_metrics_table(metrics: &[MetricsData], project: &ProjectProject) -> Result<()> {
+pub fn print_metrics_table(metrics: &[MetricsData], _project: &ProjectProject) -> Result<()> {
     if metrics.is_empty() {
         println!("{}", "No metrics data available.".yellow());
         return Ok(());
@@ -138,17 +156,11 @@ pub fn print_metrics_table(metrics: &[MetricsData], project: &ProjectProject) ->
     println!("{:─<80}", "");
 
     for metric in metrics {
-        let service_name = if let Some(ref sid) = metric.service_id {
-            project
-                .services
-                .edges
-                .iter()
-                .find(|s| &s.node.id == sid)
-                .map(|s| s.node.name.clone())
-                .unwrap_or_else(|| sid.clone())
-        } else {
-            "Unknown".to_string()
-        };
+        let service_name = metric
+            .service_name
+            .clone()
+            .or_else(|| metric.service_id.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let cpu = metric
             .cpu_usage
