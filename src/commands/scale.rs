@@ -235,7 +235,7 @@ pub fn get_dynamic_args(cmd: Command) -> Command {
                     .long(region_static) // --my-region
                     .help(format!("Number of instances to run on {region_static}"))
                     .value_name("INSTANCES")
-                    .value_parser(clap::value_parser!(u16))
+                    .value_parser(clap::value_parser!(u64))
                     .action(clap::ArgAction::Set),
             );
         }

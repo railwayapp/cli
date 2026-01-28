@@ -2,6 +2,7 @@ use super::{Delete as Args, *};
 use crate::{
     Configs, GQLClient,
     controllers::project::get_project,
+    errors::RailwayError,
     util::{
         progress::create_spinner_if,
         prompt::{prompt_confirm_with_default, prompt_options, prompt_text},
@@ -85,9 +86,7 @@ pub async fn delete_environment(args: Args) -> Result<()> {
         } else if is_terminal {
             prompt_text("Enter your 2FA code")?
         } else {
-            bail!(
-                "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
-            );
+            return Err(RailwayError::TwoFactorRequiresInteractive.into());
         };
         let vars = mutations::validate_two_factor::Variables { token };
 
