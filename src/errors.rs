@@ -86,7 +86,9 @@ pub enum RailwayError {
     #[error("2FA code is incorrect. Please try again.")]
     InvalidTwoFactorCode,
 
-    #[error("2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode.")]
+    #[error(
+        "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
+    )]
     TwoFactorRequiresInteractive,
 
     #[error("Two-factor authentication is required for workspace \"{0}\".\nEnable 2FA at: {1}")]
