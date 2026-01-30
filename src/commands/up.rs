@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use url::Url;
 
 use futures::StreamExt;
 use gzp::{ZBuilder, deflate::Gzip};
@@ -71,6 +72,10 @@ pub struct Args {
     #[clap(long)]
     /// Output logs in JSON format (implies CI mode behavior)
     json: bool,
+
+    #[clap(short, long)]
+    /// Message to attach to the deployment
+    message: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,12 +233,20 @@ pub async fn command(args: Args) -> Result<()> {
     }
     parz.finish()?;
 
-    let url = format!(
-        "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
+    let mut url = Url::parse(&format!(
+        "https://backboard.{hostname}/project/{}/environment/{}/up",
         project_id,
         environment_id,
-        service.clone().unwrap_or_default(),
-    );
+    ))?;
+
+    url.query_pairs_mut()
+        .append_pair("serviceId", &service.clone().unwrap_or_default());
+
+    if let Some(ref message) = args.message {
+        url.query_pairs_mut().append_pair("message", message);
+    }
+
+    let url = url.to_string();
 
     if args.verbose {
         let bytes_len = arc.lock().unwrap().len();
