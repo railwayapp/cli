@@ -235,8 +235,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let mut url = Url::parse(&format!(
         "https://backboard.{hostname}/project/{}/environment/{}/up",
-        project_id,
-        environment_id,
+        project_id, environment_id,
     ))?;
 
     url.query_pairs_mut()
