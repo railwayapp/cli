@@ -67,7 +67,11 @@ structstruck::strike! {
 
             /// Skip confirmation for deleting
             #[clap(long, short, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
-            yes: Option<bool>
+            yes: Option<bool>,
+
+            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+            #[clap(long = "2fa-code")]
+            two_factor_code: Option<String>
         }),
 
         /// Push a new change to the function
