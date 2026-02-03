@@ -352,10 +352,10 @@ mod cli_tests {
             assert_parses(&["metrics", "--time", "6h"]);
             assert_parses(&["metrics", "--time", "1d"]);
             assert_parses(&["metrics", "--time", "7d"]);
-            assert_parses(&["metrics", "--raw"]);
+            assert_parses(&["metrics", "--json"]);
             assert_parses(&["metrics", "--watch"]);
             assert_parses(&["metrics", "-w"]);
-            assert_parses(&["metrics", "-s", "myservice", "--time", "1h", "--raw"]);
+            assert_parses(&["metrics", "-s", "myservice", "--time", "1h", "--json"]);
         }
     }
 }
