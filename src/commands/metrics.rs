@@ -11,7 +11,7 @@ EXAMPLES:
   railway metrics                                    # View metrics for all services
   railway metrics --service myservice               # View metrics for a specific service
   railway metrics --time 6h                         # View metrics from the last 6 hours
-  railway metrics --raw                             # Output metrics in JSON format
+  railway metrics --json                            # Output metrics in JSON format
   railway metrics --watch                           # Live-updating top-like view"
 )]
 pub struct Args {
@@ -22,7 +22,7 @@ pub struct Args {
     time: String,
 
     #[clap(long)]
-    raw: bool,
+    json: bool,
 
     #[clap(short, long)]
     watch: bool,
@@ -78,7 +78,7 @@ pub async fn command(args: Args) -> Result<()> {
             &project,
         )
         .await?;
-    } else if args.raw {
+    } else if args.json {
         println!("{}", serde_json::to_string_pretty(&metrics_data)?);
     } else {
         crate::controllers::metrics::print_metrics_table(&metrics_data, &project)?;
