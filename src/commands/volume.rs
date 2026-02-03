@@ -8,6 +8,7 @@ use crate::{
     util::{
         progress::create_spinner,
         prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+        two_factor::validate_two_factor_if_enabled,
     },
 };
 use anyhow::{anyhow, bail};
@@ -63,13 +64,13 @@ structstruck::strike! {
             #[clap(short = 'y', long = "yes")]
             yes: bool,
 
-            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
-            #[clap(long = "2fa-code")]
-            two_factor_code: Option<String>,
-
             /// Output in JSON format
             #[clap(long)]
             json: bool,
+
+            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+            #[clap(long = "2fa-code")]
+            two_factor_code: Option<String>,
         }),
 
         /// Update a volume
@@ -147,8 +148,8 @@ pub async fn command(args: Args) -> Result<()> {
                 d.volume,
                 project,
                 d.yes,
-                d.two_factor_code,
                 d.json,
+                d.two_factor_code,
             )
             .await?
         }
@@ -401,8 +402,8 @@ async fn delete(
     volume: Option<String>,
     project: ProjectProject,
     yes: bool,
-    two_factor_code: Option<String>,
     json: bool,
+    two_factor_code: Option<String>,
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
@@ -426,39 +427,8 @@ async fn delete(
         );
     };
     if confirm {
-        let is_two_factor_enabled = {
-            let vars = queries::two_factor_info::Variables {};
+        validate_two_factor_if_enabled(&client, &configs, is_terminal, two_factor_code).await?;
 
-            let info =
-                post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-                    .await?
-                    .two_factor_info;
-
-            info.is_verified
-        };
-
-        if is_two_factor_enabled {
-            let token = if let Some(code) = two_factor_code {
-                code
-            } else if is_terminal {
-                prompt_text("Enter your 2FA code")?
-            } else {
-                return Err(RailwayError::TwoFactorRequiresInteractive.into());
-            };
-            let vars = mutations::validate_two_factor::Variables { token };
-
-            let valid = post_graphql::<mutations::ValidateTwoFactor, _>(
-                &client,
-                configs.get_backboard(),
-                vars,
-            )
-            .await?
-            .two_factor_info_validate;
-
-            if !valid {
-                return Err(RailwayError::InvalidTwoFactorCode.into());
-            }
-        }
         let volume_id = volume.0.volume.id.clone();
         let p = post_graphql::<mutations::VolumeDelete, _>(
             &client,

@@ -3,7 +3,8 @@ use crate::{
     queries::project::ProjectProjectEnvironmentsEdges,
     util::{
         progress::{create_spinner, success_spinner},
-        prompt::{fake_select, prompt_select, prompt_text},
+        prompt::{fake_select, prompt_select},
+        two_factor::validate_two_factor_if_enabled,
     },
 };
 use anyhow::bail;
@@ -27,7 +28,7 @@ pub async fn delete(environment: &ProjectProjectEnvironmentsEdges, args: Delete)
         return Ok(());
     }
 
-    validate_two_factor_if_enabled(&client, &configs).await?;
+    validate_two_factor_if_enabled(&client, &configs, terminal, args.two_factor_code).await?;
     delete_function_service(&client, &mut configs, function, environment).await?;
 
     Ok(())
@@ -63,41 +64,6 @@ fn find_function_by_identifier<'a>(
         }
         None => bail!("Service {} not found", identifier),
     }
-}
-
-async fn validate_two_factor_if_enabled(client: &reqwest::Client, configs: &Configs) -> Result<()> {
-    let is_two_factor_enabled = check_two_factor_status(client, configs).await?;
-
-    if is_two_factor_enabled {
-        validate_two_factor_code(client, configs).await?;
-    }
-
-    Ok(())
-}
-
-async fn check_two_factor_status(client: &reqwest::Client, configs: &Configs) -> Result<bool> {
-    let vars = queries::two_factor_info::Variables {};
-    let info = post_graphql::<queries::TwoFactorInfo, _>(client, configs.get_backboard(), vars)
-        .await?
-        .two_factor_info;
-
-    Ok(info.is_verified)
-}
-
-async fn validate_two_factor_code(client: &reqwest::Client, configs: &Configs) -> Result<()> {
-    let token = prompt_text("Enter your 2FA code")?;
-    let vars = mutations::validate_two_factor::Variables { token };
-
-    let valid =
-        post_graphql::<mutations::ValidateTwoFactor, _>(client, configs.get_backboard(), vars)
-            .await?
-            .two_factor_info_validate;
-
-    if !valid {
-        return Err(RailwayError::InvalidTwoFactorCode.into());
-    }
-
-    Ok(())
 }
 
 async fn delete_function_service(

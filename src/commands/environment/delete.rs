@@ -5,7 +5,8 @@ use crate::{
     errors::RailwayError,
     util::{
         progress::create_spinner_if,
-        prompt::{prompt_confirm_with_default, prompt_options, prompt_text},
+        prompt::{prompt_confirm_with_default, prompt_options},
+        two_factor::validate_two_factor_if_enabled,
     },
 };
 use anyhow::{Result, bail};
@@ -70,35 +71,8 @@ pub async fn delete_environment(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    let is_two_factor_enabled = {
-        let vars = queries::two_factor_info::Variables {};
+    validate_two_factor_if_enabled(&client, &configs, is_terminal, args.two_factor_code).await?;
 
-        let info =
-            post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-                .await?
-                .two_factor_info;
-
-        info.is_verified
-    };
-    if is_two_factor_enabled {
-        let token = if let Some(code) = args.two_factor_code {
-            code
-        } else if is_terminal {
-            prompt_text("Enter your 2FA code")?
-        } else {
-            return Err(RailwayError::TwoFactorRequiresInteractive.into());
-        };
-        let vars = mutations::validate_two_factor::Variables { token };
-
-        let valid =
-            post_graphql::<mutations::ValidateTwoFactor, _>(&client, configs.get_backboard(), vars)
-                .await?
-                .two_factor_info_validate;
-
-        if !valid {
-            return Err(RailwayError::InvalidTwoFactorCode.into());
-        }
-    }
     let spinner = create_spinner_if(!args.json, "Deleting environment...".into());
     let _r = post_graphql::<mutations::EnvironmentDelete, _>(
         &client,

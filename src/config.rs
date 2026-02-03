@@ -120,6 +120,13 @@ impl Configs {
         std::env::var(consts::RAILWAY_API_TOKEN_ENV).ok()
     }
 
+    /// Returns true if using token-based auth (RAILWAY_TOKEN or RAILWAY_API_TOKEN)
+    /// rather than session-based auth from `railway login`.
+    /// Token-based auth bypasses 2FA on the backend, so client-side 2FA checks are unnecessary.
+    pub fn is_using_token_auth() -> bool {
+        Self::get_railway_token().is_some() || Self::get_railway_api_token().is_some()
+    }
+
     pub fn env_is_ci() -> bool {
         std::env::var("CI")
             .map(|val| val.trim().to_lowercase() == "true")
