@@ -253,7 +253,6 @@ pub struct EnvironmentPatchCommit;
 )]
 pub struct EnvironmentStageChanges;
 
-
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
