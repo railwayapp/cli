@@ -61,20 +61,6 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    // Stage changes with merge=true to combine with any existing staged changes
-    let stage_vars = mutations::environment_stage_changes::Variables {
-        environment_id: environment_id.clone(),
-        input: env_config,
-        merge: Some(true),
-    };
-
-    post_graphql::<mutations::EnvironmentStageChanges, _>(
-        &client,
-        configs.get_backboard(),
-        stage_vars,
-    )
-    .await?;
-
     // Determine whether to stage only or apply now
     // --stage flag means stage only, --message flag implies apply now
     let should_stage_only = if args.stage {
@@ -90,6 +76,20 @@ pub async fn edit_environment(args: Args) -> Result<()> {
     };
 
     if should_stage_only {
+        // Stage only: use environmentStageChanges with merge=true
+        let stage_vars = mutations::environment_stage_changes::Variables {
+            environment_id: environment_id.clone(),
+            input: env_config,
+            merge: Some(true),
+        };
+
+        post_graphql::<mutations::EnvironmentStageChanges, _>(
+            &client,
+            configs.get_backboard(),
+            stage_vars,
+        )
+        .await?;
+
         if json {
             println!(
                 "{}",
@@ -116,14 +116,14 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         .clone()
         .inspect(|msg| fake_select("Commit message", msg));
 
-    // Commit the staged changes
-    let commit_vars = mutations::environment_patch_commit_staged::Variables {
+    // Commit directly with patch (single mutation instead of stage + commit)
+    let commit_vars = mutations::environment_patch_commit::Variables {
         environment_id: environment_id.clone(),
+        patch: env_config,
         commit_message: commit_message.clone(),
-        skip_deploys: None,
     };
 
-    post_graphql::<mutations::EnvironmentPatchCommitStaged, _>(
+    post_graphql::<mutations::EnvironmentPatchCommit, _>(
         &client,
         configs.get_backboard(),
         commit_vars,
