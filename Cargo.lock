@@ -2361,7 +2361,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "railwayapp"
-version = "4.27.6"
+version = "4.28.0"
 dependencies = [
  "anyhow",
  "arboard",
