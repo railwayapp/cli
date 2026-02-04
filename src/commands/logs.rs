@@ -9,7 +9,10 @@ use crate::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
-    util::{logs::print_log, time::parse_time},
+    util::{
+        logs::{LogFormat, print_log},
+        time::parse_time,
+    },
 };
 use anyhow::bail;
 
@@ -177,7 +180,7 @@ pub async fn command(args: Args) -> Result<()> {
     if show_build_logs {
         if should_stream {
             stream_build_logs(deployment_id.clone(), args.filter.clone(), |log| {
-                print_log(log, args.json, false) // Build logs use simple output
+                print_log(log, args.json, LogFormat::LevelOnly)
             })
             .await?;
         } else {
@@ -191,13 +194,13 @@ pub async fn command(args: Args) -> Result<()> {
                     start_date,
                     end_date,
                 },
-                |log| print_log(log, args.json, false),
+                |log| print_log(log, args.json, LogFormat::LevelOnly),
             )
             .await?;
         }
     } else if should_stream {
         stream_deploy_logs(deployment_id.clone(), args.filter.clone(), |log| {
-            print_log(log, args.json, true)
+            print_log(log, args.json, LogFormat::Full)
         })
         .await?;
     } else {
@@ -211,7 +214,7 @@ pub async fn command(args: Args) -> Result<()> {
                 start_date,
                 end_date,
             },
-            |log| print_log(log, args.json, true),
+            |log| print_log(log, args.json, LogFormat::Full),
         )
         .await?;
     }
