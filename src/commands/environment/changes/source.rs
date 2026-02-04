@@ -47,7 +47,7 @@ pub fn parse_interactive(
         return Ok(vec![]);
     };
 
-    let base_path = format!("services.{}.source", service_id);
+    let base_path = format!("services.{service_id}.source");
 
     let mut entries: Vec<PatchEntry> = Vec::new();
 
@@ -72,12 +72,12 @@ pub fn parse_interactive(
                 break image;
             };
 
-            entries.push((format!("{}.image", base_path), serde_json::json!(image)));
+            entries.push((format!("{base_path}.image"), serde_json::json!(image)));
         }
         SourceType::GitHub => {
             // GitHub repo (required)
             let repo_placeholder = match (existing_repo, existing_branch) {
-                (Some(repo), Some(branch)) => format!("{}/{}", repo, branch),
+                (Some(repo), Some(branch)) => format!("{repo}/{branch}"),
                 _ => "<owner/repo/branch>".to_string(),
             };
             let (repo, branch) = loop {
@@ -106,8 +106,8 @@ pub fn parse_interactive(
                 break (format!("{}/{}", parts[0], parts[1]), parts[2].to_string());
             };
 
-            entries.push((format!("{}.repo", base_path), serde_json::json!(repo)));
-            entries.push((format!("{}.branch", base_path), serde_json::json!(branch)));
+            entries.push((format!("{base_path}.repo"), serde_json::json!(repo)));
+            entries.push((format!("{base_path}.branch"), serde_json::json!(branch)));
 
             // Root directory (monorepos)
             let root_dir_placeholder = existing_root_dir.unwrap_or("/packages/backend");
@@ -117,7 +117,7 @@ pub fn parse_interactive(
             )? {
                 if !root_dir.is_empty() {
                     entries.push((
-                        format!("{}.rootDirectory", base_path),
+                        format!("{base_path}.rootDirectory"),
                         serde_json::json!(root_dir),
                     ));
                 }
@@ -130,7 +130,7 @@ pub fn parse_interactive(
                 check_suites_default,
             )? {
                 entries.push((
-                    format!("{}.checkSuites", base_path),
+                    format!("{base_path}.checkSuites"),
                     serde_json::json!(check_suites),
                 ));
             }

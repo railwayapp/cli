@@ -237,7 +237,7 @@ pub async fn fetch_and_create(
                 "templateName": details.template.name,
             })
         };
-        println!("{}", output);
+        println!("{output}");
     } else if let Some(spinner) = spinner {
         let mut msg = format!("🎉 Added {} to project", template_name.green().bold());
         if options.should_link && linked_project.service.is_none() && new_service.is_some() {

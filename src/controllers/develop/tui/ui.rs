@@ -182,7 +182,7 @@ fn render_log_line<'a>(
     vis_row: usize,
     selection: &Option<Selection>,
 ) -> Line<'a> {
-    let prefix = format!("[{}] ", service_name);
+    let prefix = format!("[{service_name}] ");
     let prefix_len = prefix.chars().count();
 
     let Some(sel) = selection else {
@@ -202,7 +202,7 @@ fn render_log_line<'a>(
         ]);
     }
 
-    let full_line = format!("{}{}", prefix, message);
+    let full_line = format!("{prefix}{message}");
     let chars: Vec<char> = full_line.chars().collect();
     let line_len = chars.len();
 

@@ -374,7 +374,7 @@ impl TuiApp {
             }
 
             let (_, service_name, message, _) = log_ref.parts();
-            let full_line = format!("[{}] {}", service_name, message);
+            let full_line = format!("[{service_name}] {message}");
             let line_chars: Vec<char> = full_line.chars().collect();
             let line_len = line_chars.len();
 

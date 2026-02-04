@@ -51,15 +51,15 @@ pub fn parse_interactive(
         return Ok(vec![]);
     };
 
-    let base_path = format!("services.{}.deploy", service_id);
+    let base_path = format!("services.{service_id}.deploy");
 
     let result = match policy_type {
         RestartPolicyType::Never => vec![(
-            format!("{}.restartPolicyType", base_path),
+            format!("{base_path}.restartPolicyType"),
             serde_json::json!("NEVER"),
         )],
         RestartPolicyType::Always => vec![(
-            format!("{}.restartPolicyType", base_path),
+            format!("{base_path}.restartPolicyType"),
             serde_json::json!("ALWAYS"),
         )],
         RestartPolicyType::OnFailure => {
@@ -84,11 +84,11 @@ pub fn parse_interactive(
                     Ok(max_retries) => {
                         break vec![
                             (
-                                format!("{}.restartPolicyType", base_path),
+                                format!("{base_path}.restartPolicyType"),
                                 serde_json::json!("ON_FAILURE"),
                             ),
                             (
-                                format!("{}.restartPolicyMaxRetries", base_path),
+                                format!("{base_path}.restartPolicyMaxRetries"),
                                 serde_json::json!(max_retries),
                             ),
                         ];

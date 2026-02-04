@@ -50,7 +50,7 @@ pub fn print_code_service_summary(
                 }
             }
             None => {
-                println!("    http://localhost:{}", port);
+                println!("    http://localhost:{port}");
             }
         }
     }

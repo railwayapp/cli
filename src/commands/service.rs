@@ -230,7 +230,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&service_statuses)?);
         } else {
             if service_statuses.is_empty() {
-                println!("No services found in environment '{}'", environment_name);
+                println!("No services found in environment '{environment_name}'");
                 return Ok(());
             }
 
@@ -315,7 +315,7 @@ async fn source_command(args: SourceArgs) -> Result<()> {
         linked_project
             .service
             .clone()
-            .context("No service linked. Use --service flag to specify a service.")?  
+            .context("No service linked. Use --service flag to specify a service.")?
     };
 
     // Get the service name for display
@@ -343,7 +343,12 @@ async fn source_command(args: SourceArgs) -> Result<()> {
         let repo_info = repos
             .iter()
             .find(|r| r.full_name == args.repo)
-            .ok_or_else(|| anyhow::anyhow!("Repo '{}' not found. Make sure you have access to this repository.", args.repo))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Repo '{}' not found. Make sure you have access to this repository.",
+                    args.repo
+                )
+            })?;
 
         repo_info.default_branch.clone()
     };
@@ -373,8 +378,7 @@ async fn source_command(args: SourceArgs) -> Result<()> {
     );
 
     // Update root directory and watch paths if provided
-    let has_instance_updates =
-        args.root_directory.is_some() || !args.watch_paths.is_empty();
+    let has_instance_updates = args.root_directory.is_some() || !args.watch_paths.is_empty();
 
     if has_instance_updates {
         let watch_patterns = if args.watch_paths.is_empty() {

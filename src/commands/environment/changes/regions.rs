@@ -56,10 +56,10 @@ pub fn parse_interactive(
 
     // Convert to patch entries
     let mut entries: Vec<PatchEntry> = Vec::new();
-    let base_path = format!("services.{}.deploy.multiRegionConfig", service_id);
+    let base_path = format!("services.{service_id}.deploy.multiRegionConfig");
 
     for (region, config) in region_map {
-        entries.push((format!("{}.{}", base_path, region), config));
+        entries.push((format!("{base_path}.{region}"), config));
     }
 
     Ok(entries)

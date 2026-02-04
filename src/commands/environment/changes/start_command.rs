@@ -26,7 +26,7 @@ pub fn parse_interactive(
     }
 
     Ok(vec![(
-        format!("services.{}.deploy.startCommand", service_id),
+        format!("services.{service_id}.deploy.startCommand"),
         serde_json::json!(start_command),
     )])
 }

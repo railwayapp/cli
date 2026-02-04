@@ -154,7 +154,7 @@ impl DevSession {
 
             let (private_url, public_url) = match (internal_port, proxy_port) {
                 (Some(port), Some(pport)) => {
-                    let private = format!("http://localhost:{}", port);
+                    let private = format!("http://localhost:{port}");
                     let public = https_config.as_ref().map(|config| {
                         let slug = slugify(&service_name);
                         if config.use_port_443 {
