@@ -27,7 +27,7 @@ use crate::{
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::logs::print_log,
+    util::logs::{LogFormat, print_log},
 };
 
 use super::*;
@@ -354,7 +354,7 @@ pub async fn command(args: Args) -> Result<()> {
             let should_exit =
                 ci_flag && log.message.starts_with("No changed files matched patterns");
             if json_mode {
-                print_log(log, true, false);
+                print_log(log, true, LogFormat::LevelOnly);
             } else {
                 println!("{}", log.message);
             }
@@ -377,7 +377,7 @@ pub async fn command(args: Args) -> Result<()> {
         let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
             if let Err(e) = stream_deploy_logs(deploy_deployment_id, None, |log| {
-                print_log(log, false, true)
+                print_log(log, false, LogFormat::Full)
             })
             .await
             {
