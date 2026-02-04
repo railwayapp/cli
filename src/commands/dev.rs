@@ -335,10 +335,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                 local_dev_config.save(&project_id)?;
                 println!("{} Removed configuration for '{}'", "✓".green(), name);
             } else {
-                println!(
-                    "{}",
-                    format!("Service '{name}' is not configured").yellow()
-                );
+                println!("{}", format!("Service '{name}' is not configured").yellow());
             }
         }
 
@@ -476,8 +473,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                     let railway_port = svc.get_ports().first().map(|&p| p as u16);
                     let current_port = existing.port.or(railway_port).unwrap_or(DEFAULT_PORT);
 
-                    let port_input =
-                        prompt_text(&format!("Port for '{name}' [{current_port}]:"))?;
+                    let port_input = prompt_text(&format!("Port for '{name}' [{current_port}]:"))?;
 
                     let mut new_port = if port_input.is_empty() {
                         current_port
@@ -594,10 +590,7 @@ fn prompt_service_config(
     let command = if default_command.is_empty() {
         prompt_text(&format!("Dev command for '{name}':"))?
     } else {
-        prompt_text(&format!(
-            "Dev command for '{name}' [{default_command}]:"
-        ))
-        .map(|s| {
+        prompt_text(&format!("Dev command for '{name}' [{default_command}]:")).map(|s| {
             if s.is_empty() {
                 default_command.to_string()
             } else {
