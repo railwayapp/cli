@@ -1,6 +1,6 @@
-mutation EnvironmentCreate($projectId: String!, $name: String!, $sourceId: String, $applyChangesInBackground: Boolean) {
+mutation EnvironmentCreate($projectId: String!, $name: String!, $sourceId: String, $applyChangesInBackground: Boolean, $skipInitialDeploys: Boolean) {
   environmentCreate(
-    input: {projectId: $projectId, name: $name, sourceEnvironmentId: $sourceId, applyChangesInBackground: $applyChangesInBackground}
+      input: {projectId: $projectId, name: $name, sourceEnvironmentId: $sourceId, applyChangesInBackground: $applyChangesInBackground, skipInitialDeploys: $skipInitialDeploys}
   ) {
     name,
     id

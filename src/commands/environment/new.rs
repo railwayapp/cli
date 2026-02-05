@@ -33,6 +33,7 @@ pub async fn new_environment(args: Args) -> Result<()> {
         source_id: duplicate_id.clone(),
         // Apply duplication in background if we're duplicating, we'll wait for it
         apply_changes_in_background: duplicate_id.as_ref().map(|_| true),
+        skip_initial_deploys: Some(has_config_changes),
     };
 
     let spinner = create_spinner_if(!json, "Creating environment...".into());
