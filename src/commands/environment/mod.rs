@@ -3,12 +3,9 @@ use std::fmt::Display;
 use crate::{
     controllers::project::get_project,
     errors::RailwayError,
-    util::{
-        prompt::{
-            PromptServiceInstance, fake_select, prompt_multi_options, prompt_options_skippable,
-            prompt_text,
-        },
-        retry::{RetryConfig, retry_with_backoff},
+    util::prompt::{
+        PromptServiceInstance, fake_select, prompt_multi_options, prompt_options_skippable,
+        prompt_text,
     },
 };
 use anyhow::bail;

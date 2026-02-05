@@ -1,5 +1,0 @@
-query EnvironmentStagedChanges($environmentId: String!) {
-  environmentStagedChanges(environmentId: $environmentId) {
-    status
-  }
-}
