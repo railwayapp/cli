@@ -165,6 +165,14 @@ pub struct GetEnvironmentConfig;
 )]
 pub struct WorkflowStatus;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Metrics.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct Metrics;
+
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
 impl From<project::DeploymentStatus> for SubscriptionDeploymentStatus {
     fn from(value: project::DeploymentStatus) -> Self {
