@@ -152,14 +152,6 @@ pub struct LatestFunctionVersion;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/queries/strings/EnvironmentStagedChanges.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct EnvironmentStagedChanges;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/EnvironmentConfig.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
