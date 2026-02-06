@@ -34,9 +34,9 @@ impl std::fmt::Display for ExpectedType {
             ExpectedType::Integer => write!(f, "integer"),
             ExpectedType::Number => write!(f, "number"),
             ExpectedType::Boolean => write!(f, "boolean"),
-            ExpectedType::Array(inner) => write!(f, "array of {}", inner),
+            ExpectedType::Array(inner) => write!(f, "array of {inner}"),
             ExpectedType::Object => write!(f, "object"),
-            ExpectedType::Nullable(inner) => write!(f, "{} (nullable)", inner),
+            ExpectedType::Nullable(inner) => write!(f, "{inner} (nullable)"),
             ExpectedType::Any => write!(f, "any"),
         }
     }
@@ -431,7 +431,7 @@ pub fn build_config(entries: Vec<PatchEntry>) -> Result<EnvironmentConfig> {
 
     for (path, value) in entries {
         json.dot_set(&path, value)
-            .with_context(|| format!("Failed to set path: {}", path))?;
+            .with_context(|| format!("Failed to set path: {path}"))?;
     }
 
     serde_json::from_value(json).context("Failed to parse built config into EnvironmentConfig")

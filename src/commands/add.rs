@@ -124,14 +124,14 @@ pub async fn command(args: Args) -> Result<()> {
         }
     };
     if verbose {
-        println!("{:?}", type_of_create);
+        println!("{type_of_create:?}");
     }
     match type_of_create {
         CreateKind::Database(databases) => {
             let is_single_db = databases.len() == 1;
             for db in databases {
                 if verbose {
-                    println!("iterating through databases to add: {:?}", db)
+                    println!("iterating through databases to add: {db:?}")
                 }
                 deploy::fetch_and_create(
                     &client,
@@ -147,7 +147,7 @@ pub async fn command(args: Args) -> Result<()> {
                 )
                 .await?;
                 if verbose {
-                    println!("successfully created {:?}", db)
+                    println!("successfully created {db:?}")
                 }
             }
         }

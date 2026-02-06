@@ -39,7 +39,7 @@ pub fn parse_interactive(
     }
 
     Ok(vec![(
-        format!("services.{}.build.watchPatterns", service_id),
+        format!("services.{service_id}.build.watchPatterns"),
         serde_json::json!(patterns_vec),
     )])
 }

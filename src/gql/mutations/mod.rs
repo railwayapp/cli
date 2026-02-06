@@ -178,6 +178,15 @@ pub struct ServiceCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceConnect.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceConnect;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/CustomDomainCreate.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
@@ -234,6 +243,15 @@ pub struct EnvironmentDelete;
     skip_serializing_none
 )]
 pub struct FunctionUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceInstanceUpdateSource.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceInstanceUpdateSource;
 
 #[derive(GraphQLQuery)]
 #[graphql(

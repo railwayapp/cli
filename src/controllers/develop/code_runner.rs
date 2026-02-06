@@ -41,7 +41,7 @@ fn spawn_child(
         .kill_on_drop(true)
         .process_group(0)
         .spawn()
-        .with_context(|| format!("Failed to spawn '{}'", command))?;
+        .with_context(|| format!("Failed to spawn '{command}'"))?;
 
     #[cfg(windows)]
     let child = Command::new("cmd")
@@ -111,7 +111,7 @@ impl ProcessManager {
 
         let cmd_log = LogLine {
             service_name: service_name.clone(),
-            message: format!("$ {}", command),
+            message: format!("$ {command}"),
             is_stderr: false,
             color,
         };

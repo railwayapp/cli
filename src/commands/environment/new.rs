@@ -174,7 +174,7 @@ pub fn parse_non_interactive_configs(
         configured_fields.insert(display_field);
 
         // Build full path with service ID
-        let full_path = format!("services.{}.{}", service_id, normalized_path);
+        let full_path = format!("services.{service_id}.{normalized_path}");
         entries.push((full_path, json_value));
     }
 
@@ -249,7 +249,7 @@ pub async fn parse_interactive_configs(
             .and_then(|c| c.services.get(service_id));
 
         let selected_changes = prompt_multi_options(
-            &format!("What do you want to configure for {}?", service_name),
+            &format!("What do you want to configure for {service_name}?"),
             Change::iter().collect(),
         )?;
 

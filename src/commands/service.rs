@@ -42,12 +42,42 @@ enum Commands {
 
     /// Scale a service across regions
     Scale(crate::commands::scale::Args),
+
+    /// Configure service repo source and settings
+    Source(SourceArgs),
 }
 
 #[derive(Parser)]
 struct LinkArgs {
     /// The service ID/name to link
     service: Option<String>,
+}
+
+#[derive(Parser)]
+struct SourceArgs {
+    /// GitHub repo to connect (format: owner/repo)
+    #[clap(short, long)]
+    repo: String,
+
+    /// Branch name (optional, defaults to repo's default branch)
+    #[clap(short, long)]
+    branch: Option<String>,
+
+    /// Root directory path within the repo
+    #[clap(long)]
+    root_directory: Option<String>,
+
+    /// Watch paths/patterns to trigger deployments
+    #[clap(long)]
+    watch_paths: Vec<String>,
+
+    /// Service name or ID (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
 }
 
 #[derive(Parser)]
@@ -102,6 +132,7 @@ pub async fn command(args: Args) -> Result<()> {
             crate::commands::restart::command(restart_args).await
         }
         Some(Commands::Scale(scale_args)) => crate::commands::scale::command(scale_args).await,
+        Some(Commands::Source(source_args)) => source_command(source_args).await,
         None => unreachable!(),
     }
 }
@@ -199,7 +230,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&service_statuses)?);
         } else {
             if service_statuses.is_empty() {
-                println!("No services found in environment '{}'", environment_name);
+                println!("No services found in environment '{environment_name}'");
                 return Ok(());
             }
 
@@ -249,6 +280,130 @@ async fn status_command(args: StatusArgs) -> Result<()> {
                     .dimmed()
             );
             println!("Status: {}", format_status_display(target_service));
+        }
+    }
+
+    Ok(())
+}
+
+async fn source_command(args: SourceArgs) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let linked_project = configs.get_linked_project().await?;
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    // Determine which environment to use
+    let environment_id = if let Some(env_name) = args.environment {
+        let env = get_matched_environment(&project, env_name)?;
+        env.id
+    } else {
+        linked_project.environment.clone()
+    };
+
+    // Resolve service ID
+    let service_id = if let Some(service_name) = args.service {
+        let service = project
+            .services
+            .edges
+            .iter()
+            .find(|s| s.node.id == service_name || s.node.name == service_name)
+            .ok_or_else(|| RailwayError::ServiceNotFound(service_name.clone()))?;
+        service.node.id.clone()
+    } else {
+        linked_project
+            .service
+            .clone()
+            .context("No service linked. Use --service flag to specify a service.")?
+    };
+
+    // Get the service name for display
+    let service_name = project
+        .services
+        .edges
+        .iter()
+        .find(|s| s.node.id == service_id)
+        .map(|s| s.node.name.clone())
+        .unwrap_or_else(|| service_id.clone());
+
+    // Get branch - use provided or fetch default branch from GitHub
+    let branch = if let Some(branch) = args.branch {
+        branch
+    } else {
+        // Fetch default branch for the repo
+        let repos = post_graphql::<queries::GitHubRepos, _>(
+            &client,
+            &configs.get_backboard(),
+            queries::git_hub_repos::Variables {},
+        )
+        .await?
+        .github_repos;
+
+        let repo_info = repos
+            .iter()
+            .find(|r| r.full_name == args.repo)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Repo '{}' not found. Make sure you have access to this repository.",
+                    args.repo
+                )
+            })?;
+
+        repo_info.default_branch.clone()
+    };
+
+    // Connect service to repo source
+    let connect_input = mutations::service_connect::ServiceConnectInput {
+        repo: Some(args.repo.clone()),
+        branch: Some(branch.clone()),
+        image: None,
+    };
+
+    post_graphql::<mutations::ServiceConnect, _>(
+        &client,
+        &configs.get_backboard(),
+        mutations::service_connect::Variables {
+            id: service_id.clone(),
+            input: connect_input,
+        },
+    )
+    .await?;
+
+    println!(
+        "Connected service {} to repo {} (branch: {})",
+        service_name.green().bold(),
+        args.repo.blue(),
+        branch.cyan()
+    );
+
+    // Update root directory and watch paths if provided
+    let has_instance_updates = args.root_directory.is_some() || !args.watch_paths.is_empty();
+
+    if has_instance_updates {
+        let watch_patterns = if args.watch_paths.is_empty() {
+            None
+        } else {
+            Some(args.watch_paths.clone())
+        };
+
+        post_graphql::<mutations::ServiceInstanceUpdateSource, _>(
+            &client,
+            &configs.get_backboard(),
+            mutations::service_instance_update_source::Variables {
+                environment_id: environment_id.clone(),
+                service_id: service_id.clone(),
+                root_directory: args.root_directory.clone(),
+                watch_patterns,
+            },
+        )
+        .await?;
+
+        if let Some(root_dir) = &args.root_directory {
+            println!("Set root directory to {}", root_dir.cyan());
+        }
+        if !args.watch_paths.is_empty() {
+            println!("Set watch paths to {}", args.watch_paths.join(", ").cyan());
         }
     }
 
