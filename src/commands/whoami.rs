@@ -27,7 +27,7 @@ struct WorkspaceJson {
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
+    let client = GQLClient::new_authorized_with_scope(&configs, AuthScope::GlobalOnly)?;
 
     let user: RailwayUser = get_user(&client, &configs).await?;
 

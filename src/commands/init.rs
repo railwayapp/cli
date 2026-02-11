@@ -26,7 +26,7 @@ pub struct Args {
 pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
 
-    let client = GQLClient::new_authorized(&configs)?;
+    let client = GQLClient::new_authorized_with_scope(&configs, AuthScope::GlobalOnly)?;
 
     let workspaces = workspaces().await?;
     let workspace = prompt_workspace(workspaces, args.workspace)?;

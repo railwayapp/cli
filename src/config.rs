@@ -59,6 +59,53 @@ pub enum Environment {
     Dev,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthScope {
+    GlobalOnly,
+    PreferScoped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedAuth {
+    Bearer(String),
+    ScopedToken(String),
+}
+
+fn resolve_auth_for_scope(
+    scope: AuthScope,
+    scoped_token: Option<&str>,
+    global_token: Option<&str>,
+    login_token: Option<&str>,
+) -> Result<ResolvedAuth, RailwayError> {
+    let env_token_auth_active = scoped_token.is_some() || global_token.is_some();
+    let global_auth_token = if env_token_auth_active {
+        global_token
+    } else {
+        global_token.or(login_token)
+    };
+
+    match scope {
+        AuthScope::GlobalOnly => {
+            if let Some(token) = global_auth_token {
+                Ok(ResolvedAuth::Bearer(token.to_owned()))
+            } else if scoped_token.is_some() {
+                Err(RailwayError::GlobalAuthRequired)
+            } else {
+                Err(RailwayError::Unauthorized)
+            }
+        }
+        AuthScope::PreferScoped => {
+            if let Some(token) = scoped_token {
+                Ok(ResolvedAuth::ScopedToken(token.to_owned()))
+            } else if let Some(token) = global_auth_token {
+                Ok(ResolvedAuth::Bearer(token.to_owned()))
+            } else {
+                Err(RailwayError::Unauthorized)
+            }
+        }
+    }
+}
+
 impl Configs {
     pub fn new() -> Result<Self> {
         let environment = Self::get_environment_id();
@@ -133,14 +180,30 @@ impl Configs {
             .unwrap_or(false)
     }
 
-    /// tries the environment variable and the config file
+    /// Tries global token env var, then login token from config.
     pub fn get_railway_auth_token(&self) -> Option<String> {
-        Self::get_railway_api_token().or(self
-            .root_config
+        Self::get_railway_api_token().or(self.get_login_token())
+    }
+
+    fn get_login_token(&self) -> Option<String> {
+        self.root_config
             .user
             .token
             .clone()
-            .filter(|t| !t.is_empty()))
+            .filter(|t| !t.is_empty())
+    }
+
+    pub fn resolve_auth(&self, scope: AuthScope) -> Result<ResolvedAuth, RailwayError> {
+        let scoped_token = Self::get_railway_token();
+        let global_token = Self::get_railway_api_token();
+        let login_token = self.get_login_token();
+
+        resolve_auth_for_scope(
+            scope,
+            scoped_token.as_deref(),
+            global_token.as_deref(),
+            login_token.as_deref(),
+        )
     }
 
     pub fn get_environment_id() -> Environment {
@@ -400,5 +463,63 @@ impl Configs {
         fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_auth_prefers_global_token_when_both_env_tokens_are_set() {
+        let selected = resolve_auth_for_scope(
+            AuthScope::GlobalOnly,
+            Some("scoped-token"),
+            Some("global-token"),
+            None,
+        );
+
+        assert!(matches!(
+            selected,
+            Ok(ResolvedAuth::Bearer(token)) if token == "global-token"
+        ));
+    }
+
+    #[test]
+    fn global_auth_errors_when_only_scoped_token_is_set() {
+        let selected =
+            resolve_auth_for_scope(AuthScope::GlobalOnly, Some("scoped-token"), None, None);
+
+        assert!(matches!(selected, Err(RailwayError::GlobalAuthRequired)));
+    }
+
+    #[test]
+    fn global_auth_errors_when_no_tokens_are_set() {
+        let selected = resolve_auth_for_scope(AuthScope::GlobalOnly, None, None, None);
+
+        assert!(matches!(selected, Err(RailwayError::Unauthorized)));
+    }
+
+    #[test]
+    fn global_auth_ignores_login_token_when_env_scoped_token_is_set() {
+        let selected = resolve_auth_for_scope(
+            AuthScope::GlobalOnly,
+            Some("scoped-token"),
+            None,
+            Some("login-token"),
+        );
+
+        assert!(matches!(selected, Err(RailwayError::GlobalAuthRequired)));
+    }
+
+    #[test]
+    fn global_auth_uses_login_token_when_no_env_tokens_are_set() {
+        let selected =
+            resolve_auth_for_scope(AuthScope::GlobalOnly, None, None, Some("login-token"));
+
+        assert!(matches!(
+            selected,
+            Ok(ResolvedAuth::Bearer(token)) if token == "login-token"
+        ));
     }
 }
