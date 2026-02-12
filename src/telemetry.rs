@@ -44,11 +44,7 @@ pub fn show_notice_if_needed() {
     eprintln!(
         "{}\nYou can opt out by setting RAILWAY_NO_TELEMETRY=1 or DO_NOT_TRACK=1 in your environment.\n{}",
         "Railway now collects CLI usage data to improve the developer experience.".bold(),
-        format!(
-            "Learn more: {}",
-            "https://docs.railway.com/cli/telemetry"
-        )
-        .dimmed(),
+        format!("Learn more: {}", "https://docs.railway.com/cli/telemetry").dimmed(),
     );
 
     Notices {
