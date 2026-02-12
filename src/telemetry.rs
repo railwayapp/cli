@@ -1,6 +1,61 @@
+use colored::Colorize;
+
 use crate::client::{GQLClient, post_graphql};
 use crate::config::Configs;
 use crate::gql::mutations::{self, cli_event_track};
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct Notices {
+    telemetry_notice_shown: bool,
+}
+
+impl Notices {
+    fn path() -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|h| h.join(".railway/notices.json"))
+    }
+
+    fn read() -> Self {
+        Self::path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn write(&self) {
+        if let Some(path) = Self::path() {
+            let _ = serde_json::to_string(self)
+                .ok()
+                .map(|contents| std::fs::write(path, contents));
+        }
+    }
+}
+
+pub fn show_notice_if_needed() {
+    if is_telemetry_disabled() {
+        return;
+    }
+
+    let notices = Notices::read();
+    if notices.telemetry_notice_shown {
+        return;
+    }
+
+    eprintln!(
+        "{}\nYou can opt out by setting DO_NOT_TRACK=1 in your environment.\n{}",
+        "Railway now collects CLI usage data to improve the developer experience.".bold(),
+        format!(
+            "Learn more: {}",
+            "https://docs.railway.com/guides/cli#telemetry"
+        )
+        .dimmed(),
+    );
+
+    Notices {
+        telemetry_notice_shown: true,
+    }
+    .write();
+}
 
 pub struct CliTrackEvent {
     pub command: String,

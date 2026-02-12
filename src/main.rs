@@ -100,6 +100,8 @@ async fn handle_update_task(
 async fn main() -> Result<()> {
     let args = build_args().try_get_matches();
     let check_updates_handle = if std::io::stdout().is_terminal() {
+        telemetry::show_notice_if_needed();
+
         let update = UpdateCheck::read().unwrap_or_default();
 
         if let Some(latest_version) = update.latest_version {
