@@ -3,7 +3,8 @@ use strum::IntoEnumIterator;
 use super::{New as Args, changes::Change, *};
 use crate::{
     controllers::config::{
-        self, EnvironmentConfig, PatchEntry, environment::fetch_environment_config,
+        self, EnvironmentConfig, PatchEntry,
+        environment::{fetch_environment_config, prepare_config_for_duplication},
     },
     util::progress::create_spinner_if,
 };
@@ -47,6 +48,9 @@ pub async fn new_environment(args: Args) -> Result<()> {
         let source_config = fetch_environment_config(&client, &configs, source_env_id, true)
             .await?
             .config;
+
+        // Prepare config for duplication: mark services/volumes/buckets for creation
+        let source_config = prepare_config_for_duplication(source_config);
 
         // Get any --service-config overrides
         let override_config = edit_services_select(

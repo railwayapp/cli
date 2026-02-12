@@ -42,6 +42,7 @@ pub struct ServiceInstance {
     pub volume_mounts: BTreeMap<String, VolumeMount>,
     pub is_deleted: Option<bool>,
     pub is_created: Option<bool>,
+    pub parent_service_id: Option<String>,
 }
 
 #[skip_serializing_none]
@@ -52,6 +53,7 @@ pub struct ServiceSource {
     pub repo: Option<String>,
     pub branch: Option<String>,
     pub commit_sha: Option<String>,
+    pub upstream_url: Option<String>,
     pub root_directory: Option<String>,
     pub check_suites: Option<bool>,
     pub auto_updates: Option<AutoUpdates>,
@@ -62,6 +64,16 @@ pub struct ServiceSource {
 #[serde(default, rename_all = "camelCase")]
 pub struct AutoUpdates {
     pub r#type: Option<String>, // disabled | patch | minor
+    pub schedule: Option<Vec<AutoUpdateSchedule>>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AutoUpdateSchedule {
+    pub day: Option<i64>,
+    pub start_hour: Option<i64>,
+    pub end_hour: Option<i64>,
 }
 
 #[skip_serializing_none]
@@ -96,6 +108,8 @@ pub struct Variable {
     pub default_value: Option<String>,
     pub description: Option<String>,
     pub is_optional: Option<bool>,
+    pub is_sealed: Option<bool>,
+    pub generator: Option<String>,
 }
 
 #[skip_serializing_none]
@@ -109,8 +123,25 @@ pub struct RegistryCredentials {
 #[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
+pub struct LimitOverride {
+    pub containers: Option<ContainerLimits>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ContainerLimits {
+    pub cpu: Option<f64>,
+    pub memory_bytes: Option<i64>,
+    pub disk_bytes: Option<i64>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
+#[serde(default, rename_all = "camelCase")]
 pub struct DeployConfig {
     pub start_command: Option<String>,
+    pub pre_deploy_command: Option<serde_json::Value>, // string or [string]
     pub healthcheck_path: Option<String>,
     pub healthcheck_timeout: Option<i64>,
     pub num_replicas: Option<i64>,
@@ -120,6 +151,10 @@ pub struct DeployConfig {
     pub restart_policy_max_retries: Option<i64>,
     pub sleep_application: Option<bool>,
     pub registry_credentials: Option<RegistryCredentials>,
+    pub limit_override: Option<LimitOverride>,
+    pub required_mount_path: Option<String>,
+    pub overlap_seconds: Option<i64>,
+    pub draining_seconds: Option<i64>,
 }
 
 #[skip_serializing_none]
@@ -135,9 +170,13 @@ pub struct RegionConfig {
 pub struct BuildConfig {
     pub builder: Option<String>, // NIXPACKS | DOCKERFILE | RAILPACK
     pub build_command: Option<String>,
+    pub build_environment: Option<String>, // V2 | V3
     pub dockerfile_path: Option<String>,
     pub watch_patterns: Option<Vec<String>>,
     pub nixpacks_config_path: Option<String>,
+    pub nixpacks_plan: Option<serde_json::Value>,
+    pub nixpacks_version: Option<String>,
+    pub railpack_version: Option<String>,
 }
 
 #[skip_serializing_none]
@@ -146,7 +185,10 @@ pub struct BuildConfig {
 pub struct VolumeInstance {
     pub size_mb: Option<i64>,
     pub region: Option<String>,
+    pub alerts: Option<serde_json::Value>,
     pub is_deleted: Option<bool>,
+    pub is_created: Option<bool>,
+    pub allow_online_resize: Option<bool>,
 }
 
 #[skip_serializing_none]
@@ -154,6 +196,8 @@ pub struct VolumeInstance {
 #[serde(default, rename_all = "camelCase")]
 pub struct BucketInstance {
     pub region: Option<String>,
+    pub is_deleted: Option<bool>,
+    pub is_created: Option<bool>,
 }
 
 #[skip_serializing_none]
@@ -161,6 +205,7 @@ pub struct BucketInstance {
 #[serde(default, rename_all = "camelCase")]
 pub struct VolumeMount {
     pub mount_path: Option<String>,
+    pub backup_schedules: Option<Vec<String>>, // DAILY | WEEKLY | MONTHLY
 }
 
 impl ServiceInstance {
@@ -225,4 +270,25 @@ pub async fn fetch_environment_config(
         config,
         name: data.environment.name,
     })
+}
+
+/// Prepare an environment config for duplication by marking all services and volumes
+/// as needing creation in the target environment.
+pub fn prepare_config_for_duplication(mut config: EnvironmentConfig) -> EnvironmentConfig {
+    // Mark all services as needing creation
+    for service in config.services.values_mut() {
+        service.is_created = Some(true);
+    }
+
+    // Mark all volumes as needing creation
+    for volume in config.volumes.values_mut() {
+        volume.is_created = Some(true);
+    }
+
+    // Mark all buckets as needing creation
+    for bucket in config.buckets.values_mut() {
+        bucket.is_created = Some(true);
+    }
+
+    config
 }
