@@ -1,11 +1,7 @@
-use serde::Serialize;
-use std::time::Duration;
-
-use crate::client::GQLClient;
+use crate::client::{GQLClient, post_graphql};
 use crate::config::Configs;
+use crate::gql::mutations::{self, cli_event_track};
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CliTrackEvent {
     pub command: String,
     pub sub_command: Option<String>,
@@ -39,16 +35,23 @@ pub async fn send(event: CliTrackEvent) {
         Err(_) => return,
     };
 
-    let url = configs.get_backboard();
-    let body = serde_json::json!({
-        "query": "mutation CliEventTrack($input: CliEventTrackInput!) { cliEventTrack(input: $input) }",
-        "variables": { "input": event }
-    });
+    let vars = cli_event_track::Variables {
+        input: cli_event_track::CliEventTrackInput {
+            command: event.command,
+            sub_command: event.sub_command,
+            duration_ms: event.duration_ms as i64,
+            success: event.success,
+            error_message: event.error_message,
+            os: event.os.to_string(),
+            arch: event.arch.to_string(),
+            cli_version: event.cli_version.to_string(),
+            is_ci: event.is_ci,
+        },
+    };
 
-    let _ = client
-        .post(&url)
-        .json(&body)
-        .timeout(Duration::from_secs(3))
-        .send()
-        .await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        post_graphql::<mutations::CliEventTrack, _>(&client, configs.get_backboard(), vars),
+    )
+    .await;
 }
