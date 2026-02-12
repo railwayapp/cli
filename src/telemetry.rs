@@ -46,7 +46,7 @@ pub fn show_notice_if_needed() {
         "Railway now collects CLI usage data to improve the developer experience.".bold(),
         format!(
             "Learn more: {}",
-            "https://docs.railway.com/guides/cli#telemetry"
+            "https://docs.railway.com/cli/telemetry"
         )
         .dimmed(),
     );
