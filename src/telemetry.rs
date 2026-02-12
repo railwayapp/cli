@@ -42,7 +42,7 @@ pub fn show_notice_if_needed() {
     }
 
     eprintln!(
-        "{}\nYou can opt out by setting DO_NOT_TRACK=1 in your environment.\n{}",
+        "{}\nYou can opt out by setting RAILWAY_NO_TELEMETRY=1 or DO_NOT_TRACK=1 in your environment.\n{}",
         "Railway now collects CLI usage data to improve the developer experience.".bold(),
         format!(
             "Learn more: {}",
@@ -69,10 +69,14 @@ pub struct CliTrackEvent {
     pub is_ci: bool,
 }
 
-fn is_telemetry_disabled() -> bool {
-    std::env::var("DO_NOT_TRACK")
+fn env_var_is_truthy(name: &str) -> bool {
+    std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn is_telemetry_disabled() -> bool {
+    env_var_is_truthy("DO_NOT_TRACK") || env_var_is_truthy("RAILWAY_NO_TELEMETRY")
 }
 
 pub async fn send(event: CliTrackEvent) {
