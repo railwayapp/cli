@@ -12,6 +12,14 @@ type EnvironmentConfig = controllers::config::EnvironmentConfig;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CliEventTrack.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CliEventTrack;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/DeploymentRemove.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
@@ -259,6 +267,7 @@ impl std::fmt::Display for custom_domain_create::DNSRecordType {
             Self::DNS_RECORD_TYPE_CNAME => write!(f, "CNAME"),
             Self::DNS_RECORD_TYPE_A => write!(f, "A"),
             Self::DNS_RECORD_TYPE_NS => write!(f, "NS"),
+            Self::DNS_RECORD_TYPE_TXT => write!(f, "TXT"),
             Self::DNS_RECORD_TYPE_UNSPECIFIED => write!(f, "UNSPECIFIED"),
             Self::UNRECOGNIZED => write!(f, "UNRECOGNIZED"),
             Self::Other(s) => write!(f, "{s}"),

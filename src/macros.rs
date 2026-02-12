@@ -49,9 +49,27 @@ macro_rules! commands {
                 match matches.subcommand() {
                     $(
                         Some((stringify!([<$module:snake>]), sub_matches)) => {
-                               let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
-                                   .map_err(anyhow::Error::from)?;
-                            $module::command(args).await?;
+                            let subcommand_name = sub_matches.subcommand_name().map(|s| s.to_string());
+                            let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
+                                .map_err(anyhow::Error::from)?;
+                            let start = ::std::time::Instant::now();
+                            let result = $module::command(args).await;
+                            let duration = start.elapsed();
+                            $crate::telemetry::send($crate::telemetry::CliTrackEvent {
+                                command: stringify!([<$module:snake>]).to_string(),
+                                sub_command: subcommand_name,
+                                success: result.is_ok(),
+                                error_message: result.as_ref().err().map(|e| {
+                                    let msg = format!("{e}");
+                                    if msg.len() > 256 { msg[..256].to_string() } else { msg }
+                                }),
+                                duration_ms: duration.as_millis() as u64,
+                                cli_version: env!("CARGO_PKG_VERSION"),
+                                os: ::std::env::consts::OS,
+                                arch: ::std::env::consts::ARCH,
+                                is_ci: $crate::config::Configs::env_is_ci(),
+                            }).await;
+                            result?;
                         },
                     )*
                     _ => {
