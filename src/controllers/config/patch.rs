@@ -453,6 +453,7 @@ mod tests {
     #[test]
     fn test_validate_service_path_valid() {
         assert!(validate_service_path("source.image").is_ok());
+        assert!(validate_service_path("configFile").is_ok());
         assert!(validate_service_path("deploy.startCommand").is_ok());
         assert!(validate_service_path("deploy.restartPolicyType").is_ok());
         assert!(validate_service_path("build.builder").is_ok());
@@ -477,6 +478,9 @@ mod tests {
         // String fields should accept strings
         let (_, value) = parse_service_value("source.image", "nginx:latest").unwrap();
         assert_eq!(value, serde_json::json!("nginx:latest"));
+
+        let (_, value) = parse_service_value("configFile", "railway.json").unwrap();
+        assert_eq!(value, serde_json::json!("railway.json"));
 
         let (_, value) = parse_service_value("deploy.startCommand", "npm start").unwrap();
         assert_eq!(value, serde_json::json!("npm start"));

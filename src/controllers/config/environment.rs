@@ -35,6 +35,7 @@ pub struct ServiceInstance {
     pub networking: Option<ServiceNetworking>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, Option<Variable>>,
+    pub config_file: Option<String>,
     pub deploy: Option<DeployConfig>,
     pub build: Option<BuildConfig>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
