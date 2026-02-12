@@ -100,6 +100,14 @@ pub struct Variable {
 #[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
+pub struct RegistryCredentials {
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
+#[serde(default, rename_all = "camelCase")]
 pub struct DeployConfig {
     pub start_command: Option<String>,
     pub healthcheck_path: Option<String>,
@@ -110,6 +118,7 @@ pub struct DeployConfig {
     pub restart_policy_type: Option<String>, // ON_FAILURE | ALWAYS | NEVER
     pub restart_policy_max_retries: Option<i64>,
     pub sleep_application: Option<bool>,
+    pub registry_credentials: Option<RegistryCredentials>,
 }
 
 #[skip_serializing_none]
