@@ -21,6 +21,7 @@ mod workspace;
 
 #[macro_use]
 mod macros;
+mod telemetry;
 
 // Generates the commands based on the modules in the commands directory
 // Specify the modules you want to include in the commands_enum! macro
