@@ -106,6 +106,9 @@ ratatui = "0.29"
 scopeguard = "1.2"
 schemars = "0.8"
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
+
 [profile.release]
 lto = "fat"
 opt-level = "z"
