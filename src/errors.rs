@@ -15,6 +15,11 @@ pub enum RailwayError {
     UnauthorizedLogin,
 
     #[error(
+        "This command requires global authentication. Set RAILWAY_API_TOKEN or run `railway login`."
+    )]
+    GlobalAuthRequired,
+
+    #[error(
         "Invalid {0}. Please check that it is valid and has access to the resource you're trying to use."
     )]
     InvalidRailwayToken(String),

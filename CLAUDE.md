@@ -23,5 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Commands use a macro system in `main.rs`. The `commands!` macro generates routing for modules in `src/commands/`.
 
 ### Authentication
-- Project tokens via `RAILWAY_TOKEN` environment variable
-- User tokens via OAuth flow stored in config directory
+- There are three auth sources:
+  - Scoped token via `RAILWAY_TOKEN`
+  - Global token via `RAILWAY_API_TOKEN`
+  - User token via OAuth from `railway login` (stored in config)
