@@ -82,8 +82,8 @@ fn parse_log_line(line: &str, service_mapping: &ServiceMapping) -> Option<LogLin
         for (slug, (display_name, color)) in service_mapping {
             // Match "slug-N" or exact "slug"
             if service_part == slug
-                || service_part.starts_with(&format!("{}-", slug))
-                || service_part.starts_with(&format!("{}_", slug))
+                || service_part.starts_with(&format!("{slug}-"))
+                || service_part.starts_with(&format!("{slug}_"))
             {
                 return Some(LogLine {
                     service_name: display_name.clone(),

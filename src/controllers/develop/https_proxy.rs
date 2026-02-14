@@ -25,7 +25,7 @@ pub fn is_project_proxy_on_443(project_id: &str) -> bool {
         .args([
             "ps",
             "--filter",
-            &format!("name={}-railway-proxy", project_id),
+            &format!("name={project_id}-railway-proxy"),
             "--format",
             "{{.Ports}}",
         ])
@@ -107,7 +107,7 @@ pub fn get_existing_certs(
     output_dir: &Path,
     use_port_443: bool,
 ) -> HttpsConfig {
-    let base_domain = format!("{}.railway.localhost", project_slug);
+    let base_domain = format!("{project_slug}.railway.localhost");
     HttpsConfig {
         project_slug: project_slug.to_string(),
         base_domain,
@@ -122,8 +122,8 @@ pub fn generate_certs(
     output_dir: &Path,
     use_port_443: bool,
 ) -> Result<HttpsConfig> {
-    let base_domain = format!("{}.railway.localhost", project_slug);
-    let wildcard_domain = format!("*.{}", base_domain);
+    let base_domain = format!("{project_slug}.railway.localhost");
+    let wildcard_domain = format!("*.{base_domain}");
 
     let cert_path = output_dir.join("cert.pem");
     let key_path = output_dir.join("key.pem");
@@ -187,7 +187,7 @@ pub fn generate_caddyfile(services: &[ServicePort], https_config: &HttpsConfig) 
             format!("{}:{}", https_config.base_domain, svc.external_port)
         };
 
-        caddyfile.push_str(&format!("{} {{\n", site_address));
+        caddyfile.push_str(&format!("{site_address} {{\n"));
         caddyfile.push_str("    tls /certs/cert.pem /certs/key.pem\n");
 
         // Code services run on host network, image services run in Docker network
@@ -197,7 +197,7 @@ pub fn generate_caddyfile(services: &[ServicePort], https_config: &HttpsConfig) 
             format!("{}:{}", svc.slug, svc.internal_port)
         };
 
-        caddyfile.push_str(&format!("    reverse_proxy {}\n", upstream));
+        caddyfile.push_str(&format!("    reverse_proxy {upstream}\n"));
         caddyfile.push_str("}\n\n");
     }
 
