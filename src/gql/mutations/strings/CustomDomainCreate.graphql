@@ -28,6 +28,9 @@ mutation CustomDomainCreate($input: CustomDomainCreateInput!) {
         keyType
       }
       certificateStatus
+      verificationToken
+      verificationDnsHost
+      verified
     }
   }
 }
