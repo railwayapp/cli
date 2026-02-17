@@ -294,17 +294,26 @@ async fn create_custom_domain(
         bail!("No DNS records found. Please check the Railway dashboard for more information.");
     }
 
+    let zone = response.custom_domain_create.status.dns_records[0]
+        .zone
+        .clone();
     println!(
         "To finish setting up your custom domain, add the following DNS records to {}:\n",
-        &response.custom_domain_create.status.dns_records[0].zone
+        &zone
     );
 
-    print_dns(response.custom_domain_create.status.dns_records);
+    print_dns(
+        response.custom_domain_create.status.dns_records,
+        &response.custom_domain_create.status.verification_dns_host,
+        &response.custom_domain_create.status.verification_token,
+        response.custom_domain_create.status.verified,
+        &zone,
+    );
 
     println!(
         "\nNote: if the Name is \"@\", the DNS record should be created for the root of the domain."
     );
-    println!("*DNS changes can take up to 72 hours to propagate worldwide.");
+    println!("DNS changes can take up to 72 hours to propagate worldwide.");
 
     Ok(())
 }
@@ -313,7 +322,25 @@ fn print_dns(
     domains: Vec<
         mutations::custom_domain_create::CustomDomainCreateCustomDomainCreateStatusDnsRecords,
     >,
+    verification_dns_host: &Option<String>,
+    verification_token: &Option<String>,
+    verified: bool,
+    zone: &str,
 ) {
+    // Build the TXT verification value if needed
+    let txt_verification = if !verified {
+        match (verification_dns_host, verification_token) {
+            (Some(host), Some(token)) => {
+                // Strip the zone suffix from the verification DNS host (e.g., "_railway-verify.example.com" -> "_railway-verify")
+                let host_label = host.strip_suffix(&format!(".{}", zone)).unwrap_or(host);
+                Some((host_label.to_string(), format!("railway-verify={}", token)))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // I benchmarked this iter().fold() and it's faster than using 3x iter().map()
     let (padding_type, padding_hostlabel, padding_value) = domains
         .iter()
@@ -325,6 +352,18 @@ fn print_dns(
                 max(max_value, d.required_value.len()),
             )
         });
+
+    // Include TXT verification record in padding calculation
+    let (padding_type, padding_hostlabel, padding_value) =
+        if let Some((host, value)) = &txt_verification {
+            (
+                max(padding_type, 3), // "TXT".len()
+                max(padding_hostlabel, host.len()),
+                max(padding_value, value.len()),
+            )
+        } else {
+            (padding_type, padding_hostlabel, padding_value)
+        };
 
     // Add extra minimum padding to each length
     let [padding_type, padding_hostlabel, padding_value] =
@@ -352,6 +391,19 @@ fn print_dns(
                 &domain.hostlabel
             },
             domain.required_value,
+            width_type = padding_type,
+            width_host = padding_hostlabel,
+            width_value = padding_value
+        );
+    }
+
+    // Print TXT verification record if domain is not yet verified
+    if let Some((host, value)) = txt_verification {
+        println!(
+            "\t{:<width_type$}{:<width_host$}{:<width_value$}",
+            "TXT",
+            host,
+            value,
             width_type = padding_type,
             width_host = padding_hostlabel,
             width_value = padding_value
