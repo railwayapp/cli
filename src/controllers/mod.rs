@@ -11,3 +11,4 @@ pub mod terminal;
 pub mod user;
 pub mod variables;
 pub mod workflow;
+pub mod metrics;
