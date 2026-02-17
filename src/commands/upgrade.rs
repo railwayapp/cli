@@ -130,7 +130,7 @@ fn run_upgrade_command(method: InstallMethod) -> Result<()> {
     let status = Command::new(program)
         .args(&args)
         .status()
-        .context(format!("Failed to execute {}", program))?;
+        .context(format!("Failed to execute {program}"))?;
 
     if !status.success() {
         bail!(
