@@ -185,6 +185,7 @@ jobs:
 
   publish-crates:
     name: Publish to crates.io
+    if: github.repository_owner == 'railwayapp'
     needs: ["create-release"]
     runs-on: ubuntu-latest
 
@@ -202,7 +203,7 @@ jobs:
 
   publish-release:
     name: Publish Release
-    needs: ["create-release", "build-release", "publish-crates"]
+    needs: ["create-release", "build-release"]
     runs-on: ubuntu-latest
 
     steps:
@@ -214,6 +215,7 @@ jobs:
 
   publish-npm:
     name: Publish NPM
+    if: github.repository_owner == 'railwayapp'
     needs: ["create-release", "build-release", "publish-release"]
     runs-on: ubuntu-latest
     permissions:
@@ -238,6 +240,7 @@ jobs:
 
   notify-release:
     name: Notify Release
+    if: secrets.DEPLOY_WEBHOOK != ''
     needs: ["create-release", "build-release", "publish-release"]
     runs-on: ubuntu-latest
 

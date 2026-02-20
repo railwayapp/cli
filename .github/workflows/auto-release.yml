@@ -3,7 +3,13 @@ name: Auto Release
 on:
   pull_request:
     types: [closed]
-    branches: [master]
+    branches: [master, main]
+
+permissions:
+  contents: write
+  pull-requests: read
+  checks: read
+  actions: read
 
 # Queue releases - don't cancel, let them aggregate
 concurrency:
@@ -13,20 +19,17 @@ concurrency:
 jobs:
   auto-release:
     name: Auto Release
-    # Only run if PR was merged (not just closed) and has a release label
-    if: |
-      github.event.pull_request.merged == true &&
-      (contains(github.event.pull_request.labels.*.name, 'release/patch') ||
-       contains(github.event.pull_request.labels.*.name, 'release/minor') ||
-       contains(github.event.pull_request.labels.*.name, 'release/major'))
+    if: github.event.pull_request.merged == true
+    env:
+      BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: ${{ env.BASE_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       # Debounce - wait for more PRs to potentially merge
       - name: Wait for batch window
@@ -34,20 +37,20 @@ jobs:
           echo "Waiting 2 minutes for more PRs to merge..."
           sleep 120
 
-      # Wait for CI to pass on master
-      - name: Wait for CI on master
+      # Wait for CI to pass on the base branch
+      - name: Wait for CI on base branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Waiting for CI checks on master..."
-          git fetch origin master
-          MASTER_SHA=$(git rev-parse origin/master)
-          echo "Master SHA: $MASTER_SHA"
+          echo "Waiting for CI checks on ${BASE_BRANCH}..."
+          git fetch origin "${BASE_BRANCH}"
+          BASE_SHA=$(git rev-parse "origin/${BASE_BRANCH}")
+          echo "Base SHA: $BASE_SHA"
 
           # Wait up to 10 minutes for CI to complete
           for i in {1..20}; do
             # Use check-runs API (what GitHub Actions CI uses) instead of status API
-            CHECKS=$(gh api repos/${{ github.repository }}/commits/$MASTER_SHA/check-runs --jq '{
+            CHECKS=$(gh api repos/${{ github.repository }}/commits/$BASE_SHA/check-runs --jq '{
               total: .total_count,
               completed: [.check_runs[] | select(.status == "completed")] | length,
               success: [.check_runs[] | select(.conclusion == "success")] | length,
@@ -211,8 +214,8 @@ jobs:
       - name: Push changes and tag
         if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
         run: |
-          git pull --rebase origin master
-          git push origin master
+          git pull --rebase origin "${BASE_BRANCH}"
+          git push origin "${BASE_BRANCH}"
           git push origin "v${{ steps.bump.outputs.version }}"
 
       # Publishing (crates.io, npm, binaries) is handled by release.yml
