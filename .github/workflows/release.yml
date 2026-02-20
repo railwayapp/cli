@@ -240,7 +240,7 @@ jobs:
 
   notify-release:
     name: Notify Release
-    if: secrets.DEPLOY_WEBHOOK != ''
+    if: github.repository_owner == 'railwayapp'
     needs: ["create-release", "build-release", "publish-release"]
     runs-on: ubuntu-latest
 
