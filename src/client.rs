@@ -1,7 +1,6 @@
 use std::{
     fs,
-    io::Cursor,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -23,7 +22,6 @@ use graphql_client::Response as GraphQLResponse;
 
 pub struct GQLClient;
 const RAILWAY_CA_CERT_FILE_ENV: &str = "RAILWAY_CA_CERT_FILE";
-const RAILWAY_CA_CERT_DIR_ENV: &str = "RAILWAY_CA_CERT_DIR";
 
 impl GQLClient {
     pub fn new_authorized(configs: &Configs) -> Result<Client, RailwayError> {
@@ -68,23 +66,28 @@ impl GQLClient {
 }
 
 fn build_client(mut builder: ClientBuilder) -> ClientBuilder {
-    let native_certs = rustls_native_certs::load_native_certs();
-    for native_cert in native_certs.certs {
-        if let Ok(cert) = Certificate::from_der(native_cert.as_ref()) {
-            builder = builder.add_root_certificate(cert);
-        }
-    }
-
-    for err in native_certs.errors {
-        eprintln!("warning: failed to load a native certificate: {err}");
-    }
-
     for path in configured_ca_file_paths() {
-        builder = add_root_certs_from_file(builder, &path);
-    }
-
-    for path in configured_ca_dir_paths() {
-        builder = add_root_certs_from_dir(builder, &path);
+        match fs::read(&path) {
+            Ok(contents) => {
+                let certs = parse_pem_certificates(&contents);
+                if certs.is_empty() {
+                    eprintln!(
+                        "warning: could not parse CA certs from {:?}; continuing with default native trust roots",
+                        path
+                    );
+                } else {
+                    for cert in certs {
+                        builder = builder.add_root_certificate(cert);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to read CA cert file {:?}: {err}; continuing with default native trust roots",
+                    path
+                );
+            }
+        }
     }
 
     builder
@@ -99,16 +102,6 @@ fn parse_pem_certificates(contents: &[u8]) -> Vec<Certificate> {
 
     if let Ok(cert) = Certificate::from_pem(contents) {
         certs.push(cert);
-    }
-
-    let mut cursor = Cursor::new(contents);
-    for maybe_der in rustls_pemfile::certs(&mut cursor) {
-        let Ok(der) = maybe_der else {
-            continue;
-        };
-        if let Ok(cert) = Certificate::from_der(der.as_ref()) {
-            certs.push(cert);
-        }
     }
 
     certs
@@ -129,67 +122,6 @@ fn configured_ca_file_paths() -> Vec<PathBuf> {
     }
 
     paths
-}
-
-fn configured_ca_dir_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    for var in [RAILWAY_CA_CERT_DIR_ENV, "SSL_CERT_DIR"] {
-        if let Some(path) = std::env::var_os(var) {
-            paths.push(PathBuf::from(path));
-        }
-    }
-
-    paths
-}
-
-fn add_root_certs_from_file(mut builder: ClientBuilder, ca_cert_path: &Path) -> ClientBuilder {
-    match fs::read(ca_cert_path) {
-        Ok(contents) => {
-            let certs = parse_pem_certificates(&contents);
-            if certs.is_empty() {
-                eprintln!(
-                    "warning: could not parse CA certs from {:?}; continuing with other trust roots",
-                    ca_cert_path
-                );
-            } else {
-                for cert in certs {
-                    builder = builder.add_root_certificate(cert);
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "warning: failed to read CA cert file {:?}: {err}; continuing with other trust roots",
-                ca_cert_path
-            );
-        }
-    }
-
-    builder
-}
-
-fn add_root_certs_from_dir(mut builder: ClientBuilder, ca_dir_path: &Path) -> ClientBuilder {
-    let entries = match fs::read_dir(ca_dir_path) {
-        Ok(entries) => entries,
-        Err(err) => {
-            eprintln!(
-                "warning: failed to read CA cert directory {:?}: {err}; continuing with other trust roots",
-                ca_dir_path
-            );
-            return builder;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        builder = add_root_certs_from_file(builder, &path);
-    }
-
-    builder
 }
 
 pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
