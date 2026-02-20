@@ -2408,6 +2408,8 @@ dependencies = [
  "rand",
  "ratatui",
  "reqwest",
+ "rustls-native-certs",
+ "rustls-pemfile",
  "schemars",
  "scopeguard",
  "serde",
