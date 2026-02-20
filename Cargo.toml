@@ -26,7 +26,7 @@ serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.134"
 serde_yaml = "0.9"
 reqwest = { version = "0.12.12", default-features = false, features = [
-  "rustls-tls",
+  "rustls-tls-native-roots",
   "json",
 ] }
 chrono = { version = "0.4.39", features = [

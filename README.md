@@ -33,6 +33,11 @@ Follow the [CLI guide](https://docs.railway.com/guides/cli) to install the CLI a
 
 For non-interactive authentication details, see the [CLI guide](https://docs.railway.com/guides/cli#tokens).
 
+### TLS / Custom CA
+
+In environments with TLS-intercepting proxies, the CLI now uses native OS trust roots and can load
+an additional PEM bundle from `RAILWAY_CA_CERT_FILE` (or `SSL_CERT_FILE`).
+
 ## Installation
 
 ### Package managers

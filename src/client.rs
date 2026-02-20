@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use graphql_client::GraphQLQuery;
 use reqwest::{
-    Client,
+    Certificate, Client, ClientBuilder,
     header::{HeaderMap, HeaderValue},
 };
 
@@ -17,6 +17,7 @@ use anyhow::Result;
 use graphql_client::Response as GraphQLResponse;
 
 pub struct GQLClient;
+const RAILWAY_CA_CERT_FILE_ENV: &str = "RAILWAY_CA_CERT_FILE";
 
 impl GQLClient {
     pub fn new_authorized(configs: &Configs) -> Result<Client, RailwayError> {
@@ -35,13 +36,13 @@ impl GQLClient {
             "x-source",
             HeaderValue::from_static(consts::get_user_agent()),
         );
-        let client = Client::builder()
+        let client = build_client(Client::builder())
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
             .build()
-            .unwrap();
+            .map_err(RailwayError::FetchError)?;
         Ok(client)
     }
 
@@ -51,13 +52,65 @@ impl GQLClient {
             "x-source",
             HeaderValue::from_static(consts::get_user_agent()),
         );
-        let client = Client::builder()
+        let client = build_client(Client::builder())
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
             .build()?;
         Ok(client)
     }
+}
+
+fn build_client(mut builder: ClientBuilder) -> ClientBuilder {
+    if let Some(ca_cert_path) =
+        std::env::var_os(RAILWAY_CA_CERT_FILE_ENV).or_else(|| std::env::var_os("SSL_CERT_FILE"))
+    {
+        match fs::read(&ca_cert_path) {
+            Ok(contents) => {
+                let certs = parse_pem_certificates(&contents);
+                if certs.is_empty() {
+                    eprintln!(
+                        "warning: could not parse CA certs from {:?}; continuing with default trust roots",
+                        ca_cert_path
+                    );
+                } else {
+                    for cert in certs {
+                        builder = builder.add_root_certificate(cert);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to read CA cert file {:?}: {err}; continuing with default trust roots",
+                    ca_cert_path
+                );
+            }
+        }
+    }
+
+    builder
+}
+
+fn parse_pem_certificates(contents: &[u8]) -> Vec<Certificate> {
+    if let Ok(single_or_bundle) = Certificate::from_pem(contents) {
+        return vec![single_or_bundle];
+    }
+
+    // Fallback parser for PEM bundles where from_pem rejects a multi-cert input.
+    let mut certs = Vec::new();
+    let body = String::from_utf8_lossy(contents);
+
+    for chunk in body.split("-----END CERTIFICATE-----") {
+        if !chunk.contains("-----BEGIN CERTIFICATE-----") {
+            continue;
+        }
+        let pem = format!("{chunk}-----END CERTIFICATE-----\n");
+        if let Ok(cert) = Certificate::from_pem(pem.as_bytes()) {
+            certs.push(cert);
+        }
+    }
+
+    certs
 }
 
 pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
