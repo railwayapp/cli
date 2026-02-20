@@ -29,7 +29,14 @@ jobs:
         with:
           ref: ${{ env.BASE_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Warn when RELEASE_TOKEN is missing
+        if: ${{ secrets.RELEASE_TOKEN == '' }}
+        run: |
+          echo "::warning::RELEASE_TOKEN is not configured."
+          echo "::warning::Tag pushes made with GITHUB_TOKEN may not trigger the Release workflow."
+          echo "::warning::Configure RELEASE_TOKEN (PAT with repo contents write) for full automation."
 
       # Debounce - wait for more PRs to potentially merge
       - name: Wait for batch window
@@ -213,6 +220,8 @@ jobs:
 
       - name: Push changes and tag
         if: steps.check-release.outputs.skip != 'true' && steps.check-changes.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           git pull --rebase origin "${BASE_BRANCH}"
           git push origin "${BASE_BRANCH}"
