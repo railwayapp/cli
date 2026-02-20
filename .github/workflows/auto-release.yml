@@ -32,11 +32,14 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Warn when RELEASE_TOKEN is missing
-        if: ${{ secrets.RELEASE_TOKEN == '' }}
+        env:
+          RELEASE_TOKEN_VALUE: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          echo "::warning::RELEASE_TOKEN is not configured."
-          echo "::warning::Tag pushes made with GITHUB_TOKEN may not trigger the Release workflow."
-          echo "::warning::Configure RELEASE_TOKEN (PAT with repo contents write) for full automation."
+          if [ -z "${RELEASE_TOKEN_VALUE}" ]; then
+            echo "::warning::RELEASE_TOKEN is not configured."
+            echo "::warning::Tag pushes made with GITHUB_TOKEN may not trigger the Release workflow."
+            echo "::warning::Configure RELEASE_TOKEN (PAT with repo contents write) for full automation."
+          fi
 
       # Debounce - wait for more PRs to potentially merge
       - name: Wait for batch window
