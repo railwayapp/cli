@@ -42,7 +42,7 @@ pub fn show_notice_if_needed() {
     }
 
     eprintln!(
-        "{}\nYou can opt out by setting RAILWAY_NO_TELEMETRY=1 or DO_NOT_TRACK=1 in your environment.\n{}",
+        "{}\nYou can opt out by running `railway telemetry disable` or by setting RAILWAY_NO_TELEMETRY=1 in your environment.\n{}",
         "Railway now collects CLI usage data to improve the developer experience.".bold(),
         format!("Learn more: {}", "https://docs.railway.com/cli/telemetry").dimmed(),
     );
@@ -71,8 +71,40 @@ fn env_var_is_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_telemetry_disabled() -> bool {
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Preferences {
+    #[serde(default)]
+    pub telemetry_disabled: bool,
+}
+
+impl Preferences {
+    fn path() -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|h| h.join(".railway/preferences.json"))
+    }
+
+    pub fn read() -> Self {
+        Self::path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn write(&self) {
+        if let Some(path) = Self::path() {
+            let _ = serde_json::to_string(self)
+                .ok()
+                .map(|contents| std::fs::write(path, contents));
+        }
+    }
+}
+
+pub fn is_telemetry_disabled_by_env() -> bool {
     env_var_is_truthy("DO_NOT_TRACK") || env_var_is_truthy("RAILWAY_NO_TELEMETRY")
+}
+
+fn is_telemetry_disabled() -> bool {
+    is_telemetry_disabled_by_env() || Preferences::read().telemetry_disabled
 }
 
 pub async fn send(event: CliTrackEvent) {
