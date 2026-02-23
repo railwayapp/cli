@@ -37,6 +37,7 @@ pub mod shell;
 pub mod ssh;
 pub mod starship;
 pub mod status;
+pub mod telemetry_cmd;
 pub mod unlink;
 pub mod up;
 pub mod upgrade;

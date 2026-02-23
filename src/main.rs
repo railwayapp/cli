@@ -51,6 +51,7 @@ commands!(
     ssh,
     starship,
     status,
+    telemetry_cmd(telemetry),
     unlink,
     up,
     upgrade,
