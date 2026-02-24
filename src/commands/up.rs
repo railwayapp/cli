@@ -277,7 +277,7 @@ pub async fn command(args: Args) -> Result<()> {
     let body = arc.lock().unwrap().clone();
 
     let res = builder
-        .header("Content-Type", "multipart/form-data")
+        .header("Content-Type", "application/gzip")
         .body(body)
         .send()
         .await?;
