@@ -4,4 +4,14 @@ fn main() {
     println!("cargo:rerun-if-changed=src/gql/mutations/strings");
     println!("cargo:rerun-if-changed=src/gql/subscriptions/strings");
     println!("cargo:rerun-if-changed=src/gql/schema.json");
+
+    #[cfg(windows)]
+    {
+        use winres::WindowsResource;
+
+        let mut res = WindowsResource::new();
+        res.set_manifest_file("railway.exe.manifest")
+            .set_icon("wix/logo.ico");
+        res.compile().unwrap();
+    }
 }
