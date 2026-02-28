@@ -37,7 +37,7 @@ pub struct Args {
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
+    let client = GQLClient::new_authorized_with_scope(&configs, AuthScope::GlobalOnly)?;
     let is_terminal = std::io::stdout().is_terminal();
 
     let all_workspaces = workspaces().await?;

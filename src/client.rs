@@ -8,7 +8,7 @@ use reqwest::{
 
 use crate::{
     commands::Environment,
-    config::Configs,
+    config::{AuthScope, Configs, ResolvedAuth},
     consts::{self, RAILWAY_API_TOKEN_ENV, RAILWAY_TOKEN_ENV},
     errors::RailwayError,
 };
@@ -20,16 +20,24 @@ pub struct GQLClient;
 
 impl GQLClient {
     pub fn new_authorized(configs: &Configs) -> Result<Client, RailwayError> {
+        Self::new_authorized_with_scope(configs, AuthScope::PreferScoped)
+    }
+
+    pub fn new_authorized_with_scope(
+        configs: &Configs,
+        scope: AuthScope,
+    ) -> Result<Client, RailwayError> {
         let mut headers = HeaderMap::new();
-        if let Some(token) = &Configs::get_railway_token() {
-            headers.insert("project-access-token", HeaderValue::from_str(token)?);
-        } else if let Some(token) = configs.get_railway_auth_token() {
-            headers.insert(
-                "authorization",
-                HeaderValue::from_str(&format!("Bearer {token}"))?,
-            );
-        } else {
-            return Err(RailwayError::Unauthorized);
+        match configs.resolve_auth(scope)? {
+            ResolvedAuth::ScopedToken(token) => {
+                headers.insert("project-access-token", HeaderValue::from_str(&token)?);
+            }
+            ResolvedAuth::Bearer(token) => {
+                headers.insert(
+                    "authorization",
+                    HeaderValue::from_str(&format!("Bearer {token}"))?,
+                );
+            }
         }
         headers.insert(
             "x-source",
@@ -40,8 +48,7 @@ impl GQLClient {
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
+            .build()?;
         Ok(client)
     }
 

@@ -13,7 +13,7 @@ use super::{
 pub async fn workspaces() -> Result<Vec<Workspace>> {
     let configs = Configs::new()?;
     let vars = queries::user_projects::Variables {};
-    let client = GQLClient::new_authorized(&configs)?;
+    let client = GQLClient::new_authorized_with_scope(&configs, AuthScope::GlobalOnly)?;
     let response =
         post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
 
