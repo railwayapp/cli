@@ -89,7 +89,7 @@ impl LocalDevelopContext {
             })
         } else {
             let port = config.port_mapping.values().next().copied()?;
-            Some(format!("localhost:{}", port))
+            Some(format!("localhost:{port}"))
         }
     }
 
@@ -214,7 +214,7 @@ fn replace_domain_refs(
         let port_mapping = ctx.port_mapping_for_slug(slug);
 
         // Replace {slug}.railway.internal:{port} patterns
-        let railway_domain = format!("{}.railway.internal", slug);
+        let railway_domain = format!("{slug}.railway.internal");
         if result.contains(&railway_domain) {
             match ctx.mode {
                 NetworkMode::Docker => {
@@ -234,8 +234,8 @@ fn replace_domain_refs(
         if ctx.mode == NetworkMode::Host {
             if let Some(ports) = port_mapping {
                 for (internal, external) in ports {
-                    let old_pattern = format!("{}:{}", slug, internal);
-                    let new_pattern = format!("localhost:{}", external);
+                    let old_pattern = format!("{slug}:{internal}");
+                    let new_pattern = format!("localhost:{external}");
                     result = result.replace(&old_pattern, &new_pattern);
                 }
             }
@@ -246,8 +246,8 @@ fn replace_domain_refs(
     for (prod_domain, local_domain) in public_domain_mapping {
         if !ctx.https_enabled() {
             // When HTTPS disabled, also replace https://prod -> http://local
-            let https_prod = format!("https://{}", prod_domain);
-            let http_local = format!("http://{}", local_domain);
+            let https_prod = format!("https://{prod_domain}");
+            let http_local = format!("http://{local_domain}");
             result = result.replace(&https_prod, &http_local);
         }
         result = result.replace(prod_domain, local_domain);
@@ -264,8 +264,8 @@ fn replace_domain_with_port_mapping(
     let mut result = value.to_string();
 
     for (internal, external) in port_mapping {
-        let old_pattern = format!("{}:{}", domain, internal);
-        let new_pattern = format!("localhost:{}", external);
+        let old_pattern = format!("{domain}:{internal}");
+        let new_pattern = format!("localhost:{external}");
         result = result.replace(&old_pattern, &new_pattern);
     }
 

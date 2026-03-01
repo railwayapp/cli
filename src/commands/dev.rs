@@ -335,10 +335,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                 local_dev_config.save(&project_id)?;
                 println!("{} Removed configuration for '{}'", "✓".green(), name);
             } else {
-                println!(
-                    "{}",
-                    format!("Service '{}' is not configured", name).yellow()
-                );
+                println!("{}", format!("Service '{name}' is not configured").yellow());
             }
         }
 
@@ -403,7 +400,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                     );
                     let suggested = generate_random_port();
                     let port_input =
-                        prompt_text(&format!("Choose a different port [{}]:", suggested))?;
+                        prompt_text(&format!("Choose a different port [{suggested}]:"))?;
                     new_config.port = Some(if port_input.is_empty() {
                         suggested
                     } else {
@@ -453,7 +450,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                         .unwrap_or_else(|_| existing.directory.clone());
 
                     let input_path = prompt_path_with_default(
-                        &format!("Directory for '{}' (relative to cwd):", name),
+                        &format!("Directory for '{name}' (relative to cwd):"),
                         &default_dir,
                     )?;
 
@@ -476,8 +473,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                     let railway_port = svc.get_ports().first().map(|&p| p as u16);
                     let current_port = existing.port.or(railway_port).unwrap_or(DEFAULT_PORT);
 
-                    let port_input =
-                        prompt_text(&format!("Port for '{}' [{}]:", name, current_port))?;
+                    let port_input = prompt_text(&format!("Port for '{name}' [{current_port}]:"))?;
 
                     let mut new_port = if port_input.is_empty() {
                         current_port
@@ -501,7 +497,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
                         );
                         let suggested = generate_random_port();
                         let port_input =
-                            prompt_text(&format!("Choose a different port [{}]:", suggested))?;
+                            prompt_text(&format!("Choose a different port [{suggested}]:"))?;
                         new_port = if port_input.is_empty() {
                             suggested
                         } else {
@@ -564,7 +560,7 @@ fn show_service_config_menu(name: &str, config: &CodeServiceConfig) -> Result<Co
         Err(_) => config.directory.clone(),
     };
 
-    println!("\n{}", format!("Service '{}'", name).cyan().bold());
+    println!("\n{}", format!("Service '{name}'").cyan().bold());
     println!("  {}: {}", "command".dimmed(), config.command);
     println!("  {}: {}", "directory".dimmed(), display_dir);
     if let Some(port) = config.port {
@@ -588,17 +584,13 @@ fn prompt_service_config(
     svc: &ServiceInstance,
     existing: Option<&CodeServiceConfig>,
 ) -> Result<CodeServiceConfig> {
-    println!("\n{}", format!("Configure '{}'", name).cyan().bold());
+    println!("\n{}", format!("Configure '{name}'").cyan().bold());
 
     let default_command = existing.map(|e| e.command.as_str()).unwrap_or("");
     let command = if default_command.is_empty() {
-        prompt_text(&format!("Dev command for '{}':", name))?
+        prompt_text(&format!("Dev command for '{name}':"))?
     } else {
-        prompt_text(&format!(
-            "Dev command for '{}' [{}]:",
-            name, default_command
-        ))
-        .map(|s| {
+        prompt_text(&format!("Dev command for '{name}' [{default_command}]:")).map(|s| {
             if s.is_empty() {
                 default_command.to_string()
             } else {
@@ -618,7 +610,7 @@ fn prompt_service_config(
         .unwrap_or_else(|| ".".to_string());
 
     let input_path = prompt_path_with_default(
-        &format!("Directory for '{}' (relative to current directory):", name),
+        &format!("Directory for '{name}' (relative to current directory):"),
         &default_dir,
     )?;
 
@@ -635,7 +627,7 @@ fn prompt_service_config(
     let default_port = existing.and_then(|e| e.port).or(inferred_port);
 
     let port = if let Some(default) = default_port {
-        let port_input = prompt_text(&format!("Port for '{}' [{}]:", name, default))?;
+        let port_input = prompt_text(&format!("Port for '{name}' [{default}]:"))?;
         if port_input.is_empty() {
             Some(default)
         } else {
@@ -702,7 +694,7 @@ fn prompt_initial_service_setup(
                     conflicts.join(", ")
                 );
                 let suggested = generate_random_port();
-                let port_input = prompt_text(&format!("Choose a different port [{}]:", suggested))?;
+                let port_input = prompt_text(&format!("Choose a different port [{suggested}]:"))?;
                 new_config.port = Some(if port_input.is_empty() {
                     suggested
                 } else {
@@ -799,8 +791,7 @@ fn resolve_port_conflicts(
             if let Some(service_id) = service_id {
                 let suggested = generate_random_port();
                 let port_input = prompt_text(&format!(
-                    "New port for '{}' (currently {}) [{}]:",
-                    service_name, port, suggested
+                    "New port for '{service_name}' (currently {port}) [{suggested}]:"
                 ))?;
 
                 let new_port = if port_input.is_empty() {
@@ -1306,7 +1297,7 @@ fn build_image_service_compose(
         for (vol_id, vol_mount) in &svc.volume_mounts {
             if let Some(mount_path) = &vol_mount.mount_path {
                 let vol_name = volume_name(environment_id, vol_id);
-                service_volumes.push(format!("{}:{}", vol_name, mount_path));
+                service_volumes.push(format!("{vol_name}:{mount_path}"));
                 compose_volumes.insert(vol_name, DockerComposeVolume {});
             }
         }

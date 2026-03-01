@@ -1,0 +1,15 @@
+mutation ServiceInstanceUpdateSource(
+  $environmentId: String!
+  $serviceId: String!
+  $rootDirectory: String
+  $watchPatterns: [String!]
+) {
+  serviceInstanceUpdate(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    input: {
+      rootDirectory: $rootDirectory
+      watchPatterns: $watchPatterns
+    }
+  )
+}

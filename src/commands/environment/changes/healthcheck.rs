@@ -14,7 +14,7 @@ pub fn parse_interactive(
     let existing_healthcheck_timeout = existing_deploy.and_then(|d| d.healthcheck_timeout);
 
     let mut entries: Vec<PatchEntry> = Vec::new();
-    let base_path = format!("services.{}.deploy", service_id);
+    let base_path = format!("services.{service_id}.deploy");
 
     // Health check path
     let path_placeholder = existing_healthcheck_path.unwrap_or("None");
@@ -31,7 +31,7 @@ pub fn parse_interactive(
     }
 
     entries.push((
-        format!("{}.healthcheckPath", base_path),
+        format!("{base_path}.healthcheckPath"),
         serde_json::json!(path),
     ));
 
@@ -57,7 +57,7 @@ pub fn parse_interactive(
         match timeout_str.parse::<i64>() {
             Ok(timeout) if timeout > 0 => {
                 entries.push((
-                    format!("{}.healthcheckTimeout", base_path),
+                    format!("{base_path}.healthcheckTimeout"),
                     serde_json::json!(timeout),
                 ));
                 break;
