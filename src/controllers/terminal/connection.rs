@@ -1,9 +1,6 @@
 use anyhow::{Result, bail};
-use async_tungstenite::WebSocketStream;
-use async_tungstenite::tungstenite::handshake::client::generate_key;
-use async_tungstenite::tungstenite::http::Request;
 use indicatif::ProgressBar;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, sleep};
 use url::Url;
 
 use crate::commands::ssh::{
@@ -26,7 +23,7 @@ pub async fn establish_connection(
     params: &SSHConnectParams,
     spinner: &mut ProgressBar,
     max_attempts: Option<u32>,
-) -> Result<WebSocketStream<async_tungstenite::tokio::ConnectStream>> {
+) -> Result<reqwest_websocket::WebSocket> {
     let url = Url::parse(url)?;
 
     let max_attempts = max_attempts.unwrap_or(SSH_MAX_CONNECT_ATTEMPTS);
@@ -62,20 +59,16 @@ pub async fn attempt_connection(
     url: &Url,
     token: AuthKind,
     params: &SSHConnectParams,
-) -> Result<WebSocketStream<async_tungstenite::tokio::ConnectStream>> {
-    let key = generate_key();
+) -> Result<reqwest_websocket::WebSocket> {
+    use reqwest_websocket::RequestBuilderExt;
 
-    let mut request = Request::builder()
-        .uri(url.as_str())
-        .header("Sec-WebSocket-Key", key)
-        .header("Upgrade", "websocket")
-        .header("Connection", "Upgrade")
-        .header("Sec-WebSocket-Version", "13")
-        .header("Host", url.host_str().unwrap_or(""))
+    let mut request = reqwest::Client::default()
+        .get(url.as_str())
         .header("X-Source", get_user_agent())
         .header("X-Railway-Project-Id", params.project_id.clone())
         .header("X-Railway-Service-Id", params.service_id.clone())
-        .header("X-Railway-Environment-Id", params.environment_id.clone());
+        .header("X-Railway-Environment-Id", params.environment_id.clone())
+        .timeout(Duration::from_secs(SSH_CONNECTION_TIMEOUT_SECS));
 
     if let Some(instance_id) = params.deployment_instance_id.as_ref() {
         request = request.header("X-Railway-Deployment-Instance-Id", instance_id);
@@ -89,16 +82,10 @@ pub async fn attempt_connection(
         }
     }
 
-    let request = request.body(())?;
-
-    let (ws_stream, response) = timeout(
-        Duration::from_secs(SSH_CONNECTION_TIMEOUT_SECS),
-        async_tungstenite::tokio::connect_async_with_config(request, None),
-    )
-    .await??;
+    let response = request.upgrade().send().await?;
 
     if response.status().as_u16() == 101 {
-        Ok(ws_stream)
+        Ok(response.into_websocket().await?)
     } else {
         bail!(
             "Server did not upgrade to WebSocket. Status: {}",
