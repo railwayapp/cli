@@ -1,6 +1,7 @@
 use graphql_client::GraphQLQuery;
 
 type DateTime = chrono::DateTime<chrono::Utc>;
+type BigInt = i64;
 type EnvironmentVariables = std::collections::BTreeMap<String, Option<String>>;
 //type DeploymentMeta = std::collections::BTreeMap<String, serde_json::Value>;
 type DeploymentMeta = serde_json::Value;
@@ -105,6 +106,22 @@ pub struct Domains;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct ProjectToken;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/BucketInstanceDetails.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct BucketInstanceDetails;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/BucketS3Credentials.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct BucketS3Credentials;
 
 pub type SerializedTemplateConfig = serde_json::Value;
 pub type EnvironmentConfig = serde_json::Value;

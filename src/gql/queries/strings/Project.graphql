@@ -6,6 +6,15 @@ query Project($id: String!) {
     workspace {
       name
     }
+    buckets {
+      edges {
+        node {
+          id
+          name
+          projectId
+        }
+      }
+    }
     environments {
       edges {
         node {
@@ -13,6 +22,7 @@ query Project($id: String!) {
           name
           canAccess
           deletedAt
+          unmergedChangesCount
           serviceInstances {
             edges {
               node {
