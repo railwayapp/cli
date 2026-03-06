@@ -32,85 +32,101 @@ pub struct Args {
     environment: Option<String>,
 }
 
-structstruck::strike! {
-    #[strikethrough[derive(Parser)]]
-    enum Commands {
-        /// List buckets
-        #[clap(alias = "ls")]
-        List(struct {
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-        }),
+#[derive(Parser)]
+struct ListArgs {
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
 
-        /// Create a new bucket
-        #[clap(alias = "add", alias = "new")]
-        Create(struct {
-            /// Optional bucket name
-            name: Option<String>,
+#[derive(Parser)]
+struct CreateArgs {
+    /// Optional bucket name
+    name: Option<String>,
 
-            /// Bucket region: sjc (US West), iad (US East), ams (EU West), sin (Asia Pacific)
-            #[clap(long, short)]
-            region: Option<String>,
+    /// Bucket region: sjc (US West), iad (US East), ams (EU West), sin (Asia Pacific)
+    #[clap(long, short)]
+    region: Option<String>,
 
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-        }),
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
 
-        /// Delete a bucket
-        #[clap(alias = "remove", alias = "rm")]
-        Delete(struct {
-            /// Skip confirmation dialog
-            #[clap(short = 'y', long = "yes")]
-            yes: bool,
+#[derive(Parser)]
+struct DeleteArgs {
+    /// Skip confirmation dialog
+    #[clap(short = 'y', long = "yes")]
+    yes: bool,
 
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 
-            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
-            #[clap(long = "2fa-code")]
-            two_factor_code: Option<String>,
-        }),
+    /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+    #[clap(long = "2fa-code")]
+    two_factor_code: Option<String>,
+}
 
-        /// Show bucket details
-        Info(struct {
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-        }),
+#[derive(Parser)]
+struct InfoArgs {
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
 
-        /// Show or reset S3-compatible credentials
-        Credentials(struct {
-            /// Reset S3 credentials
-            #[clap(long)]
-            reset: bool,
+#[derive(Parser)]
+struct CredentialsArgs {
+    /// Reset S3 credentials
+    #[clap(long)]
+    reset: bool,
 
-            /// Skip confirmation dialog when resetting credentials
-            #[clap(short = 'y', long = "yes", requires = "reset")]
-            yes: bool,
+    /// Skip confirmation dialog when resetting credentials
+    #[clap(short = 'y', long = "yes", requires = "reset")]
+    yes: bool,
 
-            /// 2FA code for verification when resetting credentials
-            #[clap(long = "2fa-code", requires = "reset")]
-            two_factor_code: Option<String>,
+    /// 2FA code for verification when resetting credentials
+    #[clap(long = "2fa-code", requires = "reset")]
+    two_factor_code: Option<String>,
 
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-        }),
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
 
-        /// Rename a bucket
-        Rename(struct {
-            /// New bucket name
-            #[clap(long, short)]
-            name: Option<String>,
+#[derive(Parser)]
+struct RenameArgs {
+    /// New bucket name
+    #[clap(long, short)]
+    name: Option<String>,
 
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-        }),
-    }
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+enum Commands {
+    /// List buckets
+    #[clap(alias = "ls")]
+    List(ListArgs),
+
+    /// Create a new bucket
+    #[clap(alias = "add", alias = "new")]
+    Create(CreateArgs),
+
+    /// Delete a bucket
+    #[clap(alias = "remove", alias = "rm")]
+    Delete(DeleteArgs),
+
+    /// Show bucket details
+    Info(InfoArgs),
+
+    /// Show or reset S3-compatible credentials
+    Credentials(CredentialsArgs),
+
+    /// Rename a bucket
+    Rename(RenameArgs),
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -141,41 +157,12 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     match args.command {
-        Commands::List(list_args) => list(&context, list_args.json)?,
-        Commands::Create(create_args) => {
-            create(
-                &context,
-                create_args.name,
-                create_args.region,
-                create_args.json,
-            )
-            .await?
-        }
-        Commands::Delete(delete_args) => {
-            delete(
-                &context,
-                args.bucket,
-                delete_args.yes,
-                delete_args.json,
-                delete_args.two_factor_code,
-            )
-            .await?
-        }
-        Commands::Info(info_args) => info(&context, args.bucket, info_args.json).await?,
-        Commands::Credentials(credentials_args) => {
-            credentials(
-                &context,
-                args.bucket,
-                credentials_args.reset,
-                credentials_args.yes,
-                credentials_args.two_factor_code,
-                credentials_args.json,
-            )
-            .await?
-        }
-        Commands::Rename(rename_args) => {
-            rename(&context, args.bucket, rename_args.name, rename_args.json).await?
-        }
+        Commands::List(sub) => list(&context, sub)?,
+        Commands::Create(sub) => create(&context, sub).await?,
+        Commands::Delete(sub) => delete(&context, args.bucket, sub).await?,
+        Commands::Info(sub) => info(&context, args.bucket, sub).await?,
+        Commands::Credentials(sub) => credentials(&context, args.bucket, sub).await?,
+        Commands::Rename(sub) => rename(&context, args.bucket, sub).await?,
     }
 
     Ok(())
@@ -257,6 +244,14 @@ impl BucketRegion {
         }
     }
 
+    fn country(self) -> &'static str {
+        match self {
+            Self::Sjc | Self::Iad => "US",
+            Self::Ams => "NL",
+            Self::Sin => "SG",
+        }
+    }
+
     fn parse(input: &str) -> Result<Self> {
         match input.trim().to_ascii_lowercase().as_str() {
             "sjc" => Ok(Self::Sjc),
@@ -278,10 +273,10 @@ impl Display for BucketRegion {
     }
 }
 
-fn list(context: &CommandContext, json: bool) -> Result<()> {
+fn list(context: &CommandContext, args: ListArgs) -> Result<()> {
     let buckets = resolve_environment_buckets(&context.project, &context.environment_config);
 
-    if json {
+    if args.json {
         let output: Vec<serde_json::Value> = buckets
             .into_iter()
             .map(|bucket| serde_json::json!({ "id": bucket.id, "name": bucket.name }))
@@ -305,13 +300,9 @@ fn list(context: &CommandContext, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn create(
-    context: &CommandContext,
-    name: Option<String>,
-    region: Option<String>,
-    json: bool,
-) -> Result<()> {
-    let region = resolve_region(region, context.is_terminal, json)?;
+async fn create(context: &CommandContext, args: CreateArgs) -> Result<()> {
+    let json = args.json;
+    let region = resolve_region(args.region, context.is_terminal, json)?;
     let spinner = create_spinner_if(context.is_terminal && !json, "Creating bucket...".into());
 
     let create_response = post_graphql_skip_none::<mutations::BucketCreate, _>(
@@ -322,7 +313,7 @@ async fn create(
                 // Bucket is created at the project level; it gets deployed to the
                 // environment via the patch application below.
                 environment_id: None,
-                name,
+                name: args.name,
                 project_id: context.project.id.clone(),
             },
         },
@@ -395,16 +386,10 @@ async fn create(
     Ok(())
 }
 
-async fn delete(
-    context: &CommandContext,
-    bucket: Option<String>,
-    yes: bool,
-    json: bool,
-    two_factor_code: Option<String>,
-) -> Result<()> {
+async fn delete(context: &CommandContext, bucket: Option<String>, args: DeleteArgs) -> Result<()> {
     let bucket = select_bucket(context, bucket)?;
 
-    let confirmed = if yes {
+    let confirmed = if args.yes {
         true
     } else if context.is_terminal {
         prompt_confirm_with_default(
@@ -422,7 +407,7 @@ async fn delete(
     };
 
     if !confirmed {
-        if !json {
+        if !args.json {
             println!("Deletion cancelled.");
         }
         return Ok(());
@@ -432,7 +417,7 @@ async fn delete(
         &context.client,
         &context.configs,
         context.is_terminal,
-        two_factor_code,
+        args.two_factor_code,
     )
     .await?;
 
@@ -454,7 +439,7 @@ async fn delete(
     )
     .await?;
 
-    if json {
+    if args.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -479,7 +464,7 @@ async fn delete(
     Ok(())
 }
 
-async fn info(context: &CommandContext, bucket: Option<String>, json: bool) -> Result<()> {
+async fn info(context: &CommandContext, bucket: Option<String>, args: InfoArgs) -> Result<()> {
     let bucket = select_bucket(context, bucket)?;
     let details = post_graphql::<queries::BucketInstanceDetails, _>(
         &context.client,
@@ -509,7 +494,7 @@ async fn info(context: &CommandContext, bucket: Option<String>, json: bool) -> R
         object_count: details.object_count,
     };
 
-    if json {
+    if args.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -538,15 +523,12 @@ async fn info(context: &CommandContext, bucket: Option<String>, json: bool) -> R
 async fn credentials(
     context: &CommandContext,
     bucket: Option<String>,
-    reset: bool,
-    yes: bool,
-    two_factor_code: Option<String>,
-    json: bool,
+    args: CredentialsArgs,
 ) -> Result<()> {
     let bucket = select_bucket(context, bucket)?;
 
-    if reset {
-        let confirmed = if yes {
+    if args.reset {
+        let confirmed = if args.yes {
             true
         } else if context.is_terminal {
             prompt_confirm_with_default(
@@ -560,7 +542,7 @@ async fn credentials(
         };
 
         if !confirmed {
-            if !json {
+            if !args.json {
                 println!("Credential reset cancelled.");
             }
             return Ok(());
@@ -570,7 +552,7 @@ async fn credentials(
             &context.client,
             &context.configs,
             context.is_terminal,
-            two_factor_code,
+            args.two_factor_code,
         )
         .await?;
 
@@ -594,7 +576,7 @@ async fn credentials(
             url_style: response.bucket_credentials_reset.url_style,
         };
 
-        if json {
+        if args.json {
             print_credentials_json(&credentials)?;
         } else {
             println!("Credentials reset for {}", bucket.name);
@@ -605,7 +587,7 @@ async fn credentials(
 
     let credentials = fetch_bucket_credentials(context, &bucket.id).await?;
 
-    if json {
+    if args.json {
         print_credentials_json(&credentials)?;
     } else {
         print_credentials_kv(&credentials);
@@ -614,14 +596,9 @@ async fn credentials(
     Ok(())
 }
 
-async fn rename(
-    context: &CommandContext,
-    bucket: Option<String>,
-    name: Option<String>,
-    json: bool,
-) -> Result<()> {
+async fn rename(context: &CommandContext, bucket: Option<String>, args: RenameArgs) -> Result<()> {
     let bucket = select_bucket(context, bucket)?;
-    let new_name = if let Some(name) = name {
+    let new_name = if let Some(name) = args.name {
         name
     } else if context.is_terminal {
         prompt_text("New bucket name")?
@@ -629,7 +606,7 @@ async fn rename(
         bail!("Bucket name must be specified via --name in non-interactive mode.");
     };
 
-    if context.is_terminal && !json {
+    if context.is_terminal && !args.json {
         fake_select("New bucket name", &new_name);
     }
 
@@ -645,7 +622,7 @@ async fn rename(
 
     let updated_bucket = response.bucket_update;
 
-    if json {
+    if args.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -827,7 +804,8 @@ fn resolve_region(region: Option<String>, is_terminal: bool, json: bool) -> Resu
         Some(region) => {
             let region = BucketRegion::parse(&region)?;
             if is_terminal && !json {
-                fake_select("Bucket region", &region.to_string());
+                let flag = country_emoji::flag(region.country()).unwrap_or_default();
+                fake_select("Bucket region", &format!("{} {}", flag, region.label()));
             }
             Ok(region)
         }
