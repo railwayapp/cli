@@ -83,6 +83,12 @@ pub enum RailwayError {
     #[error("Volume {0} not found.")]
     VolumeNotFound(String),
 
+    #[error("Bucket \"{0}\" not found.")]
+    BucketNotFound(String),
+
+    #[error("Bucket \"{0}\" is not deployed in environment \"{1}\".")]
+    BucketNotInEnvironment(String, String),
+
     #[error("2FA code is incorrect. Please try again.")]
     InvalidTwoFactorCode,
 

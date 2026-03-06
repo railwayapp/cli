@@ -1,0 +1,7 @@
+mutation BucketCreate($input: BucketCreateInput!) {
+  bucketCreate(input: $input) {
+    id
+    name
+    projectId
+  }
+}

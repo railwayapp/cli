@@ -228,6 +228,33 @@ pub struct ServiceDelete;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/BucketCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct BucketCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/BucketUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct BucketUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/BucketCredentialsReset.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct BucketCredentialsReset;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/EnvironmentDelete.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
