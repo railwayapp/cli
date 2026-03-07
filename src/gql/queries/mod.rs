@@ -202,11 +202,27 @@ pub struct Metrics;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/SshPublicKeys.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SshPublicKeys;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/Templates.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
 pub struct Templates;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ServiceInstance.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceInstance;
 
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
 impl From<project::DeploymentStatus> for SubscriptionDeploymentStatus {
