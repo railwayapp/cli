@@ -18,6 +18,7 @@ pub const SSH_MAX_CONNECT_ATTEMPTS: u32 = 3;
 pub const SSH_MAX_CONNECT_ATTEMPTS_PERSISTENT: u32 = 20;
 
 mod common;
+mod native;
 mod platform;
 
 use common::*;
@@ -47,6 +48,10 @@ pub struct Args {
     #[clap(long, value_name = "SESSION_NAME", default_missing_value = "railway", num_args = 0..=1)]
     session: Option<String>,
 
+    /// Use WebSocket relay instead of native SSH (fallback mode)
+    #[clap(long, hide = true)]
+    relay: bool,
+
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
@@ -56,7 +61,58 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let params = get_ssh_connect_params(args.clone(), &configs, &client).await?;
+    // Try native SSH if available and not explicitly using relay mode
+    let use_native = !args.relay && native::native_ssh_available();
+
+    if use_native {
+        return command_native(args, &configs, &client).await;
+    }
+
+    // Fall back to WebSocket relay
+    command_relay(args, &configs, &client).await
+}
+
+/// Native SSH command using ssh <serviceInstanceId>@ssh.railway.com
+async fn command_native(args: Args, configs: &Configs, client: &reqwest::Client) -> Result<()> {
+    // Ensure SSH key is registered
+    native::ensure_ssh_key(client, configs).await?;
+
+    // Get connection params to resolve service instance ID
+    let params = get_ssh_connect_params(args.clone(), configs, client).await?;
+
+    // Get the service instance ID
+    let service_instance_id = native::get_service_instance_id(
+        client,
+        configs,
+        &params.environment_id,
+        &params.service_id,
+    )
+    .await?;
+
+    // Run native SSH
+    if let Some(session_name) = args.session {
+        let exit_code = native::run_native_ssh_with_tmux(&service_instance_id, &session_name)?;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+    } else {
+        let command = if args.command.is_empty() {
+            None
+        } else {
+            Some(args.command.as_slice())
+        };
+        let exit_code = native::run_native_ssh(&service_instance_id, command)?;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+    }
+
+    Ok(())
+}
+
+/// WebSocket relay command (legacy/fallback)
+async fn command_relay(args: Args, configs: &Configs, client: &reqwest::Client) -> Result<()> {
+    let params = get_ssh_connect_params(args.clone(), configs, client).await?;
 
     if let Some(name) = args.session {
         run_persistent_session(&params, name).await?;

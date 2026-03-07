@@ -288,6 +288,14 @@ pub struct EnvironmentPatchCommit;
 )]
 pub struct EnvironmentStageChanges;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SshPublicKeyCreate.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SshPublicKeyCreate;
+
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
