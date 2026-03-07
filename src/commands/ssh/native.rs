@@ -5,9 +5,7 @@ use std::process::{Command, Stdio};
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{
-    ensure_ssh_key_registered, find_local_ssh_keys, register_ssh_key,
-};
+use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
 use crate::gql::queries::{service_instance, ServiceInstance};
 use crate::util::prompt::prompt_confirm_with_default;
 
@@ -39,48 +37,73 @@ pub async fn get_service_instance_id(
 
 /// Ensure SSH key is registered, prompting user if needed
 pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
-    let local_key = ensure_ssh_key_registered(client, configs).await?;
+    let local_keys = find_local_ssh_keys()?;
 
-    // Check if this key is already registered (the function returns the key even if not registered)
+    if local_keys.is_empty() {
+        bail!(
+            "No SSH keys found in ~/.ssh/\n\n\
+            Generate one with:\n  ssh-keygen -t ed25519\n\n\
+            Then run this command again."
+        );
+    }
+
+    // Check which local keys are registered
     let registered_keys = crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs).await?;
-    let is_registered = registered_keys.iter().any(|k| k.fingerprint == local_key.fingerprint);
 
-    if !is_registered {
-        let is_tty = std::io::stdin().is_terminal();
+    // Find a local key that's already registered
+    let registered_local = local_keys.iter().find(|local| {
+        registered_keys.iter().any(|r| r.fingerprint == local.fingerprint)
+    });
 
-        if is_tty {
-            println!("SSH key not registered with Railway.");
-            println!("Key: {} ({})", local_key.path.display(), local_key.fingerprint);
-            println!();
+    if let Some(key) = registered_local {
+        // Already registered - just use it
+        eprintln!("Using SSH key: {}", key.path.display());
+        return Ok(());
+    }
 
-            let should_register = prompt_confirm_with_default(
-                "Register this SSH key with Railway?",
-                true,
-            )?;
+    // No local key is registered - need to register one
+    // Prefer ed25519, then ecdsa, then rsa
+    let key_to_register = local_keys
+        .iter()
+        .find(|k| k.key_type.contains("ed25519"))
+        .or_else(|| local_keys.iter().find(|k| k.key_type.contains("ecdsa")))
+        .or_else(|| local_keys.first())
+        .unwrap();
 
-            if !should_register {
-                bail!("SSH key registration required for native SSH access.\n\
-                       You can also register your key at: https://railway.com/account/ssh-keys");
-            }
-        } else {
-            // Non-TTY: auto-register the key
-            eprintln!("Registering SSH key with Railway...");
+    let is_tty = std::io::stdin().is_terminal();
+
+    if is_tty {
+        println!("SSH key not registered with Railway.");
+        println!("Key: {} ({})", key_to_register.path.display(), key_to_register.fingerprint);
+        println!();
+
+        let should_register = prompt_confirm_with_default(
+            "Register this SSH key with Railway?",
+            true,
+        )?;
+
+        if !should_register {
+            bail!("SSH key registration required for native SSH access.\n\
+                   You can also register your key at: https://railway.com/account/ssh-keys");
         }
+    } else {
+        // Non-TTY: auto-register the key
+        eprintln!("Registering SSH key with Railway...");
+    }
 
-        let key_name = local_key
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ssh-key")
-            .to_string();
+    let key_name = key_to_register
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ssh-key")
+        .to_string();
 
-        register_ssh_key(client, configs, &key_name, &local_key.public_key).await?;
+    register_ssh_key(client, configs, &key_name, &key_to_register.public_key).await?;
 
-        if is_tty {
-            println!("SSH key registered successfully!");
-        } else {
-            eprintln!("SSH key registered successfully!");
-        }
+    if is_tty {
+        println!("SSH key registered successfully!");
+    } else {
+        eprintln!("SSH key registered successfully!");
     }
 
     Ok(())
