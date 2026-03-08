@@ -227,6 +227,33 @@ mod cli_tests {
         }
 
         #[test]
+        fn logs_http_examples_parse() {
+            assert_parses(&["logs", "--http", "--lines", "50"]);
+            assert_parses(&[
+                "logs",
+                "--http",
+                "--filter",
+                "@path:/api/users @httpStatus:200",
+            ]);
+            assert_parses(&[
+                "logs",
+                "--http",
+                "--json",
+                "--filter",
+                "@requestId:abcd1234",
+            ]);
+            assert_parses(&[
+                "service",
+                "logs",
+                "--http",
+                "--lines",
+                "10",
+                "--filter",
+                "@httpStatus:404",
+            ]);
+        }
+
+        #[test]
         fn variable_legacy_flags() {
             assert_parses(&["variable", "--set", "KEY=value"]);
             assert_parses(&["variable", "--set", "KEY=value", "--set", "KEY2=value2"]);
