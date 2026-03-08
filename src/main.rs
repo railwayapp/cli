@@ -220,6 +220,13 @@ mod cli_tests {
         }
 
         #[test]
+        fn logs_http_flag_parses() {
+            assert_parses(&["logs", "--http"]);
+            assert_parses(&["logs", "--http", "--lines", "50"]);
+            assert_parses(&["service", "logs", "--http"]);
+        }
+
+        #[test]
         fn variable_legacy_flags() {
             assert_parses(&["variable", "--set", "KEY=value"]);
             assert_parses(&["variable", "--set", "KEY=value", "--set", "KEY2=value2"]);

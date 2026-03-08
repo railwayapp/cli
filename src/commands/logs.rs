@@ -3,14 +3,14 @@ use is_terminal::IsTerminal;
 use crate::{
     controllers::{
         deployment::{
-            FetchLogsParams, fetch_build_logs, fetch_deploy_logs, stream_build_logs,
-            stream_deploy_logs,
+            FetchLogsParams, fetch_build_logs, fetch_deploy_logs, fetch_http_logs,
+            stream_build_logs, stream_deploy_logs, stream_http_logs,
         },
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
     },
     util::{
-        logs::{LogFormat, print_log},
+        logs::{LogFormat, print_http_log, print_log},
         time::parse_time,
     },
 };
@@ -23,12 +23,14 @@ use super::{
 
 #[derive(Parser)]
 #[clap(
-    about = "View build or deploy logs from a Railway deployment",
-    long_about = "View build or deploy logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines, --since, or --until flags are provided.",
+    about = "View build, deploy, or HTTP logs from a Railway deployment",
+    long_about = "View build, deploy, or HTTP logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines, --since, or --until flags are provided.",
     after_help = "Examples:
 
   railway logs                                                       # Stream live logs from latest deployment
   railway logs --build 7422c95b-c604-46bc-9de4-b7a43e1fd53d          # Stream build logs from a specific deployment
+  railway logs --http --lines 50                                     # Pull latest HTTP logs without streaming
+  railway logs --http --filter \"@path:/api/users @httpStatus:200\"    # Query HTTP logs by path and status
   railway logs --lines 100                                           # Pull last 100 logs without streaming
   railway logs --since 1h                                            # View logs from the last hour
   railway logs --since 30m --until 10m                               # View logs from 30 minutes ago until 10 minutes ago
@@ -55,6 +57,10 @@ pub struct Args {
     /// Show build logs
     #[clap(short, long, group = "log_type")]
     build: bool,
+
+    /// Show HTTP request logs
+    #[clap(long, group = "log_type")]
+    http: bool,
 
     /// Deployment ID to view logs from. Defaults to most recent successful deployment, or latest deployment if none succeeded
     deployment_id: Option<String>,
@@ -89,6 +95,7 @@ pub struct Args {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
+    let backboard = configs.get_backboard();
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
@@ -146,10 +153,9 @@ pub async fn command(args: Args) -> Result<()> {
         },
         first: None,
     };
-    let deployments =
-        post_graphql::<queries::Deployments, _>(&client, configs.get_backboard(), vars)
-            .await?
-            .deployments;
+    let deployments = post_graphql::<queries::Deployments, _>(&client, &backboard, vars)
+        .await?
+        .deployments;
     let mut all_deployments: Vec<_> = deployments
         .edges
         .into_iter()
@@ -173,11 +179,39 @@ pub async fn command(args: Args) -> Result<()> {
         default_deployment.id.clone()
     };
 
-    let show_build_logs = args.build
-        || (default_deployment.status == DeploymentStatus::FAILED
-            && deployment_id == default_deployment.id);
+    let show_http_logs = args.http;
+    let show_build_logs = !show_http_logs
+        && !args.deployment
+        && (args.build
+            || (default_deployment.status == DeploymentStatus::FAILED
+                && deployment_id == default_deployment.id));
 
-    if show_build_logs {
+    if show_http_logs {
+        if should_stream {
+            stream_http_logs(
+                &client,
+                &backboard,
+                deployment_id.clone(),
+                args.filter.clone(),
+                |log| print_http_log(log, args.json),
+            )
+            .await?;
+        } else {
+            fetch_http_logs(
+                FetchLogsParams {
+                    client: &client,
+                    backboard: &backboard,
+                    deployment_id: deployment_id.clone(),
+                    limit: args.lines.or(Some(500)),
+                    filter: args.filter.clone(),
+                    start_date,
+                    end_date,
+                },
+                |log| print_http_log(log, args.json),
+            )
+            .await?;
+        }
+    } else if show_build_logs {
         if should_stream {
             stream_build_logs(deployment_id.clone(), args.filter.clone(), |log| {
                 print_log(log, args.json, LogFormat::LevelOnly)
@@ -187,7 +221,7 @@ pub async fn command(args: Args) -> Result<()> {
             fetch_build_logs(
                 FetchLogsParams {
                     client: &client,
-                    backboard: &configs.get_backboard(),
+                    backboard: &backboard,
                     deployment_id: deployment_id.clone(),
                     limit: args.lines.or(Some(500)),
                     filter: args.filter.clone(),
@@ -207,7 +241,7 @@ pub async fn command(args: Args) -> Result<()> {
         fetch_deploy_logs(
             FetchLogsParams {
                 client: &client,
-                backboard: &configs.get_backboard(),
+                backboard: &backboard,
                 deployment_id: deployment_id.clone(),
                 limit: args.lines.or(Some(500)),
                 filter: args.filter.clone(),

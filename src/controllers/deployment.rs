@@ -8,9 +8,10 @@ use crate::{
     util::retry::RetryConfig,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures::StreamExt;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -96,6 +97,31 @@ pub async fn fetch_deploy_logs(
     Ok(())
 }
 
+pub async fn fetch_http_logs(
+    params: FetchLogsParams<'_>,
+    on_log: impl Fn(queries::http_logs::HttpLogFields),
+) -> Result<()> {
+    let vars = queries::http_logs::Variables {
+        deployment_id: params.deployment_id,
+        limit: params.limit,
+        filter: params.filter,
+        start_date: params.start_date.map(|date| date.to_rfc3339()),
+        end_date: params.end_date.map(|date| date.to_rfc3339()),
+    };
+
+    let response =
+        post_graphql::<queries::HttpLogs, _>(params.client, params.backboard, vars).await?;
+
+    let logs = response.http_logs;
+    let logs_to_process = take_last_n_logs(logs, params.limit);
+
+    for log in logs_to_process {
+        on_log(log);
+    }
+
+    Ok(())
+}
+
 pub async fn stream_build_logs(
     deployment_id: String,
     filter: Option<String>,
@@ -160,6 +186,50 @@ pub async fn stream_build_logs(
                     .min(LOGS_RETRY_CONFIG.max_delay_ms);
             }
         }
+    }
+}
+
+pub async fn stream_http_logs(
+    client: &Client,
+    backboard: &str,
+    deployment_id: String,
+    filter: Option<String>,
+    on_log: impl Fn(queries::http_logs::HttpLogFields),
+) -> Result<()> {
+    // HTTP log subscriptions currently return empty payloads for this backend
+    // path, so follow the latest logs by polling the query endpoint instead.
+    let mut last_timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let mut seen_request_ids = HashSet::new();
+
+    loop {
+        let vars = queries::http_logs::Variables {
+            deployment_id: deployment_id.clone(),
+            filter: filter.clone(),
+            limit: Some(500),
+            start_date: None,
+            end_date: None,
+        };
+
+        let response = post_graphql::<queries::HttpLogs, _>(client, backboard, vars).await?;
+
+        for line in response.http_logs {
+            if line.timestamp < last_timestamp {
+                continue;
+            }
+
+            if line.timestamp > last_timestamp {
+                last_timestamp = line.timestamp.clone();
+                seen_request_ids.clear();
+            }
+
+            if !seen_request_ids.insert(line.request_id.clone()) {
+                continue;
+            }
+
+            on_log(line);
+        }
+
+        sleep(Duration::from_millis(1000)).await;
     }
 }
 
