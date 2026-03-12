@@ -17,7 +17,17 @@ pub struct LocalSshKey {
     pub key_type: String,
 }
 
-/// Find local SSH keys
+/// Supported SSH key types (in order of preference)
+const SUPPORTED_KEY_TYPES: &[&str] = &[
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-rsa",
+    "ssh-dss",
+];
+
+/// Find local SSH keys by scanning ~/.ssh/ for .pub files
 pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let ssh_dir = home.join(".ssh");
@@ -26,18 +36,33 @@ pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
         return Ok(vec![]);
     }
 
-    let key_files = ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub", "id_dsa.pub"];
-
     let mut keys = Vec::new();
 
-    for key_file in key_files {
-        let key_path = ssh_dir.join(key_file);
-        if key_path.exists() {
-            if let Ok(key) = read_ssh_key(&key_path) {
-                keys.push(key);
+    // Scan for all .pub files in ~/.ssh/
+    if let Ok(entries) = std::fs::read_dir(&ssh_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "pub") {
+                if let Ok(key) = read_ssh_key(&path) {
+                    // Only include supported key types
+                    if SUPPORTED_KEY_TYPES
+                        .iter()
+                        .any(|t| key.key_type.starts_with(t))
+                    {
+                        keys.push(key);
+                    }
+                }
             }
         }
     }
+
+    // Sort by key type preference (ed25519 first, then ecdsa, then rsa, then dss)
+    keys.sort_by_key(|k| {
+        SUPPORTED_KEY_TYPES
+            .iter()
+            .position(|t| k.key_type.starts_with(t))
+            .unwrap_or(usize::MAX)
+    });
 
     Ok(keys)
 }
