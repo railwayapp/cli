@@ -61,8 +61,8 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    // Use native SSH for interactive shells only (no command specified)
-    // Command execution uses relay mode because Railway's SSH proxy
+    // Use native SSH for interactive shells only (no command, no tmux session)
+    // Command execution and tmux use relay mode because Railway's SSH proxy
     // doesn't forward exec commands through the QUIC tunnel
     let use_native = !args.relay
         && args.command.is_empty()

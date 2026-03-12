@@ -1,4 +1,4 @@
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 use reqwest::Client;
 use std::process::{Command, Stdio};
@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use crate::client::post_graphql;
 use crate::config::Configs;
 use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
-use crate::gql::queries::{service_instance, ServiceInstance};
+use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::prompt_confirm_with_default;
 
 const SSH_HOST: &str = "ssh.railway.com";
@@ -32,7 +32,11 @@ pub async fn get_service_instance_id(
         }
     }
 
-    bail!("No service instance found for service {} in environment {}", service_id, environment_id)
+    bail!(
+        "No service instance found for service {} in environment {}",
+        service_id,
+        environment_id
+    )
 }
 
 /// Ensure SSH key is registered, prompting user if needed
@@ -48,11 +52,14 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     }
 
     // Check which local keys are registered
-    let registered_keys = crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs).await?;
+    let registered_keys =
+        crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs).await?;
 
     // Find a local key that's already registered
     let registered_local = local_keys.iter().find(|local| {
-        registered_keys.iter().any(|r| r.fingerprint == local.fingerprint)
+        registered_keys
+            .iter()
+            .any(|r| r.fingerprint == local.fingerprint)
     });
 
     if let Some(key) = registered_local {
@@ -74,17 +81,21 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     if is_tty {
         println!("SSH key not registered with Railway.");
-        println!("Key: {} ({})", key_to_register.path.display(), key_to_register.fingerprint);
+        println!(
+            "Key: {} ({})",
+            key_to_register.path.display(),
+            key_to_register.fingerprint
+        );
         println!();
 
-        let should_register = prompt_confirm_with_default(
-            "Register this SSH key with Railway?",
-            true,
-        )?;
+        let should_register =
+            prompt_confirm_with_default("Register this SSH key with Railway?", true)?;
 
         if !should_register {
-            bail!("SSH key registration required for native SSH access.\n\
-                   You can also register your key at: https://railway.com/account/ssh-keys");
+            bail!(
+                "SSH key registration required for native SSH access.\n\
+                   You can also register your key at: https://railway.com/account/ssh-keys"
+            );
         }
     } else {
         // Non-TTY: auto-register the key
@@ -111,47 +122,21 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
 /// Check if native SSH is available (local SSH key exists)
 pub fn native_ssh_available() -> bool {
-    find_local_ssh_keys().map(|keys| !keys.is_empty()).unwrap_or(false)
+    find_local_ssh_keys()
+        .map(|keys| !keys.is_empty())
+        .unwrap_or(false)
 }
 
 /// Run SSH command with the given service instance ID
 /// Note: This only works for interactive shells. Command execution requires relay mode
 /// because Railway's SSH proxy doesn't forward exec commands through the QUIC tunnel.
-pub fn run_native_ssh(
-    service_instance_id: &str,
-) -> Result<i32> {
+pub fn run_native_ssh(service_instance_id: &str) -> Result<i32> {
     let target = format!("{}@{}", service_instance_id, SSH_HOST);
 
     let mut ssh_cmd = Command::new("ssh");
     ssh_cmd.arg(&target);
 
     // Interactive shell - inherit everything
-    ssh_cmd.stdin(Stdio::inherit());
-    ssh_cmd.stdout(Stdio::inherit());
-    ssh_cmd.stderr(Stdio::inherit());
-
-    let status = ssh_cmd.status().context("Failed to execute ssh command")?;
-
-    Ok(status.code().unwrap_or(1))
-}
-
-/// Run SSH with tmux session
-pub fn run_native_ssh_with_tmux(
-    service_instance_id: &str,
-    session_name: &str,
-) -> Result<i32> {
-    let target = format!("{}@{}", service_instance_id, SSH_HOST);
-    let tmux_cmd = format!(
-        "which tmux || (apt-get update && apt-get install -y tmux); exec tmux new-session -A -s {} \\; set -g mouse on",
-        session_name
-    );
-
-    let mut ssh_cmd = Command::new("ssh");
-    ssh_cmd.arg("-t"); // Force TTY allocation for tmux
-    ssh_cmd.arg(&target);
-    ssh_cmd.arg("--");
-    ssh_cmd.arg(&tmux_cmd);
-
     ssh_cmd.stdin(Stdio::inherit());
     ssh_cmd.stdout(Stdio::inherit());
     ssh_cmd.stderr(Stdio::inherit());
