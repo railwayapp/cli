@@ -27,8 +27,10 @@ serde_json = "1.0.134"
 serde_yaml = "0.9"
 reqwest = { version = "0.12.12", default-features = false, features = [
   "rustls-tls",
+  "rustls-tls-native-roots",
   "json",
 ] }
+reqwest-websocket = "0.5.1"
 chrono = { version = "0.4.39", features = [
   "serde",
   "clock",
@@ -63,14 +65,7 @@ futures = { version = "0.3.31", default-features = false, features = [
   "executor"
 ] }
 futures-util = "0.3"
-graphql-ws-client = { version = "0.11.1", features = [
-  "client-graphql-client",
-  "tungstenite",
-] }
-async-tungstenite = { version = "0.28.2", features = [
-  "tokio-runtime",
-  "tokio-rustls-native-certs",
-] }
+graphql-ws-client = { version = "0.11.1", features = ["client-graphql-client"] }
 crossterm = { version = "0.27.0", features = ["event-stream"] }
 http = "0.2"
 is-terminal = "0.4.13"

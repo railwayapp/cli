@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
-use async_tungstenite::WebSocketStream;
-use async_tungstenite::tungstenite::Message;
+use futures::SinkExt;
 use futures_util::stream::StreamExt;
 use indicatif::ProgressBar;
+use reqwest_websocket::{Message, WebSocket};
 use std::io::Write;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, interval, timeout};
@@ -14,7 +14,7 @@ use super::connection::{SSHConnectParams, establish_connection};
 use super::messages::{ClientMessage, ClientPayload, DataPayload, ServerMessage};
 
 pub struct TerminalClient {
-    ws_stream: WebSocketStream<async_tungstenite::tokio::ConnectStream>,
+    ws_stream: WebSocket,
     initialized: bool,
     ready: bool,
     in_command_progress: bool,
@@ -232,7 +232,7 @@ impl TerminalClient {
 
     /// Sends a ping message to keep the connection alive
     async fn send_ping(&mut self) -> Result<()> {
-        self.send_message(Message::Ping(vec![]))
+        self.send_message(Message::Ping(Default::default()))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send ping: {}", e))?;
         Ok(())
@@ -337,19 +337,13 @@ impl TerminalClient {
                                         }
                                     }
                                 }
-                                Message::Close(frame) => {
+                                Message::Close { code, reason } => {
                                     if let Some(tx) = &self.ready_tx {
                                         let _ = tx.send(false).await;
                                     }
-                                    if let Some(frame) = frame {
-                                        bail!(
-                                            "WebSocket closed with code {}: {}",
-                                            frame.code,
-                                            frame.reason
-                                        );
-                                    } else {
-                                        bail!("WebSocket closed unexpectedly");
-                                    }
+                                    bail!(
+                                        "WebSocket closed with code {code}: {reason}",
+                                    );
                                 }
                                 Message::Ping(data) => {
                                     self.send_message(Message::Pong(data)).await?;
@@ -359,9 +353,6 @@ impl TerminalClient {
                                 }
                                 Message::Binary(_) => {
                                     writeln!(writer, "Warning: Unexpected binary message received")?;
-                                }
-                                Message::Frame(_) => {
-                                    writeln!(writer, "Warning: Unexpected raw frame received")?;
                                 }
                             }
                         },
@@ -435,12 +426,8 @@ impl TerminalClient {
                                 Message::Ping(data) => {
                                     self.send_message(Message::Pong(data)).await?;
                                 }
-                                Message::Close(frame) => {
-                                    if let Some(frame) = frame {
-                                        bail!("WebSocket closed with code {}: {}", frame.code, frame.reason);
-                                    } else {
-                                        bail!("WebSocket closed unexpectedly");
-                                    }
+                                Message::Close { code, reason } => {
+                                    bail!("WebSocket closed with code {code}: {reason}");
                                 }
                                 // Ignore other message types
                                 _ => {}
