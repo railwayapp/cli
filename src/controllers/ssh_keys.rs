@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::gql::mutations::{ssh_public_key_create, SshPublicKeyCreate};
-use crate::gql::queries::{ssh_public_keys, SshPublicKeys};
+use crate::gql::mutations::{SshPublicKeyCreate, ssh_public_key_create};
+use crate::gql::queries::{SshPublicKeys, ssh_public_keys};
 
 /// Local SSH key info
 #[derive(Debug, Clone)]
@@ -26,12 +26,7 @@ pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
         return Ok(vec![]);
     }
 
-    let key_files = [
-        "id_ed25519.pub",
-        "id_ecdsa.pub",
-        "id_rsa.pub",
-        "id_dsa.pub",
-    ];
+    let key_files = ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub", "id_dsa.pub"];
 
     let mut keys = Vec::new();
 
@@ -48,9 +43,9 @@ pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
 }
 
 /// Read and parse an SSH public key file
-fn read_ssh_key(path: &PathBuf) -> Result<LocalSshKey> {
+fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
     let content = std::fs::read_to_string(path)?;
-    let parts: Vec<&str> = content.trim().split_whitespace().collect();
+    let parts: Vec<&str> = content.split_whitespace().collect();
 
     if parts.len() < 2 {
         bail!("Invalid SSH key format");
@@ -63,7 +58,7 @@ fn read_ssh_key(path: &PathBuf) -> Result<LocalSshKey> {
     let fingerprint = compute_fingerprint(path)?;
 
     Ok(LocalSshKey {
-        path: path.clone(),
+        path: path.to_path_buf(),
         public_key,
         fingerprint,
         key_type,
@@ -71,7 +66,7 @@ fn read_ssh_key(path: &PathBuf) -> Result<LocalSshKey> {
 }
 
 /// Compute SHA256 fingerprint of an SSH key
-pub fn compute_fingerprint(key_path: &PathBuf) -> Result<String> {
+pub fn compute_fingerprint(key_path: &Path) -> Result<String> {
     let output = Command::new("ssh-keygen")
         .args(["-lf", key_path.to_str().unwrap(), "-E", "sha256"])
         .output()
@@ -131,61 +126,4 @@ pub async fn register_ssh_key(
         post_graphql::<SshPublicKeyCreate, _>(client, configs.get_backboard(), vars).await?;
 
     Ok(response.ssh_public_key_create)
-}
-
-/// Check if any local SSH key is registered with Railway
-/// Returns the local key that matches a registered one, if any
-pub async fn find_registered_local_key(
-    client: &Client,
-    configs: &Configs,
-) -> Result<Option<LocalSshKey>> {
-    let local_keys = find_local_ssh_keys()?;
-    if local_keys.is_empty() {
-        return Ok(None);
-    }
-
-    let registered_keys = get_registered_ssh_keys(client, configs).await?;
-
-    for local_key in &local_keys {
-        for registered in &registered_keys {
-            if registered.fingerprint == local_key.fingerprint {
-                return Ok(Some(local_key.clone()));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-/// Ensure at least one local SSH key is registered with Railway
-/// Returns the local key that is (or was just) registered
-pub async fn ensure_ssh_key_registered(
-    client: &Client,
-    configs: &Configs,
-) -> Result<LocalSshKey> {
-    let local_keys = find_local_ssh_keys()?;
-
-    if local_keys.is_empty() {
-        bail!(
-            "No SSH keys found in ~/.ssh/\n\n\
-            Generate one with:\n  ssh-keygen -t ed25519\n\n\
-            Then run this command again."
-        );
-    }
-
-    // Check if any local key is already registered
-    if let Some(registered_key) = find_registered_local_key(client, configs).await? {
-        return Ok(registered_key);
-    }
-
-    // No local key is registered - return the best candidate for registration
-    // Prefer ed25519, then ecdsa, then rsa
-    let key_to_register = local_keys
-        .iter()
-        .find(|k| k.key_type.contains("ed25519"))
-        .or_else(|| local_keys.iter().find(|k| k.key_type.contains("ecdsa")))
-        .or_else(|| local_keys.first())
-        .unwrap();
-
-    Ok(key_to_register.clone())
 }
