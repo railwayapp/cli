@@ -257,6 +257,27 @@ impl HttpLogLike for queries::http_logs::HttpLogFields {
     }
 }
 
+impl HttpLogLike for subscriptions::http_logs::HttpLogFields {
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn method(&self) -> &str {
+        &self.method
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn http_status(&self) -> i64 {
+        i64::from(self.http_status)
+    }
+    fn total_duration(&self) -> i64 {
+        i64::from(self.total_duration)
+    }
+    fn request_id(&self) -> &str {
+        &self.request_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -188,13 +188,9 @@ pub async fn command(args: Args) -> Result<()> {
 
     if show_http_logs {
         if should_stream {
-            stream_http_logs(
-                &client,
-                &backboard,
-                deployment_id.clone(),
-                args.filter.clone(),
-                |log| print_http_log(log, args.json),
-            )
+            stream_http_logs(deployment_id.clone(), args.filter.clone(), |log| {
+                print_http_log(log, args.json)
+            })
             .await?;
         } else {
             fetch_http_logs(
