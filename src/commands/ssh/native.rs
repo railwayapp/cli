@@ -20,23 +20,13 @@ pub async fn get_service_instance_id(
 ) -> Result<String> {
     let vars = service_instance::Variables {
         environment_id: environment_id.to_string(),
+        service_id: service_id.to_string(),
     };
 
     let response =
         post_graphql::<ServiceInstance, _>(client, configs.get_backboard(), vars).await?;
 
-    // Find the service instance matching our service
-    for edge in response.environment.service_instances.edges {
-        if edge.node.service_id == service_id {
-            return Ok(edge.node.id);
-        }
-    }
-
-    bail!(
-        "No service instance found for service {} in environment {}",
-        service_id,
-        environment_id
-    )
+    Ok(response.service_instance.id)
 }
 
 /// Ensure SSH key is registered, prompting user if needed
