@@ -7,8 +7,10 @@ use is_terminal::IsTerminal;
 use crate::client::GQLClient;
 use crate::config::Configs;
 use crate::controllers::ssh_keys::{
-    LocalSshKey, delete_ssh_key, find_local_ssh_keys, get_registered_ssh_keys, register_ssh_key,
+    LocalSshKey, compute_fingerprint_from_pubkey, delete_ssh_key, find_local_ssh_keys,
+    get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
 };
+use crate::gql::queries::git_hub_ssh_keys::GitHubSshKeysGitHubSshKeys;
 use crate::gql::queries::ssh_public_keys::SshPublicKeysSshPublicKeysEdgesNode;
 use crate::util::prompt::{prompt_options, prompt_text};
 
@@ -36,6 +38,22 @@ struct RegisteredKeyOption(SshPublicKeysSshPublicKeysEdgesNode);
 impl fmt::Display for RegisteredKeyOption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.0.name, self.0.fingerprint)
+    }
+}
+
+/// Wrapper for GitHub SSH key to implement Display for prompts
+struct GitHubKeyOption(GitHubSshKeysGitHubSshKeys);
+
+impl fmt::Display for GitHubKeyOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts: Vec<&str> = self.0.key.split_whitespace().collect();
+        let key_type = parts.first().unwrap_or(&"unknown");
+        let fingerprint = compute_fingerprint_from_pubkey(&self.0.key).unwrap_or_default();
+        if fingerprint.is_empty() {
+            write!(f, "{} ({})", self.0.title, key_type)
+        } else {
+            write!(f, "{} ({}) {}", self.0.title, key_type, fingerprint)
+        }
     }
 }
 
@@ -73,6 +91,10 @@ enum Commands {
         #[clap(long = "2fa-code")]
         two_factor_code: Option<String>,
     },
+
+    /// Import SSH keys from your GitHub account
+    #[clap(alias = "import")]
+    Github,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -83,6 +105,7 @@ pub async fn command(args: Args) -> Result<()> {
             key,
             two_factor_code,
         }) => remove_key(key, two_factor_code).await,
+        Some(Commands::Github) => import_github_keys().await,
     }
 }
 
@@ -92,30 +115,72 @@ async fn list_keys() -> Result<()> {
 
     let registered_keys = get_registered_ssh_keys(&client, &configs).await?;
     let local_keys = find_local_ssh_keys()?;
+    let github_keys = get_github_ssh_keys(&client, &configs)
+        .await
+        .unwrap_or_default();
 
-    if registered_keys.is_empty() {
-        println!("No SSH keys registered with Railway.");
-        println!();
-        println!("Add a key with: railway ssh keys add");
-        println!("Or register at: https://railway.com/account/ssh-keys");
-        return Ok(());
+    // Show registered Railway keys
+    if !registered_keys.is_empty() {
+        println!("Registered SSH Keys:\n");
+
+        for key in &registered_keys {
+            let local_match = local_keys.iter().find(|l| l.fingerprint == key.fingerprint);
+
+            // Extract comment/hostname from public key
+            let parts: Vec<&str> = key.public_key.split_whitespace().collect();
+            let key_type = parts.first().unwrap_or(&"");
+            let hostname = parts.get(2).unwrap_or(&"");
+
+            println!("  {}", key.name);
+            println!("    Fingerprint: {}", key.fingerprint);
+            if !key_type.is_empty() {
+                println!("    Type:        {}", key_type);
+            }
+            if !hostname.is_empty() {
+                println!("    Hostname:    {}", hostname);
+            }
+            if local_match.is_some() {
+                println!("    Source:      local (~/.ssh/)");
+            }
+            println!();
+        }
     }
 
-    println!("Registered SSH Keys:");
-    println!();
+    // Show GitHub keys
+    if !github_keys.is_empty() {
+        println!("GitHub SSH Keys:\n");
+        for key in &github_keys {
+            let parts: Vec<&str> = key.key.split_whitespace().collect();
+            let key_type = parts.first().unwrap_or(&"unknown");
+            let hostname = parts.get(2).unwrap_or(&"");
+            let fingerprint = compute_fingerprint_from_pubkey(&key.key).unwrap_or_default();
 
-    for key in &registered_keys {
-        let local_match = local_keys.iter().find(|l| l.fingerprint == key.fingerprint);
-        let local_indicator = if local_match.is_some() {
-            " (local)"
-        } else {
-            ""
-        };
+            // Check if already registered
+            let is_registered = registered_keys.iter().any(|r| r.fingerprint == fingerprint);
 
-        println!("  {} {}{}", key.name, key.fingerprint, local_indicator);
+            println!("  {}", key.title);
+            if !fingerprint.is_empty() {
+                println!("    Fingerprint: {}", fingerprint);
+            }
+            println!("    Type:        {}", key_type);
+            if !hostname.is_empty() {
+                println!("    Hostname:    {}", hostname);
+            }
+            if is_registered {
+                println!("    Status:      registered");
+            }
+            println!();
+        }
+
+        let has_unregistered = github_keys.iter().any(|gh| {
+            let fp = compute_fingerprint_from_pubkey(&gh.key).unwrap_or_default();
+            !registered_keys.iter().any(|r| r.fingerprint == fp)
+        });
+        if has_unregistered {
+            println!();
+            println!("Import with: railway ssh keys github");
+        }
     }
-
-    println!();
 
     // Show local keys that aren't registered
     let unregistered: Vec<_> = local_keys
@@ -127,14 +192,32 @@ async fn list_keys() -> Result<()> {
         })
         .collect();
 
+    if registered_keys.is_empty() && github_keys.is_empty() {
+        println!("No SSH keys registered with Railway.");
+        println!();
+        println!("Add a key with: railway ssh keys add");
+        println!("Or register at: https://railway.com/account/ssh-keys");
+        return Ok(());
+    }
+
     if !unregistered.is_empty() {
-        println!("Local keys not registered:");
+        println!("Local Keys (not registered):\n");
         for key in unregistered {
+            // Extract hostname from public key
+            let parts: Vec<&str> = key.public_key.split_whitespace().collect();
+            let hostname = parts.get(2).unwrap_or(&"");
+
             println!(
-                "  {} {}",
-                key.path.file_name().unwrap_or_default().to_string_lossy(),
-                key.fingerprint
+                "  {}",
+                key.path.file_name().unwrap_or_default().to_string_lossy()
             );
+            println!("    Fingerprint: {}", key.fingerprint);
+            println!("    Type:        {}", key.key_type);
+            if !hostname.is_empty() {
+                println!("    Hostname:    {}", hostname);
+            }
+            println!("    Path:        {}", key.path.display());
+            println!();
         }
         println!();
         println!("Add with: railway ssh keys add");
@@ -287,4 +370,73 @@ async fn remove_key(key: Option<String>, two_factor_code: Option<String>) -> Res
             }
         }
     }
+}
+
+async fn import_github_keys() -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    println!("Fetching SSH keys from GitHub...");
+
+    let github_keys = get_github_ssh_keys(&client, &configs).await?;
+
+    if github_keys.is_empty() {
+        println!("No SSH keys found in your GitHub account.");
+        println!();
+        println!("Add SSH keys to GitHub at: https://github.com/settings/keys");
+        return Ok(());
+    }
+
+    let registered_keys = get_registered_ssh_keys(&client, &configs).await?;
+
+    // Filter to keys not already registered (compare by fingerprint)
+    let unregistered: Vec<_> = github_keys
+        .iter()
+        .filter(|gh| {
+            let gh_fingerprint = compute_fingerprint_from_pubkey(&gh.key).unwrap_or_default();
+            !registered_keys
+                .iter()
+                .any(|r| r.fingerprint == gh_fingerprint)
+        })
+        .collect();
+
+    if unregistered.is_empty() {
+        println!("All GitHub SSH keys are already registered with Railway.");
+        return Ok(());
+    }
+
+    println!(
+        "Found {} GitHub key(s) not yet registered:",
+        unregistered.len()
+    );
+    for key in &unregistered {
+        let parts: Vec<&str> = key.key.split_whitespace().collect();
+        let key_type = parts.first().unwrap_or(&"unknown");
+        let fingerprint = compute_fingerprint_from_pubkey(&key.key).unwrap_or_default();
+        println!("  - {} ({}) {}", key.title, key_type, fingerprint);
+    }
+    println!();
+
+    // Select key to import
+    let key_to_import = if unregistered.len() == 1 {
+        unregistered[0].clone()
+    } else if std::io::stdin().is_terminal() {
+        let options: Vec<GitHubKeyOption> = unregistered
+            .into_iter()
+            .map(|k| GitHubKeyOption(k.clone()))
+            .collect();
+        let selected = prompt_options("Select a key to import", options)?;
+        selected.0
+    } else {
+        // Non-interactive: import first key
+        unregistered[0].clone()
+    };
+
+    println!("Importing key: {}", key_to_import.title);
+
+    register_ssh_key(&client, &configs, &key_to_import.title, &key_to_import.key).await?;
+
+    println!("SSH key '{}' imported successfully!", key_to_import.title);
+
+    Ok(())
 }
