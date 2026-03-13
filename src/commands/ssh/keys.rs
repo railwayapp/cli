@@ -121,7 +121,7 @@ async fn list_keys() -> Result<()> {
 
     // Show registered Railway keys
     if !registered_keys.is_empty() {
-        println!("Registered SSH Keys:\n");
+        println!("Registered SSH Keys:");
 
         for key in &registered_keys {
             let local_match = local_keys.iter().find(|l| l.fingerprint == key.fingerprint);
@@ -148,7 +148,7 @@ async fn list_keys() -> Result<()> {
 
     // Show GitHub keys
     if !github_keys.is_empty() {
-        println!("GitHub SSH Keys:\n");
+        println!("GitHub SSH Keys:");
         for key in &github_keys {
             let parts: Vec<&str> = key.key.split_whitespace().collect();
             let key_type = parts.first().unwrap_or(&"unknown");
@@ -177,8 +177,8 @@ async fn list_keys() -> Result<()> {
             !registered_keys.iter().any(|r| r.fingerprint == fp)
         });
         if has_unregistered {
+            println!("Import with:\n    railway ssh keys github");
             println!();
-            println!("Import with: railway ssh keys github");
         }
     }
 
@@ -201,7 +201,7 @@ async fn list_keys() -> Result<()> {
     }
 
     if !unregistered.is_empty() {
-        println!("Local Keys (not registered):\n");
+        println!("Local Keys (not registered):");
         for key in unregistered {
             // Extract hostname from public key
             let parts: Vec<&str> = key.public_key.split_whitespace().collect();
@@ -219,8 +219,7 @@ async fn list_keys() -> Result<()> {
             println!("    Path:        {}", key.path.display());
             println!();
         }
-        println!();
-        println!("Add with: railway ssh keys add");
+        println!("Add with:\n    railway ssh keys add");
     }
 
     Ok(())
