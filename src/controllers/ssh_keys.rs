@@ -5,7 +5,9 @@ use std::process::Command;
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::gql::mutations::{SshPublicKeyCreate, ssh_public_key_create};
+use crate::gql::mutations::{
+    SshPublicKeyCreate, SshPublicKeyDelete, ssh_public_key_create, ssh_public_key_delete,
+};
 use crate::gql::queries::{SshPublicKeys, ssh_public_keys};
 
 /// Local SSH key info
@@ -151,4 +153,22 @@ pub async fn register_ssh_key(
         post_graphql::<SshPublicKeyCreate, _>(client, configs.get_backboard(), vars).await?;
 
     Ok(response.ssh_public_key_create)
+}
+
+/// Delete an SSH public key from Railway
+pub async fn delete_ssh_key(
+    client: &Client,
+    configs: &Configs,
+    id: &str,
+    two_factor_code: Option<String>,
+) -> Result<bool> {
+    let vars = ssh_public_key_delete::Variables {
+        id: id.to_string(),
+        code: two_factor_code,
+    };
+
+    let response =
+        post_graphql::<SshPublicKeyDelete, _>(client, configs.get_backboard(), vars).await?;
+
+    Ok(response.ssh_public_key_delete)
 }

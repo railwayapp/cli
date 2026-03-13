@@ -18,29 +18,33 @@ pub const SSH_MAX_CONNECT_ATTEMPTS: u32 = 3;
 pub const SSH_MAX_CONNECT_ATTEMPTS_PERSISTENT: u32 = 20;
 
 mod common;
+mod keys;
 mod native;
 mod platform;
 
 use common::*;
 use platform::*;
 
-/// Connect to a service via SSH
+/// Connect to a service via SSH or manage SSH keys
 #[derive(Parser, Clone)]
 pub struct Args {
+    #[clap(subcommand)]
+    subcommand: Option<Commands>,
+
     /// Project to connect to (defaults to linked project)
     #[clap(short, long)]
     project: Option<String>,
 
-    #[clap(short, long)]
     /// Service to connect to (defaults to linked service)
+    #[clap(short, long)]
     service: Option<String>,
 
-    #[clap(short, long)]
     /// Environment to connect to (defaults to linked environment)
+    #[clap(short, long)]
     environment: Option<String>,
 
-    #[clap(short, long)]
     /// Deployment instance ID to connect to (defaults to first active instance)
+    #[clap(short, long)]
     #[arg(long = "deployment-instance", value_name = "deployment-instance-id")]
     deployment_instance: Option<String>,
 
@@ -57,7 +61,18 @@ pub struct Args {
     command: Vec<String>,
 }
 
+#[derive(Parser, Clone)]
+enum Commands {
+    /// Manage SSH keys registered with Railway
+    Keys(keys::Args),
+}
+
 pub async fn command(args: Args) -> Result<()> {
+    // Handle subcommands first
+    if let Some(Commands::Keys(keys_args)) = args.subcommand {
+        return keys::command(keys_args).await;
+    }
+
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
