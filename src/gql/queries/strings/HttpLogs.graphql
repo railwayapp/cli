@@ -1,0 +1,20 @@
+query HttpLogs($deploymentId: String!, $limit: Int, $filter: String, $startDate: String, $endDate: String) {
+  httpLogs(
+    deploymentId: $deploymentId
+    limit: $limit
+    filter: $filter
+    startDate: $startDate
+    endDate: $endDate
+  ) {
+    ...HttpLogFields
+  }
+}
+
+fragment HttpLogFields on HttpLog {
+  timestamp
+  method
+  path
+  httpStatus
+  totalDuration
+  requestId
+}

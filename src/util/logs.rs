@@ -129,6 +129,52 @@ where
     println!("{}", format_log_string(log, json, format));
 }
 
+pub trait HttpLogLike {
+    fn timestamp(&self) -> &str;
+    fn method(&self) -> &str;
+    fn path(&self) -> &str;
+    fn http_status(&self) -> i64;
+    fn total_duration(&self) -> i64;
+    fn request_id(&self) -> &str;
+}
+
+pub fn format_http_log_string<T: HttpLogLike>(log: &T, json: bool) -> String {
+    if json {
+        serde_json::json!({
+            "timestamp": log.timestamp(),
+            "method": log.method(),
+            "path": log.path(),
+            "httpStatus": log.http_status(),
+            "totalDuration": log.total_duration(),
+            "requestId": log.request_id(),
+        })
+        .to_string()
+    } else {
+        let status = log.http_status();
+        let status = match status {
+            200..=299 => status.to_string().green(),
+            300..=399 => status.to_string().cyan(),
+            400..=499 => status.to_string().yellow(),
+            500..=599 => status.to_string().red(),
+            _ => status.to_string().normal(),
+        };
+
+        format!(
+            "{} {} {} {} {} {}",
+            log.timestamp().dimmed(),
+            log.method().bold(),
+            log.path(),
+            status.bold(),
+            format!("{}ms", log.total_duration()).dimmed(),
+            log.request_id().dimmed()
+        )
+    }
+}
+
+pub fn print_http_log<T: HttpLogLike>(log: T, json: bool) {
+    println!("{}", format_http_log_string(&log, json));
+}
+
 // Implementations for all the generated GraphQL log types
 impl LogLike for subscriptions::deployment_logs::LogFields {
     fn message(&self) -> &str {
@@ -187,6 +233,48 @@ impl LogLike for queries::build_logs::LogFields {
             .iter()
             .map(|a| (a.key.as_str(), a.value.as_str()))
             .collect()
+    }
+}
+
+impl HttpLogLike for queries::http_logs::HttpLogFields {
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn method(&self) -> &str {
+        &self.method
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn http_status(&self) -> i64 {
+        i64::from(self.http_status)
+    }
+    fn total_duration(&self) -> i64 {
+        i64::from(self.total_duration)
+    }
+    fn request_id(&self) -> &str {
+        &self.request_id
+    }
+}
+
+impl HttpLogLike for subscriptions::http_logs::HttpLogFields {
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn method(&self) -> &str {
+        &self.method
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn http_status(&self) -> i64 {
+        i64::from(self.http_status)
+    }
+    fn total_duration(&self) -> i64 {
+        i64::from(self.total_duration)
+    }
+    fn request_id(&self) -> &str {
+        &self.request_id
     }
 }
 
@@ -316,5 +404,77 @@ mod tests {
         // Test simple output mode
         let output = format_log_string(log, false, LogFormat::Simple);
         assert_eq!(output, "Test message");
+    }
+
+    #[derive(serde::Serialize)]
+    struct TestHttpLog {
+        timestamp: String,
+        method: String,
+        path: String,
+        http_status: i64,
+        total_duration: i64,
+        request_id: String,
+    }
+
+    impl HttpLogLike for TestHttpLog {
+        fn timestamp(&self) -> &str {
+            &self.timestamp
+        }
+        fn method(&self) -> &str {
+            &self.method
+        }
+        fn path(&self) -> &str {
+            &self.path
+        }
+        fn http_status(&self) -> i64 {
+            self.http_status
+        }
+        fn total_duration(&self) -> i64 {
+            self.total_duration
+        }
+        fn request_id(&self) -> &str {
+            &self.request_id
+        }
+    }
+
+    #[test]
+    fn test_format_http_log_plain_text() {
+        let log = TestHttpLog {
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            method: "GET".to_string(),
+            path: "/healthz".to_string(),
+            http_status: 200,
+            total_duration: 5,
+            request_id: "req-123".to_string(),
+        };
+
+        let output = format_http_log_string(&log, false);
+        assert!(output.contains("2025-01-01T00:00:00Z"));
+        assert!(output.contains("GET"));
+        assert!(output.contains("/healthz"));
+        assert!(output.contains("200"));
+        assert!(output.contains("5ms"));
+        assert!(output.contains("req-123"));
+    }
+
+    #[test]
+    fn test_format_http_log_json() {
+        let log = TestHttpLog {
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            method: "POST".to_string(),
+            path: "/form/verify".to_string(),
+            http_status: 200,
+            total_duration: 4,
+            request_id: "req-456".to_string(),
+        };
+
+        let output = format_http_log_string(&log, true);
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(json["timestamp"], "2025-01-01T00:00:00Z");
+        assert_eq!(json["method"], "POST");
+        assert_eq!(json["path"], "/form/verify");
+        assert_eq!(json["httpStatus"], 200);
+        assert_eq!(json["totalDuration"], 4);
+        assert_eq!(json["requestId"], "req-456");
     }
 }
