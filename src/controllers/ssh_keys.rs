@@ -8,7 +8,7 @@ use crate::config::Configs;
 use crate::gql::mutations::{
     SshPublicKeyCreate, SshPublicKeyDelete, ssh_public_key_create, ssh_public_key_delete,
 };
-use crate::gql::queries::{SshPublicKeys, ssh_public_keys};
+use crate::gql::queries::{GitHubSshKeys, SshPublicKeys, git_hub_ssh_keys, ssh_public_keys};
 
 /// Local SSH key info
 #[derive(Debug, Clone)]
@@ -92,7 +92,7 @@ fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
     })
 }
 
-/// Compute SHA256 fingerprint of an SSH key
+/// Compute SHA256 fingerprint of an SSH key file
 pub fn compute_fingerprint(key_path: &Path) -> Result<String> {
     let output = Command::new("ssh-keygen")
         .args(["-lf", key_path.to_str().unwrap(), "-E", "sha256"])
@@ -109,6 +109,41 @@ pub fn compute_fingerprint(key_path: &Path) -> Result<String> {
     let output_str = String::from_utf8_lossy(&output.stdout);
     // Format: "256 SHA256:xxxxx comment (TYPE)"
     // We want "SHA256:xxxxx"
+    let parts: Vec<&str> = output_str.split_whitespace().collect();
+    if parts.len() >= 2 {
+        Ok(parts[1].to_string())
+    } else {
+        bail!("Could not parse fingerprint from ssh-keygen output");
+    }
+}
+
+/// Compute SHA256 fingerprint from a public key string
+pub fn compute_fingerprint_from_pubkey(pubkey: &str) -> Result<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new("ssh-keygen")
+        .args(["-lf", "-", "-E", "sha256"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to run ssh-keygen")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(pubkey.as_bytes())?;
+    }
+
+    let output = child.wait_with_output()?;
+
+    if !output.status.success() {
+        bail!(
+            "ssh-keygen failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<&str> = output_str.split_whitespace().collect();
     if parts.len() >= 2 {
         Ok(parts[1].to_string())
@@ -171,4 +206,15 @@ pub async fn delete_ssh_key(
         post_graphql::<SshPublicKeyDelete, _>(client, configs.get_backboard(), vars).await?;
 
     Ok(response.ssh_public_key_delete)
+}
+
+/// Get SSH public keys from the user's GitHub account
+pub async fn get_github_ssh_keys(
+    client: &Client,
+    configs: &Configs,
+) -> Result<Vec<git_hub_ssh_keys::GitHubSshKeysGitHubSshKeys>> {
+    let vars = git_hub_ssh_keys::Variables {};
+    let response = post_graphql::<GitHubSshKeys, _>(client, configs.get_backboard(), vars).await?;
+
+    Ok(response.git_hub_ssh_keys)
 }
