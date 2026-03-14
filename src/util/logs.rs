@@ -57,7 +57,7 @@ pub fn format_attr_log_string<T: LogLike>(log: &T, show_all_attributes: bool) ->
         .bold();
 
         if others.is_empty() {
-            format!("{} {}", level_str, message)
+            format!("{level_str} {message}")
         } else {
             format!(
                 "{} {} {} {}",
