@@ -18,28 +18,33 @@ pub const SSH_MAX_CONNECT_ATTEMPTS: u32 = 3;
 pub const SSH_MAX_CONNECT_ATTEMPTS_PERSISTENT: u32 = 20;
 
 mod common;
+mod keys;
+mod native;
 mod platform;
 
 use common::*;
 use platform::*;
 
-/// Connect to a service via SSH
+/// Connect to a service via SSH or manage SSH keys
 #[derive(Parser, Clone)]
 pub struct Args {
+    #[clap(subcommand)]
+    subcommand: Option<Commands>,
+
     /// Project to connect to (defaults to linked project)
     #[clap(short, long)]
     project: Option<String>,
 
-    #[clap(short, long)]
     /// Service to connect to (defaults to linked service)
+    #[clap(short, long)]
     service: Option<String>,
 
-    #[clap(short, long)]
     /// Environment to connect to (defaults to linked environment)
+    #[clap(short, long)]
     environment: Option<String>,
 
-    #[clap(short, long)]
     /// Deployment instance ID to connect to (defaults to first active instance)
+    #[clap(short, long)]
     #[arg(long = "deployment-instance", value_name = "deployment-instance-id")]
     deployment_instance: Option<String>,
 
@@ -47,16 +52,76 @@ pub struct Args {
     #[clap(long, value_name = "SESSION_NAME", default_missing_value = "railway", num_args = 0..=1)]
     session: Option<String>,
 
+    /// Use WebSocket relay instead of native SSH (fallback mode)
+    #[clap(long, hide = true)]
+    relay: bool,
+
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
 }
 
+#[derive(Parser, Clone)]
+enum Commands {
+    /// Manage SSH keys registered with Railway
+    Keys(keys::Args),
+}
+
 pub async fn command(args: Args) -> Result<()> {
+    // Handle subcommands first
+    if let Some(Commands::Keys(keys_args)) = args.subcommand {
+        return keys::command(keys_args).await;
+    }
+
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let params = get_ssh_connect_params(args.clone(), &configs, &client).await?;
+    // Use native SSH for interactive shells only (no command, no tmux session)
+    // Command execution and tmux use relay mode because Railway's SSH proxy
+    // doesn't forward exec commands through the QUIC tunnel
+    let use_native = !args.relay
+        && args.command.is_empty()
+        && args.session.is_none()
+        && native::native_ssh_available();
+
+    if use_native {
+        return command_native(args, &configs, &client).await;
+    }
+
+    // Fall back to WebSocket relay for commands, tmux sessions, or when native unavailable
+    command_relay(args, &configs, &client).await
+}
+
+/// Native SSH command using ssh <serviceInstanceId>@ssh.railway.com
+/// Only used for interactive shells - commands and tmux use relay mode
+async fn command_native(args: Args, configs: &Configs, client: &reqwest::Client) -> Result<()> {
+    // Ensure SSH key is registered
+    native::ensure_ssh_key(client, configs).await?;
+
+    // Get connection params to resolve service instance ID
+    let params = get_ssh_connect_params(args.clone(), configs, client).await?;
+
+    // Get the service instance ID
+    let service_instance_id = native::get_service_instance_id(
+        client,
+        configs,
+        &params.environment_id,
+        &params.service_id,
+    )
+    .await?;
+
+    // Run native SSH (interactive shell only)
+    let exit_code = native::run_native_ssh(&service_instance_id)?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
+
+/// WebSocket relay command (legacy/fallback)
+async fn command_relay(args: Args, configs: &Configs, client: &reqwest::Client) -> Result<()> {
+    let params = get_ssh_connect_params(args.clone(), configs, client).await?;
 
     if let Some(name) = args.session {
         run_persistent_session(&params, name).await?;

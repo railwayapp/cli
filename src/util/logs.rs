@@ -76,8 +76,6 @@ pub fn format_attr_log_string<T: LogLike>(log: &T, show_all_attributes: bool) ->
 /// Formatting mode for log output
 #[derive(Clone, Copy)]
 pub enum LogFormat {
-    /// Just the raw message, no formatting
-    Simple,
     /// Level indicator only (e.g. [ERRO]), no other attributes - good for build logs
     LevelOnly,
     /// Full formatting with all attributes - good for deploy logs
@@ -114,7 +112,6 @@ where
         serde_json::to_string(&map).unwrap()
     } else {
         match format {
-            LogFormat::Simple => log.message().to_string(),
             LogFormat::LevelOnly => format_attr_log_string(&log, false),
             LogFormat::Full => format_attr_log_string(&log, true),
         }
@@ -296,25 +293,12 @@ mod tests {
             ],
         };
 
-        // Test JSON output mode
-        let output = format_log_string(log, true, LogFormat::Simple);
+        // Test JSON output mode (format param is ignored for JSON)
+        let output = format_log_string(log, true, LogFormat::Full);
         let json: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(json["message"], "Test message");
         assert_eq!(json["timestamp"], "2025-01-01T00:00:00Z");
         assert_eq!(json["level"], "warn");
         assert_eq!(json["count"], 42); // This parses as a number
-    }
-
-    #[test]
-    fn test_print_log_simple_mode() {
-        let log = TestLog {
-            message: "Test message".to_string(),
-            timestamp: "2025-01-01T00:00:00Z".to_string(),
-            attributes: vec![("level".to_string(), "info".to_string())],
-        };
-
-        // Test simple output mode
-        let output = format_log_string(log, false, LogFormat::Simple);
-        assert_eq!(output, "Test message");
     }
 }

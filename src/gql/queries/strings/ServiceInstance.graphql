@@ -1,0 +1,5 @@
+query ServiceInstance($environmentId: String!, $serviceId: String!) {
+  serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+    id
+  }
+}
