@@ -52,9 +52,9 @@ pub struct Args {
     #[clap(long, value_name = "SESSION_NAME", default_missing_value = "railway", num_args = 0..=1)]
     session: Option<String>,
 
-    /// Use WebSocket relay instead of native SSH (fallback mode)
-    #[clap(long, hide = true)]
-    relay: bool,
+    /// Use native SSH client (requires SSH key setup)
+    #[clap(long)]
+    native: bool,
 
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
@@ -76,10 +76,10 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    // Use native SSH for interactive shells only (no command, no tmux session)
-    // Command execution and tmux use relay mode because Railway's SSH proxy
-    // doesn't forward exec commands through the QUIC tunnel
-    let use_native = !args.relay
+    // Use native SSH only when explicitly requested with --native flag
+    // Native SSH only works for interactive shells (no command, no tmux session)
+    // because Railway's SSH proxy doesn't forward exec commands through the QUIC tunnel
+    let use_native = args.native
         && args.command.is_empty()
         && args.session.is_none()
         && native::native_ssh_available();
@@ -88,7 +88,7 @@ pub async fn command(args: Args) -> Result<()> {
         return command_native(args, &configs, &client).await;
     }
 
-    // Fall back to WebSocket relay for commands, tmux sessions, or when native unavailable
+    // Use WebSocket relay by default
     command_relay(args, &configs, &client).await
 }
 
