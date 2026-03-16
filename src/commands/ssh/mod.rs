@@ -77,14 +77,21 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     // Use native SSH only when explicitly requested with --native flag
-    // Native SSH only works for interactive shells (no command, no tmux session)
-    // because Railway's SSH proxy doesn't forward exec commands through the QUIC tunnel
-    let use_native = args.native
-        && args.command.is_empty()
-        && args.session.is_none()
-        && native::native_ssh_available();
-
-    if use_native {
+    if args.native {
+        // Native SSH doesn't support tmux sessions (requires relay for session management)
+        if args.session.is_some() {
+            anyhow::bail!(
+                "Native SSH does not support tmux sessions.\n\
+                Remove the --native flag to use --session via the relay."
+            );
+        }
+        if !native::native_ssh_available() {
+            anyhow::bail!(
+                "No SSH keys found in ~/.ssh/\n\n\
+                Generate one with:\n  ssh-keygen -t ed25519\n\n\
+                Then run this command again."
+            );
+        }
         return command_native(args, &configs, &client).await;
     }
 
@@ -93,7 +100,6 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 /// Native SSH command using ssh <serviceInstanceId>@ssh.railway.com
-/// Only used for interactive shells - commands and tmux use relay mode
 async fn command_native(args: Args, configs: &Configs, client: &reqwest::Client) -> Result<()> {
     // Ensure SSH key is registered
     native::ensure_ssh_key(client, configs).await?;
@@ -110,8 +116,13 @@ async fn command_native(args: Args, configs: &Configs, client: &reqwest::Client)
     )
     .await?;
 
-    // Run native SSH (interactive shell only)
-    let exit_code = native::run_native_ssh(&service_instance_id)?;
+    // Run native SSH with optional command
+    let command = if args.command.is_empty() {
+        None
+    } else {
+        Some(args.command.as_slice())
+    };
+    let exit_code = native::run_native_ssh(&service_instance_id, command)?;
     if exit_code != 0 {
         std::process::exit(exit_code);
     }

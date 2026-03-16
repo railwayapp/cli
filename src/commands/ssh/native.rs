@@ -118,15 +118,20 @@ pub fn native_ssh_available() -> bool {
 }
 
 /// Run SSH command with the given service instance ID
-/// Note: This only works for interactive shells. Command execution requires relay mode
-/// because Railway's SSH proxy doesn't forward exec commands through the QUIC tunnel.
-pub fn run_native_ssh(service_instance_id: &str) -> Result<i32> {
+/// Optionally executes a command instead of starting an interactive shell
+pub fn run_native_ssh(service_instance_id: &str, command: Option<&[String]>) -> Result<i32> {
     let target = format!("{}@{}", service_instance_id, SSH_HOST);
 
     let mut ssh_cmd = Command::new("ssh");
     ssh_cmd.arg(&target);
 
-    // Interactive shell - inherit everything
+    // Add command if provided
+    if let Some(cmd_args) = command {
+        for arg in cmd_args {
+            ssh_cmd.arg(arg);
+        }
+    }
+
     ssh_cmd.stdin(Stdio::inherit());
     ssh_cmd.stdout(Stdio::inherit());
     ssh_cmd.stderr(Stdio::inherit());
