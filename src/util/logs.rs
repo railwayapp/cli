@@ -129,7 +129,7 @@ where
     println!("{}", format_log_string(log, json, format));
 }
 
-pub trait HttpLogLike {
+pub trait HttpLogLike: serde::Serialize {
     fn timestamp(&self) -> &str;
     fn method(&self) -> &str;
     fn path(&self) -> &str;
@@ -140,15 +140,7 @@ pub trait HttpLogLike {
 
 pub fn format_http_log_string<T: HttpLogLike>(log: &T, json: bool) -> String {
     if json {
-        serde_json::json!({
-            "timestamp": log.timestamp(),
-            "method": log.method(),
-            "path": log.path(),
-            "httpStatus": log.http_status(),
-            "totalDuration": log.total_duration(),
-            "requestId": log.request_id(),
-        })
-        .to_string()
+        serde_json::to_string(log).unwrap()
     } else {
         let status = log.http_status();
         let status = match status {
@@ -407,6 +399,7 @@ mod tests {
     }
 
     #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct TestHttpLog {
         timestamp: String,
         method: String,

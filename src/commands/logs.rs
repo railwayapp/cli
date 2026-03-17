@@ -1,3 +1,6 @@
+use std::fmt;
+use std::str::FromStr;
+
 use is_terminal::IsTerminal;
 
 use crate::{
@@ -21,25 +24,156 @@ use super::{
     *,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum HttpMethod {
+    #[value(name = "GET")]
+    Get,
+    #[value(name = "POST")]
+    Post,
+    #[value(name = "PUT")]
+    Put,
+    #[value(name = "DELETE")]
+    Delete,
+    #[value(name = "PATCH")]
+    Patch,
+    #[value(name = "HEAD")]
+    Head,
+    #[value(name = "OPTIONS")]
+    Options,
+}
+
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Get => write!(f, "GET"),
+            Self::Post => write!(f, "POST"),
+            Self::Put => write!(f, "PUT"),
+            Self::Delete => write!(f, "DELETE"),
+            Self::Patch => write!(f, "PATCH"),
+            Self::Head => write!(f, "HEAD"),
+            Self::Options => write!(f, "OPTIONS"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum StatusFilter {
+    Exact(u16),
+    Comparison { op: &'static str, value: u16 },
+    Range { low: u16, high: u16 },
+}
+
+impl StatusFilter {
+    fn to_filter_expr(&self) -> String {
+        match self {
+            Self::Exact(v) => format!("@httpStatus:{v}"),
+            Self::Comparison { op, value } => format!("@httpStatus:{op}{value}"),
+            Self::Range { low, high } => format!("@httpStatus:{low}..{high}"),
+        }
+    }
+}
+
+impl FromStr for StatusFilter {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Try range first: "200..299"
+        if let Some((low, high)) = s.split_once("..") {
+            let low: u16 = low
+                .parse()
+                .map_err(|_| format!("Invalid status range start: {low}"))?;
+            let high: u16 = high
+                .parse()
+                .map_err(|_| format!("Invalid status range end: {high}"))?;
+            if low > high {
+                return Err(format!("Range start ({low}) must be <= end ({high})"));
+            }
+            return Ok(Self::Range { low, high });
+        }
+
+        // Try comparison: ">=400", ">399", "<=499", "<500"
+        for prefix in &[">=", "<=", ">", "<"] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                let value: u16 = rest
+                    .parse()
+                    .map_err(|_| format!("Invalid status code: {rest}"))?;
+                return Ok(Self::Comparison { op: prefix, value });
+            }
+        }
+
+        // Exact: "200"
+        let value: u16 = s.parse().map_err(|_| {
+            format!(
+                "Invalid status filter: \"{s}\". Expected a number (200), comparison (>=400), or range (500..599)"
+            )
+        })?;
+        Ok(Self::Exact(value))
+    }
+}
+
+fn build_http_filter(args: &Args) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ref method) = args.method {
+        parts.push(format!("@method:{method}"));
+    }
+
+    if let Some(ref status) = args.status {
+        parts.push(status.to_filter_expr());
+    }
+
+    if let Some(ref path) = args.path {
+        parts.push(format!("@path:{path}"));
+    }
+
+    if let Some(ref request_id) = args.request_id {
+        parts.push(format!("@requestId:{request_id}"));
+    }
+
+    if let Some(ref raw_filter) = args.filter {
+        if !raw_filter.is_empty() {
+            parts.push(raw_filter.clone());
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 #[derive(Parser)]
 #[clap(
     about = "View build, deploy, or HTTP logs from a Railway deployment",
     long_about = "View build, deploy, or HTTP logs from a Railway deployment. This will stream logs by default, or fetch historical logs if the --lines, --since, or --until flags are provided.",
     after_help = "Examples:
 
+  Deployment logs:
   railway logs                                                       # Stream live logs from latest deployment
   railway logs --build 7422c95b-c604-46bc-9de4-b7a43e1fd53d          # Stream build logs from a specific deployment
-  railway logs --http --lines 50                                     # Pull latest HTTP logs without streaming
-  railway logs --http --filter \"@path:/api/users @httpStatus:200\"    # Query HTTP logs by path and status
   railway logs --lines 100                                           # Pull last 100 logs without streaming
   railway logs --since 1h                                            # View logs from the last hour
   railway logs --since 30m --until 10m                               # View logs from 30 minutes ago until 10 minutes ago
   railway logs --since 2024-01-15T10:00:00Z                          # View logs since a specific timestamp
-  railway logs --service backend --environment production            # Stream latest deployment logs from a specific service in a specific environment
+  railway logs --service backend --environment production            # Stream logs from a specific service/environment
   railway logs --lines 10 --filter \"@level:error\"                    # View 10 latest error logs
   railway logs --lines 10 --filter \"@level:warn AND rate limit\"      # View 10 latest warning logs related to rate limiting
   railway logs --json                                                # Get logs in JSON format
-  railway logs --latest                                              # Stream logs from the latest deployment (even if failed/building)"
+  railway logs --latest                                              # Stream logs from the latest deployment (even if failed/building)
+
+  HTTP logs (typed filters):
+  railway logs --http --method GET --status 200                      # GET requests with 200 status
+  railway logs --http --method POST --path /api/users                # POST requests to /api/users
+  railway logs --http --status \">=400\" --lines 50                    # Client/server errors, last 50
+  railway logs --http --status 500..599                              # Server errors only
+  railway logs --http --request-id abc123                            # Find a specific request
+
+  HTTP logs (raw filter for advanced queries):
+  railway logs --http --method GET --filter \"@totalDuration:>=1000\"  # Slow GET requests (combining typed + raw)
+  railway logs --http --filter \"@srcIp:203.0.113.1 @edgeRegion:us-east-1\"  # Filter by source IP and region
+  railway logs --http --filter \"@httpStatus:>=400 AND @path:/api\"   # Errors on API routes
+  railway logs --http --filter \"-@method:OPTIONS\"                    # Exclude OPTIONS requests"
 )]
 pub struct Args {
     /// Service to view logs from (defaults to linked service). Can be service name or service ID
@@ -74,10 +208,51 @@ pub struct Args {
     lines: Option<i64>,
 
     /// Filter logs using Railway's query syntax
-    ///
-    /// Can be a text search ("error message" or "user signup"), attribute filters (@level:error, @level:warn), or a combination with the operators AND, OR, - (not). See https://docs.railway.com/guides/logs for full syntax.
-    #[clap(long, short = 'f')]
+    #[clap(
+        long,
+        short = 'f',
+        long_help = "\
+Filter logs using Railway's query syntax
+
+For deploy/build logs:
+  Text search:   \"error message\", \"user signup\"
+  Level filter:  @level:error, @level:warn, @level:info
+
+For HTTP logs (--http), all filterable fields:
+  String:  @method, @path, @host, @requestId, @clientUa, @srcIp,
+           @edgeRegion, @upstreamAddress, @upstreamProto,
+           @downstreamProto, @responseDetails,
+           @deploymentId, @deploymentInstanceId
+  Numeric: @httpStatus, @totalDuration, @responseTime,
+           @upstreamRqDuration, @txBytes, @rxBytes, @upstreamErrors
+
+Numeric operators: > >= < <= .. (range, e.g. @httpStatus:200..299)
+Logical operators: AND, OR, - (negation), parentheses for grouping
+
+Examples:
+  @httpStatus:>=400
+  @totalDuration:>1000
+  -@method:OPTIONS
+  @httpStatus:>=400 AND @path:/api
+  (@method:GET OR @method:POST) AND @httpStatus:500"
+    )]
     filter: Option<String>,
+
+    /// Filter HTTP logs by request method (requires --http)
+    #[clap(long, requires = "http", value_enum, ignore_case = true)]
+    method: Option<HttpMethod>,
+
+    /// Filter HTTP logs by status code (requires --http). Accepts: 200, >=400, 500..599
+    #[clap(long, requires = "http", value_name = "CODE")]
+    status: Option<StatusFilter>,
+
+    /// Filter HTTP logs by request path (requires --http)
+    #[clap(long, requires = "http", value_name = "PATH")]
+    path: Option<String>,
+
+    /// Filter HTTP logs by request ID (requires --http)
+    #[clap(long = "request-id", requires = "http", value_name = "ID")]
+    request_id: Option<String>,
 
     /// Always show logs from the latest deployment, even if it failed or is still building
     #[clap(long)]
@@ -99,6 +274,9 @@ pub async fn command(args: Args) -> Result<()> {
     let linked_project = configs.get_linked_project().await?;
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+
+    // Build filter before args is partially moved by service matching below
+    let http_filter = build_http_filter(&args);
 
     let start_date = args.since.as_ref().map(|s| parse_time(s)).transpose()?;
     let end_date = args.until.as_ref().map(|s| parse_time(s)).transpose()?;
@@ -188,7 +366,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     if show_http_logs {
         if should_stream {
-            stream_http_logs(deployment_id.clone(), args.filter.clone(), |log| {
+            stream_http_logs(deployment_id.clone(), http_filter, |log| {
                 print_http_log(log, args.json)
             })
             .await?;
@@ -199,7 +377,7 @@ pub async fn command(args: Args) -> Result<()> {
                     backboard: &backboard,
                     deployment_id: deployment_id.clone(),
                     limit: args.lines.or(Some(500)),
-                    filter: args.filter.clone(),
+                    filter: http_filter,
                     start_date,
                     end_date,
                 },
@@ -250,4 +428,48 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_http_filter_composes_typed_and_raw() {
+        // No filters → None
+        let args = Args::parse_from(["logs", "--http"]);
+        assert_eq!(build_http_filter(&args), None);
+
+        // All typed flags composed in order
+        let args = Args::parse_from([
+            "logs",
+            "--http",
+            "--method",
+            "POST",
+            "--status",
+            ">=400",
+            "--path",
+            "/api/users",
+            "--request-id",
+            "abc123",
+        ]);
+        assert_eq!(
+            build_http_filter(&args),
+            Some("@method:POST @httpStatus:>=400 @path:/api/users @requestId:abc123".to_string())
+        );
+
+        // Typed + raw filter combined
+        let args = Args::parse_from([
+            "logs",
+            "--http",
+            "--method",
+            "GET",
+            "--filter",
+            "@totalDuration:>=1000",
+        ]);
+        assert_eq!(
+            build_http_filter(&args),
+            Some("@method:GET @totalDuration:>=1000".to_string())
+        );
+    }
 }

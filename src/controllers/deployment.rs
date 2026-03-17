@@ -105,21 +105,24 @@ pub async fn fetch_http_logs(
     params: FetchLogsParams<'_>,
     on_log: impl Fn(queries::http_logs::HttpLogFields),
 ) -> Result<()> {
+    let before_limit = params.limit.unwrap_or(500);
     let vars = queries::http_logs::Variables {
         deployment_id: params.deployment_id,
-        limit: params.limit,
         filter: params.filter,
-        start_date: params.start_date.map(|date| date.to_rfc3339()),
-        end_date: params.end_date.map(|date| date.to_rfc3339()),
+        before_limit,
+        before_date: params.start_date.map(|date| date.to_rfc3339()),
+        anchor_date: params.end_date.map(|date| date.to_rfc3339()),
+        after_date: None,
+        after_limit: None,
     };
 
     let response =
         post_graphql::<queries::HttpLogs, _>(params.client, params.backboard, vars).await?;
 
     let logs = response.http_logs;
-    let logs_to_process = take_last_n_logs(logs, params.limit);
+    let logs = take_last_n_logs(logs, Some(before_limit));
 
-    for log in logs_to_process {
+    for log in logs {
         on_log(log);
     }
 

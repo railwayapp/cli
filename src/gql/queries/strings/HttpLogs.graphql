@@ -1,10 +1,20 @@
-query HttpLogs($deploymentId: String!, $limit: Int, $filter: String, $startDate: String, $endDate: String) {
+query HttpLogs(
+  $deploymentId: String!
+  $filter: String
+  $beforeLimit: Int!
+  $beforeDate: String
+  $anchorDate: String
+  $afterDate: String
+  $afterLimit: Int
+) {
   httpLogs(
     deploymentId: $deploymentId
-    limit: $limit
     filter: $filter
-    startDate: $startDate
-    endDate: $endDate
+    beforeLimit: $beforeLimit
+    beforeDate: $beforeDate
+    anchorDate: $anchorDate
+    afterDate: $afterDate
+    afterLimit: $afterLimit
   ) {
     ...HttpLogFields
   }
@@ -17,4 +27,18 @@ fragment HttpLogFields on HttpLog {
   httpStatus
   totalDuration
   requestId
+  host
+  clientUa
+  srcIp
+  edgeRegion
+  txBytes
+  rxBytes
+  upstreamRqDuration
+  upstreamAddress
+  upstreamProto
+  downstreamProto
+  upstreamErrors
+  responseDetails
+  deploymentId
+  deploymentInstanceId
 }

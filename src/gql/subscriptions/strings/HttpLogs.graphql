@@ -23,4 +23,18 @@ fragment HttpLogFields on HttpLog {
   httpStatus
   totalDuration
   requestId
+  host
+  clientUa
+  srcIp
+  edgeRegion
+  txBytes
+  rxBytes
+  upstreamRqDuration
+  upstreamAddress
+  upstreamProto
+  downstreamProto
+  upstreamErrors
+  responseDetails
+  deploymentId
+  deploymentInstanceId
 }
