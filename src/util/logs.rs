@@ -239,10 +239,10 @@ impl HttpLogLike for queries::http_logs::HttpLogFields {
         &self.path
     }
     fn http_status(&self) -> i64 {
-        i64::from(self.http_status)
+        self.http_status
     }
     fn total_duration(&self) -> i64 {
-        i64::from(self.total_duration)
+        self.total_duration
     }
     fn request_id(&self) -> &str {
         &self.request_id
@@ -260,10 +260,10 @@ impl HttpLogLike for subscriptions::http_logs::HttpLogFields {
         &self.path
     }
     fn http_status(&self) -> i64 {
-        i64::from(self.http_status)
+        self.http_status
     }
     fn total_duration(&self) -> i64 {
-        i64::from(self.total_duration)
+        self.total_duration
     }
     fn request_id(&self) -> &str {
         &self.request_id

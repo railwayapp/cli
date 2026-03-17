@@ -1,7 +1,7 @@
 use crate::{
     commands::{
         queries::{self},
-        subscriptions::{self, build_logs, deployment_logs, http_logs},
+        subscriptions::{self, build_logs, deployment, deployment_logs, http_logs},
     },
     post_graphql,
     subscription::subscribe_graphql,
@@ -197,6 +197,50 @@ pub async fn stream_build_logs(
 }
 
 pub async fn stream_http_logs(
+    deployment_id: String,
+    filter: Option<String>,
+    on_log: impl Fn(http_logs::HttpLogFields),
+) -> Result<()> {
+    tokio::select! {
+        result = stream_http_logs_inner(deployment_id.clone(), filter, on_log) => result,
+        _ = wait_for_deployment_removal(&deployment_id) => {
+            eprintln!("\nDeployment was removed. HTTP log stream closed.");
+            Ok(())
+        }
+    }
+}
+
+async fn wait_for_deployment_removal(deployment_id: &str) {
+    loop {
+        if let Ok(mut stream) = subscribe_graphql::<subscriptions::Deployment>(
+            deployment::Variables {
+                id: deployment_id.to_owned(),
+            },
+        )
+        .await
+        {
+            while let Some(response) = stream.next().await {
+                let removed = response
+                    .ok()
+                    .and_then(|r| r.data)
+                    .is_some_and(|data| {
+                        matches!(
+                            data.deployment.status,
+                            deployment::DeploymentStatus::REMOVED
+                                | deployment::DeploymentStatus::REMOVING
+                        )
+                    });
+                if removed {
+                    return;
+                }
+            }
+        }
+        // Subscription failed or ended without seeing removal — retry
+        sleep(Duration::from_secs(5)).await;
+    }
+}
+
+async fn stream_http_logs_inner(
     deployment_id: String,
     filter: Option<String>,
     on_log: impl Fn(http_logs::HttpLogFields),
