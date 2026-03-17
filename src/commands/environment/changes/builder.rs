@@ -49,12 +49,12 @@ pub fn parse_interactive(
     };
 
     let mut entries: Vec<PatchEntry> = Vec::new();
-    let base_path = format!("services.{}.build", service_id);
+    let base_path = format!("services.{service_id}.build");
 
     match builder_type {
         BuilderType::Dockerfile => {
             entries.push((
-                format!("{}.builder", base_path),
+                format!("{base_path}.builder"),
                 serde_json::json!("DOCKERFILE"),
             ));
 
@@ -66,7 +66,7 @@ pub fn parse_interactive(
             )? {
                 if !dockerfile_path.is_empty() {
                     entries.push((
-                        format!("{}.dockerfilePath", base_path),
+                        format!("{base_path}.dockerfilePath"),
                         serde_json::json!(dockerfile_path),
                     ));
                 }
@@ -74,7 +74,7 @@ pub fn parse_interactive(
         }
         BuilderType::Railpack => {
             entries.push((
-                format!("{}.builder", base_path),
+                format!("{base_path}.builder"),
                 serde_json::json!("RAILPACK"),
             ));
             // Railpack doesn't have a config path option

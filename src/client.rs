@@ -114,7 +114,7 @@ fn get_security_url() -> String {
         Environment::Staging => "railway-staging.com",
         Environment::Dev => "railway-develop.com",
     };
-    format!("https://{}/account/security", host)
+    format!("https://{host}/account/security")
 }
 
 pub(crate) fn auth_failure_error() -> RailwayError {

@@ -156,7 +156,7 @@ impl EnvironmentConfigOptions {
 
                 if let Some((key, value)) = key_value.split_once('=') {
                     configs.push(service.clone());
-                    configs.push(format!("variables.{}.value", key));
+                    configs.push(format!("variables.{key}.value"));
                     configs.push(value.to_string());
                 }
             }
