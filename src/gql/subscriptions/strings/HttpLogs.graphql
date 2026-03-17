@@ -1,0 +1,40 @@
+subscription HttpLogs(
+  $deploymentId: String!
+  $filter: String
+  $anchorDate: String
+  $afterDate: String
+  $afterLimit: Int
+) {
+  httpLogs(
+    deploymentId: $deploymentId
+    filter: $filter
+    anchorDate: $anchorDate
+    afterDate: $afterDate
+    afterLimit: $afterLimit
+  ) {
+    ...HttpLogFields
+  }
+}
+
+fragment HttpLogFields on HttpLog {
+  timestamp
+  method
+  path
+  httpStatus
+  totalDuration
+  requestId
+  host
+  clientUa
+  srcIp
+  edgeRegion
+  txBytes
+  rxBytes
+  upstreamRqDuration
+  upstreamAddress
+  upstreamProto
+  downstreamProto
+  upstreamErrors
+  responseDetails
+  deploymentId
+  deploymentInstanceId
+}
