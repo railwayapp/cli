@@ -100,6 +100,7 @@ async-trait = "0.1.89"
 ratatui = "0.29"
 scopeguard = "1.2"
 schemars = "0.8"
+rmcp = { version = "0.16", features = ["transport-io"] }
 
 [profile.release]
 lto = "fat"

@@ -44,6 +44,7 @@ commands!(
     login,
     logout,
     logs,
+    mcp,
     open,
     project,
     run(local),
