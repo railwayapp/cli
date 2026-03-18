@@ -69,7 +69,7 @@ graphql-ws-client = { version = "0.11.1", features = ["client-graphql-client"] }
 crossterm = { version = "0.27.0", features = ["event-stream"] }
 http = "0.2"
 is-terminal = "0.4.13"
-serde_with = "3.12.0"
+serde_with = { version = "3.17.0", default-features = false, features = ["macros"] }
 ctrlc = "3.4.5"
 which = "7.0.1"
 thiserror = "2.0.9"
