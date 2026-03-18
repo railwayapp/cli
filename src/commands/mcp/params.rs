@@ -472,3 +472,9 @@ pub struct DocsSearchParams {
     /// Search query to find Railway documentation pages.
     pub query: String,
 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DocsFetchParams {
+    /// The documentation page URL (e.g. "https://docs.railway.com/guides/getting-started") or slug (e.g. "guides/getting-started").
+    pub url: String,
+}

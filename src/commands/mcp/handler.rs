@@ -1039,13 +1039,23 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Search the Railway documentation and return the content of the best matching page. Returns markdown content up to 8KB."
+        description = "Search Railway documentation by keyword. Returns a list of matching page URLs. Use docs_fetch to read the full content of a specific page."
     )]
     async fn docs_search(
         &self,
         Parameters(params): Parameters<DocsSearchParams>,
     ) -> Result<CallToolResult, McpError> {
         self.do_docs_search(params).await
+    }
+
+    #[tool(
+        description = "Fetch the full markdown content of a Railway documentation page. Accepts a docs URL (e.g. https://docs.railway.com/guides/getting-started) or a slug (e.g. guides/getting-started). Use docs_search first to find the right page."
+    )]
+    async fn docs_fetch(
+        &self,
+        Parameters(params): Parameters<DocsFetchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_docs_fetch(params).await
     }
 
     #[tool(
