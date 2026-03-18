@@ -1,6 +1,6 @@
 use rmcp::{ErrorData as McpError, model::*};
 
-use crate::{client::post_graphql, gql::mutations};
+use crate::{client::post_graphql, gql::mutations, workspace::workspaces};
 
 use super::super::handler::RailwayMcp;
 use super::super::params::{
@@ -13,10 +13,40 @@ impl RailwayMcp {
         &self,
         params: CreateProjectParams,
     ) -> Result<CallToolResult, McpError> {
+        let workspace_id = match params.workspace_id {
+            Some(id) => Some(id),
+            None => {
+                let all_workspaces = workspaces().await.map_err(|e| {
+                    McpError::internal_error(format!("Failed to fetch workspaces: {e}"), None)
+                })?;
+                let team_workspaces: Vec<_> = all_workspaces
+                    .iter()
+                    .filter(|w| w.team_id().is_some())
+                    .collect();
+                match team_workspaces.len() {
+                    0 => None,
+                    1 => Some(team_workspaces[0].id().to_string()),
+                    _ => {
+                        let list = team_workspaces
+                            .iter()
+                            .map(|w| format!("- {} (id: {})", w.name(), w.id()))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        return Err(McpError::invalid_params(
+                            format!(
+                                "Multiple team workspaces found. Please specify a workspace_id:\n{list}"
+                            ),
+                            None,
+                        ));
+                    }
+                }
+            }
+        };
+
         let vars = mutations::project_create::Variables {
             name: Some(params.name),
             description: params.description,
-            workspace_id: params.workspace_id,
+            workspace_id,
         };
 
         let result = post_graphql::<mutations::ProjectCreate, _>(
@@ -159,12 +189,19 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
 
-        let restart_policy_type = params.restart_policy_type.map(|s| match s.to_uppercase().as_str() {
-            "ALWAYS" => mutations::service_instance_update::RestartPolicyType::ALWAYS,
-            "NEVER" => mutations::service_instance_update::RestartPolicyType::NEVER,
-            "ON_FAILURE" => mutations::service_instance_update::RestartPolicyType::ON_FAILURE,
-            other => mutations::service_instance_update::RestartPolicyType::Other(other.to_string()),
-        });
+        let restart_policy_type =
+            params
+                .restart_policy_type
+                .map(|s| match s.to_uppercase().as_str() {
+                    "ALWAYS" => mutations::service_instance_update::RestartPolicyType::ALWAYS,
+                    "NEVER" => mutations::service_instance_update::RestartPolicyType::NEVER,
+                    "ON_FAILURE" => {
+                        mutations::service_instance_update::RestartPolicyType::ON_FAILURE
+                    }
+                    other => mutations::service_instance_update::RestartPolicyType::Other(
+                        other.to_string(),
+                    ),
+                });
 
         let input = mutations::service_instance_update::ServiceInstanceUpdateInput {
             build_command: params.build_command,

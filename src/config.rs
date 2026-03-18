@@ -206,6 +206,24 @@ impl Configs {
         Err(RailwayError::NoLinkedProject.into())
     }
 
+    /// Returns the locally-linked project from disk config, ignoring any RAILWAY_TOKEN override.
+    pub fn get_local_linked_project(&self) -> Result<LinkedProject> {
+        let mut current_path = std::env::current_dir()?;
+        loop {
+            let path = current_path
+                .to_str()
+                .context("Unable to get current working directory")?
+                .to_owned();
+            if let Some(project) = self.root_config.projects.get(&path) {
+                return Ok(project.clone());
+            }
+            if !current_path.pop() {
+                break;
+            }
+        }
+        Err(RailwayError::NoLinkedProject.into())
+    }
+
     pub async fn get_linked_project(&self) -> Result<LinkedProject> {
         let path = self.get_closest_linked_project_directory()?;
         let project = self.root_config.projects.get(&path);

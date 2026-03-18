@@ -63,7 +63,9 @@ impl RailwayMcp {
         project_id: Option<String>,
         environment_id: Option<String>,
     ) -> Result<ResolvedContext, McpError> {
-        let linked = self.configs.get_linked_project().await.ok();
+        let local_linked = self.configs.get_local_linked_project().ok();
+        let token_linked = self.configs.get_linked_project().await.ok();
+        let linked = local_linked.or(token_linked);
 
         let project_id = project_id
             .or_else(|| linked.as_ref().map(|l| l.project.clone()))
@@ -771,7 +773,9 @@ impl RailwayMcp {
         &self,
         Parameters(params): Parameters<LinkEnvironmentParams>,
     ) -> Result<CallToolResult, McpError> {
-        let linked = self.configs.get_linked_project().await.ok();
+        let local_linked = self.configs.get_local_linked_project().ok();
+        let token_linked = self.configs.get_linked_project().await.ok();
+        let linked = local_linked.or(token_linked);
         let project_id = linked.as_ref().map(|l| l.project.clone()).ok_or_else(|| {
             McpError::invalid_params(
                 "No linked project. Run 'railway link' first or use link_service.",
@@ -1065,15 +1069,21 @@ impl RailwayMcp {
                     .iter()
                     .find(|s| s.node.id == *sid || s.node.name.eq_ignore_ascii_case(sid))
                     .map(|s| s.node.id.clone())
-                    .unwrap_or_else(|| sid.clone());
+                    .ok_or_else(|| {
+                        let available = format_services(&ctx.project);
+                        McpError::invalid_params(
+                            format!("Service '{sid}' not found. Available services:\n{available}"),
+                            None,
+                        )
+                    })?;
                 Some(resolved)
             }
             None => self
                 .configs
-                .get_linked_project()
-                .await
+                .get_local_linked_project()
                 .ok()
-                .and_then(|l| l.service),
+                .and_then(|l| l.service)
+                .or(ctx.linked.as_ref().and_then(|l| l.service.clone())),
         };
 
         let path = match &params.path {
