@@ -76,12 +76,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         struct KeyOption<'a>(&'a crate::controllers::ssh_keys::LocalSshKey);
         impl fmt::Display for KeyOption<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(
-                    f,
-                    "{} ({})",
-                    self.0.path.display(),
-                    self.0.fingerprint
-                )
+                write!(f, "{} ({})", self.0.path.display(), self.0.fingerprint)
             }
         }
         let options: Vec<KeyOption> = local_keys.iter().map(KeyOption).collect();
@@ -96,8 +91,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     );
     println!();
 
-    let should_register =
-        prompt_confirm_with_default("Register this SSH key with Railway?", true)?;
+    let should_register = prompt_confirm_with_default("Register this SSH key with Railway?", true)?;
 
     if !should_register {
         bail!(
