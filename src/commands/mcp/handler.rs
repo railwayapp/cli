@@ -859,7 +859,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Remove a service from a Railway project. This is irreversible. Requires confirm: true.",
+        description = "Remove a service from a Railway project. This is irreversible. Returns a preview first.",
         annotations(destructive_hint = true)
     )]
     async fn remove_service(
@@ -985,7 +985,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Remove an object storage bucket from a Railway environment. This is irreversible. Requires confirm: true.",
+        description = "Remove an object storage bucket from a Railway environment. This is irreversible. Returns a preview first.",
         annotations(destructive_hint = true)
     )]
     async fn remove_bucket(
@@ -1022,7 +1022,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Remove a persistent volume by ID. This is irreversible. Requires confirm: true.",
+        description = "Remove a persistent volume by ID. This is irreversible. Returns a preview first.",
         annotations(destructive_hint = true)
     )]
     async fn remove_volume(

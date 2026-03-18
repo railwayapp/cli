@@ -228,6 +228,7 @@ pub struct RemoveServiceParams {
     pub environment_id: Option<String>,
     /// Must be set to true to confirm deletion. This action is irreversible.
     #[serde(default)]
+    #[schemars(skip)]
     pub confirm: bool,
 }
 
@@ -422,6 +423,7 @@ pub struct RemoveBucketParams {
     pub environment_id: Option<String>,
     /// Must be set to true to confirm deletion. This action is irreversible.
     #[serde(default)]
+    #[schemars(skip)]
     pub confirm: bool,
 }
 
@@ -464,6 +466,7 @@ pub struct RemoveVolumeParams {
     pub volume_id: String,
     /// Must be set to true to confirm deletion. This action is irreversible.
     #[serde(default)]
+    #[schemars(skip)]
     pub confirm: bool,
 }
 

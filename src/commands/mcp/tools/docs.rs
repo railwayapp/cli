@@ -26,9 +26,10 @@ impl RailwayMcp {
             ))]));
         }
 
-        let body = resp.text().await.map_err(|e| {
-            McpError::internal_error(format!("Failed to read sitemap: {e}"), None)
-        })?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to read sitemap: {e}"), None))?;
 
         let doc_paths: Vec<String> = body
             .split("<loc>")
@@ -86,9 +87,7 @@ impl RailwayMcp {
         let results: Vec<String> = scored
             .iter()
             .take(5)
-            .map(|(path, _)| {
-                format!("- https://docs.railway.com/{path}")
-            })
+            .map(|(path, _)| format!("- https://docs.railway.com/{path}"))
             .collect();
 
         Ok(CallToolResult::success(vec![Content::text(format!(
