@@ -7,7 +7,7 @@ use crate::client::post_graphql;
 use crate::config::Configs;
 use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
 use crate::gql::queries::{ServiceInstance, service_instance};
-use crate::util::prompt::prompt_confirm_with_default;
+use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
 const SSH_HOST: &str = "ssh.railway.com";
 
@@ -59,42 +59,50 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     }
 
     // No local key is registered - need to register one
-    // Prefer ed25519, then ecdsa, then rsa
-    let key_to_register = local_keys
-        .iter()
-        .find(|k| k.key_type.contains("ed25519"))
-        .or_else(|| local_keys.iter().find(|k| k.key_type.contains("ecdsa")))
-        .or_else(|| local_keys.first())
-        .unwrap();
-
-    let is_tty = std::io::stdin().is_terminal();
-
-    if is_tty {
-        println!("SSH key not registered with Railway.");
-        println!(
-            "Key: {} ({})",
-            key_to_register.path.display(),
-            key_to_register.fingerprint
-        );
-        println!();
-
-        let should_register =
-            prompt_confirm_with_default("Register this SSH key with Railway?", true)?;
-
-        if !should_register {
-            bail!(
-                "SSH key registration required for native SSH access.\n\
-                   You can also register your key at: https://railway.com/account/ssh-keys"
-            );
-        }
-    } else {
+    if !std::io::stdin().is_terminal() {
         bail!(
-            "SSH key registration required for native SSH access.\n\n\
-            Key found but not registered: {} ({})\n\n\
-            Register it with:\n  railway ssh keys add\n\n\
-            Or import from GitHub:\n  railway ssh keys github",
-            key_to_register.path.display(),
-            key_to_register.fingerprint
+            "No registered SSH keys found. Register one with:\n  railway ssh keys add\n\n\
+            Or import from GitHub:\n  railway ssh keys github"
+        );
+    }
+
+    println!("No SSH keys registered with Railway.");
+
+    let key_to_register = if local_keys.len() == 1 {
+        &local_keys[0]
+    } else {
+        // Let the user pick which key to register
+        use std::fmt;
+        struct KeyOption<'a>(&'a crate::controllers::ssh_keys::LocalSshKey);
+        impl fmt::Display for KeyOption<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    f,
+                    "{} ({})",
+                    self.0.path.display(),
+                    self.0.fingerprint
+                )
+            }
+        }
+        let options: Vec<KeyOption> = local_keys.iter().map(KeyOption).collect();
+        let selected = prompt_select("Which SSH key would you like to register?", options)?;
+        selected.0
+    };
+
+    println!(
+        "Key: {} ({})",
+        key_to_register.path.display(),
+        key_to_register.fingerprint
+    );
+    println!();
+
+    let should_register =
+        prompt_confirm_with_default("Register this SSH key with Railway?", true)?;
+
+    if !should_register {
+        bail!(
+            "SSH key registration required for native SSH access.\n\
+               You can also register your key at: https://railway.com/account/ssh-keys"
         );
     }
 
