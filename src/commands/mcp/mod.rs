@@ -6,6 +6,7 @@ pub(crate) mod params;
 mod tools;
 use handler::RailwayMcp;
 
+/// Starts a local MCP server for AI-agent access
 #[derive(Parser)]
 pub struct Args {}
 
