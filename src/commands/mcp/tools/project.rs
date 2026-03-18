@@ -119,6 +119,13 @@ impl RailwayMcp {
         &self,
         params: CreateServiceParams,
     ) -> Result<CallToolResult, McpError> {
+        if params.source_image.is_some() && params.source_repo.is_some() {
+            return Err(McpError::invalid_params(
+                "Cannot specify both source_repo and source_image. Provide one or the other.",
+                None,
+            ));
+        }
+
         let ctx = self
             .resolve_context(params.project_id, params.environment_id)
             .await?;
