@@ -6,7 +6,8 @@ use std::process::Command;
 use crate::client::post_graphql;
 use crate::config::Configs;
 use crate::gql::mutations::{
-    SshPublicKeyCreate, SshPublicKeyDelete, ssh_public_key_create, ssh_public_key_delete,
+    SshPublicKeyCreate, SshPublicKeyDelete, ValidateTwoFactor, ssh_public_key_create,
+    ssh_public_key_delete, validate_two_factor,
 };
 use crate::gql::queries::{GitHubSshKeys, SshPublicKeys, git_hub_ssh_keys, ssh_public_keys};
 
@@ -197,11 +198,12 @@ pub async fn delete_ssh_key(
     id: &str,
     two_factor_code: Option<String>,
 ) -> Result<bool> {
-    let vars = ssh_public_key_delete::Variables {
-        id: id.to_string(),
-        code: two_factor_code,
-    };
+    if let Some(token) = two_factor_code {
+        let vars = validate_two_factor::Variables { token };
+        post_graphql::<ValidateTwoFactor, _>(client, configs.get_backboard(), vars).await?;
+    }
 
+    let vars = ssh_public_key_delete::Variables { id: id.to_string() };
     let response =
         post_graphql::<SshPublicKeyDelete, _>(client, configs.get_backboard(), vars).await?;
 

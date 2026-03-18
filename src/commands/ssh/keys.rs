@@ -351,9 +351,10 @@ async fn remove_key(key: Option<String>, two_factor_code: Option<String>) -> Res
         }
         Err(e) => {
             // Check if it's a 2FA error
-            let err_str = e.to_string();
-            if err_str.contains("2FA")
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("two factor")
                 || err_str.contains("two-factor")
+                || err_str.contains("2fa")
                 || err_str.contains("verification")
             {
                 if std::io::stdin().is_terminal() {

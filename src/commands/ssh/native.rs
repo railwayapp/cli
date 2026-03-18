@@ -88,8 +88,14 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
             );
         }
     } else {
-        // Non-TTY: auto-register the key
-        eprintln!("Registering SSH key with Railway...");
+        bail!(
+            "SSH key registration required for native SSH access.\n\n\
+            Key found but not registered: {} ({})\n\n\
+            Register it with:\n  railway ssh keys add\n\n\
+            Or import from GitHub:\n  railway ssh keys github",
+            key_to_register.path.display(),
+            key_to_register.fingerprint
+        );
     }
 
     let key_name = key_to_register
@@ -101,11 +107,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     register_ssh_key(client, configs, &key_name, &key_to_register.public_key).await?;
 
-    if is_tty {
-        println!("SSH key registered successfully!");
-    } else {
-        eprintln!("SSH key registered successfully!");
-    }
+    println!("SSH key registered successfully!");
 
     Ok(())
 }
@@ -125,18 +127,24 @@ pub fn run_native_ssh(service_instance_id: &str, command: Option<&[String]>) -> 
     let mut ssh_cmd = Command::new("ssh");
     ssh_cmd.arg(&target);
 
-    // Add command if provided
     if let Some(cmd_args) = command {
+        // Pass command as SSH args (exec channel)
         for arg in cmd_args {
             ssh_cmd.arg(arg);
         }
+        ssh_cmd.stdin(Stdio::inherit());
+        ssh_cmd.stdout(Stdio::inherit());
+        ssh_cmd.stderr(Stdio::inherit());
+
+        let status = ssh_cmd.status().context("Failed to execute ssh command")?;
+        Ok(status.code().unwrap_or(1))
+    } else {
+        // Interactive shell - inherit everything
+        ssh_cmd.stdin(Stdio::inherit());
+        ssh_cmd.stdout(Stdio::inherit());
+        ssh_cmd.stderr(Stdio::inherit());
+
+        let status = ssh_cmd.status().context("Failed to execute ssh command")?;
+        Ok(status.code().unwrap_or(1))
     }
-
-    ssh_cmd.stdin(Stdio::inherit());
-    ssh_cmd.stdout(Stdio::inherit());
-    ssh_cmd.stderr(Stdio::inherit());
-
-    let status = ssh_cmd.status().context("Failed to execute ssh command")?;
-
-    Ok(status.code().unwrap_or(1))
 }
