@@ -871,7 +871,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Update service instance settings such as build command, start command, replicas, health check path, sleep mode, and root directory."
+        description = "Update service instance settings such as build command, start command, replicas, health check, sleep mode, root directory, cron schedule, Dockerfile path, restart policy, pre-deploy command, region, Railway config file, and watch patterns."
     )]
     async fn update_service(
         &self,

@@ -254,12 +254,39 @@ pub struct UpdateServiceParams {
     /// Health check path (e.g. "/health").
     #[serde(default)]
     pub health_check_path: Option<String>,
+    /// Health check timeout in milliseconds.
+    #[serde(default)]
+    pub healthcheck_timeout: Option<i64>,
     /// Whether to sleep the service when inactive.
     #[serde(default)]
     pub sleep_application: Option<bool>,
     /// Root directory for the build.
     #[serde(default)]
     pub root_directory: Option<String>,
+    /// Cron schedule expression (e.g. "0 */5 * * *").
+    #[serde(default)]
+    pub cron_schedule: Option<String>,
+    /// Path to the Dockerfile (e.g. "Dockerfile.prod").
+    #[serde(default)]
+    pub dockerfile_path: Option<String>,
+    /// Restart policy type: "ALWAYS", "ON_FAILURE", or "NEVER".
+    #[serde(default)]
+    pub restart_policy_type: Option<String>,
+    /// Maximum number of restart retries (used with ON_FAILURE restart policy).
+    #[serde(default)]
+    pub restart_policy_max_retries: Option<i64>,
+    /// Commands to run before deploying (e.g. database migrations).
+    #[serde(default)]
+    pub pre_deploy_command: Option<Vec<String>>,
+    /// Region to deploy in (e.g. "us-west1").
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Path to the Railway config file.
+    #[serde(default)]
+    pub railway_config_file: Option<String>,
+    /// File watch patterns that trigger deploys.
+    #[serde(default)]
+    pub watch_patterns: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

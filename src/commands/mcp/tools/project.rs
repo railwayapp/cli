@@ -159,13 +159,29 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
 
+        let restart_policy_type = params.restart_policy_type.map(|s| match s.to_uppercase().as_str() {
+            "ALWAYS" => mutations::service_instance_update::RestartPolicyType::ALWAYS,
+            "NEVER" => mutations::service_instance_update::RestartPolicyType::NEVER,
+            "ON_FAILURE" => mutations::service_instance_update::RestartPolicyType::ON_FAILURE,
+            other => mutations::service_instance_update::RestartPolicyType::Other(other.to_string()),
+        });
+
         let input = mutations::service_instance_update::ServiceInstanceUpdateInput {
             build_command: params.build_command,
             start_command: params.start_command,
             num_replicas: params.num_replicas,
             healthcheck_path: params.health_check_path,
+            healthcheck_timeout: params.healthcheck_timeout,
             sleep_application: params.sleep_application,
             root_directory: params.root_directory,
+            cron_schedule: params.cron_schedule,
+            dockerfile_path: params.dockerfile_path,
+            restart_policy_type,
+            restart_policy_max_retries: params.restart_policy_max_retries,
+            pre_deploy_command: params.pre_deploy_command,
+            region: params.region,
+            railway_config_file: params.railway_config_file,
+            watch_patterns: params.watch_patterns,
             ..Default::default()
         };
 
