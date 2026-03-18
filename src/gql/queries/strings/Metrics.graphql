@@ -1,0 +1,23 @@
+query Metrics(
+  $serviceId: String
+  $environmentId: String
+  $startDate: DateTime!
+  $endDate: DateTime
+  $measurements: [MetricMeasurement!]!
+  $sampleRateSeconds: Int
+) {
+  metrics(
+    serviceId: $serviceId
+    environmentId: $environmentId
+    startDate: $startDate
+    endDate: $endDate
+    measurements: $measurements
+    sampleRateSeconds: $sampleRateSeconds
+  ) {
+    measurement
+    values {
+      ts
+      value
+    }
+  }
+}
