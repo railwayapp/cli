@@ -51,7 +51,7 @@ fn take_last_n_logs<T>(mut logs: Vec<T>, limit: Option<i64>) -> Vec<T> {
 
 pub async fn fetch_build_logs(
     params: FetchLogsParams<'_>,
-    on_log: impl Fn(queries::build_logs::BuildLogsBuildLogs),
+    mut on_log: impl FnMut(queries::build_logs::BuildLogsBuildLogs),
 ) -> Result<()> {
     let vars = queries::build_logs::Variables {
         deployment_id: params.deployment_id,
@@ -77,7 +77,7 @@ pub async fn fetch_build_logs(
 
 pub async fn fetch_deploy_logs(
     params: FetchLogsParams<'_>,
-    on_log: impl Fn(queries::deployment_logs::LogFields),
+    mut on_log: impl FnMut(queries::deployment_logs::LogFields),
 ) -> Result<()> {
     let vars = queries::deployment_logs::Variables {
         deployment_id: params.deployment_id,
@@ -103,7 +103,7 @@ pub async fn fetch_deploy_logs(
 
 pub async fn fetch_http_logs(
     params: FetchLogsParams<'_>,
-    on_log: impl Fn(queries::http_logs::HttpLogFields),
+    mut on_log: impl FnMut(queries::http_logs::HttpLogFields),
 ) -> Result<()> {
     let before_limit = params.limit.unwrap_or(500);
     let vars = queries::http_logs::Variables {
@@ -132,7 +132,7 @@ pub async fn fetch_http_logs(
 pub async fn stream_build_logs(
     deployment_id: String,
     filter: Option<String>,
-    on_log: impl Fn(build_logs::LogFields),
+    mut on_log: impl FnMut(build_logs::LogFields),
 ) -> Result<()> {
     let mut last_timestamp: Option<String> = None;
     let mut attempt = 0;
@@ -199,7 +199,7 @@ pub async fn stream_build_logs(
 pub async fn stream_http_logs(
     deployment_id: String,
     filter: Option<String>,
-    on_log: impl Fn(http_logs::HttpLogFields),
+    on_log: impl FnMut(http_logs::HttpLogFields),
 ) -> Result<()> {
     tokio::select! {
         result = stream_http_logs_inner(deployment_id.clone(), filter, on_log) => result,
@@ -212,24 +212,20 @@ pub async fn stream_http_logs(
 
 async fn wait_for_deployment_removal(deployment_id: &str) {
     loop {
-        if let Ok(mut stream) = subscribe_graphql::<subscriptions::Deployment>(
-            deployment::Variables {
+        if let Ok(mut stream) =
+            subscribe_graphql::<subscriptions::Deployment>(deployment::Variables {
                 id: deployment_id.to_owned(),
-            },
-        )
-        .await
+            })
+            .await
         {
             while let Some(response) = stream.next().await {
-                let removed = response
-                    .ok()
-                    .and_then(|r| r.data)
-                    .is_some_and(|data| {
-                        matches!(
-                            data.deployment.status,
-                            deployment::DeploymentStatus::REMOVED
-                                | deployment::DeploymentStatus::REMOVING
-                        )
-                    });
+                let removed = response.ok().and_then(|r| r.data).is_some_and(|data| {
+                    matches!(
+                        data.deployment.status,
+                        deployment::DeploymentStatus::REMOVED
+                            | deployment::DeploymentStatus::REMOVING
+                    )
+                });
                 if removed {
                     return;
                 }
@@ -243,7 +239,7 @@ async fn wait_for_deployment_removal(deployment_id: &str) {
 async fn stream_http_logs_inner(
     deployment_id: String,
     filter: Option<String>,
-    on_log: impl Fn(http_logs::HttpLogFields),
+    mut on_log: impl FnMut(http_logs::HttpLogFields),
 ) -> Result<()> {
     let mut last_timestamp = Some(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true));
     let mut seen_request_ids = HashSet::new();
@@ -376,7 +372,7 @@ fn is_new_http_log(
 pub async fn stream_deploy_logs(
     deployment_id: String,
     filter: Option<String>,
-    on_log: impl Fn(deployment_logs::LogFields),
+    mut on_log: impl FnMut(deployment_logs::LogFields),
 ) -> Result<()> {
     let mut last_timestamp: Option<String> = None;
     let mut attempt = 0;
