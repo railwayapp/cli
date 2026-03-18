@@ -1,0 +1,11 @@
+query Templates($verified: Boolean, $recommended: Boolean, $first: Int) {
+  templates(verified: $verified, recommended: $recommended, first: $first) {
+    edges {
+      node {
+        id
+        code
+        name
+      }
+    }
+  }
+}

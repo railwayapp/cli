@@ -158,19 +158,31 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "CDN_CACHING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "CONVERSATIONAL_UI"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "MAGIC_CONFIG"
+              "name": "DEBUG_SMART_DIAGNOSIS"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "NETWORK_FLOWS"
+              "name": "IPV6_EGRESS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "MAGIC_CONFIG"
             },
             {
               "deprecationReason": null,
@@ -189,6 +201,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "RAW_SQL_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "SMART_DIAGNOSIS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "UNLIMITED_SMART_DIAGNOSIS"
             }
           ],
           "fields": null,
@@ -206,6 +230,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "ALLOW_REPLICA_METRICS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "ARCHIVER_V2_ROLLOUT"
             },
             {
               "deprecationReason": null,
@@ -259,12 +289,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "DOMAIN_VERIFICATION_ROLLOUT"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "ENABLE_RAW_SQL_QUERIES"
             },
             {
@@ -277,13 +301,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "OAUTH_DCR_KILLSWITCH"
+              "name": "NEW_STRIPE_WEBHOOK_VERSION_ROLLOUT"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "SCYLLADB_ROUTING_ENABLED"
+              "name": "OAUTH_DCR_KILLSWITCH"
             },
             {
               "deprecationReason": null,
@@ -296,6 +320,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "SPLIT_USAGE_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "UNIFIED_SNAPSHOT_AND_BUILD"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "UNIFIED_SNAPSHOT_AND_BUILD_HOBBY"
             },
             {
               "deprecationReason": null,
@@ -359,19 +395,7 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "DOMAIN_VERIFICATION"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "ENABLE_DOCKER_EXTENSION"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "ENABLE_ONLINE_VOLUME_RESIZING"
             },
             {
               "deprecationReason": null,
@@ -1993,6 +2017,57 @@
           "possibleTypes": null
         },
         {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "mutations",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "JSON",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "state",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "JSON",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "CanvasViewMergePreview",
+          "possibleTypes": null
+        },
+        {
           "description": "The type of error that occurred during certificate issuance",
           "enumValues": [
             {
@@ -2747,13 +2822,9 @@
               "description": null,
               "name": "projectId",
               "type": {
-                "kind": "NON_NULL",
-                "name": null,
-                "ofType": {
-                  "kind": "SCALAR",
-                  "name": "String",
-                  "ofType": null
-                }
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
               }
             },
             {
@@ -2970,6 +3041,18 @@
           "description": null,
           "enumValues": null,
           "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "cdnMode",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
             {
               "args": [],
               "deprecationReason": "Use the `status` field instead.",
@@ -5001,6 +5084,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "diagnosis",
+              "type": {
+                "kind": "SCALAR",
+                "name": "DeploymentDiagnosis",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "environment",
               "type": {
                 "kind": "NON_NULL",
@@ -5365,6 +5460,16 @@
           "interfaces": [],
           "kind": "OBJECT",
           "name": "DeploymentDeploymentInstance",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "SCALAR",
+          "name": "DeploymentDiagnosis",
           "possibleTypes": null
         },
         {
@@ -6594,6 +6699,18 @@
           "description": null,
           "enumValues": null,
           "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "cdnMode",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
             {
               "args": [],
               "deprecationReason": null,
@@ -8774,6 +8891,16 @@
               "defaultValue": null,
               "description": null,
               "name": "object",
+              "type": {
+                "kind": "INPUT_OBJECT",
+                "name": "EventStringListFilter",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "serviceId",
               "type": {
                 "kind": "INPUT_OBJECT",
                 "name": "EventStringListFilter",
@@ -12266,6 +12393,51 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "sourceEnvironmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "targetEnvironmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Merge a canvas layout from one environment into another. Re-computes the merge from current state and applies mutations.",
+              "isDeprecated": false,
+              "name": "canvasViewMerge",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "input",
                   "type": {
                     "kind": "NON_NULL",
@@ -15078,6 +15250,37 @@
                 "ofType": {
                   "kind": "SCALAR",
                   "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "input",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "INPUT_OBJECT",
+                      "name": "ProjectMemberAddInput",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Add a workspace member to a project with a specific role. The user must already be a member of the project's workspace.",
+              "isDeprecated": false,
+              "name": "projectMemberAdd",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "ProjectMember",
                   "ofType": null
                 }
               }
@@ -18385,6 +18588,11 @@
               "kind": "OBJECT",
               "name": "WorkspaceIdentityProvider",
               "ofType": null
+            },
+            {
+              "kind": "OBJECT",
+              "name": "WorkspacePolicy",
+              "ofType": null
             }
           ]
         },
@@ -20827,6 +21035,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "ARCHIVER_V2_ROLLOUT"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "BUILDER_V3_ROLLOUT_EXISTING_SERVICES"
             },
             {
@@ -20875,12 +21089,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "DOMAIN_VERIFICATION_ROLLOUT"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "ENABLE_RAW_SQL_QUERIES"
             },
             {
@@ -20893,13 +21101,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "OAUTH_DCR_KILLSWITCH"
+              "name": "NEW_STRIPE_WEBHOOK_VERSION_ROLLOUT"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "SCYLLADB_ROUTING_ENABLED"
+              "name": "OAUTH_DCR_KILLSWITCH"
             },
             {
               "deprecationReason": null,
@@ -20912,6 +21120,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "SPLIT_USAGE_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "UNIFIED_SNAPSHOT_AND_BUILD"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "UNIFIED_SNAPSHOT_AND_BUILD_HOBBY"
             },
             {
               "deprecationReason": null,
@@ -24507,6 +24727,59 @@
         {
           "description": null,
           "enumValues": null,
+          "fields": null,
+          "inputFields": [
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "projectId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "role",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "ProjectRole",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "userId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "interfaces": null,
+          "kind": "INPUT_OBJECT",
+          "name": "ProjectMemberAddInput",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
           "fields": [
             {
               "args": [],
@@ -26744,6 +27017,51 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "sourceEnvironmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "targetEnvironmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Preview a canvas layout merge from one environment to another. Returns the merged state and the mutations needed to reach it.",
+              "isDeprecated": false,
+              "name": "canvasViewMergePreview",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "CanvasViewMergePreview",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "id",
                   "type": {
                     "kind": "NON_NULL",
@@ -28939,13 +29257,9 @@
                   "description": null,
                   "name": "projectId",
                   "type": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "SCALAR",
-                      "name": "String",
-                      "ofType": null
-                    }
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
                   }
                 },
                 {
@@ -31445,6 +31759,33 @@
                   "name": "QueryWorkspaceIdentityProvidersConnection",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "workspaceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get the policies for a workspace",
+              "isDeprecated": false,
+              "name": "workspacePolicy",
+              "type": {
+                "kind": "OBJECT",
+                "name": "WorkspacePolicy",
+                "ofType": null
               }
             },
             {
@@ -35338,6 +35679,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "cdnMode",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "createdAt",
               "type": {
                 "kind": "SCALAR",
@@ -35943,6 +36296,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "ipv6EgressEnabled",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Boolean",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "isUpdatable",
               "type": {
                 "kind": "NON_NULL",
@@ -36396,6 +36761,16 @@
               "type": {
                 "kind": "SCALAR",
                 "name": "Int",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "ipv6EgressEnabled",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Boolean",
                 "ofType": null
               }
             },
@@ -46230,6 +46605,71 @@
           "interfaces": null,
           "kind": "INPUT_OBJECT",
           "name": "WorkspacePermissionChangeInput",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "id",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "ID",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "restrictPublicTcpProxies",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "restrictRailwayDomainGeneration",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [
+            {
+              "kind": "INTERFACE",
+              "name": "Node",
+              "ofType": null
+            }
+          ],
+          "kind": "OBJECT",
+          "name": "WorkspacePolicy",
           "possibleTypes": null
         },
         {
