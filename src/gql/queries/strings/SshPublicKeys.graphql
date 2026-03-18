@@ -1,0 +1,12 @@
+query SshPublicKeys {
+  sshPublicKeys(first: 100) {
+    edges {
+      node {
+        id
+        name
+        publicKey
+        fingerprint
+      }
+    }
+  }
+}

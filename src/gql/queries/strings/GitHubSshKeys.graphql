@@ -1,0 +1,7 @@
+query GitHubSshKeys {
+  gitHubSshKeys {
+    id
+    key
+    title
+  }
+}

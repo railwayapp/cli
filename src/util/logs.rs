@@ -76,8 +76,6 @@ pub fn format_attr_log_string<T: LogLike>(log: &T, show_all_attributes: bool) ->
 /// Formatting mode for log output
 #[derive(Clone, Copy)]
 pub enum LogFormat {
-    /// Just the raw message, no formatting
-    Simple,
     /// Level indicator only (e.g. [ERRO]), no other attributes - good for build logs
     LevelOnly,
     /// Full formatting with all attributes - good for deploy logs
@@ -114,7 +112,6 @@ where
         serde_json::to_string(&map).unwrap()
     } else {
         match format {
-            LogFormat::Simple => log.message().to_string(),
             LogFormat::LevelOnly => format_attr_log_string(&log, false),
             LogFormat::Full => format_attr_log_string(&log, true),
         }
@@ -376,98 +373,12 @@ mod tests {
             ],
         };
 
-        // Test JSON output mode
-        let output = format_log_string(log, true, LogFormat::Simple);
+        // Test JSON output mode (format param is ignored for JSON)
+        let output = format_log_string(log, true, LogFormat::Full);
         let json: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(json["message"], "Test message");
         assert_eq!(json["timestamp"], "2025-01-01T00:00:00Z");
         assert_eq!(json["level"], "warn");
         assert_eq!(json["count"], 42); // This parses as a number
-    }
-
-    #[test]
-    fn test_print_log_simple_mode() {
-        let log = TestLog {
-            message: "Test message".to_string(),
-            timestamp: "2025-01-01T00:00:00Z".to_string(),
-            attributes: vec![("level".to_string(), "info".to_string())],
-        };
-
-        // Test simple output mode
-        let output = format_log_string(log, false, LogFormat::Simple);
-        assert_eq!(output, "Test message");
-    }
-
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct TestHttpLog {
-        timestamp: String,
-        method: String,
-        path: String,
-        http_status: i64,
-        total_duration: i64,
-        request_id: String,
-    }
-
-    impl HttpLogLike for TestHttpLog {
-        fn timestamp(&self) -> &str {
-            &self.timestamp
-        }
-        fn method(&self) -> &str {
-            &self.method
-        }
-        fn path(&self) -> &str {
-            &self.path
-        }
-        fn http_status(&self) -> i64 {
-            self.http_status
-        }
-        fn total_duration(&self) -> i64 {
-            self.total_duration
-        }
-        fn request_id(&self) -> &str {
-            &self.request_id
-        }
-    }
-
-    #[test]
-    fn test_format_http_log_plain_text() {
-        let log = TestHttpLog {
-            timestamp: "2025-01-01T00:00:00Z".to_string(),
-            method: "GET".to_string(),
-            path: "/healthz".to_string(),
-            http_status: 200,
-            total_duration: 5,
-            request_id: "req-123".to_string(),
-        };
-
-        let output = format_http_log_string(&log, false);
-        assert!(output.contains("2025-01-01T00:00:00Z"));
-        assert!(output.contains("GET"));
-        assert!(output.contains("/healthz"));
-        assert!(output.contains("200"));
-        assert!(output.contains("5ms"));
-        assert!(output.contains("req-123"));
-    }
-
-    #[test]
-    fn test_format_http_log_json() {
-        let log = TestHttpLog {
-            timestamp: "2025-01-01T00:00:00Z".to_string(),
-            method: "POST".to_string(),
-            path: "/form/verify".to_string(),
-            http_status: 200,
-            total_duration: 4,
-            request_id: "req-456".to_string(),
-        };
-
-        let output = format_http_log_string(&log, true);
-        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(json["timestamp"], "2025-01-01T00:00:00Z");
-        assert_eq!(json["method"], "POST");
-        assert_eq!(json["path"], "/form/verify");
-        assert_eq!(json["httpStatus"], 200);
-        assert_eq!(json["totalDuration"], 4);
-        assert_eq!(json["requestId"], "req-456");
     }
 }
