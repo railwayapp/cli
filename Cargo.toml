@@ -102,6 +102,9 @@ scopeguard = "1.2"
 schemars = "0.8"
 rmcp = { version = "0.16", features = ["transport-io"] }
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
+
 [profile.release]
 lto = "fat"
 opt-level = "z"
