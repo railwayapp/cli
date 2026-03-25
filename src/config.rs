@@ -29,11 +29,14 @@ pub struct LinkedProject {
     pub service: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayUser {
     pub token: Option<String>,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -80,7 +83,7 @@ impl Configs {
                     eprintln!("{}", "Unable to parse config file, regenerating".yellow());
                     RailwayConfig {
                         projects: BTreeMap::new(),
-                        user: RailwayUser { token: None },
+                        user: RailwayUser::default(),
                         linked_functions: None,
                     }
                 });
@@ -97,7 +100,7 @@ impl Configs {
             root_config_path,
             root_config: RailwayConfig {
                 projects: BTreeMap::new(),
-                user: RailwayUser { token: None },
+                user: RailwayUser::default(),
                 linked_functions: None,
             },
         })
@@ -106,7 +109,7 @@ impl Configs {
     pub fn reset(&mut self) -> Result<()> {
         self.root_config = RailwayConfig {
             projects: BTreeMap::new(),
-            user: RailwayUser { token: None },
+            user: RailwayUser::default(),
             linked_functions: None,
         };
         Ok(())
@@ -135,12 +138,53 @@ impl Configs {
 
     /// tries the environment variable and the config file
     pub fn get_railway_auth_token(&self) -> Option<String> {
-        Self::get_railway_api_token().or(self
-            .root_config
-            .user
-            .token
-            .clone()
-            .filter(|t| !t.is_empty()))
+        Self::get_railway_api_token()
+            .or(self
+                .root_config
+                .user
+                .access_token
+                .clone()
+                .filter(|t| !t.is_empty()))
+            .or(self
+                .root_config
+                .user
+                .token
+                .clone()
+                .filter(|t| !t.is_empty()))
+    }
+
+    pub fn has_oauth_token(&self) -> bool {
+        self.root_config.user.access_token.is_some()
+    }
+
+    pub fn get_refresh_token(&self) -> Option<&str> {
+        self.root_config.user.refresh_token.as_deref()
+    }
+
+    pub fn is_token_expired(&self) -> bool {
+        match self.root_config.user.token_expires_at {
+            Some(expires_at) => {
+                let now = chrono::Utc::now().timestamp();
+                now >= (expires_at - 60) // 60s buffer
+            }
+            None => false,
+        }
+    }
+
+    pub fn save_oauth_tokens(
+        &mut self,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_in: i64,
+    ) -> Result<()> {
+        anyhow::ensure!(!access_token.is_empty(), "access_token cannot be empty");
+        anyhow::ensure!(expires_in > 0, "Server returned non-positive expires_in");
+        let expires_at = chrono::Utc::now().timestamp() + expires_in;
+        self.root_config.user.access_token = Some(access_token.to_string());
+        self.root_config.user.refresh_token = refresh_token.map(|s| s.to_string());
+        self.root_config.user.token_expires_at = Some(expires_at);
+        self.root_config.user.token = None; // Clear legacy token
+        self.write()
     }
 
     pub fn get_environment_id() -> Environment {

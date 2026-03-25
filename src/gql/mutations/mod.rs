@@ -28,22 +28,6 @@ pub struct DeploymentRemove;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/LoginSessionConsume.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct LoginSessionConsume;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/LoginSessionCreate.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct LoginSessionCreate;
-
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ProjectCreate.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
