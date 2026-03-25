@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,24 @@ impl Configs {
         std::env::var(consts::RAILWAY_API_TOKEN_ENV).ok()
     }
 
+    pub fn get_railway_project_id() -> Option<String> {
+        std::env::var(consts::RAILWAY_PROJECT_ID_ENV).ok()
+    }
+
+    pub fn get_railway_environment_id() -> Option<String> {
+        std::env::var(consts::RAILWAY_ENVIRONMENT_ID_ENV).ok()
+    }
+
+    pub fn get_railway_service_id() -> Option<String> {
+        std::env::var(consts::RAILWAY_SERVICE_ID_ENV).ok()
+    }
+
+    /// Returns true if RAILWAY_PROJECT_ID and RAILWAY_ENVIRONMENT_ID env vars are both set,
+    /// allowing the link step to be skipped entirely.
+    pub fn has_env_var_project_config() -> bool {
+        Self::get_railway_project_id().is_some() && Self::get_railway_environment_id().is_some()
+    }
+
     /// Returns true if using token-based auth (RAILWAY_TOKEN or RAILWAY_API_TOKEN)
     /// rather than session-based auth from `railway login`.
     /// Token-based auth bypasses 2FA on the backend, so client-side 2FA checks are unnecessary.
@@ -227,7 +245,7 @@ impl Configs {
     }
 
     pub fn get_closest_linked_project_directory(&self) -> Result<String> {
-        if Self::get_railway_token().is_some() {
+        if Self::has_env_var_project_config() || Self::get_railway_token().is_some() {
             return self.get_current_directory();
         }
 
@@ -289,6 +307,27 @@ impl Configs {
                 service: project.cloned().and_then(|p| p.service),
             };
             return Ok(project);
+        }
+
+        if let (Some(project_id), Some(environment_id)) = (
+            Self::get_railway_project_id(),
+            Self::get_railway_environment_id(),
+        ) {
+            if self.get_railway_auth_token().is_none() {
+                bail!(RailwayError::Unauthorized);
+            }
+
+            let service_id = Self::get_railway_service_id()
+                .or_else(|| project.cloned().and_then(|p| p.service));
+
+            return Ok(LinkedProject {
+                project_path: self.get_current_directory()?,
+                name: None,
+                project: project_id,
+                environment: environment_id,
+                environment_name: None,
+                service: service_id,
+            });
         }
 
         project

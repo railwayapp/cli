@@ -77,7 +77,7 @@ pub async fn ensure_project_and_environment_exist(
         linked_project
             .environment_name
             .clone()
-            .unwrap_or("Production".to_string()),
+            .unwrap_or_else(|| linked_project.environment.clone()),
     );
 
     match environment {
