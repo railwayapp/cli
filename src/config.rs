@@ -317,8 +317,8 @@ impl Configs {
                 bail!(RailwayError::Unauthorized);
             }
 
-            let service_id = Self::get_railway_service_id()
-                .or_else(|| project.cloned().and_then(|p| p.service));
+            let service_id =
+                Self::get_railway_service_id().or_else(|| project.cloned().and_then(|p| p.service));
 
             return Ok(LinkedProject {
                 project_path: self.get_current_directory()?,
