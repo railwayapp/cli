@@ -135,10 +135,10 @@ impl Configs {
         std::env::var(consts::RAILWAY_SERVICE_ID_ENV).ok()
     }
 
-    /// Returns true if RAILWAY_PROJECT_ID and RAILWAY_ENVIRONMENT_ID env vars are both set,
-    /// allowing the link step to be skipped entirely.
+    /// Returns true if either RAILWAY_PROJECT_ID or RAILWAY_ENVIRONMENT_ID env vars are set,
+    /// indicating the user intends to use env-var-based project targeting.
     pub fn has_env_var_project_config() -> bool {
-        Self::get_railway_project_id().is_some() && Self::get_railway_environment_id().is_some()
+        Self::get_railway_project_id().is_some() || Self::get_railway_environment_id().is_some()
     }
 
     /// Returns true if using token-based auth (RAILWAY_TOKEN or RAILWAY_API_TOKEN)
@@ -307,6 +307,20 @@ impl Configs {
                 service: project.cloned().and_then(|p| p.service),
             };
             return Ok(project);
+        }
+
+        let has_project_id = Self::get_railway_project_id().is_some();
+        let has_environment_id = Self::get_railway_environment_id().is_some();
+
+        if has_project_id != has_environment_id {
+            bail!(
+                "Both RAILWAY_PROJECT_ID and RAILWAY_ENVIRONMENT_ID must be set together. {} is missing.",
+                if has_project_id {
+                    "RAILWAY_ENVIRONMENT_ID"
+                } else {
+                    "RAILWAY_PROJECT_ID"
+                }
+            );
         }
 
         if let (Some(project_id), Some(environment_id)) = (
