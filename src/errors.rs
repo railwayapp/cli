@@ -103,4 +103,16 @@ pub enum RailwayError {
 
     #[error("You are being ratelimited. Please try again later")]
     Ratelimited,
+
+    #[error("Device code expired. Please run `railway login` again.")]
+    OAuthDeviceCodeExpired,
+
+    #[error("Authorization was denied by the user.")]
+    OAuthAccessDenied,
+
+    #[error("Token refresh failed: {0}. Please run `railway login` again.")]
+    OAuthRefreshFailed(String),
+
+    #[error("OAuth error: {0}")]
+    OAuthError(String),
 }

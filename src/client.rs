@@ -11,6 +11,7 @@ use crate::{
     config::Configs,
     consts::{self, RAILWAY_API_TOKEN_ENV, RAILWAY_TOKEN_ENV},
     errors::RailwayError,
+    oauth,
 };
 use anyhow::Result;
 
@@ -42,20 +43,6 @@ impl GQLClient {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        Ok(client)
-    }
-
-    pub fn new_unauthorized() -> Result<Client> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-source",
-            HeaderValue::from_static(consts::get_user_agent()),
-        );
-        let client = Client::builder()
-            .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
-            .user_agent(consts::get_user_agent())
-            .default_headers(headers)
-            .build()?;
         Ok(client)
     }
 }
@@ -131,6 +118,33 @@ pub(crate) fn auth_failure_error() -> RailwayError {
     } else {
         RailwayError::Unauthorized
     }
+}
+
+/// Ensures the OAuth access token is still valid, refreshing if needed.
+pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
+    // Env var tokens are not managed by us
+    if Configs::get_railway_token().is_some() || Configs::get_railway_api_token().is_some() {
+        return Ok(());
+    }
+
+    if !configs.has_oauth_token() || !configs.is_token_expired() {
+        return Ok(());
+    }
+
+    let refresh_token = configs.get_refresh_token().ok_or_else(|| {
+        RailwayError::OAuthRefreshFailed("No refresh token available".to_string())
+    })?;
+
+    let host = configs.get_host();
+    let token_resp = oauth::refresh_access_token(host, refresh_token).await?;
+
+    configs.save_oauth_tokens(
+        &token_resp.access_token,
+        token_resp.refresh_token.as_deref(),
+        token_resp.expires_in,
+    )?;
+
+    Ok(())
 }
 
 /// Like post_graphql, but removes null values from the variables object before sending.

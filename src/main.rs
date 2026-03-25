@@ -5,6 +5,7 @@ use clap::error::ErrorKind;
 
 mod commands;
 use commands::*;
+use config::Configs;
 use is_terminal::IsTerminal;
 use util::{check_update::UpdateCheck, compare_semver::compare_semver};
 
@@ -14,6 +15,7 @@ mod consts;
 mod controllers;
 mod errors;
 mod gql;
+mod oauth;
 mod subscription;
 mod table;
 mod util;
@@ -149,6 +151,30 @@ async fn main() -> Result<()> {
             std::process::exit(2); // The default behavior is exit 2
         }
     };
+
+    // Commands that do not require authentication -- skip token refresh for these.
+    const NO_AUTH_COMMANDS: &[&str] = &[
+        "login",
+        "logout",
+        "completion",
+        "docs",
+        "upgrade",
+        "telemetry_cmd",
+        "check_updates",
+    ];
+
+    let needs_refresh = cli
+        .subcommand_name()
+        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd))
+        .unwrap_or(false);
+
+    if needs_refresh {
+        if let Ok(mut configs) = Configs::new() {
+            if let Err(e) = client::ensure_valid_token(&mut configs).await {
+                eprintln!("{}: {e}", "Warning: failed to refresh OAuth token".yellow());
+            }
+        }
+    }
 
     let exec_result = exec_cli(cli).await;
 

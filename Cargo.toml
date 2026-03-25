@@ -40,12 +40,9 @@ tokio = { version = "1.48.0", features = ["full"] }
 clap_complete = "4.5.40"
 open = "5.3.1"
 inquire = "0.9.1"
-hyper = { version = "1.5.2", features = ["server", "http1"] }
-hyper-util = { version = "0.1.10", features = ["tokio"] }
 base64 = "0.22.1"
-http-body-util = "0.1.2"
 rand = "0.8.5"
-hostname = "0.4.0"
+sha2 = "0.10"
 indicatif = "0.18.3"
 indoc = "2.0.5"
 console = "0.15.10"
