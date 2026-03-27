@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::Configs;
 use crate::telemetry::{Preferences, is_auto_update_disabled_by_env};
 use crate::util::install_method::InstallMethod;
 
@@ -43,9 +44,16 @@ pub async fn command(args: Args) -> Result<()> {
             let env_disabled = is_auto_update_disabled_by_env();
             let method = InstallMethod::detect();
 
+            let ci = Configs::env_is_ci();
+
             if env_disabled {
                 println!(
                     "Auto-updates: {} (disabled by RAILWAY_NO_AUTO_UPDATE)",
+                    "disabled".yellow()
+                );
+            } else if ci {
+                println!(
+                    "Auto-updates: {} (disabled in CI environment)",
                     "disabled".yellow()
                 );
             } else if prefs.auto_update_disabled {

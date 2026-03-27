@@ -97,6 +97,9 @@ impl Preferences {
             let Ok(contents) = serde_json::to_string(self) else {
                 return;
             };
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
             let pid = std::process::id();
             let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
             let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));

@@ -67,6 +67,17 @@ pub async fn command(args: Args) -> Result<()> {
                 method.name()
             );
         }
+        interact_or!(NON_INTERACTIVE_FAILURE);
+        if !method.can_write_binary() {
+            println!(
+                "{}",
+                "Cannot rollback: the CLI binary is not writable by the current user.".yellow()
+            );
+            println!();
+            println!("To rollback, re-run with elevated permissions:");
+            println!("  {}", "sudo railway upgrade --rollback".bold());
+            return Ok(());
+        }
         return crate::util::self_update::rollback();
     }
 

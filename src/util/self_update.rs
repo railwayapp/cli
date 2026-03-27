@@ -43,7 +43,8 @@ fn detect_target_triple() -> Result<&'static str> {
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
         ("windows", "x86") => "i686-pc-windows-msvc",
         ("windows", "aarch64") => "aarch64-pc-windows-msvc",
-        ("freebsd", "x86_64") => "x86_64-unknown-freebsd",
+        // FreeBSD is recognized by the install script but the release pipeline
+        // does not publish a FreeBSD asset yet, so self-update is not supported.
         (os, arch) => bail!("Unsupported platform: {os}-{arch}"),
     };
     Ok(triple)

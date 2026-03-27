@@ -20,7 +20,7 @@ impl UpdateCheck {
         let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
         let contents = serde_json::to_string_pretty(&self)?;
         std::fs::write(&tmp_path, contents)?;
-        std::fs::rename(&tmp_path, &path)?;
+        super::rename_replacing(&tmp_path, &path)?;
         Ok(())
     }
 
