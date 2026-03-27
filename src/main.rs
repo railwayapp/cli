@@ -70,17 +70,20 @@ commands!(
     functions(function, func, fn, funcs, fns)
 );
 
-fn spawn_update_task() -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
+fn spawn_update_task(
+    known_version: Option<String>,
+) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        if !std::io::stdout().is_terminal() {
-            anyhow::bail!("Stdout is not a terminal");
-        }
+        // If the caller already read a pending version from disk, use it
+        // directly instead of calling check_update().  check_update() would
+        // short-circuit (same-day gate) after clear_latest() was called, so
+        // without this bypass a timed-out download would never be retried on
+        // the same day.
+        let latest_version = match known_version {
+            Some(v) => Some(v),
+            None => util::check_update::check_update(false).await?,
+        };
 
-        let latest_version = util::check_update::check_update(false).await?;
-
-        // If auto-update is enabled and a new version is available, try to
-        // stage it.  This runs inside the awaited task so it won't be
-        // cancelled on exit; handle_update_task caps the wait with a timeout.
         if let Some(ref version) = latest_version {
             if !telemetry::is_auto_update_disabled() {
                 let method = util::install_method::InstallMethod::detect();
@@ -107,7 +110,7 @@ async fn handle_update_task(
         match tokio::time::timeout(Duration::from_secs(5), handle).await {
             Ok(Ok(Ok(_))) => {}
             Ok(Ok(Err(_))) | Ok(Err(_)) => {} // update error or task panic — non-fatal
-            Err(_) => {} // timeout — download will resume on next invocation
+            Err(_) => {} // timeout — next invocation retries via known_pending bypass
         }
     }
 }
@@ -124,9 +127,14 @@ async fn main() -> Result<()> {
 
         let update = UpdateCheck::read().unwrap_or_default();
 
-        if let Some(latest_version) = update.latest_version {
+        // Capture the pending version *before* clear_latest() overwrites it.
+        // Passing it to spawn_update_task lets the task skip the same-day
+        // short-circuit and retry a download that timed out in a prior run.
+        let known_pending = update.latest_version;
+
+        if let Some(ref latest_version) = known_pending {
             if matches!(
-                compare_semver(env!("CARGO_PKG_VERSION"), &latest_version),
+                compare_semver(env!("CARGO_PKG_VERSION"), latest_version),
                 Ordering::Less
             ) {
                 println!(
@@ -139,7 +147,20 @@ async fn main() -> Result<()> {
             UpdateCheck::clear_latest();
         }
 
-        Some(spawn_update_task())
+        // Don't race with `railway autoupdate disable`: skip spawning when
+        // the user is explicitly managing auto-update preferences so the
+        // preference flip happens before any update work begins.
+        let is_autoupdate_cmd = args
+            .as_ref()
+            .ok()
+            .and_then(|a| a.subcommand_name())
+            == Some("autoupdate");
+
+        if is_autoupdate_cmd {
+            None
+        } else {
+            Some(spawn_update_task(known_pending))
+        }
     } else {
         None
     };

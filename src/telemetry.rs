@@ -98,7 +98,8 @@ impl Preferences {
                 return;
             };
             let pid = std::process::id();
-            let tmp_path = path.with_extension(format!("tmp.{pid}.json"));
+            let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+            let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
             if std::fs::write(&tmp_path, contents).is_ok() {
                 let _ = std::fs::rename(&tmp_path, &path);
             }

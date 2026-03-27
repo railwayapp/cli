@@ -51,11 +51,17 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
     let update = UpdateCheck::read().unwrap_or_default();
 
     if let Some(last_update_check) = update.last_update_check {
+        // Dates are compared in UTC; a check near midnight local time may
+        // occasionally fire twice, but that is harmless.
         if chrono::Utc::now().date_naive() == last_update_check.date_naive() && !force {
             return Ok(None);
         }
     }
 
+    // No explicit timeout here: callers that care about latency (e.g. the
+    // background task capped by handle_update_task) are already bounded by
+    // the tokio runtime; the interactive `railway upgrade` path relies on
+    // reqwest's default (no timeout) so it can complete on slow connections.
     let client = reqwest::Client::new();
     let response = client
         .get(GITHUB_API_RELEASE_URL)
@@ -99,7 +105,6 @@ pub fn spawn_package_manager_update(
         .package_manager_command()
         .context("No package manager command for this install method")?;
 
-    // Verify the package manager binary exists
     if which::which(program).is_err() {
         bail!("Package manager '{program}' not found in PATH");
     }
@@ -131,10 +136,20 @@ pub fn spawn_package_manager_update(
     let mut cmd = std::process::Command::new(program);
     cmd.args(&args).stdout(log_file).stderr(log_stderr);
 
+    // Isolate the child from the parent's terminal so that Ctrl+C does not
+    // propagate and kill the in-flight update process.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP detaches the child from the console's
+        // Ctrl+C handler on Windows.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
 
     let child = cmd.spawn().context(format!("Failed to spawn {program}"))?;
@@ -151,19 +166,38 @@ pub fn spawn_package_manager_update(
 fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        use std::process::Command;
-        // `kill -0 <pid>` checks existence without sending a signal.
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        // Signal 0 checks existence without delivering a signal.
+        // EPERM means the process exists but we lack permission to signal it.
+        matches!(
+            kill(Pid::from_raw(pid as i32), None),
+            Ok(()) | Err(nix::errno::Errno::EPERM)
+        )
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // On Windows, conservatively assume it's alive to avoid duplicates.
-        // A stale PID file will be overwritten on the next successful spawn.
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::{GetExitCodeProcess, OpenProcess};
+        use winapi::um::winnt::PROCESS_QUERY_INFORMATION;
+        // GetExitCodeProcess returns STILL_ACTIVE (259) while the process runs.
+        const STILL_ACTIVE: u32 = 259;
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+            if handle.is_null() {
+                // Process doesn't exist or we have no permission to query it.
+                return false;
+            }
+            let mut exit_code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut exit_code as *mut u32 as *mut _) != 0;
+            CloseHandle(handle);
+            ok && exit_code == STILL_ACTIVE
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Conservative fallback for other platforms (e.g. FreeBSD): assume
+        // alive and let the 10-minute staleness TTL expire the entry.
         let _ = pid;
         true
     }

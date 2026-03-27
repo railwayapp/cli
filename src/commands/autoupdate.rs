@@ -31,7 +31,10 @@ pub async fn command(args: Args) -> Result<()> {
             let mut prefs = Preferences::read();
             prefs.auto_update_disabled = true;
             prefs.write();
-            // Clean up any staged update that would otherwise sit on disk indefinitely
+            // Clean up any staged update that would otherwise sit on disk indefinitely.
+            // Note: a package-manager child already spawned by a prior invocation runs
+            // detached and cannot be cancelled here — it will finish regardless.
+            // The preference flip takes effect on every subsequent invocation.
             let _ = crate::util::self_update::clean_staged();
             println!("{}", "Auto-updates disabled.".yellow());
         }

@@ -43,7 +43,6 @@ fn detect_target_triple() -> Result<&'static str> {
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
         ("windows", "x86") => "i686-pc-windows-msvc",
         ("windows", "aarch64") => "aarch64-pc-windows-msvc",
-        ("freebsd", "x86_64") => "x86_64-unknown-freebsd",
         (os, arch) => bail!("Unsupported platform: {os}-{arch}"),
     };
     Ok(triple)
@@ -189,7 +188,6 @@ fn verify_checksum(bytes: &[u8], expected_hex: &str) -> Result<()> {
 /// Downloads the release tarball for the given version and extracts the binary
 /// to the staged update directory. Cleans up on partial failure.
 pub async fn download_and_stage(version: &str) -> Result<()> {
-    // Skip if we already have this version staged
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version {
             return Ok(());
@@ -200,6 +198,9 @@ pub async fn download_and_stage(version: &str) -> Result<()> {
     let asset_name = release_asset_name(version, target);
     let url = release_url(version, &asset_name);
 
+    // 120 s applies to the interactive `railway upgrade` path.  Background
+    // calls from spawn_update_task are bounded by handle_update_task's 5 s
+    // outer cap, which will abort the tokio task before this fires.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
@@ -225,6 +226,13 @@ pub async fn download_and_stage(version: &str) -> Result<()> {
 
     if let Some(ref expected) = expected_checksum {
         verify_checksum(&bytes, expected)?;
+    } else {
+        // checksums.txt was not published for this release.  Proceed but warn
+        // so users know integrity was not verified.
+        eprintln!(
+            "{} no checksums.txt found for v{version}; skipping integrity check",
+            "warning:".yellow().bold()
+        );
     }
 
     let dir = staged_update_dir()?;
@@ -497,48 +505,59 @@ pub async fn self_update_interactive() -> Result<()> {
 
 pub fn rollback() -> Result<()> {
     let dir = backups_dir()?;
+
+    // Back up the current binary first so (a) the rollback itself can be
+    // undone, and (b) prune has already run by the time we build the
+    // candidate list — preventing a prune from removing the target mid-flight.
+    backup_current_binary()?;
+
     let entries = list_backups(&dir)?;
-
-    if entries.is_empty() {
-        bail!("No backups found. Cannot rollback.");
-    }
-
     let current_version = env!("CARGO_PKG_VERSION");
 
-    // list_backups sorts oldest-first; find the newest that differs from the current version
-    let backup = entries
+    // Collect (version_string, path) pairs, newest-first, excluding current.
+    let candidates: Vec<(String, std::path::PathBuf)> = entries
         .iter()
         .rev()
-        .find(|e| {
-            let name = e.file_name();
-            let v = name.to_string_lossy();
-            let v = v
+        .filter_map(|e| {
+            let raw = e.file_name().to_string_lossy().into_owned();
+            let ver = raw
                 .trim_start_matches(BACKUP_PREFIX)
-                .trim_end_matches(".exe");
-            v != current_version
-        });
+                .trim_end_matches(".exe")
+                .to_string();
+            if ver == current_version {
+                None
+            } else {
+                Some((ver, e.path()))
+            }
+        })
+        .collect();
 
-    let Some(backup) = backup else {
+    if candidates.is_empty() {
         bail!(
             "All backups match the current version (v{current_version}). Nothing to roll back to."
         );
+    }
+
+    let (version, backup_path) = if candidates.len() == 1 {
+        candidates.into_iter().next().unwrap()
+    } else {
+        // Multiple candidates: let the user pick.
+        let labels: Vec<String> = candidates.iter().map(|(v, _)| v.clone()).collect();
+        let selected = inquire::Select::new("Select version to roll back to:", labels)
+            .prompt()
+            .context("Rollback cancelled")?;
+        candidates
+            .into_iter()
+            .find(|(v, _)| *v == selected)
+            .expect("selected label must exist in candidates")
     };
-
-    let backup_path = backup.path();
-    let backup_name = backup.file_name();
-    let backup_name_str = backup_name.to_string_lossy();
-
-    let version = backup_name_str
-        .trim_start_matches(BACKUP_PREFIX)
-        .trim_end_matches(".exe");
-
-    let current_exe = std::env::current_exe().context("Failed to get current exe path")?;
 
     println!("{} v{}...", "Rolling back to".yellow().bold(), version);
 
+    let current_exe = std::env::current_exe().context("Failed to get current exe path")?;
     replace_binary(&backup_path, &current_exe)?;
 
-    // Clean staged updates so the rolled-back version doesn't immediately re-apply
+    // Clean staged updates so the rolled-back binary doesn't immediately re-apply.
     let _ = StagedUpdate::clean();
 
     println!("{} v{}", "Rolled back to".green().bold(), version);
@@ -555,10 +574,7 @@ mod tests {
         let triple = detect_target_triple().unwrap();
         assert!(!triple.is_empty());
         assert!(
-            triple.contains("darwin")
-                || triple.contains("linux")
-                || triple.contains("windows")
-                || triple.contains("freebsd")
+            triple.contains("darwin") || triple.contains("linux") || triple.contains("windows")
         );
     }
 

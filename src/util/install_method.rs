@@ -111,13 +111,15 @@ impl InstallMethod {
             None => return false,
         };
 
-        // Try creating (and immediately removing) a temp file in the same
-        // directory.  This is the most reliable cross-platform writability
-        // check because it accounts for ACLs, mount options, etc.
+        // Try creating a temp file in the same directory — the most reliable
+        // cross-platform writability check (accounts for ACLs, mount flags…).
+        // scopeguard ensures the probe is removed even if this thread panics.
         let probe = dir.join(".railway-write-probe");
         match std::fs::File::create(&probe) {
             Ok(_) => {
-                let _ = std::fs::remove_file(&probe);
+                let _guard = scopeguard::guard(probe, |p| {
+                    let _ = std::fs::remove_file(&p);
+                });
                 true
             }
             Err(_) => false,
@@ -125,7 +127,9 @@ impl InstallMethod {
     }
 
     /// Whether this install method supports auto-running the package manager
-    /// in the background (fast package managers only).
+    /// in the background.  Homebrew and Cargo are excluded because they can
+    /// take several minutes and would keep a detached process alive far longer
+    /// than is acceptable for a transparent background update.
     pub fn can_auto_run_package_manager(&self) -> bool {
         matches!(
             self,
