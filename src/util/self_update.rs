@@ -24,6 +24,10 @@ pub fn update_lock_path() -> Result<PathBuf> {
     Ok(railway_dir()?.join("update.lock"))
 }
 
+pub fn package_update_pid_path() -> Result<PathBuf> {
+    Ok(railway_dir()?.join("package-update.pid"))
+}
+
 pub fn auto_update_log_path() -> Result<PathBuf> {
     Ok(railway_dir()?.join("auto-update.log"))
 }

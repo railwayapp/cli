@@ -52,7 +52,7 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
 
     if let Some(last_update_check) = update.last_update_check {
         if chrono::Utc::now().date_naive() == last_update_check.date_naive() && !force {
-            bail!("Update check already ran today");
+            return Ok(None);
         }
     }
 
@@ -74,7 +74,16 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
             update.write()?;
             Ok(Some(latest_version.to_string()))
         }
-        _ => Ok(None),
+        _ => {
+            // Still record the check time so we don't re-check on every
+            // invocation when the CLI is already up-to-date.
+            let update = UpdateCheck {
+                last_update_check: Some(chrono::Utc::now()),
+                latest_version: None,
+            };
+            let _ = update.write();
+            Ok(None)
+        }
     }
 }
 
@@ -99,7 +108,7 @@ pub fn spawn_package_manager_update(
     // Format: "PID UNIX_TIMESTAMP".  We check whether the recorded process is
     // still alive AND the entry is recent (< 10 min).  The staleness check
     // ensures we recover on all platforms even if PID liveness detection fails.
-    let pid_path = super::self_update::update_lock_path()?;
+    let pid_path = super::self_update::package_update_pid_path()?;
     if let Ok(contents) = std::fs::read_to_string(&pid_path) {
         let parts: Vec<&str> = contents.split_whitespace().collect();
         if let (Some(pid_str), Some(ts_str)) = (parts.first(), parts.get(1)) {

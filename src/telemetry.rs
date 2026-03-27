@@ -94,9 +94,14 @@ impl Preferences {
 
     pub fn write(&self) {
         if let Some(path) = Self::path() {
-            let _ = serde_json::to_string(self)
-                .ok()
-                .map(|contents| std::fs::write(path, contents));
+            let Ok(contents) = serde_json::to_string(self) else {
+                return;
+            };
+            let pid = std::process::id();
+            let tmp_path = path.with_extension(format!("tmp.{pid}.json"));
+            if std::fs::write(&tmp_path, contents).is_ok() {
+                let _ = std::fs::rename(&tmp_path, &path);
+            }
         }
     }
 }
