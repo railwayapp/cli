@@ -24,6 +24,15 @@ impl UpdateCheck {
         Ok(())
     }
 
+    /// Clear the cached "new version available" notification.
+    pub fn clear_latest() {
+        let update = Self {
+            last_update_check: Some(chrono::Utc::now()),
+            latest_version: None,
+        };
+        let _ = update.write();
+    }
+
     pub fn read() -> anyhow::Result<Self> {
         let home = home_dir().context("Failed to get home directory")?;
         let path = home.join(".railway/version.json");
@@ -67,4 +76,53 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
         }
         _ => Ok(None),
     }
+}
+
+/// Spawns a fully detached package manager process to update the CLI.
+/// Used for npm, Bun, and Scoop installs where the package manager is fast.
+/// The child process runs independently — if the update succeeds, the next
+/// CLI invocation will be the new version and the "new version available"
+/// notification will stop appearing.
+pub fn spawn_package_manager_update(
+    method: super::install_method::InstallMethod,
+) -> anyhow::Result<()> {
+    use fs2::FileExt;
+
+    let (program, args) = method
+        .package_manager_command()
+        .context("No package manager command for this install method")?;
+
+    // Verify the package manager binary exists
+    if which::which(program).is_err() {
+        bail!("Package manager '{program}' not found in PATH");
+    }
+
+    // Use the same update lock to prevent multiple concurrent update processes
+    let lock_path = super::self_update::update_lock_path()?;
+    let lock_file = std::fs::File::create(&lock_path)?;
+    if lock_file.try_lock_exclusive().is_err() {
+        bail!("Another update process is already running");
+    }
+    // Release the lock immediately — we just wanted to check no one else is running.
+    // The child process is detached and can't hold our lock anyway.
+    drop(lock_file);
+
+    let log_path = super::self_update::auto_update_log_path()?;
+    let log_file = std::fs::File::create(&log_path)?;
+    let log_stderr = log_file.try_clone()?;
+
+    // Spawn in its own process group so SIGINT from the terminal doesn't
+    // propagate to the child when the user hits Ctrl+C.
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(&args).stdout(log_file).stderr(log_stderr);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    cmd.spawn().context(format!("Failed to spawn {program}"))?;
+
+    Ok(())
 }

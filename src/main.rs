@@ -29,6 +29,7 @@ mod telemetry;
 // Specify the modules you want to include in the commands_enum! macro
 commands!(
     add,
+    autoupdate,
     bucket,
     completion,
     connect,
@@ -71,11 +72,25 @@ commands!(
 
 fn spawn_update_task() -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // outputting would break json output on CI
         if !std::io::stdout().is_terminal() {
             anyhow::bail!("Stdout is not a terminal");
         }
+
         let latest_version = util::check_update::check_update(false).await?;
+
+        // If auto-update is enabled and a new version is available, try to stage it
+        if let Some(ref version) = latest_version {
+            if !telemetry::is_auto_update_disabled() {
+                let method = util::install_method::InstallMethod::detect();
+                if method.can_self_update() {
+                    // Download and stage the update in the background
+                    let _ = util::self_update::download_and_stage(version).await;
+                } else if method.can_auto_run_package_manager() {
+                    // Spawn a detached package manager process
+                    let _ = util::check_update::spawn_package_manager_update(method);
+                }
+            }
+        }
 
         Ok(latest_version)
     })
@@ -107,6 +122,10 @@ async fn main() -> Result<()> {
     let check_updates_handle = if std::io::stdout().is_terminal() {
         telemetry::show_notice_if_needed();
 
+        if !telemetry::is_auto_update_disabled() {
+            util::self_update::try_apply_staged();
+        }
+
         let update = UpdateCheck::read().unwrap_or_default();
 
         if let Some(latest_version) = update.latest_version {
@@ -121,13 +140,7 @@ async fn main() -> Result<()> {
                     "https://docs.railway.com/guides/cli".purple(),
                 );
             }
-            let update = UpdateCheck {
-                last_update_check: Some(chrono::Utc::now()),
-                latest_version: None,
-            };
-            update
-                .write()
-                .context("Failed to save time since last update check")?;
+            UpdateCheck::clear_latest();
         }
 
         Some(spawn_update_task())
@@ -159,6 +172,7 @@ async fn main() -> Result<()> {
         "completion",
         "docs",
         "upgrade",
+        "autoupdate",
         "telemetry_cmd",
         "check_updates",
     ];

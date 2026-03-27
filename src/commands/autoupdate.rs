@@ -1,0 +1,63 @@
+use super::*;
+use crate::telemetry::{Preferences, is_auto_update_disabled_by_env};
+use crate::util::install_method::InstallMethod;
+
+/// Manage auto-update preferences
+#[derive(Parser)]
+pub struct Args {
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Parser)]
+enum Commands {
+    /// Enable automatic updates
+    Enable,
+    /// Disable automatic updates
+    Disable,
+    /// Show current auto-update status
+    Status,
+}
+
+pub async fn command(args: Args) -> Result<()> {
+    match args.command {
+        Commands::Enable => {
+            let mut prefs = Preferences::read();
+            prefs.auto_update_disabled = false;
+            prefs.write();
+            println!("{}", "Auto-updates enabled.".green());
+        }
+        Commands::Disable => {
+            let mut prefs = Preferences::read();
+            prefs.auto_update_disabled = true;
+            prefs.write();
+            // Clean up any staged update that would otherwise sit on disk indefinitely
+            let _ = crate::util::self_update::clean_staged();
+            println!("{}", "Auto-updates disabled.".yellow());
+        }
+        Commands::Status => {
+            let prefs = Preferences::read();
+            let env_disabled = is_auto_update_disabled_by_env();
+            let method = InstallMethod::detect();
+
+            if env_disabled {
+                println!(
+                    "Auto-updates: {} (disabled by RAILWAY_NO_AUTO_UPDATE)",
+                    "disabled".yellow()
+                );
+            } else if prefs.auto_update_disabled {
+                println!(
+                    "Auto-updates: {} (disabled via {})",
+                    "disabled".yellow(),
+                    "railway autoupdate disable".bold()
+                );
+            } else {
+                println!("Auto-updates: {}", "enabled".green());
+            }
+
+            println!("Install method: {}", method.name().bold());
+            println!("Update strategy: {}", method.update_strategy());
+        }
+    }
+    Ok(())
+}

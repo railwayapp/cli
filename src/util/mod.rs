@@ -1,9 +1,11 @@
 pub mod check_update;
 pub mod compare_semver;
+pub mod install_method;
 pub mod logs;
 pub mod progress;
 pub mod prompt;
 pub mod retry;
+pub mod self_update;
 pub mod time;
 pub mod two_factor;
 pub mod watcher;

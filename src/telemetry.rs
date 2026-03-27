@@ -76,6 +76,8 @@ fn env_var_is_truthy(name: &str) -> bool {
 pub struct Preferences {
     #[serde(default)]
     pub telemetry_disabled: bool,
+    #[serde(default)]
+    pub auto_update_disabled: bool,
 }
 
 impl Preferences {
@@ -101,6 +103,16 @@ impl Preferences {
 
 pub fn is_telemetry_disabled_by_env() -> bool {
     env_var_is_truthy("DO_NOT_TRACK") || env_var_is_truthy("RAILWAY_NO_TELEMETRY")
+}
+
+pub fn is_auto_update_disabled_by_env() -> bool {
+    env_var_is_truthy("RAILWAY_NO_AUTO_UPDATE")
+}
+
+pub fn is_auto_update_disabled() -> bool {
+    is_auto_update_disabled_by_env()
+        || Preferences::read().auto_update_disabled
+        || crate::config::Configs::env_is_ci()
 }
 
 fn is_telemetry_disabled() -> bool {
