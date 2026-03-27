@@ -87,14 +87,16 @@ fn spawn_update_task(
             if !telemetry::is_auto_update_disabled() {
                 let method = util::install_method::InstallMethod::detect();
                 if method.can_self_update() && method.can_write_binary() {
-                    if util::self_update::download_and_stage(version).await.is_ok() {
+                    match util::self_update::download_and_stage(version).await {
+                        Ok(true) => UpdateCheck::clear_latest(),
+                        Ok(false) => {} // Lock held by another process, retry next invocation
+                        Err(_) => {}    // Download failed, retry next invocation
+                    }
+                } else if method.can_auto_run_package_manager() {
+                    if util::check_update::spawn_package_manager_update(method).is_ok() {
                         UpdateCheck::clear_latest();
                     }
-                    // On failure: don't clear — retry on next invocation
-                } else if method.can_auto_run_package_manager()
-                    && util::check_update::spawn_package_manager_update(method).is_ok()
-                {
-                    UpdateCheck::clear_latest();
+                    // Spawn failed (missing tool, already running): retry next invocation
                 } else {
                     // Notification-only install (Homebrew, Cargo, etc.): no
                     // background action possible.  Clear the cached version so

@@ -106,7 +106,7 @@ impl StagedUpdate {
         let tmp_path = dir.join(format!("update.tmp.{pid}-{nanos}.json"));
         let contents = serde_json::to_string_pretty(self)?;
         fs::write(&tmp_path, contents)?;
-        fs::rename(&tmp_path, &path)?;
+        super::rename_replacing(&tmp_path, &path)?;
         Ok(())
     }
 
@@ -196,7 +196,11 @@ fn verify_checksum(bytes: &[u8], expected_hex: &str) -> Result<()> {
 /// Downloads the release tarball for the given version and extracts the binary
 /// to the staged update directory. Cleans up on partial failure.
 /// Uses file locking to prevent concurrent CLI processes from racing.
-pub async fn download_and_stage(version: &str) -> Result<()> {
+///
+/// Returns `Ok(true)` when the update was staged (or was already staged for
+/// this version/target).  Returns `Ok(false)` when another process holds the
+/// update lock — the caller should **not** treat this as a completed update.
+pub async fn download_and_stage(version: &str) -> Result<bool> {
     use fs2::FileExt;
 
     let target = detect_target_triple()?;
@@ -204,7 +208,7 @@ pub async fn download_and_stage(version: &str) -> Result<()> {
     // Quick check before acquiring the lock.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
-            return Ok(());
+            return Ok(true);
         }
     }
 
@@ -213,14 +217,14 @@ pub async fn download_and_stage(version: &str) -> Result<()> {
         std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
     if lock_file.try_lock_exclusive().is_err() {
         // Another process is already staging or applying an update.
-        return Ok(());
+        return Ok(false);
     }
 
     // Re-check after acquiring the lock — another process may have just
     // finished staging the same version.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
-            return Ok(());
+            return Ok(true);
         }
     }
 
@@ -290,7 +294,7 @@ pub async fn download_and_stage(version: &str) -> Result<()> {
         return Err(e);
     }
 
-    Ok(())
+    Ok(true)
 }
 
 fn extract_from_tar_gz(bytes: &[u8], bin_name: &str, dest_dir: &Path) -> Result<()> {
@@ -365,13 +369,14 @@ fn list_backups(dir: &Path) -> Result<Vec<fs::DirEntry>> {
 fn backup_current_binary() -> Result<()> {
     let current_exe = std::env::current_exe().context("Failed to get current exe path")?;
     let current_version = env!("CARGO_PKG_VERSION");
+    let target = detect_target_triple()?;
     let dir = backups_dir()?;
     fs::create_dir_all(&dir)?;
 
     let backup_name = if cfg!(target_os = "windows") {
-        format!("{BACKUP_PREFIX}{current_version}.exe")
+        format!("{BACKUP_PREFIX}{current_version}_{target}.exe")
     } else {
-        format!("{BACKUP_PREFIX}{current_version}")
+        format!("{BACKUP_PREFIX}{current_version}_{target}")
     };
     let backup_path = dir.join(&backup_name);
 
@@ -544,7 +549,9 @@ pub async fn self_update_interactive() -> Result<()> {
 
     println!("{} v{}...", "Downloading".green().bold(), latest_version);
 
-    download_and_stage(&latest_version).await?;
+    if !download_and_stage(&latest_version).await? {
+        bail!("Another update process is already running. Please try again.");
+    }
 
     let version = apply_staged_update()?;
 
@@ -555,6 +562,7 @@ pub async fn self_update_interactive() -> Result<()> {
 
 pub fn rollback() -> Result<()> {
     let dir = backups_dir()?;
+    let current_target = detect_target_triple()?;
 
     // Back up the current binary first so (a) the rollback itself can be
     // undone, and (b) prune has already run by the time we build the
@@ -565,20 +573,36 @@ pub fn rollback() -> Result<()> {
     let current_version = env!("CARGO_PKG_VERSION");
 
     // Collect (version_string, path) pairs, newest-first, excluding current.
+    // Backup filenames are either the old format "railway-v{ver}" or the new
+    // format "railway-v{ver}_{target}".  Old-format backups (no target) are
+    // assumed to match the current target since they were created locally
+    // before target tracking was added.
     let candidates: Vec<(String, std::path::PathBuf)> = entries
         .iter()
         .rev()
         .filter_map(|e| {
             let raw = e.file_name().to_string_lossy().into_owned();
-            let ver = raw
+            let stem = raw
                 .trim_start_matches(BACKUP_PREFIX)
-                .trim_end_matches(".exe")
-                .to_string();
+                .trim_end_matches(".exe");
+
+            let (ver, backup_target) = match stem.split_once('_') {
+                Some((v, t)) => (v, Some(t)),
+                None => (stem, None),
+            };
+
             if ver == current_version {
-                None
-            } else {
-                Some((ver, e.path()))
+                return None;
             }
+
+            // Filter out backups built for a different architecture.
+            if let Some(t) = backup_target {
+                if t != current_target {
+                    return None;
+                }
+            }
+
+            Some((ver.to_string(), e.path()))
         })
         .collect();
 

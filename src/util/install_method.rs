@@ -53,6 +53,18 @@ impl InstallMethod {
             return InstallMethod::Shell;
         }
 
+        // Catch-all: if the binary lives in any directory named "bin" and no
+        // package manager was detected, it was most likely installed via the
+        // shell installer with a custom --bin-dir (e.g. ~/bin, /opt/bin).
+        if exe_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n == "bin")
+            .unwrap_or(false)
+        {
+            return InstallMethod::Shell;
+        }
+
         InstallMethod::Unknown
     }
 
