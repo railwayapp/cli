@@ -75,10 +75,9 @@ fn spawn_update_task(
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
         // If the caller already read a pending version from disk, use it
-        // directly instead of calling check_update().  check_update() would
-        // short-circuit (same-day gate) after clear_latest() was called, so
-        // without this bypass a timed-out download would never be retried on
-        // the same day.
+        // directly instead of calling check_update().  This bypasses the
+        // same-day gate so a timed-out download is retried immediately on
+        // the next invocation.
         let latest_version = match known_version {
             Some(v) => Some(v),
             None => util::check_update::check_update(false).await?,
@@ -88,9 +87,13 @@ fn spawn_update_task(
             if !telemetry::is_auto_update_disabled() {
                 let method = util::install_method::InstallMethod::detect();
                 if method.can_self_update() && method.can_write_binary() {
-                    let _ = util::self_update::download_and_stage(version).await;
-                } else if method.can_auto_run_package_manager() {
-                    let _ = util::check_update::spawn_package_manager_update(method);
+                    if util::self_update::download_and_stage(version).await.is_ok() {
+                        UpdateCheck::clear_latest();
+                    }
+                } else if method.can_auto_run_package_manager()
+                    && util::check_update::spawn_package_manager_update(method).is_ok()
+                {
+                    UpdateCheck::clear_latest();
                 }
             }
         }
@@ -122,23 +125,28 @@ async fn main() -> Result<()> {
         telemetry::show_notice_if_needed();
 
         // Peek at the subcommand early so we can skip the staged-update
-        // apply when the user is running `railway upgrade` (which manages
-        // its own update path and rollback flow).
-        let is_upgrade_cmd = args
+        // apply and background updater when the user is explicitly managing
+        // updates (`railway upgrade` or `railway autoupdate`).
+        let subcommand = args
             .as_ref()
             .ok()
             .and_then(|a| a.subcommand_name())
-            == Some("upgrade");
+            .map(|s| s.to_string());
 
-        if !telemetry::is_auto_update_disabled() && !is_upgrade_cmd {
+        let is_update_management_cmd = matches!(
+            subcommand.as_deref(),
+            Some("upgrade" | "autoupdate")
+        );
+
+        if !telemetry::is_auto_update_disabled() && !is_update_management_cmd {
             util::self_update::try_apply_staged();
         }
 
         let update = UpdateCheck::read().unwrap_or_default();
 
-        // Capture the pending version *before* clear_latest() overwrites it.
-        // Passing it to spawn_update_task lets the task skip the same-day
-        // short-circuit and retry a download that timed out in a prior run.
+        // Pass any pending version to spawn_update_task so it can skip the
+        // same-day short-circuit and retry a download that timed out in a
+        // prior run.  The background task clears latest_version on success.
         let known_pending = update.latest_version;
 
         if let Some(ref latest_version) = known_pending {
@@ -153,21 +161,9 @@ async fn main() -> Result<()> {
                     "https://docs.railway.com/guides/cli".purple(),
                 );
             }
-            UpdateCheck::clear_latest();
         }
 
-        // Don't race with `railway upgrade` or `railway autoupdate disable`:
-        // skip the background updater when the user is explicitly managing
-        // updates so the preflight doesn't interfere with the manual path.
-        let subcommand = args
-            .as_ref()
-            .ok()
-            .and_then(|a| a.subcommand_name())
-            .map(|s| s.to_string());
-
-        let skip_update = matches!(subcommand.as_deref(), Some("autoupdate" | "upgrade"));
-
-        if skip_update {
+        if is_update_management_cmd {
             None
         } else {
             Some(spawn_update_task(known_pending))

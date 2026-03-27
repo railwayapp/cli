@@ -81,9 +81,23 @@ pub async fn command(args: Args) -> Result<()> {
 
     // Order matters: check self-update first, then unknown, then package manager.
     match method {
-        method if method.can_self_update() => {
+        method if method.can_self_update() && method.can_write_binary() => {
             println!();
             crate::util::self_update::self_update_interactive().await?;
+        }
+        method if method.can_self_update() => {
+            // Shell install but binary location not writable by current user
+            println!();
+            println!(
+                "{}",
+                "Cannot upgrade: the CLI binary is not writable by the current user.".yellow()
+            );
+            println!();
+            println!("To upgrade, either:");
+            println!("  1. Re-run with elevated permissions:");
+            println!("     {}", "sudo railway upgrade".bold());
+            println!("  2. Reinstall using the install script:");
+            println!("     {}", "bash <(curl -fsSL cli.new)".bold());
         }
         InstallMethod::Unknown => {
             println!();
