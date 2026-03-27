@@ -98,6 +98,32 @@ impl InstallMethod {
         matches!(self, InstallMethod::Shell)
     }
 
+    /// Whether the current process can write to the directory containing the
+    /// binary.  Returns `false` for paths like `/usr/local/bin` that were
+    /// installed with `sudo` and are not writable by the current user.
+    pub fn can_write_binary(&self) -> bool {
+        let exe_path = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let dir = match exe_path.parent() {
+            Some(d) => d,
+            None => return false,
+        };
+
+        // Try creating (and immediately removing) a temp file in the same
+        // directory.  This is the most reliable cross-platform writability
+        // check because it accounts for ACLs, mount options, etc.
+        let probe = dir.join(".railway-write-probe");
+        match std::fs::File::create(&probe) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Whether this install method supports auto-running the package manager
     /// in the background (fast package managers only).
     pub fn can_auto_run_package_manager(&self) -> bool {

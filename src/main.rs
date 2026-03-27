@@ -78,15 +78,18 @@ fn spawn_update_task() -> tokio::task::JoinHandle<anyhow::Result<Option<String>>
 
         let latest_version = util::check_update::check_update(false).await?;
 
-        // If auto-update is enabled and a new version is available, try to stage it
+        // If auto-update is enabled and a new version is available, kick off
+        // the update in the background.  The download/stage task is *not*
+        // awaited on exit so it won't block the CLI.
         if let Some(ref version) = latest_version {
             if !telemetry::is_auto_update_disabled() {
                 let method = util::install_method::InstallMethod::detect();
-                if method.can_self_update() {
-                    // Download and stage the update in the background
-                    let _ = util::self_update::download_and_stage(version).await;
+                if method.can_self_update() && method.can_write_binary() {
+                    let version = version.clone();
+                    tokio::spawn(async move {
+                        let _ = util::self_update::download_and_stage(&version).await;
+                    });
                 } else if method.can_auto_run_package_manager() {
-                    // Spawn a detached package manager process
                     let _ = util::check_update::spawn_package_manager_update(method);
                 }
             }

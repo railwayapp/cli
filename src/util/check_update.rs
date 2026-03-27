@@ -86,8 +86,6 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
 pub fn spawn_package_manager_update(
     method: super::install_method::InstallMethod,
 ) -> anyhow::Result<()> {
-    use fs2::FileExt;
-
     let (program, args) = method
         .package_manager_command()
         .context("No package manager command for this install method")?;
@@ -97,15 +95,18 @@ pub fn spawn_package_manager_update(
         bail!("Package manager '{program}' not found in PATH");
     }
 
-    // Use the same update lock to prevent multiple concurrent update processes
-    let lock_path = super::self_update::update_lock_path()?;
-    let lock_file = std::fs::File::create(&lock_path)?;
-    if lock_file.try_lock_exclusive().is_err() {
-        bail!("Another update process is already running");
+    // Guard against overlapping package-manager updates using a PID file.
+    // We check whether a previously recorded child PID is still alive; if so,
+    // an update is already in flight.  After spawning we write the new child's
+    // PID so future invocations can check.
+    let pid_path = super::self_update::update_lock_path()?;
+    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = contents.trim().parse::<u32>() {
+            if is_pid_alive(pid) {
+                bail!("Another update process (pid {pid}) is already running");
+            }
+        }
     }
-    // Release the lock immediately — we just wanted to check no one else is running.
-    // The child process is detached and can't hold our lock anyway.
-    drop(lock_file);
 
     let log_path = super::self_update::auto_update_log_path()?;
     let log_file = std::fs::File::create(&log_path)?;
@@ -122,7 +123,32 @@ pub fn spawn_package_manager_update(
         cmd.process_group(0);
     }
 
-    cmd.spawn().context(format!("Failed to spawn {program}"))?;
+    let child = cmd.spawn().context(format!("Failed to spawn {program}"))?;
+
+    // Record the child PID so future CLI invocations can detect an in-flight update.
+    let _ = std::fs::write(&pid_path, child.id().to_string());
 
     Ok(())
+}
+
+/// Check whether a process with the given PID is still running.
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        // `kill -0 <pid>` checks existence without sending a signal.
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows, conservatively assume it's alive to avoid duplicates.
+        // A stale PID file will be overwritten on the next successful spawn.
+        let _ = pid;
+        true
+    }
 }
