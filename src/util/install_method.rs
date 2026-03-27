@@ -53,9 +53,24 @@ impl InstallMethod {
             return InstallMethod::Shell;
         }
 
+        // Paths owned by system or non-shell package managers — must be
+        // checked before the catch-all so we don't misclassify them as Shell.
+        const SYSTEM_PATHS: &[&str] = &[
+            "/usr/bin",
+            "/usr/sbin",
+            "/nix/",
+            "nix-profile",
+            "/snap/",
+            "/flatpak/",
+        ];
+        if SYSTEM_PATHS.iter().any(|p| path_str.contains(p)) {
+            return InstallMethod::Unknown;
+        }
+
         // Catch-all: if the binary lives in any directory named "bin" and no
-        // package manager was detected, it was most likely installed via the
-        // shell installer with a custom --bin-dir (e.g. ~/bin, /opt/bin).
+        // package manager or system path was detected, it was most likely
+        // installed via the shell installer with a custom --bin-dir
+        // (e.g. ~/bin, /opt/bin).
         if exe_path
             .parent()
             .and_then(|p| p.file_name())
@@ -103,11 +118,11 @@ impl InstallMethod {
 
     /// Whether this install method supports direct binary self-update
     /// (download from GitHub Releases and replace in place).
-    /// Only Shell installs qualify — Unknown means we don't know where the
-    /// binary came from, so self-updating it could conflict with an
-    /// undetected package manager.
+    /// Only Shell installs on platforms with published release assets qualify.
+    /// Unknown means we don't know where the binary came from, so
+    /// self-updating it could conflict with an undetected package manager.
     pub fn can_self_update(&self) -> bool {
-        matches!(self, InstallMethod::Shell)
+        matches!(self, InstallMethod::Shell) && is_self_update_platform()
     }
 
     /// Whether the current process can write to the directory containing the
@@ -173,6 +188,14 @@ impl InstallMethod {
             InstallMethod::Shell | InstallMethod::Unknown => None,
         }
     }
+}
+
+/// Returns `true` when the release pipeline publishes a binary for the
+/// current OS, i.e. self-update can actually download an asset.
+/// FreeBSD is recognized by the install script but no release asset is
+/// published, so it must not enter the self-update path.
+fn is_self_update_platform() -> bool {
+    matches!(std::env::consts::OS, "macos" | "linux" | "windows")
 }
 
 #[cfg(test)]

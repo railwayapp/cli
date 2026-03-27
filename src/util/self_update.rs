@@ -179,9 +179,7 @@ async fn fetch_expected_checksum(
     // checksums.txt exists but our asset is not in it — the release manifest
     // is incomplete or malformed.  Treat this as an error rather than silently
     // skipping verification.
-    bail!(
-        "checksums.txt for v{version} exists but does not contain an entry for {asset_name}"
-    );
+    bail!("checksums.txt for v{version} exists but does not contain an entry for {asset_name}");
 }
 
 /// Verify the SHA-256 hash of the downloaded bytes against the expected hash.
@@ -214,6 +212,9 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
     }
 
     let lock_path = update_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let lock_file =
         std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
     if lock_file.try_lock_exclusive().is_err() {

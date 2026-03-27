@@ -104,9 +104,14 @@ fn spawn_update_task(
                     UpdateCheck::clear_latest();
                 }
             } else {
-                // Auto-updates disabled: clear so future checks can discover
-                // newer releases instead of being stuck on this version.
-                UpdateCheck::clear_latest();
+                // Auto-updates disabled: preserve latest_version so the
+                // "new version available" notification still prints, but
+                // update the check timestamp to rate-limit GitHub API calls.
+                let update = UpdateCheck {
+                    last_update_check: Some(chrono::Utc::now()),
+                    latest_version: latest_version.clone(),
+                };
+                let _ = update.write();
             }
         }
 
@@ -145,10 +150,8 @@ async fn main() -> Result<()> {
             .and_then(|a| a.subcommand_name())
             .map(|s| s.to_string());
 
-        let is_update_management_cmd = matches!(
-            subcommand.as_deref(),
-            Some("upgrade" | "autoupdate")
-        );
+        let is_update_management_cmd =
+            matches!(subcommand.as_deref(), Some("upgrade" | "autoupdate"));
 
         if !telemetry::is_auto_update_disabled() && !is_update_management_cmd {
             util::self_update::try_apply_staged();

@@ -14,6 +14,9 @@ impl UpdateCheck {
     pub fn write(&self) -> anyhow::Result<()> {
         let home = home_dir().context("Failed to get home directory")?;
         let path = home.join(".railway/version.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap();
         let pid = std::process::id();
         // almost guaranteed no collision- can be upgraded to uuid if necessary.
@@ -114,6 +117,9 @@ pub fn spawn_package_manager_update(
     // still alive AND the entry is recent (< 10 min).  The staleness check
     // ensures we recover on all platforms even if PID liveness detection fails.
     let pid_path = super::self_update::package_update_pid_path()?;
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     if let Ok(contents) = std::fs::read_to_string(&pid_path) {
         let parts: Vec<&str> = contents.split_whitespace().collect();
         if let (Some(pid_str), Some(ts_str)) = (parts.first(), parts.get(1)) {
