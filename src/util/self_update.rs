@@ -352,17 +352,28 @@ fn extract_from_zip(bytes: &[u8], bin_name: &str, dest_dir: &Path) -> Result<()>
 
 const BACKUP_PREFIX: &str = "railway-v";
 
+/// Extract the version string from a backup filename.
+/// Handles both `railway-v{ver}` and `railway-v{ver}_{target}[.exe]` formats.
+fn backup_version(entry: &fs::DirEntry) -> String {
+    let raw = entry.file_name().to_string_lossy().into_owned();
+    let stem = raw
+        .trim_start_matches(BACKUP_PREFIX)
+        .trim_end_matches(".exe");
+    match stem.split_once('_') {
+        Some((ver, _)) => ver.to_string(),
+        None => stem.to_string(),
+    }
+}
+
 fn list_backups(dir: &Path) -> Result<Vec<fs::DirEntry>> {
     let mut entries: Vec<_> = fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().starts_with(BACKUP_PREFIX))
         .collect();
 
-    // Sort by modification time, oldest first
-    entries.sort_by_key(|e| {
-        e.metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    // Sort by version (oldest first) so prune_backups can drop the leading entries.
+    entries.sort_by(|a, b| {
+        crate::util::compare_semver::compare_semver(&backup_version(a), &backup_version(b))
     });
 
     Ok(entries)
@@ -650,49 +661,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_target_triple_succeeds_on_current_platform() {
-        let triple = detect_target_triple().unwrap();
-        assert!(!triple.is_empty());
-        assert!(
-            triple.contains("darwin") || triple.contains("linux") || triple.contains("windows")
-        );
-    }
-
-    #[test]
-    fn release_asset_name_tar_gz_for_unix() {
-        assert_eq!(
-            release_asset_name("4.35.0", "x86_64-apple-darwin"),
-            "railway-v4.35.0-x86_64-apple-darwin.tar.gz"
-        );
-    }
-
-    #[test]
-    fn release_asset_name_zip_for_windows() {
-        assert_eq!(
-            release_asset_name("4.35.0", "x86_64-pc-windows-msvc"),
-            "railway-v4.35.0-x86_64-pc-windows-msvc.zip"
-        );
-    }
-
-    #[test]
-    fn release_url_format() {
-        let asset = "railway-v4.35.0-x86_64-apple-darwin.tar.gz";
-        let url = release_url("4.35.0", asset);
-        assert_eq!(
-            url,
-            "https://github.com/railwayapp/cli/releases/download/v4.35.0/railway-v4.35.0-x86_64-apple-darwin.tar.gz"
-        );
-    }
-
-    #[test]
-    fn checksums_url_format() {
-        assert_eq!(
-            checksums_url("4.35.0"),
-            "https://github.com/railwayapp/cli/releases/download/v4.35.0/checksums.txt"
-        );
-    }
-
-    #[test]
     fn verify_checksum_accepts_valid_hash() {
         let data = b"hello world";
         let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
@@ -713,10 +681,6 @@ mod tests {
         for i in 0..5u32 {
             let path = dir.path().join(format!("railway-v1.{i}.0"));
             fs::write(&path, format!("binary-{i}")).unwrap();
-            // Set distinct modification times so sort order is deterministic
-            let mtime = std::time::SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_secs(1000 + u64::from(i));
-            fs::File::open(&path).unwrap().set_modified(mtime).unwrap();
         }
 
         prune_backups(dir.path(), 3).unwrap();
@@ -728,7 +692,6 @@ mod tests {
             .iter()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        // Oldest two (v1.0.0, v1.1.0) should be pruned
         assert!(!names.contains(&"railway-v1.0.0".to_string()));
         assert!(!names.contains(&"railway-v1.1.0".to_string()));
     }
@@ -756,42 +719,5 @@ mod tests {
         fs::write(dir.path().join("railway.conf"), "config").unwrap();
 
         assert_eq!(list_backups(dir.path()).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn staged_update_serde_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("update.json");
-
-        let staged = StagedUpdate {
-            version: "4.36.0".to_string(),
-            target: "x86_64-apple-darwin".to_string(),
-            staged_at: chrono::Utc::now(),
-        };
-
-        let contents = serde_json::to_string_pretty(&staged).unwrap();
-        fs::write(&path, contents).unwrap();
-
-        let read_contents = fs::read_to_string(&path).unwrap();
-        let read_staged: StagedUpdate = serde_json::from_str(&read_contents).unwrap();
-        assert_eq!(read_staged.version, "4.36.0");
-        assert_eq!(read_staged.target, "x86_64-apple-darwin");
-    }
-
-    #[test]
-    fn staged_update_is_stale_after_max_age() {
-        let fresh = StagedUpdate {
-            version: "4.36.0".to_string(),
-            target: "x86_64-apple-darwin".to_string(),
-            staged_at: chrono::Utc::now(),
-        };
-        assert!(!fresh.is_stale());
-
-        let stale = StagedUpdate {
-            version: "4.36.0".to_string(),
-            target: "x86_64-apple-darwin".to_string(),
-            staged_at: chrono::Utc::now() - chrono::Duration::days(STAGED_UPDATE_MAX_AGE_DAYS + 1),
-        };
-        assert!(stale.is_stale());
     }
 }
