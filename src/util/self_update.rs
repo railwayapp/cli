@@ -43,6 +43,7 @@ fn detect_target_triple() -> Result<&'static str> {
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
         ("windows", "x86") => "i686-pc-windows-msvc",
         ("windows", "aarch64") => "aarch64-pc-windows-msvc",
+        ("freebsd", "x86_64") => "x86_64-unknown-freebsd",
         (os, arch) => bail!("Unsupported platform: {os}-{arch}"),
     };
     Ok(triple)
@@ -194,14 +195,35 @@ fn verify_checksum(bytes: &[u8], expected_hex: &str) -> Result<()> {
 
 /// Downloads the release tarball for the given version and extracts the binary
 /// to the staged update directory. Cleans up on partial failure.
+/// Uses file locking to prevent concurrent CLI processes from racing.
 pub async fn download_and_stage(version: &str) -> Result<()> {
+    use fs2::FileExt;
+
     let target = detect_target_triple()?;
 
+    // Quick check before acquiring the lock.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
             return Ok(());
         }
     }
+
+    let lock_path = update_lock_path()?;
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
+    if lock_file.try_lock_exclusive().is_err() {
+        // Another process is already staging or applying an update.
+        return Ok(());
+    }
+
+    // Re-check after acquiring the lock — another process may have just
+    // finished staging the same version.
+    if let Ok(Some(staged)) = StagedUpdate::read() {
+        if staged.version == version && staged.target == target {
+            return Ok(());
+        }
+    }
+
     let asset_name = release_asset_name(version, target);
     let url = release_url(version, &asset_name);
 

@@ -90,11 +90,21 @@ fn spawn_update_task(
                     if util::self_update::download_and_stage(version).await.is_ok() {
                         UpdateCheck::clear_latest();
                     }
+                    // On failure: don't clear — retry on next invocation
                 } else if method.can_auto_run_package_manager()
                     && util::check_update::spawn_package_manager_update(method).is_ok()
                 {
                     UpdateCheck::clear_latest();
+                } else {
+                    // Notification-only install (Homebrew, Cargo, etc.): no
+                    // background action possible.  Clear the cached version so
+                    // the next day's check_update() can discover newer releases.
+                    UpdateCheck::clear_latest();
                 }
+            } else {
+                // Auto-updates disabled: clear so future checks can discover
+                // newer releases instead of being stuck on this version.
+                UpdateCheck::clear_latest();
             }
         }
 
