@@ -78,17 +78,14 @@ fn spawn_update_task() -> tokio::task::JoinHandle<anyhow::Result<Option<String>>
 
         let latest_version = util::check_update::check_update(false).await?;
 
-        // If auto-update is enabled and a new version is available, kick off
-        // the update in the background.  The download/stage task is *not*
-        // awaited on exit so it won't block the CLI.
+        // If auto-update is enabled and a new version is available, try to
+        // stage it.  This runs inside the awaited task so it won't be
+        // cancelled on exit; handle_update_task caps the wait with a timeout.
         if let Some(ref version) = latest_version {
             if !telemetry::is_auto_update_disabled() {
                 let method = util::install_method::InstallMethod::detect();
                 if method.can_self_update() && method.can_write_binary() {
-                    let version = version.clone();
-                    tokio::spawn(async move {
-                        let _ = util::self_update::download_and_stage(&version).await;
-                    });
+                    let _ = util::self_update::download_and_stage(version).await;
                 } else if method.can_auto_run_package_manager() {
                     let _ = util::check_update::spawn_package_manager_update(method);
                 }
@@ -99,22 +96,18 @@ fn spawn_update_task() -> tokio::task::JoinHandle<anyhow::Result<Option<String>>
     })
 }
 
+/// Waits for the background update task to finish, but no longer than a few
+/// seconds so that short-lived commands like `--help` are not noticeably delayed.
 async fn handle_update_task(
     handle: Option<tokio::task::JoinHandle<anyhow::Result<Option<String>>>>,
 ) {
+    use std::time::Duration;
+
     if let Some(handle) = handle {
-        match handle.await {
-            Ok(Ok(_)) => {} // Task completed successfully
-            Ok(Err(e)) => {
-                if !std::io::stdout().is_terminal() {
-                    eprintln!("Failed to check for updates (not fatal)");
-                    eprintln!("{e}");
-                }
-            }
-            Err(e) => {
-                eprintln!("Check Updates: Task panicked or failed to execute.");
-                eprintln!("{e}");
-            }
+        match tokio::time::timeout(Duration::from_secs(5), handle).await {
+            Ok(Ok(Ok(_))) => {}
+            Ok(Ok(Err(_))) | Ok(Err(_)) => {} // update error or task panic — non-fatal
+            Err(_) => {} // timeout — download will resume on next invocation
         }
     }
 }

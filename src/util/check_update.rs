@@ -96,14 +96,19 @@ pub fn spawn_package_manager_update(
     }
 
     // Guard against overlapping package-manager updates using a PID file.
-    // We check whether a previously recorded child PID is still alive; if so,
-    // an update is already in flight.  After spawning we write the new child's
-    // PID so future invocations can check.
+    // Format: "PID UNIX_TIMESTAMP".  We check whether the recorded process is
+    // still alive AND the entry is recent (< 10 min).  The staleness check
+    // ensures we recover on all platforms even if PID liveness detection fails.
     let pid_path = super::self_update::update_lock_path()?;
     if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = contents.trim().parse::<u32>() {
-            if is_pid_alive(pid) {
-                bail!("Another update process (pid {pid}) is already running");
+        let parts: Vec<&str> = contents.split_whitespace().collect();
+        if let (Some(pid_str), Some(ts_str)) = (parts.first(), parts.get(1)) {
+            if let (Ok(pid), Ok(ts)) = (pid_str.parse::<u32>(), ts_str.parse::<i64>()) {
+                let now = chrono::Utc::now().timestamp();
+                let age_secs = now.saturating_sub(ts);
+                if age_secs < 600 && is_pid_alive(pid) {
+                    bail!("Another update process (pid {pid}) is already running");
+                }
             }
         }
     }
@@ -125,8 +130,10 @@ pub fn spawn_package_manager_update(
 
     let child = cmd.spawn().context(format!("Failed to spawn {program}"))?;
 
-    // Record the child PID so future CLI invocations can detect an in-flight update.
-    let _ = std::fs::write(&pid_path, child.id().to_string());
+    // Record the child PID + timestamp so future invocations can detect an
+    // in-flight update and expire stale entries.
+    let now = chrono::Utc::now().timestamp();
+    let _ = std::fs::write(&pid_path, format!("{} {now}", child.id()));
 
     Ok(())
 }
