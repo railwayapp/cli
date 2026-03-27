@@ -132,6 +132,8 @@ pub fn clean_staged() -> Result<()> {
 /// Fetch the checksums.txt file from the release and look up the expected
 /// SHA-256 hash for the given asset filename.
 /// Returns `Ok(None)` if the checksums file is not published (404).
+/// Returns an error if the checksums file exists but the asset is not listed
+/// (indicates a malformed or incomplete release manifest).
 async fn fetch_expected_checksum(
     client: &reqwest::Client,
     version: &str,
@@ -172,7 +174,12 @@ async fn fetch_expected_checksum(
         }
     }
 
-    Ok(None)
+    // checksums.txt exists but our asset is not in it — the release manifest
+    // is incomplete or malformed.  Treat this as an error rather than silently
+    // skipping verification.
+    bail!(
+        "checksums.txt for v{version} exists but does not contain an entry for {asset_name}"
+    );
 }
 
 /// Verify the SHA-256 hash of the downloaded bytes against the expected hash.
@@ -188,13 +195,13 @@ fn verify_checksum(bytes: &[u8], expected_hex: &str) -> Result<()> {
 /// Downloads the release tarball for the given version and extracts the binary
 /// to the staged update directory. Cleans up on partial failure.
 pub async fn download_and_stage(version: &str) -> Result<()> {
+    let target = detect_target_triple()?;
+
     if let Ok(Some(staged)) = StagedUpdate::read() {
-        if staged.version == version {
+        if staged.version == version && staged.target == target {
             return Ok(());
         }
     }
-
-    let target = detect_target_triple()?;
     let asset_name = release_asset_name(version, target);
     let url = release_url(version, &asset_name);
 
@@ -414,6 +421,17 @@ fn replace_binary(source: &Path, target: &Path) -> Result<()> {
 fn apply_staged_update() -> Result<String> {
     let staged = StagedUpdate::read()?.context("No staged update found")?;
 
+    // Verify the staged binary matches the current platform.
+    let current_target = detect_target_triple()?;
+    if staged.target != current_target {
+        StagedUpdate::clean()?;
+        bail!(
+            "Staged update is for {}, but this machine is {}",
+            staged.target,
+            current_target
+        );
+    }
+
     let staged_binary = staged_update_dir()?.join(binary_name());
     if !staged_binary.exists() {
         bail!("Staged binary not found");
@@ -442,6 +460,16 @@ pub fn try_apply_staged() {
     };
 
     if staged.is_stale() {
+        let _ = StagedUpdate::clean();
+        return;
+    }
+
+    // Reject staged binary built for a different platform (e.g. shared
+    // ~/.railway directory across machines or after an arch migration).
+    if detect_target_triple()
+        .map(|t| t != staged.target)
+        .unwrap_or(true)
+    {
         let _ = StagedUpdate::clean();
         return;
     }

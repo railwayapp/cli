@@ -59,6 +59,14 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     if args.rollback {
+        if !method.can_self_update() {
+            bail!(
+                "Rollback is only supported for shell-script installs.\n\
+                 Detected install method: {}. Use your package manager to \
+                 install a specific version instead.",
+                method.name()
+            );
+        }
         return crate::util::self_update::rollback();
     }
 

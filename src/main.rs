@@ -121,7 +121,16 @@ async fn main() -> Result<()> {
     let check_updates_handle = if std::io::stdout().is_terminal() {
         telemetry::show_notice_if_needed();
 
-        if !telemetry::is_auto_update_disabled() {
+        // Peek at the subcommand early so we can skip the staged-update
+        // apply when the user is running `railway upgrade` (which manages
+        // its own update path and rollback flow).
+        let is_upgrade_cmd = args
+            .as_ref()
+            .ok()
+            .and_then(|a| a.subcommand_name())
+            == Some("upgrade");
+
+        if !telemetry::is_auto_update_disabled() && !is_upgrade_cmd {
             util::self_update::try_apply_staged();
         }
 
@@ -147,16 +156,18 @@ async fn main() -> Result<()> {
             UpdateCheck::clear_latest();
         }
 
-        // Don't race with `railway autoupdate disable`: skip spawning when
-        // the user is explicitly managing auto-update preferences so the
-        // preference flip happens before any update work begins.
-        let is_autoupdate_cmd = args
+        // Don't race with `railway upgrade` or `railway autoupdate disable`:
+        // skip the background updater when the user is explicitly managing
+        // updates so the preflight doesn't interfere with the manual path.
+        let subcommand = args
             .as_ref()
             .ok()
             .and_then(|a| a.subcommand_name())
-            == Some("autoupdate");
+            .map(|s| s.to_string());
 
-        if is_autoupdate_cmd {
+        let skip_update = matches!(subcommand.as_deref(), Some("autoupdate" | "upgrade"));
+
+        if skip_update {
             None
         } else {
             Some(spawn_update_task(known_pending))
