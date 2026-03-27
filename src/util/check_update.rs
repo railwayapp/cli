@@ -27,13 +27,19 @@ impl UpdateCheck {
         Ok(())
     }
 
-    /// Clear the cached "new version available" notification.
-    pub fn clear_latest() {
+    /// Update the check timestamp, optionally preserving (or clearing) the
+    /// cached pending version.
+    pub fn persist_latest(version: Option<&str>) {
         let update = Self {
             last_update_check: Some(chrono::Utc::now()),
-            latest_version: None,
+            latest_version: version.map(String::from),
         };
         let _ = update.write();
+    }
+
+    /// Clear the cached "new version available" notification.
+    pub fn clear_latest() {
+        Self::persist_latest(None);
     }
 
     pub fn read() -> anyhow::Result<Self> {

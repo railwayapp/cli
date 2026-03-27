@@ -537,9 +537,7 @@ pub fn try_apply_staged() {
             );
         }
         Err(_) => {
-            // Preserve the staged payload so the next invocation can retry.
-            // The staleness check (STAGED_UPDATE_MAX_AGE_DAYS) will eventually
-            // clean it up if the error is permanent.
+            // Kept for retry; STAGED_UPDATE_MAX_AGE_DAYS handles permanent failures.
         }
     }
 
