@@ -17,7 +17,7 @@ impl UpdateCheck {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let pid = std::process::id();
         // almost guaranteed no collision- can be upgraded to uuid if necessary.
         let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));

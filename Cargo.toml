@@ -78,6 +78,8 @@ winapi = { version = "0.3.9", features = [
   "processthreadsapi",
   "handleapi",
   "winerror",
+  "winbase",
+  "winnt",
 ] }
 strum = { version = "0.26.3", features = ["derive"] }
 structstruck = "0.4.1"

@@ -23,13 +23,13 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Enable => {
             let mut prefs = Preferences::read();
             prefs.telemetry_disabled = false;
-            prefs.write();
+            prefs.write().context("Failed to save preferences")?;
             println!("{}", "Telemetry enabled.".green());
         }
         Commands::Disable => {
             let mut prefs = Preferences::read();
             prefs.telemetry_disabled = true;
-            prefs.write();
+            prefs.write().context("Failed to save preferences")?;
             println!("{}", "Telemetry disabled.".yellow());
         }
         Commands::Status => {

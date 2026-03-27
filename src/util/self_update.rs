@@ -102,7 +102,7 @@ impl StagedUpdate {
         let dir = staged_update_dir()?;
         fs::create_dir_all(&dir)?;
         let path = dir.join("update.json");
-        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let pid = std::process::id();
         let tmp_path = dir.join(format!("update.tmp.{pid}-{nanos}.json"));
         let contents = serde_json::to_string_pretty(self)?;
@@ -537,7 +537,9 @@ pub fn try_apply_staged() {
             );
         }
         Err(_) => {
-            let _ = StagedUpdate::clean();
+            // Preserve the staged payload so the next invocation can retry.
+            // The staleness check (STAGED_UPDATE_MAX_AGE_DAYS) will eventually
+            // clean it up if the error is permanent.
         }
     }
 
@@ -556,6 +558,10 @@ pub async fn self_update_interactive() -> Result<()> {
     }
 
     let version = apply_staged_update()?;
+
+    // Clear the cached pending version so the next invocation doesn't
+    // re-download the version we just installed.
+    crate::util::check_update::UpdateCheck::clear_latest();
 
     println!("{} v{}", "Successfully updated to".green().bold(), version);
 

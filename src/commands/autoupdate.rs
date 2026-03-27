@@ -25,13 +25,13 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Enable => {
             let mut prefs = Preferences::read();
             prefs.auto_update_disabled = false;
-            prefs.write();
+            prefs.write().context("Failed to save preferences")?;
             println!("{}", "Auto-updates enabled.".green());
         }
         Commands::Disable => {
             let mut prefs = Preferences::read();
             prefs.auto_update_disabled = true;
-            prefs.write();
+            prefs.write().context("Failed to save preferences")?;
             // Clean up any staged update that would otherwise sit on disk indefinitely.
             // Note: a package-manager child already spawned by a prior invocation runs
             // detached and cannot be cancelled here — it will finish regardless.

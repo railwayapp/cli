@@ -93,15 +93,28 @@ fn spawn_update_task(
                         Err(_) => {}    // Download failed, retry next invocation
                     }
                 } else if method.can_auto_run_package_manager() {
-                    if util::check_update::spawn_package_manager_update(method).is_ok() {
-                        UpdateCheck::clear_latest();
-                    }
-                    // Spawn failed (missing tool, already running): retry next invocation
+                    // Don't clear latest_version here — spawn only means the
+                    // child process was launched, not that the update succeeded.
+                    // The cached version is kept so the notification continues
+                    // until the user is actually on the new version.  The
+                    // same-day gate in check_update() prevents redundant API calls.
+                    let _ = util::check_update::spawn_package_manager_update(method);
+                    let update = UpdateCheck {
+                        last_update_check: Some(chrono::Utc::now()),
+                        latest_version: latest_version.clone(),
+                    };
+                    let _ = update.write();
                 } else {
                     // Notification-only install (Homebrew, Cargo, etc.): no
-                    // background action possible.  Clear the cached version so
-                    // the next day's check_update() can discover newer releases.
-                    UpdateCheck::clear_latest();
+                    // background action possible.  Preserve latest_version so
+                    // the "new version available" notification prints on the
+                    // next invocation, but update the check timestamp to
+                    // rate-limit GitHub API calls.
+                    let update = UpdateCheck {
+                        last_update_check: Some(chrono::Utc::now()),
+                        latest_version: latest_version.clone(),
+                    };
+                    let _ = update.write();
                 }
             } else {
                 // Auto-updates disabled: preserve latest_version so the

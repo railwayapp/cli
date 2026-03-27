@@ -1,3 +1,4 @@
+use anyhow::Context;
 use colored::Colorize;
 
 use crate::client::{GQLClient, post_graphql};
@@ -92,21 +93,18 @@ impl Preferences {
             .unwrap_or_default()
     }
 
-    pub fn write(&self) {
-        if let Some(path) = Self::path() {
-            let Ok(contents) = serde_json::to_string(self) else {
-                return;
-            };
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let pid = std::process::id();
-            let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-            let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
-            if std::fs::write(&tmp_path, contents).is_ok() {
-                let _ = crate::util::rename_replacing(&tmp_path, &path);
-            }
+    pub fn write(&self) -> anyhow::Result<()> {
+        let path = Self::path().context("Failed to determine home directory")?;
+        let contents = serde_json::to_string(self)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
         }
+        let pid = std::process::id();
+        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
+        std::fs::write(&tmp_path, &contents)?;
+        crate::util::rename_replacing(&tmp_path, &path)?;
+        Ok(())
     }
 }
 
