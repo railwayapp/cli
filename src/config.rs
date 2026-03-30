@@ -325,13 +325,14 @@ impl Configs {
                 bail!(RailwayError::Unauthorized);
             }
 
-            let local = project.cloned();
+            // Only merge local config when it targets the same project,
+            // to avoid silently mixing project A's environment with project B.
+            let local = project
+                .cloned()
+                .filter(|p| p.project == resolved.project_id);
             let service_id = Self::get_railway_service_id()
                 .or_else(|| local.as_ref().and_then(|p| p.service.clone()));
 
-            // When RAILWAY_ENVIRONMENT_ID is not set, fall back to the
-            // locally linked environment so that `railway environment`
-            // remains a valid remediation path.
             let environment = resolved
                 .environment_id
                 .or_else(|| local.as_ref().and_then(|p| p.environment.clone()));
