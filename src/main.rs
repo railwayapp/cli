@@ -198,8 +198,12 @@ async fn main() -> Result<()> {
 
     let check_updates_handle = if is_update_management_cmd {
         None
-    } else {
+    } else if is_tty || !telemetry::is_auto_update_disabled() {
         Some(spawn_update_task(known_pending))
+    } else {
+        // Non-TTY with auto-update disabled: no notification to show and
+        // nothing to download, so skip the API call entirely.
+        None
     };
 
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215

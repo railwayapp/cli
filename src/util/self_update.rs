@@ -234,7 +234,7 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
     let url = release_url(version, &asset_name);
 
     // 120 s applies to the interactive `railway upgrade` path.  Background
-    // calls from spawn_update_task are bounded by handle_update_task's 5 s
+    // calls from spawn_update_task are bounded by handle_update_task's 2 s
     // outer cap, which will abort the tokio task before this fires.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -422,7 +422,7 @@ fn list_backups(dir: &Path) -> Result<Vec<fs::DirEntry>> {
     Ok(entries)
 }
 
-fn backup_current_binary() -> Result<()> {
+fn backup_current_binary_no_prune() -> Result<()> {
     let current_exe = std::env::current_exe().context("Failed to get current exe path")?;
     let current_version = env!("CARGO_PKG_VERSION");
     let target = detect_target_triple()?;
@@ -440,8 +440,12 @@ fn backup_current_binary() -> Result<()> {
         fs::copy(&current_exe, &backup_path).context("Failed to backup current binary")?;
     }
 
-    prune_backups(&dir, 3)?;
+    Ok(())
+}
 
+fn backup_current_binary() -> Result<()> {
+    backup_current_binary_no_prune()?;
+    prune_backups(&backups_dir()?, 3)?;
     Ok(())
 }
 
@@ -458,6 +462,15 @@ fn prune_backups(dir: &Path, keep: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Cleans up leftover `.old.exe` from a previous Windows binary replacement.
+#[cfg(windows)]
+fn clean_old_binary() {
+    if let Ok(exe) = std::env::current_exe() {
+        let old_path = exe.with_extension("old.exe");
+        let _ = fs::remove_file(&old_path);
+    }
 }
 
 /// Atomically replaces the binary at `target` with the binary at `source`.
@@ -536,6 +549,9 @@ fn apply_staged_update() -> Result<String> {
 /// Prints a message on success, silently does nothing otherwise.
 pub fn try_apply_staged() {
     use fs2::FileExt;
+
+    #[cfg(windows)]
+    clean_old_binary();
 
     let staged = match StagedUpdate::read() {
         Ok(Some(s)) => s,
@@ -624,10 +640,10 @@ pub fn rollback() -> Result<()> {
     let dir = backups_dir()?;
     let current_target = detect_target_triple()?;
 
-    // Back up the current binary first so (a) the rollback itself can be
-    // undone, and (b) prune has already run by the time we build the
-    // candidate list — preventing a prune from removing the target mid-flight.
-    backup_current_binary()?;
+    // Back up the current binary first so the rollback itself can be undone.
+    // Use the no-prune variant so candidates aren't removed before the user
+    // sees the picker.
+    backup_current_binary_no_prune()?;
 
     let entries = list_backups(&dir)?;
     let current_version = env!("CARGO_PKG_VERSION");
@@ -693,6 +709,10 @@ pub fn rollback() -> Result<()> {
 
     // Clean staged updates so the rolled-back binary doesn't immediately re-apply.
     let _ = StagedUpdate::clean();
+
+    // Prune after rollback succeeds so the candidate list wasn't reduced
+    // before the user picked.
+    let _ = prune_backups(&dir, 3);
 
     println!("{} v{}", "Rolled back to".green().bold(), version);
 

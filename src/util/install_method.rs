@@ -140,17 +140,10 @@ impl InstallMethod {
 
         // Try creating a temp file in the same directory — the most reliable
         // cross-platform writability check (accounts for ACLs, mount flags…).
-        // scopeguard ensures the probe is removed even if this thread panics.
         let probe = dir.join(".railway-write-probe");
-        match std::fs::File::create(&probe) {
-            Ok(_) => {
-                let _guard = scopeguard::guard(probe, |p| {
-                    let _ = std::fs::remove_file(&p);
-                });
-                true
-            }
-            Err(_) => false,
-        }
+        let writable = std::fs::File::create(&probe).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        writable
     }
 
     /// Whether this install method supports auto-running the package manager

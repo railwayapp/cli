@@ -89,11 +89,9 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
         }
     }
 
-    // No explicit timeout here: callers that care about latency (e.g. the
-    // background task capped by handle_update_task) are already bounded by
-    // the tokio runtime; the interactive `railway upgrade` path relies on
-    // reqwest's default (no timeout) so it can complete on slow connections.
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     let response = client
         .get(GITHUB_API_RELEASE_URL)
         .header("User-Agent", "railwayapp")
