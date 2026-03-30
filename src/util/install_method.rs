@@ -197,4 +197,3 @@ impl InstallMethod {
 fn is_self_update_platform() -> bool {
     matches!(std::env::consts::OS, "macos" | "linux" | "windows")
 }
-

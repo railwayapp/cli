@@ -9,6 +9,10 @@ use super::compare_semver::compare_semver;
 pub struct UpdateCheck {
     pub last_update_check: Option<chrono::DateTime<chrono::Utc>>,
     pub latest_version: Option<String>,
+    /// Number of consecutive download failures for the cached version.
+    /// After 3 failures the version is cleared to force a fresh API check.
+    #[serde(default)]
+    pub download_failures: u32,
 }
 impl UpdateCheck {
     pub fn write(&self) -> anyhow::Result<()> {
@@ -28,11 +32,12 @@ impl UpdateCheck {
     }
 
     /// Update the check timestamp, optionally preserving (or clearing) the
-    /// cached pending version.
+    /// cached pending version.  Resets the failure counter.
     pub fn persist_latest(version: Option<&str>) {
         let update = Self {
             last_update_check: Some(chrono::Utc::now()),
             latest_version: version.map(String::from),
+            download_failures: 0,
         };
         let _ = update.write();
     }
@@ -40,6 +45,19 @@ impl UpdateCheck {
     /// Clear the cached "new version available" notification.
     pub fn clear_latest() {
         Self::persist_latest(None);
+    }
+
+    /// Record a failed download attempt.  After 3 consecutive failures the
+    /// cached pending version is cleared so the next invocation re-checks
+    /// the GitHub API instead of retrying a potentially stale version.
+    pub fn record_download_failure() {
+        let mut update = Self::read().unwrap_or_default();
+        update.download_failures += 1;
+        if update.download_failures >= 3 {
+            update.latest_version = None;
+            update.download_failures = 0;
+        }
+        let _ = update.write();
     }
 
     pub fn read() -> anyhow::Result<Self> {
@@ -85,6 +103,7 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
             let update = UpdateCheck {
                 last_update_check: Some(chrono::Utc::now()),
                 latest_version: Some(latest_version.to_owned()),
+                download_failures: 0,
             };
             update.write()?;
             Ok(Some(latest_version.to_string()))
@@ -95,6 +114,7 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
             let update = UpdateCheck {
                 last_update_check: Some(chrono::Utc::now()),
                 latest_version: None,
+                download_failures: 0,
             };
             let _ = update.write();
             Ok(None)

@@ -91,11 +91,10 @@ fn spawn_update_task(
             if !telemetry::is_auto_update_disabled() {
                 let method = util::install_method::InstallMethod::detect();
                 if method.can_self_update() && method.can_write_binary() {
-                    match util::self_update::download_and_stage(version).await {
-                        Ok(true) => UpdateCheck::clear_latest(),
-                        Ok(false) => {} // Lock held by another process, retry next invocation
-                        Err(_) => {}    // Download failed, retry next invocation
-                    }
+                    // Detached process handles the download independently;
+                    // it calls clear_latest on success or record_download_failure
+                    // after repeated failures.
+                    let _ = util::self_update::spawn_background_download(version);
                 } else if method.can_auto_run_package_manager() {
                     // Spawn is fire-and-forget; preserve latest_version so the
                     // notification continues until the user is on the new version.
@@ -115,51 +114,73 @@ fn spawn_update_task(
     })
 }
 
-/// Waits for the background update task to finish, but no longer than a few
-/// seconds so that short-lived commands like `--help` are not noticeably delayed.
+/// Waits for the background update task to finish, but no longer than a
+/// couple of seconds so that short-lived commands are not noticeably delayed.
+/// The heavy download work runs in a detached process, so this timeout only
+/// gates the fast version-check API call.
 async fn handle_update_task(
     handle: Option<tokio::task::JoinHandle<anyhow::Result<Option<String>>>>,
 ) {
     use std::time::Duration;
 
     if let Some(handle) = handle {
-        match tokio::time::timeout(Duration::from_secs(5), handle).await {
+        match tokio::time::timeout(Duration::from_secs(2), handle).await {
             Ok(Ok(Ok(_))) => {}
             Ok(Ok(Err(_))) | Ok(Err(_)) => {} // update error or task panic — non-fatal
-            Err(_) => {} // timeout — next invocation retries via known_pending bypass
+            Err(_) => {} // timeout — the API check was slow; next invocation retries
         }
     }
 }
 
+/// Runs in a detached child process to download and stage an update.
+async fn background_stage_update(version: &str) -> Result<()> {
+    use util::check_update::UpdateCheck;
+
+    match util::self_update::download_and_stage(version).await {
+        Ok(true) => UpdateCheck::clear_latest(),
+        Ok(false) => {} // Lock held by another process, will retry
+        Err(_) => UpdateCheck::record_download_failure(),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Internal: detached background download spawned by a prior invocation.
+    if let Ok(version) = std::env::var("_RAILWAY_STAGE_UPDATE") {
+        return background_stage_update(&version).await;
+    }
+
     let args = build_args().try_get_matches();
-    let check_updates_handle = if std::io::stdout().is_terminal() {
+    let is_tty = std::io::stdout().is_terminal();
+
+    if is_tty {
         telemetry::show_notice_if_needed();
+    }
 
-        // Peek at the subcommand early so we can skip the staged-update
-        // apply and background updater when the user is explicitly managing
-        // updates (`railway upgrade` or `railway autoupdate`).
-        let subcommand = args
-            .as_ref()
-            .ok()
-            .and_then(|a| a.subcommand_name())
-            .map(|s| s.to_string());
+    // Peek at the subcommand early so we can skip the staged-update
+    // apply and background updater when the user is explicitly managing
+    // updates (`railway upgrade` or `railway autoupdate`).
+    let subcommand = args
+        .as_ref()
+        .ok()
+        .and_then(|a| a.subcommand_name())
+        .map(|s| s.to_string());
 
-        let is_update_management_cmd =
-            matches!(subcommand.as_deref(), Some("upgrade" | "autoupdate"));
+    let is_update_management_cmd = matches!(subcommand.as_deref(), Some("upgrade" | "autoupdate"));
 
-        if !telemetry::is_auto_update_disabled() && !is_update_management_cmd {
-            util::self_update::try_apply_staged();
-        }
+    if !telemetry::is_auto_update_disabled() && !is_update_management_cmd {
+        util::self_update::try_apply_staged();
+    }
 
-        let update = UpdateCheck::read().unwrap_or_default();
+    let update = UpdateCheck::read().unwrap_or_default();
 
-        // Pass any pending version to spawn_update_task so it can skip the
-        // same-day short-circuit and retry a download that timed out in a
-        // prior run.  The background task clears latest_version on success.
-        let known_pending = update.latest_version;
+    // Pass any pending version to spawn_update_task so it can skip the
+    // same-day short-circuit and retry a download that timed out in a
+    // prior run.  The background task clears latest_version on success.
+    let known_pending = update.latest_version;
 
+    if is_tty {
         if let Some(ref latest_version) = known_pending {
             if matches!(
                 compare_semver(env!("CARGO_PKG_VERSION"), latest_version),
@@ -173,14 +194,12 @@ async fn main() -> Result<()> {
                 );
             }
         }
+    }
 
-        if is_update_management_cmd {
-            None
-        } else {
-            Some(spawn_update_task(known_pending))
-        }
-    } else {
+    let check_updates_handle = if is_update_management_cmd {
         None
+    } else {
+        Some(spawn_update_task(known_pending))
     };
 
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215

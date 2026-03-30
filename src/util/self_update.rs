@@ -299,6 +299,42 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Spawns a detached child process that downloads and stages the update.
+/// The child runs independently of the parent — it survives after the
+/// parent exits, so slow downloads are not killed by the exit timeout.
+pub fn spawn_background_download(version: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("Failed to get current exe path")?;
+    let log_path = auto_update_log_path()?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let log_file = std::fs::File::create(&log_path)?;
+    let log_stderr = log_file.try_clone()?;
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.env("_RAILWAY_STAGE_UPDATE", version)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file)
+        .stderr(log_stderr);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    cmd.spawn()
+        .context("Failed to spawn background download process")?;
+    Ok(())
+}
+
 fn extract_from_tar_gz(bytes: &[u8], bin_name: &str, dest_dir: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
 
@@ -542,7 +578,7 @@ pub fn try_apply_staged() {
             crate::util::check_update::UpdateCheck::clear_latest();
 
             println!(
-                "{} v{}",
+                "{} v{} (active on next run)",
                 "Auto-updated Railway CLI to".green().bold(),
                 version,
             );
