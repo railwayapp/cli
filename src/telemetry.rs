@@ -1,3 +1,4 @@
+use anyhow::Context;
 use colored::Colorize;
 
 use crate::client::{GQLClient, post_graphql};
@@ -76,6 +77,8 @@ fn env_var_is_truthy(name: &str) -> bool {
 pub struct Preferences {
     #[serde(default)]
     pub telemetry_disabled: bool,
+    #[serde(default)]
+    pub auto_update_disabled: bool,
 }
 
 impl Preferences {
@@ -90,17 +93,33 @@ impl Preferences {
             .unwrap_or_default()
     }
 
-    pub fn write(&self) {
-        if let Some(path) = Self::path() {
-            let _ = serde_json::to_string(self)
-                .ok()
-                .map(|contents| std::fs::write(path, contents));
+    pub fn write(&self) -> anyhow::Result<()> {
+        let path = Self::path().context("Failed to determine home directory")?;
+        let contents = serde_json::to_string(self)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
         }
+        let pid = std::process::id();
+        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
+        std::fs::write(&tmp_path, &contents)?;
+        crate::util::rename_replacing(&tmp_path, &path)?;
+        Ok(())
     }
 }
 
 pub fn is_telemetry_disabled_by_env() -> bool {
     env_var_is_truthy("DO_NOT_TRACK") || env_var_is_truthy("RAILWAY_NO_TELEMETRY")
+}
+
+pub fn is_auto_update_disabled_by_env() -> bool {
+    env_var_is_truthy("RAILWAY_NO_AUTO_UPDATE")
+}
+
+pub fn is_auto_update_disabled() -> bool {
+    is_auto_update_disabled_by_env()
+        || Preferences::read().auto_update_disabled
+        || crate::config::Configs::env_is_ci()
 }
 
 fn is_telemetry_disabled() -> bool {

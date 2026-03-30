@@ -22,6 +22,8 @@ arboard = "3"
 clap = { version = "4.5.23", features = ["derive", "suggestions", "cargo"] }
 colored = "2.2.0"
 dirs = "5.0.1"
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.134"
 serde_yaml = "0.9"
@@ -76,6 +78,8 @@ winapi = { version = "0.3.9", features = [
   "processthreadsapi",
   "handleapi",
   "winerror",
+  "winbase",
+  "winnt",
 ] }
 strum = { version = "0.26.3", features = ["derive"] }
 structstruck = "0.4.1"
