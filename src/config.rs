@@ -320,7 +320,7 @@ impl Configs {
             return Ok(project);
         }
 
-        if let Some(project_id) = Self::get_railway_project_id() {
+        if let Some(resolved) = Self::resolve_env_var_project()? {
             if self.get_railway_auth_token().is_none() {
                 bail!(RailwayError::Unauthorized);
             }
@@ -331,15 +331,11 @@ impl Configs {
             return Ok(LinkedProject {
                 project_path: self.get_current_directory()?,
                 name: None,
-                project: project_id,
-                environment: Self::get_railway_environment_id(),
+                project: resolved.project_id,
+                environment: resolved.environment_id,
                 environment_name: None,
                 service: service_id,
             });
-        }
-
-        if Self::get_railway_environment_id().is_some() {
-            bail!("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID.");
         }
 
         project
@@ -513,5 +509,94 @@ impl Configs {
         fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
 
         Ok(())
+    }
+
+    /// Resolves env-var-based project targeting. Returns:
+    /// - `Ok(Some(...))` if RAILWAY_PROJECT_ID is set (with optional environment)
+    /// - `Ok(None)` if neither env var is set (fall through to local config)
+    /// - `Err(...)` if RAILWAY_ENVIRONMENT_ID is set without RAILWAY_PROJECT_ID
+    fn resolve_env_var_project() -> Result<Option<ResolvedEnvVarProject>> {
+        let project_id = Self::get_railway_project_id();
+        let environment_id = Self::get_railway_environment_id();
+
+        match (project_id, environment_id) {
+            (Some(project_id), env_id) => Ok(Some(ResolvedEnvVarProject {
+                project_id,
+                environment_id: env_id,
+            })),
+            (None, Some(_)) => {
+                bail!("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID.")
+            }
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedEnvVarProject {
+    project_id: String,
+    environment_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Env var tests must run sequentially to avoid races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_vars<F, R>(vars: &[(&str, Option<&str>)], f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: tests run sequentially under ENV_LOCK, so no concurrent mutation.
+        unsafe {
+            for (key, val) in vars {
+                match val {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let result = f();
+        unsafe {
+            for (key, _) in vars {
+                std::env::remove_var(key);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn env_var_project_id_only_returns_none_environment() {
+        let result = with_env_vars(
+            &[
+                ("RAILWAY_PROJECT_ID", Some("proj-123")),
+                ("RAILWAY_ENVIRONMENT_ID", None),
+            ],
+            Configs::resolve_env_var_project,
+        );
+        let resolved = result.unwrap().expect("should return Some");
+        assert_eq!(resolved.project_id, "proj-123");
+        assert!(resolved.environment_id.is_none());
+    }
+
+    #[test]
+    fn env_var_environment_id_without_project_id_is_rejected() {
+        let result = with_env_vars(
+            &[
+                ("RAILWAY_PROJECT_ID", None),
+                ("RAILWAY_ENVIRONMENT_ID", Some("env-456")),
+            ],
+            Configs::resolve_env_var_project,
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID"),
+            "unexpected error: {err}"
+        );
     }
 }
