@@ -147,7 +147,7 @@ async fn background_stage_update(version: &str) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Internal: detached background download spawned by a prior invocation.
-    if let Ok(version) = std::env::var("_RAILWAY_STAGE_UPDATE") {
+    if let Ok(version) = std::env::var(consts::RAILWAY_STAGE_UPDATE_ENV) {
         return background_stage_update(&version).await;
     }
 

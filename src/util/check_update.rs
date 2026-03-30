@@ -47,13 +47,17 @@ impl UpdateCheck {
         Self::persist_latest(None);
     }
 
-    /// Record a failed download attempt.  After 3 consecutive failures the
-    /// cached pending version is cleared so the next invocation re-checks
-    /// the GitHub API instead of retrying a potentially stale version.
+    /// Max consecutive download failures before clearing the cached version.
+    const MAX_DOWNLOAD_FAILURES: u32 = 3;
+
+    /// Record a failed download attempt.  After [`Self::MAX_DOWNLOAD_FAILURES`]
+    /// consecutive failures the cached pending version is cleared so the next
+    /// invocation re-checks the GitHub API instead of retrying a potentially
+    /// stale version.
     pub fn record_download_failure() {
         let mut update = Self::read().unwrap_or_default();
         update.download_failures += 1;
-        if update.download_failures >= 3 {
+        if update.download_failures >= Self::MAX_DOWNLOAD_FAILURES {
             update.latest_version = None;
             update.download_failures = 0;
         }

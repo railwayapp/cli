@@ -303,6 +303,13 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
 /// The child runs independently of the parent — it survives after the
 /// parent exits, so slow downloads are not killed by the exit timeout.
 pub fn spawn_background_download(version: &str) -> Result<()> {
+    // Skip forking if this version is already staged.
+    if let Ok(Some(staged)) = StagedUpdate::read() {
+        if staged.target == detect_target_triple()? && staged.version == version {
+            return Ok(());
+        }
+    }
+
     let exe = std::env::current_exe().context("Failed to get current exe path")?;
     let log_path = auto_update_log_path()?;
     if let Some(parent) = log_path.parent() {
@@ -313,7 +320,7 @@ pub fn spawn_background_download(version: &str) -> Result<()> {
     let log_stderr = log_file.try_clone()?;
 
     let mut cmd = std::process::Command::new(exe);
-    cmd.env("_RAILWAY_STAGE_UPDATE", version)
+    cmd.env(crate::consts::RAILWAY_STAGE_UPDATE_ENV, version)
         .stdin(std::process::Stdio::null())
         .stdout(log_file)
         .stderr(log_stderr);
