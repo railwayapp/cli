@@ -76,9 +76,15 @@ pub async fn ensure_project_and_environment_exist(
         .environment_name
         .clone()
         .or_else(|| linked_project.environment.clone())
-        .ok_or_else(|| anyhow::anyhow!(
-            "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment` to link one."
-        ))?;
+        .ok_or_else(|| {
+            if Configs::get_railway_project_id().is_some() {
+                anyhow::anyhow!(
+                    "No environment specified. Set RAILWAY_ENVIRONMENT_ID to target an environment."
+                )
+            } else {
+                anyhow::anyhow!("No environment linked. Run `railway environment` to link one.")
+            }
+        })?;
 
     let environment = get_matched_environment(&project, env_id_or_name);
 

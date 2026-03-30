@@ -841,15 +841,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .collect();
 
     let project_id = linked_project.project.clone();
-    let environment_id = args
-        .environment
-        .clone()
-        .or(linked_project.environment.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment`"
-            )
-        })?;
+    let environment_id = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
 
     let env_response = fetch_environment_config(&client, &configs, &environment_id, true).await?;
     let env_name = env_response.name;

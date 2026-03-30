@@ -38,15 +38,10 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
-    let environment = args
-        .environment
-        .clone()
-        .or(linked_project.environment.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment`"
-            )
-        })?;
+    let environment = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 

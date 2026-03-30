@@ -33,9 +33,13 @@ impl LinkedProject {
     /// Returns the environment ID, or an error if no environment is linked.
     pub fn environment_id(&self) -> Result<&str> {
         self.environment.as_deref().ok_or_else(|| {
-            anyhow!(
-                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment` to link one."
-            )
+            if Configs::get_railway_project_id().is_some() {
+                anyhow!(
+                    "No environment specified. Set RAILWAY_ENVIRONMENT_ID to target an environment."
+                )
+            } else {
+                anyhow!("No environment linked. Run `railway environment` to link one.")
+            }
         })
     }
 }

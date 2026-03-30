@@ -108,13 +108,10 @@ async fn list_deployments(
     };
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let environment = environment
-        .or(linked_project.environment.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment`"
-            )
-        })?;
+    let environment = match environment {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
     let environment_id = get_matched_environment(&project, environment)?.id;
 
     let service_id = if let Some(service_name_or_id) = service {

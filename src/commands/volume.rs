@@ -134,15 +134,10 @@ pub async fn command(args: Args) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
     let service = args.service.or_else(|| linked_project.service.clone());
-    let environment = args
-        .environment
-        .clone()
-        .or(linked_project.environment.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment`"
-            )
-        })?;
+    let environment = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
 
     match args.command {
         Commands::Add(a) => add(service, environment, a.mount_path, project, a.json).await?,
