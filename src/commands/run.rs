@@ -125,7 +125,7 @@ pub async fn command(args: Args) -> Result<()> {
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No environment specified. Use --environment or run `railway link` first"
+                "No environment specified. Set RAILWAY_ENVIRONMENT_ID, use --environment, or run `railway environment` to link one."
             )
         })?;
 

@@ -34,7 +34,7 @@ impl LinkedProject {
     pub fn environment_id(&self) -> Result<&str> {
         self.environment.as_deref().ok_or_else(|| {
             anyhow!(
-                "No environment specified. Set RAILWAY_ENVIRONMENT_ID to target an environment."
+                "No environment specified. Set RAILWAY_ENVIRONMENT_ID, use --environment, or run `railway environment` to link one."
             )
         })
     }
