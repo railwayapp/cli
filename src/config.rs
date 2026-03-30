@@ -327,16 +327,22 @@ impl Configs {
 
             // Only merge local config when it targets the same project,
             // to avoid silently mixing project A's environment with project B.
-            let local = project
-                .cloned()
+            // Walk ancestor directories so nested dirs still find the local link.
+            let local = self
+                .get_local_linked_project()
+                .ok()
                 .filter(|p| p.project == resolved.project_id);
             let service_id = Self::get_railway_service_id()
                 .or_else(|| local.as_ref().and_then(|p| p.service.clone()));
 
+            let env_from_override = resolved.environment_id.is_some();
             let environment = resolved
                 .environment_id
                 .or_else(|| local.as_ref().and_then(|p| p.environment.clone()));
-            let environment_name = if environment.is_some() {
+            // Only carry the local environment name when we fell back to the
+            // local environment ID. If the override supplied its own ID, the
+            // local name would refer to a different environment.
+            let environment_name = if !env_from_override && environment.is_some() {
                 local.as_ref().and_then(|p| p.environment_name.clone())
             } else {
                 None
