@@ -172,7 +172,7 @@ pub async fn fetch_and_create(
 
     let mutation_vars = mutations::template_deploy::Variables {
         project_id: linked_project.project.clone(),
-        environment_id: linked_project.environment.clone(),
+        environment_id: linked_project.environment_id()?.to_string(),
         template_id: details.template.id.clone(),
         serialized_config: serde_json::to_value(&config).context("Failed to serialize config")?,
     };

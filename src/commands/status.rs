@@ -27,7 +27,7 @@ pub async fn command(args: Args) -> Result<()> {
                 .edges
                 .iter()
                 .map(|env| &env.node)
-                .find(|env| env.id == linked_project.environment)
+                .find(|env| linked_project.environment.as_deref() == Some(env.id.as_str()))
                 .context("Environment not found!")?
                 .name
                 .blue()

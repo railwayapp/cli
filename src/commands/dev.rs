@@ -260,7 +260,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         .collect();
 
     let project_id = linked_project.project.clone();
-    let environment_id = linked_project.environment.clone();
+    let environment_id = linked_project.environment_id()?.to_string();
 
     let env_response = fetch_environment_config(&client, &configs, &environment_id, false).await?;
     let config = env_response.config;
@@ -844,7 +844,12 @@ async fn up_command(args: UpArgs) -> Result<()> {
     let environment_id = args
         .environment
         .clone()
-        .unwrap_or(linked_project.environment.clone());
+        .or(linked_project.environment.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment`"
+            )
+        })?;
 
     let env_response = fetch_environment_config(&client, &configs, &environment_id, true).await?;
     let env_name = env_response.name;

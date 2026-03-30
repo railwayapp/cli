@@ -178,7 +178,7 @@ fn resolve_environment(
         }
     } else {
         // Use linked environment
-        let env_id = linked_project.environment.clone();
+        let env_id = linked_project.environment_id()?.to_string();
         let env_name = project
             .environments
             .edges

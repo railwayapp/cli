@@ -61,7 +61,7 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
 
     let vars = queries::domains::Variables {
         project_id: linked_project.project.clone(),
-        environment_id: linked_project.environment.clone(),
+        environment_id: linked_project.environment_id()?.to_string(),
         service_id: service.id.clone(),
     };
 
@@ -80,7 +80,7 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
 
     let vars = mutations::service_domain_create::Variables {
         service_id: service.id.clone(),
-        environment_id: linked_project.environment.clone(),
+        environment_id: linked_project.environment_id()?.to_string(),
     };
     let domain =
         post_graphql::<mutations::ServiceDomainCreate, _>(&client, configs.get_backboard(), vars)
@@ -264,7 +264,7 @@ async fn create_custom_domain(
     let vars = mutations::custom_domain_create::Variables {
         input: mutations::custom_domain_create::CustomDomainCreateInput {
             domain: domain.clone(),
-            environment_id: linked_project.environment.clone(),
+            environment_id: linked_project.environment_id()?.to_string(),
             project_id: linked_project.project.clone(),
             service_id: service.id.clone(),
             target_port: port.map(|p| p as i64),

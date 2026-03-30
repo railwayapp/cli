@@ -140,7 +140,12 @@ pub async fn command(args: Args) -> Result<()> {
     let environment_input = args
         .environment
         .clone()
-        .unwrap_or(linked_project.environment.clone());
+        .or(linked_project.environment.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment`"
+            )
+        })?;
     let environment = get_matched_environment(&project, environment_input)?;
     let environment_config = fetch_environment_config(&client, &configs, &environment.id, false)
         .await?

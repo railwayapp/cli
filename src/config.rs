@@ -24,9 +24,20 @@ pub struct LinkedProject {
     pub project_path: String,
     pub name: Option<String>,
     pub project: String,
-    pub environment: String,
+    pub environment: Option<String>,
     pub environment_name: Option<String>,
     pub service: Option<String>,
+}
+
+impl LinkedProject {
+    /// Returns the environment ID, or an error if no environment is linked.
+    pub fn environment_id(&self) -> Result<&str> {
+        self.environment.as_deref().ok_or_else(|| {
+            anyhow!(
+                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment` to link one."
+            )
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -302,31 +313,14 @@ impl Configs {
                 project_path: self.get_current_directory()?,
                 name: Some(data.project_token.project.name),
                 project: data.project_token.project.id,
-                environment: data.project_token.environment.id,
+                environment: Some(data.project_token.environment.id),
                 environment_name: Some(data.project_token.environment.name),
                 service: project.cloned().and_then(|p| p.service),
             };
             return Ok(project);
         }
 
-        let has_project_id = Self::get_railway_project_id().is_some();
-        let has_environment_id = Self::get_railway_environment_id().is_some();
-
-        if has_project_id != has_environment_id {
-            bail!(
-                "Both RAILWAY_PROJECT_ID and RAILWAY_ENVIRONMENT_ID must be set together. {} is missing.",
-                if has_project_id {
-                    "RAILWAY_ENVIRONMENT_ID"
-                } else {
-                    "RAILWAY_PROJECT_ID"
-                }
-            );
-        }
-
-        if let (Some(project_id), Some(environment_id)) = (
-            Self::get_railway_project_id(),
-            Self::get_railway_environment_id(),
-        ) {
+        if let Some(project_id) = Self::get_railway_project_id() {
             if self.get_railway_auth_token().is_none() {
                 bail!(RailwayError::Unauthorized);
             }
@@ -338,7 +332,7 @@ impl Configs {
                 project_path: self.get_current_directory()?,
                 name: None,
                 project: project_id,
-                environment: environment_id,
+                environment: Self::get_railway_environment_id(),
                 environment_name: None,
                 service: service_id,
             });
@@ -368,7 +362,7 @@ impl Configs {
             project_path: path.clone(),
             name,
             project: project_id,
-            environment: environment_id,
+            environment: Some(environment_id),
             environment_name,
             service: None,
         };

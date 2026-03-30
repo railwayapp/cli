@@ -264,7 +264,7 @@ impl RailwayMcp {
             let linked = self.configs.get_linked_project().await.ok();
             let environment_id = params
                 .environment_id
-                .or_else(|| linked.as_ref().map(|l| l.environment.clone()))
+                .or_else(|| linked.as_ref().and_then(|l| l.environment.clone()))
                 .ok_or_else(|| {
                     McpError::invalid_params(
                         "environment_id is required when updating mount_path.",

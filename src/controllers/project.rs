@@ -72,13 +72,15 @@ pub async fn ensure_project_and_environment_exist(
         bail!(RailwayError::ProjectDeleted);
     }
 
-    let environment = get_matched_environment(
-        &project,
-        linked_project
-            .environment_name
-            .clone()
-            .unwrap_or_else(|| linked_project.environment.clone()),
-    );
+    let env_id_or_name = linked_project
+        .environment_name
+        .clone()
+        .or_else(|| linked_project.environment.clone())
+        .ok_or_else(|| anyhow::anyhow!(
+            "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment` to link one."
+        ))?;
+
+    let environment = get_matched_environment(&project, env_id_or_name);
 
     match environment {
         Ok(environment) => {
@@ -155,7 +157,10 @@ pub async fn resolve_service_context(
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let env = environment_arg.unwrap_or(linked_project.environment.clone());
+    let env = match environment_arg {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
     let environment_id = get_matched_environment(&project, env)?.id;
 
     let services = &project.services.edges;

@@ -56,7 +56,12 @@ pub async fn command(args: Args) -> Result<()> {
     let environment = args
         .environment
         .clone()
-        .unwrap_or(linked_project.environment.clone());
+        .or(linked_project.environment.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No environment linked. Set RAILWAY_ENVIRONMENT_ID or run `railway environment`"
+            )
+        })?;
     let (existing, service_id) =
         get_existing_config(&args, &linked_project, &project, &environment)?;
     let new_config = convert_hashmap_to_map(
