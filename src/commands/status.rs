@@ -20,18 +20,14 @@ pub async fn command(args: Args) -> Result<()> {
 
     if !args.json {
         println!("Project: {}", project.name.purple().bold());
-        if let Some(env_name) = linked_project
-            .environment
-            .as_deref()
-            .and_then(|eid| {
-                project
-                    .environments
-                    .edges
-                    .iter()
-                    .find(|env| env.node.id == eid)
-                    .map(|env| env.node.name.as_str())
-            })
-        {
+        if let Some(env_name) = linked_project.environment.as_deref().and_then(|eid| {
+            project
+                .environments
+                .edges
+                .iter()
+                .find(|env| env.node.id == eid)
+                .map(|env| env.node.name.as_str())
+        }) {
             println!("Environment: {}", env_name.blue().bold());
         } else {
             println!("Environment: {}", "None".red().bold());
