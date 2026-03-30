@@ -36,10 +36,10 @@ pub async fn command(args: Args) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let environment = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
+    let environment = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
 
     let services = project.services.edges.iter().collect::<Vec<_>>();
 
@@ -72,11 +72,13 @@ pub async fn command(args: Args) -> Result<()> {
 
     let linked_project_name = linked_project
         .name
-        .expect("Linked project is missing the name");
+        .as_deref()
+        .unwrap_or(linked_project.project.as_str());
 
     let linked_environment_name = linked_project
         .environment_name
-        .expect("Linked environment is missing the name");
+        .as_deref()
+        .unwrap_or(linked_project.environment.as_deref().unwrap_or("unknown"));
 
     let linked_project_environment = format!(
         "{} environment of project {}",

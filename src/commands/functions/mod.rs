@@ -111,10 +111,10 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let environment_input = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
+    let environment_input = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
     let environment = project
         .environments
         .edges

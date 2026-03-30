@@ -118,10 +118,14 @@ pub async fn command(args: Args) -> Result<()> {
     let environment = args
         .environment
         .clone()
-        .or_else(|| linked_project.as_ref().map(|lp| lp.environment.clone()))
+        .or_else(|| {
+            linked_project
+                .as_ref()
+                .and_then(|lp| lp.environment.clone())
+        })
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No environment specified. Use --environment or run `railway link` first"
+                "No environment specified. Set RAILWAY_ENVIRONMENT_ID, use --environment, or run `railway environment` to link one."
             )
         })?;
 

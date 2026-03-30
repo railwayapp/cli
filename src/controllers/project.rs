@@ -72,22 +72,24 @@ pub async fn ensure_project_and_environment_exist(
         bail!(RailwayError::ProjectDeleted);
     }
 
-    let environment = get_matched_environment(
-        &project,
-        linked_project
-            .environment_name
-            .clone()
-            .unwrap_or_else(|| linked_project.environment.clone()),
-    );
+    // Only validate the environment if one is linked; callers that need an
+    // environment (or accept --environment) resolve and validate it themselves.
+    if let Some(env_id_or_name) = linked_project
+        .environment_name
+        .clone()
+        .or_else(|| linked_project.environment.clone())
+    {
+        let environment = get_matched_environment(&project, env_id_or_name);
 
-    match environment {
-        Ok(environment) => {
-            if environment.deleted_at.is_some() {
-                bail!(RailwayError::EnvironmentDeleted);
+        match environment {
+            Ok(environment) => {
+                if environment.deleted_at.is_some() {
+                    bail!(RailwayError::EnvironmentDeleted);
+                }
             }
-        }
-        Err(_) => bail!(RailwayError::EnvironmentDeleted),
-    };
+            Err(_) => bail!(RailwayError::EnvironmentDeleted),
+        };
+    }
 
     Ok(())
 }
@@ -155,7 +157,10 @@ pub async fn resolve_service_context(
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let env = environment_arg.unwrap_or(linked_project.environment.clone());
+    let env = match environment_arg {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
     let environment_id = get_matched_environment(&project, env)?.id;
 
     let services = &project.services.edges;

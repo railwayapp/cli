@@ -178,7 +178,7 @@ fn resolve_environment(
             bail!(RailwayError::EnvironmentNotFound(env_input.clone()))
         }
     } else {
-        let env_id = linked_project.environment.clone();
+        let env_id = linked_project.environment_id()?.to_string();
         let env_name = project
             .environments
             .edges

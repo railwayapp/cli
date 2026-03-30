@@ -294,10 +294,10 @@ pub async fn command(args: Args) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    let environment = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
+    let environment = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
 
     let services = project.services.edges.iter().collect::<Vec<_>>();
 

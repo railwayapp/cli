@@ -81,7 +81,7 @@ impl RailwayMcp {
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
         let env_id_or_name = environment_id
-            .or_else(|| linked.as_ref().map(|l| l.environment.clone()))
+            .or_else(|| linked.as_ref().and_then(|l| l.environment.clone()))
             .ok_or_else(|| {
                 let available = format_environments(&project);
                 McpError::invalid_params(
@@ -689,7 +689,7 @@ impl RailwayMcp {
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
         // Filter to services present in the linked environment (matches CLI behavior)
-        let environment_id = linked.as_ref().map(|l| l.environment.as_str());
+        let environment_id = linked.as_ref().and_then(|l| l.environment.as_deref());
         let env_service_ids = environment_id
             .and_then(|eid| project.environments.edges.iter().find(|e| e.node.id == eid))
             .map(|e| {
