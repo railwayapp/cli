@@ -325,15 +325,28 @@ impl Configs {
                 bail!(RailwayError::Unauthorized);
             }
 
-            let service_id =
-                Self::get_railway_service_id().or_else(|| project.cloned().and_then(|p| p.service));
+            let local = project.cloned();
+            let service_id = Self::get_railway_service_id()
+                .or_else(|| local.as_ref().and_then(|p| p.service.clone()));
+
+            // When RAILWAY_ENVIRONMENT_ID is not set, fall back to the
+            // locally linked environment so that `railway environment`
+            // remains a valid remediation path.
+            let environment = resolved
+                .environment_id
+                .or_else(|| local.as_ref().and_then(|p| p.environment.clone()));
+            let environment_name = if environment.is_some() {
+                local.as_ref().and_then(|p| p.environment_name.clone())
+            } else {
+                None
+            };
 
             return Ok(LinkedProject {
                 project_path: self.get_current_directory()?,
                 name: None,
                 project: resolved.project_id,
-                environment: resolved.environment_id,
-                environment_name: None,
+                environment,
+                environment_name,
                 service: service_id,
             });
         }
