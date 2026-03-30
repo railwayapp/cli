@@ -72,26 +72,24 @@ pub async fn ensure_project_and_environment_exist(
         bail!(RailwayError::ProjectDeleted);
     }
 
-    let env_id_or_name = linked_project
+    // Only validate the environment if one is linked; callers that need an
+    // environment (or accept --environment) resolve and validate it themselves.
+    if let Some(env_id_or_name) = linked_project
         .environment_name
         .clone()
         .or_else(|| linked_project.environment.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No environment specified. Set RAILWAY_ENVIRONMENT_ID to target an environment."
-            )
-        })?;
+    {
+        let environment = get_matched_environment(&project, env_id_or_name);
 
-    let environment = get_matched_environment(&project, env_id_or_name);
-
-    match environment {
-        Ok(environment) => {
-            if environment.deleted_at.is_some() {
-                bail!(RailwayError::EnvironmentDeleted);
+        match environment {
+            Ok(environment) => {
+                if environment.deleted_at.is_some() {
+                    bail!(RailwayError::EnvironmentDeleted);
+                }
             }
-        }
-        Err(_) => bail!(RailwayError::EnvironmentDeleted),
-    };
+            Err(_) => bail!(RailwayError::EnvironmentDeleted),
+        };
+    }
 
     Ok(())
 }

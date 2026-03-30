@@ -338,6 +338,10 @@ impl Configs {
             });
         }
 
+        if Self::get_railway_environment_id().is_some() {
+            bail!("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID.");
+        }
+
         project
             .cloned()
             .ok_or_else(|| RailwayError::NoLinkedProject.into())
