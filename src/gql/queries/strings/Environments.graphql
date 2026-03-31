@@ -1,0 +1,30 @@
+query Environments($projectId: String!, $isEphemeral: Boolean, $first: Int, $after: String) {
+  environments(projectId: $projectId, isEphemeral: $isEphemeral, first: $first, after: $after) {
+    edges {
+      node {
+        id
+        name
+        isEphemeral
+        createdAt
+        updatedAt
+        canAccess
+        unmergedChangesCount
+        sourceEnvironment {
+          id
+          name
+        }
+        meta {
+          prNumber
+          prTitle
+          prRepo
+          branch
+          baseBranch
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
