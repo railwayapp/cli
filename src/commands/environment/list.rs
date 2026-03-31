@@ -167,8 +167,10 @@ pub async fn command(args: Args) -> Result<()> {
         };
         println!("No {label} found");
     } else {
+        println!();
         if !persistent.is_empty() {
             println!("{}", "Environments".bold());
+            println!();
             for edge in &persistent {
                 print_environment(&edge.node, linked_env_id);
             }
@@ -177,12 +179,16 @@ pub async fn command(args: Args) -> Result<()> {
         if !ephemeral.is_empty() {
             if !persistent.is_empty() {
                 println!();
+                println!("---");
+                println!();
             }
             println!("{}", "PR Environments".bold());
+            println!();
             for edge in &ephemeral {
                 print_environment(&edge.node, linked_env_id);
             }
         }
+        println!();
     }
 
     Ok(())
