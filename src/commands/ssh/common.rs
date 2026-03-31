@@ -119,7 +119,11 @@ pub async fn get_ssh_connect_params(
     let environment = if let Some(env) = args.environment {
         env
     } else {
-        linked_project.as_ref().unwrap().environment.clone()
+        linked_project
+            .as_ref()
+            .unwrap()
+            .environment_id()?
+            .to_string()
     };
     let environment_id = get_matched_environment(&project, environment)?.id;
 

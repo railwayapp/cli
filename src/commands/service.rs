@@ -114,7 +114,7 @@ async fn link_command(args: LinkArgs) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    let service_ids_in_env = get_service_ids_in_env(&project, &linked_project.environment);
+    let service_ids_in_env = get_service_ids_in_env(&project, linked_project.environment_id()?);
     let services: Vec<_> = project
         .services
         .edges
@@ -156,7 +156,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
         let env = get_matched_environment(&project, env_name)?;
         env.id
     } else {
-        linked_project.environment.clone()
+        linked_project.environment_id()?.to_string()
     };
 
     let environment_name = project

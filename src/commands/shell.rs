@@ -63,18 +63,18 @@ pub async fn command(args: Args) -> Result<()> {
             &client,
             &configs,
             linked_project.project.clone(),
-            linked_project.environment.clone(),
+            linked_project.environment_id()?.to_string(),
             service_id.node.id.clone(),
         )
         .await?;
 
         all_variables.append(&mut variables);
-    } else if let Some(service) = linked_project.service {
+    } else if let Some(ref service) = linked_project.service {
         let mut variables = get_service_variables(
             &client,
             &configs,
             linked_project.project.clone(),
-            linked_project.environment.clone(),
+            linked_project.environment_id()?.to_string(),
             service.clone(),
         )
         .await?;

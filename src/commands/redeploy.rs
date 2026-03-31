@@ -49,9 +49,10 @@ pub async fn command(args: Args) -> Result<()> {
         .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
 
     let service_in_env =
-        find_service_instance(&project, &linked_project.environment, &service.node.id).ok_or_else(
-            || anyhow!("The service specified doesn't exist in the current environment"),
-        )?;
+        find_service_instance(&project, linked_project.environment_id()?, &service.node.id)
+            .ok_or_else(|| {
+                anyhow!("The service specified doesn't exist in the current environment")
+            })?;
 
     let Some(ref latest) = service_in_env.latest_deployment else {
         bail!("No deployment found for service")

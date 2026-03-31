@@ -158,19 +158,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "CDN_CACHING"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "CONVERSATIONAL_UI"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "DEBUG_SMART_DIAGNOSIS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "IN_DASHBOARD_SUPPORT"
             },
             {
               "deprecationReason": null,
@@ -188,19 +182,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "POSTGRES_HA"
+              "name": "POSTGRES_PGBOUNCER"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
               "name": "PRIORITY_BOARDING"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
-              "name": "RAW_SQL_QUERIES"
             },
             {
               "deprecationReason": null,
@@ -301,6 +289,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "INLINE_NOTIFICATION_PROCESSING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "KAFKA_DEPLOYMENT_STATUS_CHANGES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "NEW_STRIPE_WEBHOOK_VERSION_ROLLOUT"
             },
             {
@@ -308,6 +308,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "OAUTH_DCR_KILLSWITCH"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "OAUTH_DEVICE_FLOW_KILLSWITCH"
             },
             {
               "deprecationReason": null,
@@ -402,6 +408,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "PLACEHOLDER"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "SKIPPED_BUILDS"
             },
             {
               "deprecationReason": null,
@@ -9159,6 +9171,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "hasAutomaticDiagnosis",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": "Deprecated in favour of the SpendCommitment schema.",
+              "description": null,
+              "isDeprecated": true,
               "name": "hasBAA",
               "type": {
                 "kind": "NON_NULL",
@@ -9175,6 +9203,22 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "hasGuardrailsAccess",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": "Deprecated in favour of the SpendCommitment schema.",
+              "description": null,
+              "isDeprecated": true,
               "name": "hasRBAC",
               "type": {
                 "kind": "NON_NULL",
@@ -9312,6 +9356,18 @@
                   "name": "Boolean",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "subscriptionPlanLimit",
+              "type": {
+                "kind": "SCALAR",
+                "name": "SubscriptionPlanLimit",
+                "ofType": null
               }
             },
             {
@@ -9591,6 +9647,208 @@
           "interfaces": [],
           "kind": "OBJECT",
           "name": "GitHubBranch",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "name",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "status",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "GitHubCheck",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "additions",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "author",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "body",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "changedFiles",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "checks",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "GitHubCheck",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "deletions",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "mergeable",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Boolean",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "state",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "title",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "GitHubPRInfo",
           "possibleTypes": null
         },
         {
@@ -10109,6 +10367,132 @@
           "possibleTypes": null
         },
         {
+          "description": "The result of an HTTP duration metrics query.",
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The samples of HTTP duration metrics.",
+              "isDeprecated": false,
+              "name": "samples",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "HttpDurationMetricsSample",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "HttpDurationMetricsResult",
+          "possibleTypes": null
+        },
+        {
+          "description": "A single sample of HTTP duration metrics.",
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "50th percentile (median) request duration in milliseconds.",
+              "isDeprecated": false,
+              "name": "p50",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Float",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "90th percentile request duration in milliseconds.",
+              "isDeprecated": false,
+              "name": "p90",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Float",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "95th percentile request duration in milliseconds.",
+              "isDeprecated": false,
+              "name": "p95",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Float",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "99th percentile request duration in milliseconds.",
+              "isDeprecated": false,
+              "name": "p99",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Float",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The timestamp of the sample. Represented as number of seconds since the Unix epoch.",
+              "isDeprecated": false,
+              "name": "ts",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "HttpDurationMetricsSample",
+          "possibleTypes": null
+        },
+        {
           "description": "The result of a http logs query.",
           "enumValues": null,
           "fields": [
@@ -10437,6 +10821,135 @@
           "interfaces": [],
           "kind": "OBJECT",
           "name": "HttpLog",
+          "possibleTypes": null
+        },
+        {
+          "description": "HTTP metrics grouped by status code.",
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The samples of HTTP metrics for this status code.",
+              "isDeprecated": false,
+              "name": "samples",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "HttpMetricsSample",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The HTTP status code.",
+              "isDeprecated": false,
+              "name": "statusCode",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "HttpMetricsByStatusResult",
+          "possibleTypes": null
+        },
+        {
+          "description": "The result of an HTTP metrics query.",
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The samples of HTTP metrics.",
+              "isDeprecated": false,
+              "name": "samples",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "HttpMetricsSample",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "HttpMetricsResult",
+          "possibleTypes": null
+        },
+        {
+          "description": "A single sample of an HTTP metric.",
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The timestamp of the sample. Represented as number of seconds since the Unix epoch.",
+              "isDeprecated": false,
+              "name": "ts",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The value of the sample (count of requests).",
+              "isDeprecated": false,
+              "name": "value",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Float",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "HttpMetricsSample",
           "possibleTypes": null
         },
         {
@@ -18087,6 +18600,67 @@
                   "description": null,
                   "name": "enabled",
                   "type": {
+                    "kind": "SCALAR",
+                    "name": "Boolean",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "input",
+                  "type": {
+                    "kind": "INPUT_OBJECT",
+                    "name": "WorkspacePolicyItemUpdateInput",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "policy",
+                  "type": {
+                    "kind": "ENUM",
+                    "name": "WorkspacePolicyName",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "workspaceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Enable or disable a workspace policy. Enterprise workspaces only.",
+              "isDeprecated": false,
+              "name": "workspacePolicyItemUpdate",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "enabled",
+                  "type": {
                     "kind": "NON_NULL",
                     "name": null,
                     "ofType": {
@@ -21101,6 +21675,18 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "INLINE_NOTIFICATION_PROCESSING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "KAFKA_DEPLOYMENT_STATUS_CHANGES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "NEW_STRIPE_WEBHOOK_VERSION_ROLLOUT"
             },
             {
@@ -21108,6 +21694,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "OAUTH_DCR_KILLSWITCH"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "OAUTH_DEVICE_FLOW_KILLSWITCH"
             },
             {
               "deprecationReason": null,
@@ -28504,6 +29096,47 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "prNumber",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "Int",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "serviceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get info for a GitHub pull request",
+              "isDeprecated": false,
+              "name": "githubPRInfo",
+              "type": {
+                "kind": "OBJECT",
+                "name": "GitHubPRInfo",
+                "ofType": null
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "fullRepoName",
                   "type": {
                     "kind": "NON_NULL",
@@ -28659,6 +29292,119 @@
               "args": [
                 {
                   "defaultValue": null,
+                  "description": "The end of the period to get metrics for.",
+                  "name": "endDate",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "DateTime",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by HTTP method (e.g., GET, POST)",
+                  "name": "method",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by request path",
+                  "name": "path",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "serviceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The start of the period to get metrics for.",
+                  "name": "startDate",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "DateTime",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by HTTP status code (e.g., 200, 404, 500)",
+                  "name": "statusCode",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The frequency of data points in the response. If the `stepSeconds` is 60, then the response will contain one data point per minute.",
+                  "name": "stepSeconds",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get HTTP request duration metrics for a service (avg, p50, p90, p95, p99)",
+              "isDeprecated": false,
+              "name": "httpDurationMetrics",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "HttpDurationMetricsResult",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
                   "description": "Latest date to look for logs after the anchor",
                   "name": "afterDate",
                   "type": {
@@ -28778,6 +29524,230 @@
                     "ofType": {
                       "kind": "OBJECT",
                       "name": "HttpLog",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": "The end of the period to get metrics for.",
+                  "name": "endDate",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "DateTime",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by HTTP method (e.g., GET, POST)",
+                  "name": "method",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by request path",
+                  "name": "path",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "serviceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The start of the period to get metrics for.",
+                  "name": "startDate",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "DateTime",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by HTTP status code (e.g., 200, 404, 500)",
+                  "name": "statusCode",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The frequency of data points in the response. If the `stepSeconds` is 60, then the response will contain one data point per minute.",
+                  "name": "stepSeconds",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get HTTP request metrics for a service",
+              "isDeprecated": false,
+              "name": "httpMetrics",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "HttpMetricsResult",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": "The end of the period to get metrics for.",
+                  "name": "endDate",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "DateTime",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by HTTP method (e.g., GET, POST)",
+                  "name": "method",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by request path",
+                  "name": "path",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "serviceId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The start of the period to get metrics for.",
+                  "name": "startDate",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "DateTime",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "The frequency of data points in the response. If the `stepSeconds` is 60, then the response will contain one data point per minute.",
+                  "name": "stepSeconds",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Get HTTP request metrics for a service, grouped by status code",
+              "isDeprecated": false,
+              "name": "httpMetricsGroupedByStatus",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "HttpMetricsByStatusResult",
                       "ofType": null
                     }
                   }
@@ -45723,6 +46693,38 @@
             {
               "args": [],
               "deprecationReason": null,
+              "description": "Whether automatic deployment diagnosis is enabled for this workspace.",
+              "isDeprecated": false,
+              "name": "hasAutomaticDiagnosis",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Whether this workspace has access to guardrails policies.",
+              "isDeprecated": false,
+              "name": "hasGuardrailsAccess",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
               "name": "hasSAML",
@@ -46012,6 +47014,18 @@
                   "name": "SubscriptionModel",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "subscriptionPlanLimit",
+              "type": {
+                "kind": "SCALAR",
+                "name": "SubscriptionPlanLimit",
+                "ofType": null
               }
             },
             {
@@ -46670,6 +47684,68 @@
           ],
           "kind": "OBJECT",
           "name": "WorkspacePolicy",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": null,
+          "inputFields": [
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "enabled",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "policy",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "WorkspacePolicyName",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "interfaces": null,
+          "kind": "INPUT_OBJECT",
+          "name": "WorkspacePolicyItemUpdateInput",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "RESTRICT_PUBLIC_TCP_PROXIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "RESTRICT_RAILWAY_DOMAIN_GENERATION"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "WorkspacePolicyName",
           "possibleTypes": null
         },
         {
