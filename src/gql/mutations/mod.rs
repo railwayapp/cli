@@ -36,10 +36,10 @@ pub struct ProjectCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/ProjectDelete.graphql",
+    query_path = "src/gql/mutations/strings/ProjectScheduleDelete.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-pub struct ProjectDelete;
+pub struct ProjectScheduleDelete;
 
 #[derive(GraphQLQuery)]
 #[graphql(
