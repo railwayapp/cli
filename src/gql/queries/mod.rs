@@ -185,6 +185,14 @@ pub struct GetEnvironmentConfig;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Environments.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct Environments;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/WorkflowStatus.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

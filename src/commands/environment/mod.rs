@@ -18,6 +18,7 @@ mod config;
 mod delete;
 mod edit;
 mod link;
+mod list;
 mod new;
 
 /// Create, delete or link an environment
@@ -114,6 +115,21 @@ structstruck::strike! {
             /// Output in JSON format
             #[clap(long)]
             pub json: bool,
+        }),
+
+        /// List all environments in the project
+        List(pub struct {
+            /// Show only ephemeral (PR) environments
+            #[clap(long, conflicts_with = "no_ephemeral")]
+            pub ephemeral: bool,
+
+            /// Hide ephemeral (PR) environments
+            #[clap(long, conflicts_with = "ephemeral")]
+            pub no_ephemeral: bool,
+
+            /// Output in JSON format
+            #[clap(long)]
+            pub json: bool,
         })
 
     }
@@ -175,6 +191,7 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Commands::Delete(args)) => delete::delete_environment(args).await,
         Some(Commands::Edit(args)) => edit::edit_environment(args).await,
         Some(Commands::Config(args)) => config::command(args).await,
+        Some(Commands::List(args)) => list::command(args).await,
         // Legacy: `railway environment <name>` without subcommand
         None => link::link_environment(args.environment, args.json).await,
     }
