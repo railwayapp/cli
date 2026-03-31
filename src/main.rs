@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
                 compare_semver(env!("CARGO_PKG_VERSION"), latest_version),
                 Ordering::Less
             ) {
-                println!(
+                eprintln!(
                     "{} v{} visit {} for more info",
                     "New version available:".green().bold(),
                     latest_version.yellow(),

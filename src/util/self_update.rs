@@ -600,7 +600,7 @@ pub fn try_apply_staged() {
         Ok(version) => {
             crate::util::check_update::UpdateCheck::clear_latest();
 
-            println!(
+            eprintln!(
                 "{} v{} (active on next run)",
                 "Auto-updated Railway CLI to".green().bold(),
                 version,
