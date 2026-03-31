@@ -69,11 +69,12 @@ pub async fn command(args: Args) -> Result<()> {
 
     let spinner = create_spinner_if(!args.json, "Deleting project...".into());
 
-    let vars = mutations::project_delete::Variables {
+    let vars = mutations::project_schedule_delete::Variables {
         id: project_id.clone(),
     };
 
-    post_graphql::<mutations::ProjectDelete, _>(&client, &configs.get_backboard(), vars).await?;
+    post_graphql::<mutations::ProjectScheduleDelete, _>(&client, &configs.get_backboard(), vars)
+        .await?;
 
     if args.json {
         println!("{}", serde_json::json!({"id": project_id}));
