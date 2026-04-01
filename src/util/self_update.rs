@@ -615,6 +615,8 @@ pub fn try_apply_staged() {
 }
 
 pub async fn self_update_interactive() -> Result<()> {
+    use fs2::FileExt;
+
     let latest_version = crate::util::check_update::check_update(true)
         .await?
         .context("You are already on the latest version")?;
@@ -625,11 +627,22 @@ pub async fn self_update_interactive() -> Result<()> {
         bail!("Another update process is already running. Please try again.");
     }
 
+    // Hold the lock across apply so a concurrent try_apply_staged() cannot
+    // race us between staging and applying.
+    let lock_path = update_lock_path()?;
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
+    lock_file
+        .lock_exclusive()
+        .context("Another update process is already running")?;
+
     let version = apply_staged_update()?;
 
     // Clear the cached pending version so the next invocation doesn't
     // re-download the version we just installed.
     crate::util::check_update::UpdateCheck::clear_latest();
+
+    let _ = std::fs::remove_file(&lock_path);
 
     println!("{} v{}", "Successfully updated to".green().bold(), version);
 
@@ -637,6 +650,8 @@ pub async fn self_update_interactive() -> Result<()> {
 }
 
 pub fn rollback() -> Result<()> {
+    use fs2::FileExt;
+
     let dir = backups_dir()?;
     let current_target = detect_target_triple()?;
 
@@ -702,6 +717,15 @@ pub fn rollback() -> Result<()> {
             .expect("selected label must exist in candidates")
     };
 
+    // Acquire the update lock so background auto-update processes cannot
+    // stage or apply while we are replacing the binary.
+    let lock_path = update_lock_path()?;
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
+    lock_file
+        .lock_exclusive()
+        .context("Another update process is running. Please try again.")?;
+
     println!("{} v{}...", "Rolling back to".yellow().bold(), version);
 
     let current_exe = std::env::current_exe().context("Failed to get current exe path")?;
@@ -713,6 +737,8 @@ pub fn rollback() -> Result<()> {
     // Prune after rollback succeeds so the candidate list wasn't reduced
     // before the user picked.
     let _ = prune_backups(&dir, 3);
+
+    let _ = std::fs::remove_file(&lock_path);
 
     println!("{} v{}", "Rolled back to".green().bold(), version);
 
