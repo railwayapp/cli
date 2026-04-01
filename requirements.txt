@@ -1,1 +1,2 @@
 apscheduler>=3.10,<4.0
+python-binance>=1.0.19,<2.0

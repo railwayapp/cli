@@ -2,16 +2,19 @@
 Trading Bot Scheduler
 Runs automatically every day at 08:00 UTC (15:00 Bangkok) via APScheduler.
 Analyzes market, executes trades, sends Telegram report.
+Deploys on Railway as a background worker.
 
 Usage:
     python main.py
 
 Environment variables:
+    BINANCE_API_KEY     - Binance API key (if set, uses live Binance)
+    BINANCE_API_SECRET  - Binance API secret
+    BINANCE_TESTNET     - "true" to use Binance testnet (recommended first)
     TELEGRAM_BOT_TOKEN  - Telegram bot token from @BotFather
     TELEGRAM_CHAT_ID    - Your Telegram chat ID
-    TRADING_SYMBOL      - Trading pair (default: BTC/USD)
+    TRADING_SYMBOL      - Trading pair (default: BTC/USDT)
     MAX_TICKS           - Analysis ticks per session (default: 50)
-    INITIAL_BALANCE     - Starting balance in USD (default: 10000)
 """
 
 import os
@@ -40,9 +43,19 @@ logger = logging.getLogger("scheduler")
 # Configuration from environment
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-TRADING_SYMBOL = os.getenv("TRADING_SYMBOL", "BTC/USD")
+TRADING_SYMBOL = os.getenv("TRADING_SYMBOL", "BTC/USDT")
 MAX_TICKS = int(os.getenv("MAX_TICKS", "50"))
-INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "10000"))
+
+
+def _create_exchange():
+    """Create exchange: Binance if credentials set, otherwise Mock."""
+    if os.getenv("BINANCE_API_KEY") and os.getenv("BINANCE_API_SECRET"):
+        from binance_exchange import BinanceExchange
+        logger.info("Using LIVE Binance exchange")
+        return BinanceExchange()
+    else:
+        logger.info("No Binance credentials - using MockExchange")
+        return MockExchange(initial_balance=10000)
 
 
 def run_trading_session():
@@ -51,7 +64,7 @@ def run_trading_session():
     start_time = datetime.utcnow()
 
     # Initialize components
-    exchange = MockExchange(initial_balance=INITIAL_BALANCE)
+    exchange = _create_exchange()
     strategy = SimpleMovingAverageStrategy(short_window=5, long_window=15)
     risk_manager = RiskManager(max_position_pct=0.2, stop_loss_pct=0.05)
     bot = TradingBot(exchange, strategy, risk_manager)
@@ -71,10 +84,14 @@ def run_trading_session():
     buy_orders = sum(1 for o in exchange.orders if o.type.value == "BUY")
     sell_orders = sum(1 for o in exchange.orders if o.type.value == "SELL")
 
-    start_value = start_balance.get("USD", 0)
-    end_value = end_balance.get("USD", 0) + end_balance.get("BTC", 0) * (
-        strategy.price_history[-1] if strategy.price_history else 0
-    )
+    # Support both MockExchange (USD) and Binance (USDT) balance keys
+    start_stable = start_balance.get("USDT", start_balance.get("USD", 0))
+    end_stable = end_balance.get("USDT", end_balance.get("USD", 0))
+    end_btc = end_balance.get("BTC", 0)
+    last_price = strategy.price_history[-1] if strategy.price_history else 0
+
+    start_value = start_stable
+    end_value = end_stable + end_btc * last_price
     pnl = end_value - start_value
     pnl_pct = (pnl / start_value * 100) if start_value > 0 else 0
 
