@@ -74,18 +74,19 @@ fn spawn_update_task(
     known_version: Option<String>,
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // If the caller already read a pending version from disk, use it
-        // directly instead of calling check_update().  This bypasses the
-        // same-day gate so a timed-out download is retried immediately on
-        // the next invocation.
+        // Always attempt a fresh API check first (respects its own
+        // same-day gate so this is a no-op within the same UTC day).
+        // Fall back to the cached version only when the gate fires, so
+        // timed-out downloads are retried without waiting a full day
+        // while newer releases are still discovered on the next day.
         //
         // from_cache: when false, check_update() already persisted the
         // timestamp and version — no need to write again.
-        let from_cache = known_version.is_some();
-        let latest_version = match known_version {
-            Some(v) => Some(v),
-            None => util::check_update::check_update(false).await?,
-        };
+        let (from_cache, latest_version) =
+            match util::check_update::check_update(false).await? {
+                Some(v) => (false, Some(v)),
+                None => (known_version.is_some(), known_version),
+            };
 
         if let Some(ref version) = latest_version {
             if !telemetry::is_auto_update_disabled() {
