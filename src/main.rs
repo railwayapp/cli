@@ -170,8 +170,10 @@ async fn main() -> Result<()> {
         .and_then(|a| a.subcommand_name())
         .map(|s| s.to_string());
 
-    let is_update_management_cmd =
-        matches!(subcommand.as_deref(), Some("upgrade" | "autoupdate" | "check_updates"));
+    let is_update_management_cmd = matches!(
+        subcommand.as_deref(),
+        Some("upgrade" | "autoupdate" | "check_updates")
+    );
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
     if auto_update_enabled && is_tty && !is_update_management_cmd {
