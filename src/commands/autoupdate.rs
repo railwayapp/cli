@@ -78,31 +78,28 @@ pub async fn command(args: Args) -> Result<()> {
                 let pid_path = crate::util::self_update::package_update_pid_path()?;
                 let mut child_still_alive = false;
                 if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-                    let parts: Vec<&str> = contents.split_whitespace().collect();
-                    if let Some(pid_str) = parts.first() {
-                        if let Ok(pid) = pid_str.parse::<u32>() {
+                    if let Some((pid, _)) = crate::util::check_update::parse_pid_file(&contents) {
+                        if crate::util::check_update::is_pid_alive(pid) {
+                            eprint!(
+                                "Waiting for in-flight package manager update (PID {pid}) to finish..."
+                            );
+                            let start = std::time::Instant::now();
+                            let timeout = std::time::Duration::from_secs(30);
+                            while crate::util::check_update::is_pid_alive(pid)
+                                && start.elapsed() < timeout
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                            }
                             if crate::util::check_update::is_pid_alive(pid) {
-                                eprint!(
-                                    "Waiting for in-flight package manager update (PID {pid}) to finish..."
+                                child_still_alive = true;
+                                eprintln!(" timed out.");
+                                eprintln!(
+                                    "{}: package manager update (PID {}) may still be running in the background.",
+                                    "warning".yellow().bold(),
+                                    pid,
                                 );
-                                let start = std::time::Instant::now();
-                                let timeout = std::time::Duration::from_secs(30);
-                                while crate::util::check_update::is_pid_alive(pid)
-                                    && start.elapsed() < timeout
-                                {
-                                    std::thread::sleep(std::time::Duration::from_millis(500));
-                                }
-                                if crate::util::check_update::is_pid_alive(pid) {
-                                    child_still_alive = true;
-                                    eprintln!(" timed out.");
-                                    eprintln!(
-                                        "{}: package manager update (PID {}) may still be running in the background.",
-                                        "warning".yellow().bold(),
-                                        pid,
-                                    );
-                                } else {
-                                    eprintln!(" done.");
-                                }
+                            } else {
+                                eprintln!(" done.");
                             }
                         }
                     }

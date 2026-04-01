@@ -195,14 +195,10 @@ pub fn spawn_package_manager_update(
     // Guard against an already-running updater: PID file with a 10-minute staleness TTL.
     let pid_path = super::self_update::package_update_pid_path()?;
     if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-        let parts: Vec<&str> = contents.split_whitespace().collect();
-        if let (Some(pid_str), Some(ts_str)) = (parts.first(), parts.get(1)) {
-            if let (Ok(pid), Ok(ts)) = (pid_str.parse::<u32>(), ts_str.parse::<i64>()) {
-                let now = chrono::Utc::now().timestamp();
-                let age_secs = now.saturating_sub(ts);
-                if age_secs < 600 && is_pid_alive(pid) {
-                    bail!("Another update process (pid {pid}) is already running");
-                }
+        if let Some((pid, ts)) = parse_pid_file(&contents) {
+            let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
+            if age_secs < 600 && is_pid_alive(pid) {
+                bail!("Another update process (pid {pid}) is already running");
             }
         }
     }
@@ -222,6 +218,14 @@ pub fn spawn_package_manager_update(
     // Lock is released on drop after the PID file is written.
 
     Ok(())
+}
+
+/// Parse a PID file containing `"{pid} {timestamp}"`.
+pub fn parse_pid_file(contents: &str) -> Option<(u32, i64)> {
+    let mut parts = contents.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let ts = parts.next()?.parse().ok()?;
+    Some((pid, ts))
 }
 
 /// Check whether a process with the given PID is still running.
