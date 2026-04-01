@@ -23,6 +23,10 @@ import sys
 import logging
 from datetime import datetime
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
