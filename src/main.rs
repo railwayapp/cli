@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
     let is_update_management_cmd = matches!(subcommand.as_deref(), Some("upgrade" | "autoupdate"));
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
-    if auto_update_enabled && !is_update_management_cmd {
+    if auto_update_enabled && is_tty && !is_update_management_cmd {
         util::self_update::try_apply_staged();
     }
 
@@ -210,9 +210,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Only spawn background updates in interactive terminals. Non-TTY
+    // invocations (cron jobs, shell scripts, CI-like automation) should
+    // never silently self-mutate or launch background package-manager updates.
     let check_updates_handle = if is_update_management_cmd {
         None
-    } else if auto_update_enabled {
+    } else if auto_update_enabled && is_tty {
         Some(spawn_update_task(
             known_pending,
             auto_update_enabled,

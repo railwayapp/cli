@@ -52,6 +52,27 @@ pub async fn command(args: Args) -> Result<()> {
                 let _ = crate::util::self_update::clean_staged();
                 // Lock released on drop.
             }
+            // Also acquire the package-update lock so we wait for any
+            // in-flight npm/Bun/Scoop updater to finish.  Without this,
+            // `autoupdate disable` could return while a detached package
+            // manager process is still running.
+            {
+                use fs2::FileExt;
+                let pkg_lock_path = crate::util::self_update::package_update_lock_path()?;
+                if let Some(parent) = pkg_lock_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let pkg_lock_file = std::fs::File::create(&pkg_lock_path)
+                    .context("Failed to create package-update lock file")?;
+                // Wait for any in-flight package manager update to finish.
+                pkg_lock_file
+                    .lock_exclusive()
+                    .context("Failed to acquire package-update lock")?;
+                // Clean up the PID file so no stale reference remains.
+                let pid_path = crate::util::self_update::package_update_pid_path()?;
+                let _ = std::fs::remove_file(&pid_path);
+                // Lock released on drop.
+            }
             println!("{}", "Auto-updates disabled.".yellow());
         }
         Commands::Status => {

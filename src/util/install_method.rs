@@ -16,6 +16,11 @@ impl InstallMethod {
             Err(_) => return InstallMethod::Unknown,
         };
 
+        // Resolve symlinks so that e.g. /usr/local/bin/railway (Intel
+        // Homebrew symlink) is followed to /usr/local/Cellar/… and
+        // correctly classified as Homebrew rather than Shell.
+        let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
+
         let path_str = exe_path.to_string_lossy().to_lowercase();
 
         if path_str.contains("homebrew")
@@ -67,17 +72,25 @@ impl InstallMethod {
             return InstallMethod::Unknown;
         }
 
-        // Catch-all: if the binary lives in any directory named "bin" and no
-        // package manager or system path was detected, it was most likely
-        // installed via the shell installer with a custom --bin-dir
-        // (e.g. ~/bin, /opt/bin).
-        if exe_path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n == "bin")
-            .unwrap_or(false)
-        {
-            return InstallMethod::Shell;
+        // Match well-known shell-installer directories rather than any
+        // directory named "bin".  The previous catch-all could misclassify
+        // binaries managed by version managers (asdf, mise, proto, etc.)
+        // that also live under a `.../bin/` tree, leading to unwanted
+        // in-place self-replacement of binaries Railway doesn't own.
+        if let Some(home) = dirs::home_dir() {
+            let home_str = home.to_string_lossy().to_lowercase();
+            let known_shell_dirs: Vec<String> = vec![
+                format!("{home_str}/.railway/bin"),
+                format!("{home_str}/bin"),
+                format!("{home_str}/.local/bin"),
+                "/opt/bin".to_string(),
+            ];
+            if let Some(parent) = exe_path.parent() {
+                let parent_str = parent.to_string_lossy().to_lowercase();
+                if known_shell_dirs.contains(&parent_str) {
+                    return InstallMethod::Shell;
+                }
+            }
         }
 
         InstallMethod::Unknown
@@ -150,11 +163,21 @@ impl InstallMethod {
     /// in the background.  Homebrew and Cargo are excluded because they can
     /// take several minutes and would keep a detached process alive far longer
     /// than is acceptable for a transparent background update.
+    ///
+    /// Also checks that the package manager's global install directory is
+    /// writable by the current user, so we don't spawn a doomed `npm update -g`
+    /// (installed via `sudo`) that fails immediately on every invocation.
     pub fn can_auto_run_package_manager(&self) -> bool {
-        matches!(
+        if !matches!(
             self,
             InstallMethod::Npm | InstallMethod::Bun | InstallMethod::Scoop
-        )
+        ) {
+            return false;
+        }
+
+        // Probe writability of the directory containing the binary — if we
+        // can't write there, the package manager update will fail anyway.
+        self.can_write_binary()
     }
 
     /// Human-readable description of the auto-update strategy for this install method.
