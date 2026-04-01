@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
         other => other,
     };
 
-    if is_tty {
+    if is_tty && auto_update_enabled {
         if let Some(ref latest_version) = known_pending {
             let is_skipped = skipped_version.as_deref() == Some(latest_version.as_str());
             if !is_skipped
@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
 
     let check_updates_handle = if is_update_management_cmd {
         None
-    } else if is_tty || auto_update_enabled {
+    } else if auto_update_enabled {
         Some(spawn_update_task(
             known_pending,
             auto_update_enabled,

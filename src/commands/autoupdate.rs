@@ -34,11 +34,24 @@ pub async fn command(args: Args) -> Result<()> {
             let mut prefs = Preferences::read();
             prefs.auto_update_disabled = true;
             prefs.write().context("Failed to save preferences")?;
-            // Clean up any staged update that would otherwise sit on disk indefinitely.
-            // Note: a package-manager child already spawned by a prior invocation runs
-            // detached and cannot be cancelled here — it will finish regardless.
-            // The preference flip takes effect on every subsequent invocation.
-            let _ = crate::util::self_update::clean_staged();
+            // Acquire the update lock so we wait for any in-flight background
+            // download to finish before cleaning, and prevent new staging while
+            // we remove the directory.
+            {
+                use fs2::FileExt;
+                let lock_path = crate::util::self_update::update_lock_path()?;
+                if let Some(parent) = lock_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let lock_file = std::fs::File::create(&lock_path)
+                    .context("Failed to create update lock file")?;
+                // Wait for any concurrent stager/applier to finish.
+                lock_file
+                    .lock_exclusive()
+                    .context("Failed to acquire update lock")?;
+                let _ = crate::util::self_update::clean_staged();
+                // Lock released on drop.
+            }
             println!("{}", "Auto-updates disabled.".yellow());
         }
         Commands::Status => {
