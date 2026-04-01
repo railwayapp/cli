@@ -156,6 +156,9 @@ async fn main() -> Result<()> {
 
     let args = build_args().try_get_matches();
     let is_tty = std::io::stdout().is_terminal();
+    // Help, version, and parse-error paths are read-only: no staged-binary
+    // apply, no background update spawn, no extra latency.
+    let is_help_or_error = args.as_ref().is_err();
 
     if is_tty {
         telemetry::show_notice_if_needed();
@@ -175,7 +178,7 @@ async fn main() -> Result<()> {
     );
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
-    if auto_update_enabled && is_tty && !is_update_management_cmd {
+    if auto_update_enabled && is_tty && !is_update_management_cmd && !is_help_or_error {
         util::self_update::try_apply_staged();
     }
 
@@ -219,7 +222,7 @@ async fn main() -> Result<()> {
     // Only spawn background updates in interactive terminals. Non-TTY
     // invocations (cron jobs, shell scripts, CI-like automation) should
     // never silently self-mutate or launch background package-manager updates.
-    let check_updates_handle = if is_update_management_cmd {
+    let check_updates_handle = if is_update_management_cmd || is_help_or_error {
         None
     } else if auto_update_enabled && is_tty {
         Some(spawn_update_task(
