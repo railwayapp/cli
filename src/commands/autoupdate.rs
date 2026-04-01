@@ -76,6 +76,7 @@ pub async fn command(args: Args) -> Result<()> {
                     .context("Failed to acquire package-update lock")?;
 
                 let pid_path = crate::util::self_update::package_update_pid_path()?;
+                let mut child_still_alive = false;
                 if let Ok(contents) = std::fs::read_to_string(&pid_path) {
                     let parts: Vec<&str> = contents.split_whitespace().collect();
                     if let Some(pid_str) = parts.first() {
@@ -92,6 +93,7 @@ pub async fn command(args: Args) -> Result<()> {
                                     std::thread::sleep(std::time::Duration::from_millis(500));
                                 }
                                 if crate::util::check_update::is_pid_alive(pid) {
+                                    child_still_alive = true;
                                     eprintln!(" timed out.");
                                     eprintln!(
                                         "{}: package manager update (PID {}) may still be running in the background.",
@@ -105,7 +107,12 @@ pub async fn command(args: Args) -> Result<()> {
                         }
                     }
                 }
-                let _ = std::fs::remove_file(&pid_path);
+                // Only remove the PID file if the child actually exited.
+                // Leaving it in place prevents a duplicate updater launch
+                // if auto-updates are re-enabled before the child finishes.
+                if !child_still_alive {
+                    let _ = std::fs::remove_file(&pid_path);
+                }
             }
             println!("{}", "Auto-updates disabled.".yellow());
         }
