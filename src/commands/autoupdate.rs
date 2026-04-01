@@ -27,8 +27,13 @@ pub async fn command(args: Args) -> Result<()> {
             let mut prefs = Preferences::read();
             prefs.auto_update_disabled = false;
             prefs.write().context("Failed to save preferences")?;
-            UpdateCheck::clear_skipped_version();
             println!("{}", "Auto-updates enabled.".green());
+            let update = UpdateCheck::read().unwrap_or_default();
+            if let Some(ref skipped) = update.skipped_version {
+                println!(
+                    "Note: v{skipped} is still skipped from rollback; auto-update resumes on next release."
+                );
+            }
         }
         Commands::Disable => {
             let mut prefs = Preferences::read();

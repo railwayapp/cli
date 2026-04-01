@@ -135,6 +135,10 @@ async fn handle_update_task(
 async fn background_stage_update(version: &str) -> Result<()> {
     use util::check_update::UpdateCheck;
 
+    if telemetry::is_auto_update_disabled() {
+        return Ok(());
+    }
+
     match util::self_update::download_and_stage(version).await {
         Ok(true) => {}  // Staged successfully; cache stays until try_apply_staged() succeeds.
         Ok(false) => {} // Lock held by another process, will retry

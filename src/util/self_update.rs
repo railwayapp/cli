@@ -204,7 +204,14 @@ async fn download_and_stage_inner(version: &str) -> Result<()> {
 
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
-            return Ok(());
+            if staged_update_dir()
+                .map(|d| d.join(binary_name()).exists())
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            // Metadata exists but binary is missing — clean and re-download.
+            let _ = StagedUpdate::clean();
         }
     }
 
@@ -291,7 +298,14 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
     // Quick check before acquiring the lock.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
-            return Ok(true);
+            if staged_update_dir()
+                .map(|d| d.join(binary_name()).exists())
+                .unwrap_or(false)
+            {
+                return Ok(true);
+            }
+            // Metadata exists but binary is missing — clean and re-download.
+            let _ = StagedUpdate::clean();
         }
     }
 
@@ -303,6 +317,12 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
         std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
     if lock_file.try_lock_exclusive().is_err() {
         // Another process is already staging or applying an update.
+        return Ok(false);
+    }
+
+    // Re-check after acquiring the lock: the user may have run
+    // `railway autoupdate disable` while we were waiting.
+    if crate::telemetry::is_auto_update_disabled() {
         return Ok(false);
     }
 
@@ -598,8 +618,11 @@ pub fn try_apply_staged() {
                 version,
             );
         }
-        Err(_) => {
-            // Kept for retry; STAGED_UPDATE_MAX_AGE_DAYS handles permanent failures.
+        Err(e) => {
+            if e.to_string().contains("Staged binary not found") {
+                let _ = StagedUpdate::clean();
+            }
+            // Other errors kept for retry; STAGED_UPDATE_MAX_AGE_DAYS handles permanent failures.
         }
     }
 

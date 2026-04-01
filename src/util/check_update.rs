@@ -57,13 +57,6 @@ impl UpdateCheck {
         let _ = update.write();
     }
 
-    /// Clear the rollback skip so all future versions are eligible again.
-    pub fn clear_skipped_version() {
-        let mut update = Self::read().unwrap_or_default();
-        update.skipped_version = None;
-        let _ = update.write();
-    }
-
     /// Reset cached update state after a successful upgrade or auto-apply.
     /// Clears both the pending version notification and any rollback skip
     /// in a single read-write cycle.
