@@ -77,11 +77,11 @@ fn spawn_update_task(
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
         // Fresh API check first (respects same-day gate).  Fall back to the
-        // cached version when the gate fires, so timed-out downloads are
-        // retried without waiting a full day.
-        let (from_cache, latest_version) = match util::check_update::check_update(false).await? {
-            Some(v) => (false, Some(v)),
-            None => (known_version.is_some(), known_version),
+        // cached version when the gate fires or the API errors, so timed-out
+        // downloads are retried without waiting a full day.
+        let (from_cache, latest_version) = match util::check_update::check_update(false).await {
+            Ok(Some(v)) => (false, Some(v)),
+            Ok(None) | Err(_) => (known_version.is_some(), known_version),
         };
 
         if let Some(ref version) = latest_version {
@@ -164,15 +164,14 @@ async fn main() -> Result<()> {
     // Peek at the subcommand early so we can skip the staged-update
     // apply and background updater when the user is explicitly managing
     // updates (`railway upgrade` or `railway autoupdate`).
-    let subcommand = args
-        .as_ref()
-        .ok()
-        .and_then(|a| a.subcommand_name())
-        .map(|s| s.to_string());
+    // Check raw args too so that help/error paths (where clap returns Err)
+    // are also detected — e.g. `railway upgrade --help` should not apply
+    // a staged update as a side effect.
+    let raw_subcommand = std::env::args().nth(1).filter(|a| !a.starts_with('-'));
 
     let is_update_management_cmd = matches!(
-        subcommand.as_deref(),
-        Some("upgrade" | "autoupdate" | "check_updates")
+        raw_subcommand.as_deref(),
+        Some("upgrade" | "autoupdate" | "check_updates" | "check-updates")
     );
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
