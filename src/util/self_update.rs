@@ -670,6 +670,9 @@ pub fn rollback() -> Result<()> {
     // Acquire the update lock first so background auto-update processes cannot
     // stage or apply while we are building the candidate list or prompting.
     let lock_path = update_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let lock_file =
         std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
     lock_file
