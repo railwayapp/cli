@@ -87,12 +87,25 @@ impl InstallMethod {
         // package manager, system path, or version manager was detected, it
         // was most likely installed via the shell installer (possibly with a
         // custom --bin-dir like ~/tools/bin or /opt/railway/bin).
+        //
+        // Guard: Cargo's `CARGO_INSTALL_ROOT` can place binaries in a custom
+        // `*/bin/` too.  Cargo always writes `.crates.toml` next to the `bin/`
+        // directory, so check for that marker to avoid misclassifying a
+        // Cargo-managed binary as Shell.
         if exe_path
             .parent()
             .and_then(|p| p.file_name())
             .map(|n| n == "bin")
             .unwrap_or(false)
         {
+            let is_cargo_root = exe_path
+                .parent()
+                .and_then(|bin| bin.parent())
+                .map(|root| root.join(".crates.toml").exists())
+                .unwrap_or(false);
+            if is_cargo_root {
+                return InstallMethod::Cargo;
+            }
             return InstallMethod::Shell;
         }
 
