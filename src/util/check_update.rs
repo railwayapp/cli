@@ -51,9 +51,12 @@ impl UpdateCheck {
     }
 
     /// Record a version to skip during auto-update (set after rollback).
+    /// Also clears `last_update_check` so the next invocation performs a
+    /// fresh API check and can discover a newer release published the same day.
     pub fn skip_version(version: &str) {
         let mut update = Self::read().unwrap_or_default();
         update.skipped_version = Some(version.to_string());
+        update.last_update_check = None;
         let _ = update.write();
     }
 
@@ -168,6 +171,12 @@ pub fn spawn_package_manager_update(
     lock_file
         .try_lock_exclusive()
         .map_err(|_| anyhow::anyhow!("Another update process is starting. Please try again."))?;
+
+    // Re-check after acquiring the lock: the user may have run
+    // `railway autoupdate disable` while we were waiting.
+    if crate::telemetry::is_auto_update_disabled() {
+        bail!("Auto-updates were disabled while waiting for lock");
+    }
 
     // Guard against an already-running updater: PID file with a 10-minute staleness TTL.
     let pid_path = super::self_update::package_update_pid_path()?;

@@ -74,8 +74,13 @@ pub async fn command(args: Args) -> Result<()> {
                 "Cannot rollback: the CLI binary is not writable by the current user.".yellow()
             );
             println!();
-            println!("To rollback, re-run with elevated permissions:");
-            println!("  {}", "sudo railway upgrade --rollback".bold());
+            if cfg!(windows) {
+                println!("To rollback, run the terminal as Administrator and retry:");
+                println!("  {}", "railway upgrade --rollback".bold());
+            } else {
+                println!("To rollback, re-run with elevated permissions:");
+                println!("  {}", "sudo railway upgrade --rollback".bold());
+            }
             return Ok(());
         }
         return crate::util::self_update::rollback();
@@ -104,11 +109,16 @@ pub async fn command(args: Args) -> Result<()> {
                 "Cannot upgrade: the CLI binary is not writable by the current user.".yellow()
             );
             println!();
-            println!("To upgrade, either:");
-            println!("  1. Re-run with elevated permissions:");
-            println!("     {}", "sudo railway upgrade".bold());
-            println!("  2. Reinstall using the install script:");
-            println!("     {}", "bash <(curl -fsSL cli.new)".bold());
+            if cfg!(windows) {
+                println!("To upgrade, run the terminal as Administrator and retry:");
+                println!("  {}", "railway upgrade".bold());
+            } else {
+                println!("To upgrade, either:");
+                println!("  1. Re-run with elevated permissions:");
+                println!("     {}", "sudo railway upgrade".bold());
+                println!("  2. Reinstall using the install script:");
+                println!("     {}", "bash <(curl -fsSL cli.new)".bold());
+            }
         }
         InstallMethod::Unknown => {
             println!();
