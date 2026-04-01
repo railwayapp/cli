@@ -178,7 +178,22 @@ async fn main() -> Result<()> {
     // Pass any pending version to spawn_update_task so it can skip the
     // same-day short-circuit and retry a download that timed out in a
     // prior run.  The background task clears latest_version on success.
-    let known_pending = update.latest_version;
+    //
+    // If the running binary has already caught up to (or surpassed) the
+    // cached version, clear the stale cache so spawn_update_task falls
+    // through to a fresh check_update() and can discover newer releases.
+    let known_pending = match update.latest_version {
+        Some(ref v)
+            if !matches!(
+                compare_semver(env!("CARGO_PKG_VERSION"), v),
+                Ordering::Less
+            ) =>
+        {
+            UpdateCheck::clear_latest();
+            None
+        }
+        other => other,
+    };
 
     if is_tty {
         if let Some(ref latest_version) = known_pending {

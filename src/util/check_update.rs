@@ -168,7 +168,10 @@ pub fn spawn_package_manager_update(
     // Spawn in its own process group so SIGINT from the terminal doesn't
     // propagate to the child when the user hits Ctrl+C.
     let mut cmd = std::process::Command::new(program);
-    cmd.args(&args).stdout(log_file).stderr(log_stderr);
+    cmd.args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file)
+        .stderr(log_stderr);
 
     // Isolate the child from the parent's terminal so that Ctrl+C does not
     // propagate and kill the in-flight update process.
