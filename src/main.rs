@@ -137,7 +137,7 @@ async fn background_stage_update(version: &str) -> Result<()> {
     use util::check_update::UpdateCheck;
 
     match util::self_update::download_and_stage(version).await {
-        Ok(true) => {} // Staged successfully; cache stays until try_apply_staged() succeeds.
+        Ok(true) => {}  // Staged successfully; cache stays until try_apply_staged() succeeds.
         Ok(false) => {} // Lock held by another process, will retry
         Err(_) => UpdateCheck::record_download_failure(),
     }
