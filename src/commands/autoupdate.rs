@@ -57,12 +57,24 @@ pub async fn command(args: Args) -> Result<()> {
                 let _ = crate::util::self_update::clean_staged();
                 // Lock released on drop.
             }
-            // Wait for any in-flight detached package manager updater
-            // (npm/Bun/Scoop) to exit.  The spawn lock is only held during
-            // the spawn window, not for the child's lifetime, so acquiring
-            // it doesn't prove the child has finished.  We read the PID
-            // file and poll the process directly.
+            // Synchronize with any in-flight spawn_package_manager_update().
+            // Acquiring this lock (blocking) guarantees that if a concurrent
+            // process was mid-spawn, it has finished writing the PID file
+            // before we read it.  After we hold the lock, no new spawns can
+            // start because they will see auto_update_disabled via the
+            // is_auto_update_disabled() re-check inside the lock.
             {
+                use fs2::FileExt;
+                let pkg_lock_path = crate::util::self_update::package_update_lock_path()?;
+                if let Some(parent) = pkg_lock_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let pkg_lock_file = std::fs::File::create(&pkg_lock_path)
+                    .context("Failed to create package-update lock file")?;
+                pkg_lock_file
+                    .lock_exclusive()
+                    .context("Failed to acquire package-update lock")?;
+
                 let pid_path = crate::util::self_update::package_update_pid_path()?;
                 if let Ok(contents) = std::fs::read_to_string(&pid_path) {
                     let parts: Vec<&str> = contents.split_whitespace().collect();

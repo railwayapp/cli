@@ -128,7 +128,12 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
 
     match compare_semver(env!("CARGO_PKG_VERSION"), latest_version) {
         Ordering::Less => {
-            update.last_update_check = Some(chrono::Utc::now());
+            // Don't arm the daily gate when the latest release is the version
+            // the user rolled back from — keep checking so a fix release
+            // published later the same day is discovered promptly.
+            if update.skipped_version.as_deref() != Some(latest_version) {
+                update.last_update_check = Some(chrono::Utc::now());
+            }
             update.latest_version = Some(latest_version.to_owned());
             update.download_failures = 0;
             update.write()?;
