@@ -183,33 +183,6 @@ jobs:
         run: |
           gh release upload "${{ needs.create-release.outputs.railway_version }}" "railway-${{ needs.create-release.outputs.railway_version }}-amd64.deb"
 
-  generate-checksums:
-    name: Generate Checksums
-    needs: ["create-release", "build-release"]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          mkdir assets
-          gh release download "${{ needs.create-release.outputs.railway_version }}" --dir assets --pattern 'railway-*'
-
-      - name: Generate checksums.txt
-        run: |
-          cd assets
-          sha256sum * | sort -k2 > ../checksums.txt
-          cd -
-
-      - name: Upload checksums.txt
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          gh release upload "${{ needs.create-release.outputs.railway_version }}" checksums.txt
-
   publish-crates:
     name: Publish to crates.io
     needs: ["create-release"]
@@ -229,7 +202,7 @@ jobs:
 
   publish-release:
     name: Publish Release
-    needs: ["create-release", "build-release", "generate-checksums", "publish-crates"]
+    needs: ["create-release", "build-release", "publish-crates"]
     runs-on: ubuntu-latest
 
     steps:
