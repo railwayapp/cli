@@ -35,6 +35,11 @@ impl InstallMethod {
             return InstallMethod::Bun;
         }
 
+        // pnpm paths contain "npm" as a substring — check before npm.
+        if path_str.contains("pnpm") {
+            return InstallMethod::Unknown;
+        }
+
         if path_str.contains("node_modules")
             || path_str.contains("npm")
             || path_str.contains(".npm")

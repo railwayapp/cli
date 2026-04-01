@@ -45,9 +45,14 @@ impl UpdateCheck {
         let _ = update.write();
     }
 
-    /// Clear the cached "new version available" notification.
+    /// Clear a stale cached version without stamping `last_update_check`, so
+    /// the background task performs a fresh API check and can discover a
+    /// hotfix published later the same day.
     pub fn clear_latest() {
-        Self::persist_latest(None);
+        let mut update = Self::read().unwrap_or_default();
+        update.latest_version = None;
+        update.download_failures = 0;
+        let _ = update.write();
     }
 
     /// Record a version to skip during auto-update (set after rollback).
