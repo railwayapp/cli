@@ -158,9 +158,17 @@ impl InstallMethod {
     }
 
     /// Human-readable description of the auto-update strategy for this install method.
+    /// Reflects the actual runtime behaviour by checking platform support and
+    /// binary writability, so `autoupdate status` never overpromises.
     pub fn update_strategy(&self) -> &'static str {
         match self {
-            InstallMethod::Shell => "Background download + auto-swap",
+            InstallMethod::Shell if self.can_self_update() && self.can_write_binary() => {
+                "Background download + auto-swap"
+            }
+            InstallMethod::Shell if self.can_self_update() => {
+                "Notification only (binary not writable)"
+            }
+            InstallMethod::Shell => "Notification only (unsupported platform)",
             InstallMethod::Npm | InstallMethod::Bun | InstallMethod::Scoop => {
                 "Auto-run package manager"
             }

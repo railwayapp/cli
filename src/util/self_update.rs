@@ -192,41 +192,16 @@ fn verify_checksum(bytes: &[u8], expected_hex: &str) -> Result<()> {
     Ok(())
 }
 
-/// Downloads the release tarball for the given version and extracts the binary
-/// to the staged update directory. Cleans up on partial failure.
-/// Uses file locking to prevent concurrent CLI processes from racing.
-///
-/// Returns `Ok(true)` when the update was staged (or was already staged for
-/// this version/target).  Returns `Ok(false)` when another process holds the
-/// update lock — the caller should **not** treat this as a completed update.
-pub async fn download_and_stage(version: &str) -> Result<bool> {
-    use fs2::FileExt;
-
+/// Downloads and stages the update, assuming the caller already holds the
+/// update lock.  Shared by [`download_and_stage`] (background path) and
+/// [`self_update_interactive`] (interactive path).
+async fn download_and_stage_inner(version: &str) -> Result<()> {
     let target = detect_target_triple()?;
 
-    // Quick check before acquiring the lock.
+    // Already staged for this version/target — nothing to do.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
-            return Ok(true);
-        }
-    }
-
-    let lock_path = update_lock_path()?;
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let lock_file =
-        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
-    if lock_file.try_lock_exclusive().is_err() {
-        // Another process is already staging or applying an update.
-        return Ok(false);
-    }
-
-    // Re-check after acquiring the lock — another process may have just
-    // finished staging the same version.
-    if let Ok(Some(staged)) = StagedUpdate::read() {
-        if staged.version == version && staged.target == target {
-            return Ok(true);
+            return Ok(());
         }
     }
 
@@ -295,6 +270,41 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
         let _ = StagedUpdate::clean();
         return Err(e);
     }
+
+    Ok(())
+}
+
+/// Downloads the release tarball for the given version and extracts the binary
+/// to the staged update directory. Cleans up on partial failure.
+/// Uses file locking to prevent concurrent CLI processes from racing.
+///
+/// Returns `Ok(true)` when the update was staged (or was already staged for
+/// this version/target).  Returns `Ok(false)` when another process holds the
+/// update lock — the caller should **not** treat this as a completed update.
+pub async fn download_and_stage(version: &str) -> Result<bool> {
+    use fs2::FileExt;
+
+    let target = detect_target_triple()?;
+
+    // Quick check before acquiring the lock.
+    if let Ok(Some(staged)) = StagedUpdate::read() {
+        if staged.version == version && staged.target == target {
+            return Ok(true);
+        }
+    }
+
+    let lock_path = update_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
+    if lock_file.try_lock_exclusive().is_err() {
+        // Another process is already staging or applying an update.
+        return Ok(false);
+    }
+
+    download_and_stage_inner(version).await?;
 
     Ok(true)
 }
@@ -623,18 +633,20 @@ pub async fn self_update_interactive() -> Result<()> {
 
     println!("{} v{}...", "Downloading".green().bold(), latest_version);
 
-    if !download_and_stage(&latest_version).await? {
-        bail!("Another update process is already running. Please try again.");
-    }
-
-    // Hold the lock across apply so a concurrent try_apply_staged() cannot
-    // race us between staging and applying.
+    // Hold a single lock across both download and apply so a concurrent
+    // try_apply_staged() cannot consume the staged binary between the two
+    // steps.
     let lock_path = update_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let lock_file =
         std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
     lock_file
         .lock_exclusive()
         .context("Another update process is already running")?;
+
+    download_and_stage_inner(&latest_version).await?;
 
     let version = apply_staged_update()?;
 
