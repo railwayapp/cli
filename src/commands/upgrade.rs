@@ -22,6 +22,38 @@ fn run_upgrade_command(method: InstallMethod) -> Result<()> {
         .package_manager_command()
         .context("Cannot auto-upgrade for this install method")?;
 
+    // Coordinate with background auto-updates: acquire the same lock and
+    // check the PID file used by spawn_package_manager_update() so we
+    // don't run two package-manager processes against the same global install.
+    use fs2::FileExt;
+
+    let lock_path = crate::util::self_update::package_update_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create package-update lock file")?;
+    lock_file.try_lock_exclusive().map_err(|_| {
+        anyhow::anyhow!("A background update is already in progress. Please try again shortly.")
+    })?;
+
+    let pid_path = crate::util::self_update::package_update_pid_path()?;
+    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+        let parts: Vec<&str> = contents.split_whitespace().collect();
+        if let (Some(pid_str), Some(ts_str)) = (parts.first(), parts.get(1)) {
+            if let (Ok(pid), Ok(ts)) = (pid_str.parse::<u32>(), ts_str.parse::<i64>()) {
+                let now = chrono::Utc::now().timestamp();
+                let age_secs = now.saturating_sub(ts);
+                if age_secs < 600 && crate::util::check_update::is_pid_alive(pid) {
+                    bail!(
+                        "A background update (pid {pid}) is already running. \
+                         Please wait for it to finish or try again shortly."
+                    );
+                }
+            }
+        }
+    }
+
     println!("{} {} {}", "Running:".bold(), program, args.join(" "));
     println!();
 
@@ -29,6 +61,9 @@ fn run_upgrade_command(method: InstallMethod) -> Result<()> {
         .args(&args)
         .status()
         .context(format!("Failed to execute {}", program))?;
+
+    // Clean up stale PID file from a previous background updater.
+    let _ = std::fs::remove_file(&pid_path);
 
     if !status.success() {
         bail!(
