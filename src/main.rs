@@ -73,6 +73,7 @@ commands!(
 fn spawn_update_task(
     known_version: Option<String>,
     auto_update_enabled: bool,
+    skipped_version: Option<String>,
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
         // Fresh API check first (respects same-day gate).  Fall back to the
@@ -89,12 +90,17 @@ fn spawn_update_task(
             let mut needs_persist = from_cache;
 
             if auto_update_enabled {
-                let method = util::install_method::InstallMethod::detect();
-                if method.can_self_update() && method.can_write_binary() {
-                    let _ = util::self_update::spawn_background_download(version);
-                    needs_persist = false;
-                } else if method.can_auto_run_package_manager() {
-                    let _ = util::check_update::spawn_package_manager_update(method);
+                // A newer release will clear the skip automatically.
+                let is_skipped = skipped_version.as_deref() == Some(version.as_str());
+
+                if !is_skipped {
+                    let method = util::install_method::InstallMethod::detect();
+                    if method.can_self_update() && method.can_write_binary() {
+                        let _ = util::self_update::spawn_background_download(version);
+                        needs_persist = false;
+                    } else if method.can_auto_run_package_manager() {
+                        let _ = util::check_update::spawn_package_manager_update(method);
+                    }
                 }
             }
 
@@ -168,6 +174,7 @@ async fn main() -> Result<()> {
     }
 
     let update = UpdateCheck::read().unwrap_or_default();
+    let skipped_version = update.skipped_version;
 
     // Pass any pending version to spawn_update_task so it can skip the
     // same-day short-circuit and retry a download that timed out in a
@@ -186,10 +193,13 @@ async fn main() -> Result<()> {
 
     if is_tty {
         if let Some(ref latest_version) = known_pending {
-            if matches!(
-                compare_semver(env!("CARGO_PKG_VERSION"), latest_version),
-                Ordering::Less
-            ) {
+            let is_skipped = skipped_version.as_deref() == Some(latest_version.as_str());
+            if !is_skipped
+                && matches!(
+                    compare_semver(env!("CARGO_PKG_VERSION"), latest_version),
+                    Ordering::Less
+                )
+            {
                 eprintln!(
                     "{} v{} visit {} for more info",
                     "New version available:".green().bold(),
@@ -203,7 +213,11 @@ async fn main() -> Result<()> {
     let check_updates_handle = if is_update_management_cmd {
         None
     } else if is_tty || auto_update_enabled {
-        Some(spawn_update_task(known_pending, auto_update_enabled))
+        Some(spawn_update_task(
+            known_pending,
+            auto_update_enabled,
+            skipped_version,
+        ))
     } else {
         None
     };

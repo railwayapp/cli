@@ -13,6 +13,10 @@ pub struct UpdateCheck {
     /// After 3 failures the version is cleared to force a fresh API check.
     #[serde(default)]
     pub download_failures: u32,
+    /// Version the user rolled back from.  Auto-update skips this version
+    /// and resumes normally once a newer release is published.
+    #[serde(default)]
+    pub skipped_version: Option<String>,
 }
 impl UpdateCheck {
     pub fn write(&self) -> anyhow::Result<()> {
@@ -32,18 +36,44 @@ impl UpdateCheck {
 
     /// Update the check timestamp, optionally preserving (or clearing) the
     /// cached pending version.  Resets the failure counter.
+    /// Preserves `skipped_version` so a rollback skip survives cache updates.
     pub fn persist_latest(version: Option<&str>) {
-        let update = Self {
-            last_update_check: Some(chrono::Utc::now()),
-            latest_version: version.map(String::from),
-            download_failures: 0,
-        };
+        let mut update = Self::read().unwrap_or_default();
+        update.last_update_check = Some(chrono::Utc::now());
+        update.latest_version = version.map(String::from);
+        update.download_failures = 0;
         let _ = update.write();
     }
 
     /// Clear the cached "new version available" notification.
     pub fn clear_latest() {
         Self::persist_latest(None);
+    }
+
+    /// Record a version to skip during auto-update (set after rollback).
+    pub fn skip_version(version: &str) {
+        let mut update = Self::read().unwrap_or_default();
+        update.skipped_version = Some(version.to_string());
+        let _ = update.write();
+    }
+
+    /// Clear the rollback skip so all future versions are eligible again.
+    pub fn clear_skipped_version() {
+        let mut update = Self::read().unwrap_or_default();
+        update.skipped_version = None;
+        let _ = update.write();
+    }
+
+    /// Reset cached update state after a successful upgrade or auto-apply.
+    /// Clears both the pending version notification and any rollback skip
+    /// in a single read-write cycle.
+    pub fn clear_after_update() {
+        let mut update = Self::read().unwrap_or_default();
+        update.last_update_check = Some(chrono::Utc::now());
+        update.latest_version = None;
+        update.download_failures = 0;
+        update.skipped_version = None;
+        let _ = update.write();
     }
 
     /// Max consecutive download failures before clearing the cached version.
@@ -78,7 +108,7 @@ struct GithubApiRelease {
 
 const GITHUB_API_RELEASE_URL: &str = "https://api.github.com/repos/railwayapp/cli/releases/latest";
 pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
-    let update = UpdateCheck::read().unwrap_or_default();
+    let mut update = UpdateCheck::read().unwrap_or_default();
 
     if let Some(last_update_check) = update.last_update_check {
         // Dates are compared in UTC; a check near midnight local time may
@@ -101,11 +131,9 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
 
     match compare_semver(env!("CARGO_PKG_VERSION"), latest_version) {
         Ordering::Less => {
-            let update = UpdateCheck {
-                last_update_check: Some(chrono::Utc::now()),
-                latest_version: Some(latest_version.to_owned()),
-                download_failures: 0,
-            };
+            update.last_update_check = Some(chrono::Utc::now());
+            update.latest_version = Some(latest_version.to_owned());
+            update.download_failures = 0;
             update.write()?;
             Ok(Some(latest_version.to_string()))
         }

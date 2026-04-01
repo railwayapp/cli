@@ -561,6 +561,15 @@ pub fn try_apply_staged() {
         return;
     }
 
+    // Don't apply a version the user explicitly rolled back from.  A detached
+    // download spawned before the rollback may have staged this version.
+    if let Ok(check) = crate::util::check_update::UpdateCheck::read() {
+        if check.skipped_version.as_deref() == Some(staged.version.as_str()) {
+            let _ = StagedUpdate::clean();
+            return;
+        }
+    }
+
     let lock_path = match update_lock_path() {
         Ok(p) => p,
         Err(_) => return,
@@ -577,7 +586,7 @@ pub fn try_apply_staged() {
 
     match apply_staged_update() {
         Ok(version) => {
-            crate::util::check_update::UpdateCheck::clear_latest();
+            crate::util::check_update::UpdateCheck::clear_after_update();
 
             eprintln!(
                 "{} v{} (active on next run)",
@@ -619,9 +628,7 @@ pub async fn self_update_interactive() -> Result<()> {
 
     let version = apply_staged_update()?;
 
-    // Clear the cached pending version so the next invocation doesn't
-    // re-download the version we just installed.
-    crate::util::check_update::UpdateCheck::clear_latest();
+    crate::util::check_update::UpdateCheck::clear_after_update();
 
     drop(lock_file);
 
@@ -715,6 +722,11 @@ pub fn rollback() -> Result<()> {
     // Clean staged updates so the rolled-back binary doesn't immediately re-apply.
     let _ = StagedUpdate::clean();
 
+    // Record the current version as skipped so auto-update doesn't
+    // re-download and re-apply the version the user just rolled back from.
+    // Auto-update resumes once a newer release supersedes the skipped version.
+    crate::util::check_update::UpdateCheck::skip_version(current_version);
+
     // Prune after rollback succeeds so the candidate list wasn't reduced
     // before the user picked.
     let _ = prune_backups(&dir, 3);
@@ -722,6 +734,11 @@ pub fn rollback() -> Result<()> {
     drop(lock_file);
 
     println!("{} v{}", "Rolled back to".green().bold(), version);
+    println!(
+        "Auto-updates will skip v{}. Run {} to disable all auto-updates.",
+        current_version,
+        "railway autoupdate disable".bold()
+    );
 
     Ok(())
 }

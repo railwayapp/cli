@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::Configs;
 use crate::telemetry::{Preferences, is_auto_update_disabled_by_env};
+use crate::util::check_update::UpdateCheck;
 use crate::util::install_method::InstallMethod;
 
 /// Manage auto-update preferences
@@ -26,6 +27,7 @@ pub async fn command(args: Args) -> Result<()> {
             let mut prefs = Preferences::read();
             prefs.auto_update_disabled = false;
             prefs.write().context("Failed to save preferences")?;
+            UpdateCheck::clear_skipped_version();
             println!("{}", "Auto-updates enabled.".green());
         }
         Commands::Disable => {
@@ -68,6 +70,14 @@ pub async fn command(args: Args) -> Result<()> {
 
             println!("Install method: {}", method.name().bold());
             println!("Update strategy: {}", method.update_strategy());
+
+            let update = UpdateCheck::read().unwrap_or_default();
+            if let Some(ref skipped) = update.skipped_version {
+                println!(
+                    "Skipped version: {} (rolled back; auto-update resumes on next release)",
+                    format!("v{skipped}").yellow()
+                );
+            }
         }
     }
     Ok(())
