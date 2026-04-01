@@ -621,7 +621,7 @@ pub fn try_apply_staged() {
         }
     }
 
-    let _ = std::fs::remove_file(&lock_path);
+    drop(lock_file);
 }
 
 pub async fn self_update_interactive() -> Result<()> {
@@ -654,7 +654,7 @@ pub async fn self_update_interactive() -> Result<()> {
     // re-download the version we just installed.
     crate::util::check_update::UpdateCheck::clear_latest();
 
-    let _ = std::fs::remove_file(&lock_path);
+    drop(lock_file);
 
     println!("{} v{}", "Successfully updated to".green().bold(), version);
 
@@ -750,7 +750,7 @@ pub fn rollback() -> Result<()> {
     // before the user picked.
     let _ = prune_backups(&dir, 3);
 
-    let _ = std::fs::remove_file(&lock_path);
+    drop(lock_file);
 
     println!("{} v{}", "Rolled back to".green().bold(), version);
 
