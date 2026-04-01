@@ -58,8 +58,8 @@ impl InstallMethod {
             return InstallMethod::Shell;
         }
 
-        // Paths owned by system or non-shell package managers — must be
-        // checked before the catch-all so we don't misclassify them as Shell.
+        // Paths owned by system package managers — must be checked before
+        // the catch-all so we don't misclassify them as Shell.
         const SYSTEM_PATHS: &[&str] = &[
             "/usr/bin",
             "/usr/sbin",
@@ -72,25 +72,28 @@ impl InstallMethod {
             return InstallMethod::Unknown;
         }
 
-        // Match well-known shell-installer directories rather than any
-        // directory named "bin".  The previous catch-all could misclassify
-        // binaries managed by version managers (asdf, mise, proto, etc.)
-        // that also live under a `.../bin/` tree, leading to unwanted
-        // in-place self-replacement of binaries Railway doesn't own.
-        if let Some(home) = dirs::home_dir() {
-            let home_str = home.to_string_lossy().to_lowercase();
-            let known_shell_dirs: Vec<String> = vec![
-                format!("{home_str}/.railway/bin"),
-                format!("{home_str}/bin"),
-                format!("{home_str}/.local/bin"),
-                "/opt/bin".to_string(),
-            ];
-            if let Some(parent) = exe_path.parent() {
-                let parent_str = parent.to_string_lossy().to_lowercase();
-                if known_shell_dirs.contains(&parent_str) {
-                    return InstallMethod::Shell;
-                }
-            }
+        // Version managers install binaries under their own directory trees.
+        // Exclude them so the catch-all doesn't misclassify a managed binary
+        // as a shell install and attempt to self-replace it.
+        const VERSION_MANAGER_PATHS: &[&str] = &[
+            ".asdf/", ".mise/", ".rtx/", ".proto/", ".volta/", ".fnm/", ".nodenv/", ".rbenv/",
+            ".pyenv/",
+        ];
+        if VERSION_MANAGER_PATHS.iter().any(|p| path_str.contains(p)) {
+            return InstallMethod::Unknown;
+        }
+
+        // Catch-all: if the binary lives in any directory named "bin" and no
+        // package manager, system path, or version manager was detected, it
+        // was most likely installed via the shell installer (possibly with a
+        // custom --bin-dir like ~/tools/bin or /opt/railway/bin).
+        if exe_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n == "bin")
+            .unwrap_or(false)
+        {
+            return InstallMethod::Shell;
         }
 
         InstallMethod::Unknown
@@ -192,8 +195,13 @@ impl InstallMethod {
                 "Notification only (binary not writable)"
             }
             InstallMethod::Shell => "Notification only (unsupported platform)",
-            InstallMethod::Npm | InstallMethod::Bun | InstallMethod::Scoop => {
+            InstallMethod::Npm | InstallMethod::Bun | InstallMethod::Scoop
+                if self.can_auto_run_package_manager() =>
+            {
                 "Auto-run package manager"
+            }
+            InstallMethod::Npm | InstallMethod::Bun | InstallMethod::Scoop => {
+                "Notification only (binary not writable)"
             }
             InstallMethod::Homebrew | InstallMethod::Cargo | InstallMethod::Unknown => {
                 "Notification only (manual upgrade)"

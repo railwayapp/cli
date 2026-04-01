@@ -52,26 +52,43 @@ pub async fn command(args: Args) -> Result<()> {
                 let _ = crate::util::self_update::clean_staged();
                 // Lock released on drop.
             }
-            // Also acquire the package-update lock so we wait for any
-            // in-flight npm/Bun/Scoop updater to finish.  Without this,
-            // `autoupdate disable` could return while a detached package
-            // manager process is still running.
+            // Wait for any in-flight detached package manager updater
+            // (npm/Bun/Scoop) to exit.  The spawn lock is only held during
+            // the spawn window, not for the child's lifetime, so acquiring
+            // it doesn't prove the child has finished.  We read the PID
+            // file and poll the process directly.
             {
-                use fs2::FileExt;
-                let pkg_lock_path = crate::util::self_update::package_update_lock_path()?;
-                if let Some(parent) = pkg_lock_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let pkg_lock_file = std::fs::File::create(&pkg_lock_path)
-                    .context("Failed to create package-update lock file")?;
-                // Wait for any in-flight package manager update to finish.
-                pkg_lock_file
-                    .lock_exclusive()
-                    .context("Failed to acquire package-update lock")?;
-                // Clean up the PID file so no stale reference remains.
                 let pid_path = crate::util::self_update::package_update_pid_path()?;
+                if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+                    let parts: Vec<&str> = contents.split_whitespace().collect();
+                    if let Some(pid_str) = parts.first() {
+                        if let Ok(pid) = pid_str.parse::<u32>() {
+                            if crate::util::check_update::is_pid_alive(pid) {
+                                eprint!(
+                                    "Waiting for in-flight package manager update (PID {pid}) to finish..."
+                                );
+                                let start = std::time::Instant::now();
+                                let timeout = std::time::Duration::from_secs(30);
+                                while crate::util::check_update::is_pid_alive(pid)
+                                    && start.elapsed() < timeout
+                                {
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                }
+                                if crate::util::check_update::is_pid_alive(pid) {
+                                    eprintln!(" timed out.");
+                                    eprintln!(
+                                        "{}: package manager update (PID {}) may still be running in the background.",
+                                        "warning".yellow().bold(),
+                                        pid,
+                                    );
+                                } else {
+                                    eprintln!(" done.");
+                                }
+                            }
+                        }
+                    }
+                }
                 let _ = std::fs::remove_file(&pid_path);
-                // Lock released on drop.
             }
             println!("{}", "Auto-updates disabled.".yellow());
         }

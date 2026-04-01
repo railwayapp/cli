@@ -209,7 +209,7 @@ pub fn spawn_package_manager_update(
 }
 
 /// Check whether a process with the given PID is still running.
-fn is_pid_alive(pid: u32) -> bool {
+pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         use nix::sys::signal::kill;
