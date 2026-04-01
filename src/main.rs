@@ -82,11 +82,10 @@ fn spawn_update_task(
         //
         // from_cache: when false, check_update() already persisted the
         // timestamp and version — no need to write again.
-        let (from_cache, latest_version) =
-            match util::check_update::check_update(false).await? {
-                Some(v) => (false, Some(v)),
-                None => (known_version.is_some(), known_version),
-            };
+        let (from_cache, latest_version) = match util::check_update::check_update(false).await? {
+            Some(v) => (false, Some(v)),
+            None => (known_version.is_some(), known_version),
+        };
 
         if let Some(ref version) = latest_version {
             if !telemetry::is_auto_update_disabled() {
@@ -184,12 +183,7 @@ async fn main() -> Result<()> {
     // cached version, clear the stale cache so spawn_update_task falls
     // through to a fresh check_update() and can discover newer releases.
     let known_pending = match update.latest_version {
-        Some(ref v)
-            if !matches!(
-                compare_semver(env!("CARGO_PKG_VERSION"), v),
-                Ordering::Less
-            ) =>
-        {
+        Some(ref v) if !matches!(compare_semver(env!("CARGO_PKG_VERSION"), v), Ordering::Less) => {
             UpdateCheck::clear_latest();
             None
         }
