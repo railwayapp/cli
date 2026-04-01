@@ -23,7 +23,6 @@ impl UpdateCheck {
         }
         let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let pid = std::process::id();
-        // almost guaranteed no collision- can be upgraded to uuid if necessary.
         let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
         let contents = serde_json::to_string_pretty(&self)?;
         std::fs::write(&tmp_path, contents)?;
@@ -111,14 +110,8 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
             Ok(Some(latest_version.to_string()))
         }
         _ => {
-            // Still record the check time so we don't re-check on every
-            // invocation when the CLI is already up-to-date.
-            let update = UpdateCheck {
-                last_update_check: Some(chrono::Utc::now()),
-                latest_version: None,
-                download_failures: 0,
-            };
-            let _ = update.write();
+            // Record the check time so we don't re-check on every invocation.
+            UpdateCheck::persist_latest(None);
             Ok(None)
         }
     }
@@ -140,10 +133,7 @@ pub fn spawn_package_manager_update(
         bail!("Package manager '{program}' not found in PATH");
     }
 
-    // Guard against overlapping package-manager updates using a PID file.
-    // Format: "PID UNIX_TIMESTAMP".  We check whether the recorded process is
-    // still alive AND the entry is recent (< 10 min).  The staleness check
-    // ensures we recover on all platforms even if PID liveness detection fails.
+    // Guard against overlapping updates: PID file with a 10-minute staleness TTL.
     let pid_path = super::self_update::package_update_pid_path()?;
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -162,34 +152,11 @@ pub fn spawn_package_manager_update(
     }
 
     let log_path = super::self_update::auto_update_log_path()?;
-    let log_file = std::fs::File::create(&log_path)?;
-    let log_stderr = log_file.try_clone()?;
 
-    // Spawn in its own process group so SIGINT from the terminal doesn't
-    // propagate to the child when the user hits Ctrl+C.
     let mut cmd = std::process::Command::new(program);
-    cmd.args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(log_file)
-        .stderr(log_stderr);
+    cmd.args(&args);
 
-    // Isolate the child from the parent's terminal so that Ctrl+C does not
-    // propagate and kill the in-flight update process.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NEW_PROCESS_GROUP detaches the child from the console's
-        // Ctrl+C handler on Windows.
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
-
-    let child = cmd.spawn().context(format!("Failed to spawn {program}"))?;
+    let child = super::spawn_detached(&mut cmd, &log_path)?;
 
     // Record the child PID + timestamp so future invocations can detect an
     // in-flight update and expire stale entries.

@@ -72,40 +72,33 @@ commands!(
 
 fn spawn_update_task(
     known_version: Option<String>,
+    auto_update_enabled: bool,
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // Always attempt a fresh API check first (respects its own
-        // same-day gate so this is a no-op within the same UTC day).
-        // Fall back to the cached version only when the gate fires, so
-        // timed-out downloads are retried without waiting a full day
-        // while newer releases are still discovered on the next day.
-        //
-        // from_cache: when false, check_update() already persisted the
-        // timestamp and version — no need to write again.
+        // Fresh API check first (respects same-day gate).  Fall back to the
+        // cached version when the gate fires, so timed-out downloads are
+        // retried without waiting a full day.
         let (from_cache, latest_version) = match util::check_update::check_update(false).await? {
             Some(v) => (false, Some(v)),
             None => (known_version.is_some(), known_version),
         };
 
         if let Some(ref version) = latest_version {
-            if !telemetry::is_auto_update_disabled() {
+            // When self-update spawns a background download, that child
+            // process manages the cache — skip persist_latest here.
+            let mut needs_persist = from_cache;
+
+            if auto_update_enabled {
                 let method = util::install_method::InstallMethod::detect();
                 if method.can_self_update() && method.can_write_binary() {
-                    // Detached process handles the download independently;
-                    // it calls clear_latest on success or record_download_failure
-                    // after repeated failures.
                     let _ = util::self_update::spawn_background_download(version);
+                    needs_persist = false;
                 } else if method.can_auto_run_package_manager() {
-                    // Spawn is fire-and-forget; preserve latest_version so the
-                    // notification continues until the user is on the new version.
                     let _ = util::check_update::spawn_package_manager_update(method);
-                    if from_cache {
-                        UpdateCheck::persist_latest(latest_version.as_deref());
-                    }
-                } else if from_cache {
-                    UpdateCheck::persist_latest(latest_version.as_deref());
                 }
-            } else if from_cache {
+            }
+
+            if needs_persist {
                 UpdateCheck::persist_latest(latest_version.as_deref());
             }
         }
@@ -168,8 +161,9 @@ async fn main() -> Result<()> {
         .map(|s| s.to_string());
 
     let is_update_management_cmd = matches!(subcommand.as_deref(), Some("upgrade" | "autoupdate"));
+    let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
-    if !telemetry::is_auto_update_disabled() && !is_update_management_cmd {
+    if auto_update_enabled && !is_update_management_cmd {
         util::self_update::try_apply_staged();
     }
 
@@ -208,11 +202,9 @@ async fn main() -> Result<()> {
 
     let check_updates_handle = if is_update_management_cmd {
         None
-    } else if is_tty || !telemetry::is_auto_update_disabled() {
-        Some(spawn_update_task(known_pending))
+    } else if is_tty || auto_update_enabled {
+        Some(spawn_update_task(known_pending, auto_update_enabled))
     } else {
-        // Non-TTY with auto-update disabled: no notification to show and
-        // nothing to download, so skip the API call entirely.
         None
     };
 

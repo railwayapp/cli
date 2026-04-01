@@ -198,7 +198,6 @@ fn verify_checksum(bytes: &[u8], expected_hex: &str) -> Result<()> {
 async fn download_and_stage_inner(version: &str) -> Result<()> {
     let target = detect_target_triple()?;
 
-    // Already staged for this version/target — nothing to do.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
             return Ok(());
@@ -215,7 +214,6 @@ async fn download_and_stage_inner(version: &str) -> Result<()> {
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
-    // Fetch expected checksum before downloading the asset
     let expected_checksum = fetch_expected_checksum(&client, version, &asset_name).await?;
 
     let response = client
@@ -313,42 +311,13 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
 /// The child runs independently of the parent — it survives after the
 /// parent exits, so slow downloads are not killed by the exit timeout.
 pub fn spawn_background_download(version: &str) -> Result<()> {
-    // Skip forking if this version is already staged.
-    if let Ok(Some(staged)) = StagedUpdate::read() {
-        if staged.target == detect_target_triple()? && staged.version == version {
-            return Ok(());
-        }
-    }
-
     let exe = std::env::current_exe().context("Failed to get current exe path")?;
     let log_path = auto_update_log_path()?;
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let log_file = std::fs::File::create(&log_path)?;
-    let log_stderr = log_file.try_clone()?;
 
     let mut cmd = std::process::Command::new(exe);
-    cmd.env(crate::consts::RAILWAY_STAGE_UPDATE_ENV, version)
-        .stdin(std::process::Stdio::null())
-        .stdout(log_file)
-        .stderr(log_stderr);
+    cmd.env(crate::consts::RAILWAY_STAGE_UPDATE_ENV, version);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
-
-    cmd.spawn()
-        .context("Failed to spawn background download process")?;
+    super::spawn_detached(&mut cmd, &log_path)?;
     Ok(())
 }
 

@@ -10,6 +10,35 @@ pub mod time;
 pub mod two_factor;
 pub mod watcher;
 
+/// Spawns a command in a fully detached process group so it survives after the
+/// parent exits and Ctrl+C does not propagate.  stdout/stderr are redirected to
+/// the given log file.
+pub fn spawn_detached(
+    cmd: &mut std::process::Command,
+    log_path: &std::path::Path,
+) -> anyhow::Result<std::process::Child> {
+    let log_file = std::fs::File::create(log_path)?;
+    let log_stderr = log_file.try_clone()?;
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(log_file)
+        .stderr(log_stderr);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    cmd.spawn().map_err(Into::into)
+}
+
 /// Renames `from` to `to`, overwriting `to` if it already exists.
 /// On Unix `std::fs::rename` already replaces the destination atomically.
 /// On Windows we use `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` for an
