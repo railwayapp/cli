@@ -105,7 +105,7 @@ struct GithubApiRelease {
 
 const GITHUB_API_RELEASE_URL: &str = "https://api.github.com/repos/railwayapp/cli/releases/latest";
 pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
-    let mut update = UpdateCheck::read().unwrap_or_default();
+    let update = UpdateCheck::read().unwrap_or_default();
 
     if let Some(last_update_check) = update.last_update_check {
         // Dates are compared in UTC; a check near midnight local time may
@@ -128,15 +128,19 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
 
     match compare_semver(env!("CARGO_PKG_VERSION"), latest_version) {
         Ordering::Less => {
+            // Re-read state from disk so we don't overwrite fields that
+            // were changed while the network request was in flight (e.g.
+            // `skipped_version` set by a concurrent rollback).
+            let mut fresh = UpdateCheck::read().unwrap_or_default();
             // Don't arm the daily gate when the latest release is the version
             // the user rolled back from — keep checking so a fix release
             // published later the same day is discovered promptly.
-            if update.skipped_version.as_deref() != Some(latest_version) {
-                update.last_update_check = Some(chrono::Utc::now());
+            if fresh.skipped_version.as_deref() != Some(latest_version) {
+                fresh.last_update_check = Some(chrono::Utc::now());
             }
-            update.latest_version = Some(latest_version.to_owned());
-            update.download_failures = 0;
-            update.write()?;
+            fresh.latest_version = Some(latest_version.to_owned());
+            fresh.download_failures = 0;
+            fresh.write()?;
             Ok(Some(latest_version.to_string()))
         }
         _ => {

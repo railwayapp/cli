@@ -50,6 +50,19 @@ impl InstallMethod {
             return InstallMethod::Scoop;
         }
 
+        // Cargo's `CARGO_INSTALL_ROOT` can place binaries in standard paths
+        // like /usr/local/bin or ~/.local/bin.  Check for the `.crates.toml`
+        // marker *before* the shell-path heuristic so these are not
+        // misclassified as Shell installs.
+        if exe_path
+            .parent()
+            .and_then(|bin| bin.parent())
+            .map(|root| root.join(".crates.toml").exists())
+            .unwrap_or(false)
+        {
+            return InstallMethod::Cargo;
+        }
+
         if path_str.contains("/usr/local/bin") || path_str.contains("/.local/bin") {
             return InstallMethod::Shell;
         }
