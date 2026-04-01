@@ -88,6 +88,7 @@ impl UpdateCheck {
         update.download_failures += 1;
         if update.download_failures >= Self::MAX_DOWNLOAD_FAILURES {
             update.latest_version = None;
+            update.last_update_check = None;
             update.download_failures = 0;
         }
         let _ = update.write();
@@ -161,11 +162,22 @@ pub fn spawn_package_manager_update(
         bail!("Package manager '{program}' not found in PATH");
     }
 
-    // Guard against overlapping updates: PID file with a 10-minute staleness TTL.
-    let pid_path = super::self_update::package_update_pid_path()?;
-    if let Some(parent) = pid_path.parent() {
+    // Acquire a file lock to serialize the PID-check-spawn-write sequence,
+    // preventing two concurrent invocations from both launching an updater.
+    use fs2::FileExt;
+
+    let lock_path = super::self_update::package_update_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create package-update lock file")?;
+    lock_file
+        .try_lock_exclusive()
+        .map_err(|_| anyhow::anyhow!("Another update process is starting. Please try again."))?;
+
+    // Guard against an already-running updater: PID file with a 10-minute staleness TTL.
+    let pid_path = super::self_update::package_update_pid_path()?;
     if let Ok(contents) = std::fs::read_to_string(&pid_path) {
         let parts: Vec<&str> = contents.split_whitespace().collect();
         if let (Some(pid_str), Some(ts_str)) = (parts.first(), parts.get(1)) {
@@ -190,6 +202,8 @@ pub fn spawn_package_manager_update(
     // in-flight update and expire stale entries.
     let now = chrono::Utc::now().timestamp();
     let _ = std::fs::write(&pid_path, format!("{} {now}", child.id()));
+
+    // Lock is released on drop after the PID file is written.
 
     Ok(())
 }

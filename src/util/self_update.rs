@@ -28,6 +28,10 @@ pub fn package_update_pid_path() -> Result<PathBuf> {
     Ok(railway_dir()?.join("package-update.pid"))
 }
 
+pub fn package_update_lock_path() -> Result<PathBuf> {
+    Ok(railway_dir()?.join("package-update.lock"))
+}
+
 pub fn auto_update_log_path() -> Result<PathBuf> {
     Ok(railway_dir()?.join("auto-update.log"))
 }
@@ -640,10 +644,19 @@ pub async fn self_update_interactive() -> Result<()> {
 pub fn rollback() -> Result<()> {
     use fs2::FileExt;
 
+    // Acquire the update lock first so background auto-update processes cannot
+    // stage or apply while we are building the candidate list or prompting.
+    let lock_path = update_lock_path()?;
+    let lock_file =
+        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
+    lock_file
+        .lock_exclusive()
+        .context("Another update process is running. Please try again.")?;
+
     let dir = backups_dir()?;
     let current_target = detect_target_triple()?;
 
-    // Back up the current binary first so the rollback itself can be undone.
+    // Back up the current binary so the rollback itself can be undone.
     // Use the no-prune variant so candidates aren't removed before the user
     // sees the picker.
     backup_current_binary_no_prune()?;
@@ -704,15 +717,6 @@ pub fn rollback() -> Result<()> {
             .find(|(v, _)| *v == selected)
             .expect("selected label must exist in candidates")
     };
-
-    // Acquire the update lock so background auto-update processes cannot
-    // stage or apply while we are replacing the binary.
-    let lock_path = update_lock_path()?;
-    let lock_file =
-        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
-    lock_file
-        .lock_exclusive()
-        .context("Another update process is running. Please try again.")?;
 
     println!("{} v{}...", "Rolling back to".yellow().bold(), version);
 
