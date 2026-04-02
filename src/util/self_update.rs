@@ -36,22 +36,11 @@ pub fn auto_update_log_path() -> Result<PathBuf> {
     Ok(railway_dir()?.join("auto-update.log"))
 }
 
+/// Returns the compile-time target triple of this binary, ensuring the
+/// self-updater fetches the exact same ABI variant (e.g. gnu vs musl).
+/// The value is set by `build.rs` via `BUILD_TARGET`.
 fn detect_target_triple() -> Result<&'static str> {
-    let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
-        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
-        ("linux", "arm") => "arm-unknown-linux-musleabihf",
-        ("linux", "x86") => "i686-unknown-linux-musl",
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        ("windows", "x86") => "i686-pc-windows-msvc",
-        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
-        // FreeBSD is recognized by the install script but the release pipeline
-        // does not publish a FreeBSD asset yet, so self-update is not supported.
-        (os, arch) => bail!("Unsupported platform: {os}-{arch}"),
-    };
-    Ok(triple)
+    Ok(env!("BUILD_TARGET"))
 }
 
 const RELEASE_BASE_URL: &str = "https://github.com/railwayapp/cli/releases/download";
