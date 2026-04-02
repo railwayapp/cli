@@ -646,10 +646,41 @@ pub async fn self_update_interactive() -> Result<()> {
     if let Some(ref version) = latest_version {
         println!("{} v{}...", "Downloading".green().bold(), version);
         download_and_stage_inner(version).await?;
-    } else if StagedUpdate::read()?.is_none() {
-        bail!(
-            "You are already on the latest version (or the update check failed — check your network)"
-        );
+    } else {
+        // Falling back to a staged update — apply the same safety checks
+        // that try_apply_staged() uses so we don't downgrade, re-apply a
+        // rolled-back version, or install a stale/wrong-platform binary.
+        let staged = StagedUpdate::read()?
+            .context("You are already on the latest version (or the update check failed — check your network)")?;
+        if staged.is_stale() {
+            let _ = StagedUpdate::clean();
+            bail!("Staged update is too old. Please retry when online.");
+        }
+        let current_target = detect_target_triple()?;
+        if staged.target != current_target {
+            let _ = StagedUpdate::clean();
+            bail!(
+                "Staged update is for {}, but this machine is {current_target}",
+                staged.target
+            );
+        }
+        if !matches!(
+            crate::util::compare_semver::compare_semver(env!("CARGO_PKG_VERSION"), &staged.version),
+            std::cmp::Ordering::Less
+        ) {
+            let _ = StagedUpdate::clean();
+            bail!("You are already on the latest version");
+        }
+        if let Ok(check) = crate::util::check_update::UpdateCheck::read() {
+            if check.skipped_version.as_deref() == Some(staged.version.as_str()) {
+                let _ = StagedUpdate::clean();
+                bail!(
+                    "v{} was previously rolled back. Run `railway upgrade --rollback` to undo, or wait for a newer release.",
+                    staged.version
+                );
+            }
+        }
+        println!("Applying previously downloaded v{}...", staged.version);
     }
 
     let version = apply_staged_update()?;
