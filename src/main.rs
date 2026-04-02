@@ -101,6 +101,10 @@ fn spawn_update_task(
                     } else if method.can_auto_run_package_manager() {
                         let _ = util::check_update::spawn_package_manager_update(method);
                     }
+                } else {
+                    // Don't stamp the daily gate for a skipped version —
+                    // keep checking so a newer release is discovered promptly.
+                    needs_persist = false;
                 }
             }
 
