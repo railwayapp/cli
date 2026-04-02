@@ -46,7 +46,8 @@ fn detect_target_triple() -> Result<&'static str> {
 const RELEASE_BASE_URL: &str = "https://github.com/railwayapp/cli/releases/download";
 
 fn release_asset_name(version: &str, target: &str) -> String {
-    let ext = if target.contains("windows") {
+    // i686-pc-windows-gnu is cross-compiled on Linux and only ships as tar.gz.
+    let ext = if target.contains("windows") && target != "i686-pc-windows-gnu" {
         "zip"
     } else {
         "tar.gz"
@@ -248,7 +249,7 @@ async fn download_and_stage_inner(version: &str) -> Result<()> {
 
     let bin_name = binary_name();
     let extract_and_write = || -> Result<()> {
-        if target.contains("windows") {
+        if asset_name.ends_with(".zip") {
             extract_from_zip(&bytes, bin_name, &dir)?;
         } else {
             extract_from_tar_gz(&bytes, bin_name, &dir)?;

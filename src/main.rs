@@ -180,9 +180,11 @@ async fn main() -> Result<()> {
         raw_subcommand.as_deref(),
         Some("upgrade" | "autoupdate" | "check_updates" | "check-updates")
     );
-    // Bare `railway` (no subcommand) shows help via exec_cli — treat it as
-    // read-only so first-time users don't trigger update side effects.
-    let is_read_only_invocation = is_help_or_error || raw_subcommand.is_none();
+    // Bare `railway` and `railway help` show help — treat as read-only so
+    // first-time users don't trigger update side effects.
+    let is_read_only_invocation = is_help_or_error
+        || raw_subcommand.is_none()
+        || matches!(raw_subcommand.as_deref(), Some("help"));
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
     if auto_update_enabled && is_tty && !is_update_management_cmd && !is_read_only_invocation {
