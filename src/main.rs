@@ -76,34 +76,54 @@ fn spawn_update_task(
     skipped_version: Option<String>,
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // Fresh API check first (respects same-day gate).  Fall back to the
-        // cached version when the gate fires or the API errors, so timed-out
-        // downloads are retried without waiting a full day.
+        // When a pending version is already cached, start the background
+        // update before the API call so the 2s exit timeout cannot prevent
+        // the spawn on slow networks.
+        let mut eagerly_spawned = false;
+        if auto_update_enabled {
+            if let Some(ref version) = known_version {
+                let is_skipped = skipped_version.as_deref() == Some(version.as_str());
+                if !is_skipped {
+                    let method = util::install_method::InstallMethod::detect();
+                    if method.can_self_update() && method.can_write_binary() {
+                        let _ = util::self_update::spawn_background_download(version);
+                        eagerly_spawned = true;
+                    } else if method.can_auto_run_package_manager() {
+                        let _ = util::check_update::spawn_package_manager_update(method);
+                    }
+                }
+            }
+        }
+
+        // Fresh API check (respects same-day gate).  Fall back to the
+        // cached version when the gate fires or the API errors.
         let (from_cache, latest_version) = match util::check_update::check_update(false).await {
             Ok(Some(v)) => (false, Some(v)),
             Ok(None) | Err(_) => (known_version.is_some(), known_version),
         };
 
         if let Some(ref version) = latest_version {
-            // When self-update spawns a background download, that child
-            // process manages the cache — skip persist_latest here.
             let mut needs_persist = from_cache;
 
             if auto_update_enabled {
-                // A newer release will clear the skip automatically.
                 let is_skipped = skipped_version.as_deref() == Some(version.as_str());
 
                 if !is_skipped {
-                    let method = util::install_method::InstallMethod::detect();
-                    if method.can_self_update() && method.can_write_binary() {
-                        let _ = util::self_update::spawn_background_download(version);
+                    if !from_cache {
+                        // API returned a fresh version — spawn for it.
+                        let method = util::install_method::InstallMethod::detect();
+                        if method.can_self_update() && method.can_write_binary() {
+                            let _ = util::self_update::spawn_background_download(version);
+                            needs_persist = false;
+                        } else if method.can_auto_run_package_manager() {
+                            let _ = util::check_update::spawn_package_manager_update(method);
+                        }
+                    } else if eagerly_spawned {
+                        // Cache hit — download was already started above.
                         needs_persist = false;
-                    } else if method.can_auto_run_package_manager() {
-                        let _ = util::check_update::spawn_package_manager_update(method);
                     }
                 } else {
-                    // Don't stamp the daily gate for a skipped version —
-                    // keep checking so a newer release is discovered promptly.
+                    // Don't stamp the daily gate for a skipped version.
                     needs_persist = false;
                 }
             }

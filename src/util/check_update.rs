@@ -45,13 +45,14 @@ impl UpdateCheck {
         let _ = update.write();
     }
 
-    /// Clear a stale cached version without stamping `last_update_check`, so
-    /// the background task performs a fresh API check and can discover a
-    /// hotfix published later the same day.
+    /// Clear a stale cached version and reset the daily gate so the next
+    /// invocation performs a fresh API check and can discover a hotfix
+    /// published later the same day.
     pub fn clear_latest() {
         let mut update = Self::read().unwrap_or_default();
         update.latest_version = None;
         update.download_failures = 0;
+        update.last_update_check = None;
         let _ = update.write();
     }
 

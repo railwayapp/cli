@@ -185,6 +185,17 @@ pub async fn command(args: Args) -> Result<()> {
             println!();
             run_upgrade_command(method)?;
         }
+        InstallMethod::Shell => {
+            // Shell install on a platform where self-update is unsupported
+            // (e.g. FreeBSD). Show the reinstall command.
+            println!();
+            println!(
+                "{}",
+                "Self-update is not available on this platform. To upgrade, re-run the install script:".yellow()
+            );
+            println!();
+            println!("  {}", "bash <(curl -fsSL cli.new)".cyan());
+        }
         _ => {
             println!();
             println!(
