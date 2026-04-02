@@ -17,6 +17,9 @@ pub fn spawn_detached(
     cmd: &mut std::process::Command,
     log_path: &std::path::Path,
 ) -> anyhow::Result<std::process::Child> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let log_file = std::fs::File::create(log_path)?;
     let log_stderr = log_file.try_clone()?;
 
