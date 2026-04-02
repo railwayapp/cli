@@ -74,13 +74,19 @@ fn spawn_update_task(
     known_version: Option<String>,
     auto_update_enabled: bool,
     skipped_version: Option<String>,
+    daily_gate_armed: bool,
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // When a pending version is already cached, start the background
-        // update before the API call so the 2s exit timeout cannot prevent
-        // the spawn on slow networks.
+        // When the same-day gate is armed the API call returns instantly
+        // (no network request), so we can safely start the background
+        // update from the cached version before the await — the API cannot
+        // return a newer version that would race with this download.
+        //
+        // When the gate is NOT armed, the API call may discover a newer
+        // release, so we must not eagerly spawn for a potentially stale
+        // cached version.
         let mut eagerly_spawned = false;
-        if auto_update_enabled {
+        if auto_update_enabled && daily_gate_armed {
             if let Some(ref version) = known_version {
                 let is_skipped = skipped_version.as_deref() == Some(version.as_str());
                 if !is_skipped {
@@ -213,6 +219,10 @@ async fn main() -> Result<()> {
 
     let update = UpdateCheck::read().unwrap_or_default();
     let skipped_version = update.skipped_version;
+    let daily_gate_armed = update
+        .last_update_check
+        .map(|t| chrono::Utc::now().date_naive() == t.date_naive())
+        .unwrap_or(false);
 
     // Pass any pending version to spawn_update_task so it can skip the
     // same-day short-circuit and retry a download that timed out in a
@@ -258,6 +268,7 @@ async fn main() -> Result<()> {
             known_pending,
             auto_update_enabled,
             skipped_version,
+            daily_gate_armed,
         ))
     } else {
         None
