@@ -622,15 +622,17 @@ pub fn try_apply_staged() {
 pub async fn self_update_interactive() -> Result<()> {
     use fs2::FileExt;
 
-    let latest_version = crate::util::check_update::check_update(true)
-        .await?
-        .context("You are already on the latest version")?;
+    // Try the network check first.  If it fails and an update is already
+    // staged on disk, apply that instead of surfacing a network error.
+    let latest_version = match crate::util::check_update::check_update(true).await {
+        Ok(Some(v)) => Some(v),
+        Ok(None) => None,
+        Err(_) => {
+            // Network failure — fall through and try the staged update.
+            None
+        }
+    };
 
-    println!("{} v{}...", "Downloading".green().bold(), latest_version);
-
-    // Hold a single lock across both download and apply so a concurrent
-    // try_apply_staged() cannot consume the staged binary between the two
-    // steps.
     let lock_path = update_lock_path()?;
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
@@ -641,7 +643,14 @@ pub async fn self_update_interactive() -> Result<()> {
         .lock_exclusive()
         .context("Another update process is already running")?;
 
-    download_and_stage_inner(&latest_version).await?;
+    if let Some(ref version) = latest_version {
+        println!("{} v{}...", "Downloading".green().bold(), version);
+        download_and_stage_inner(version).await?;
+    } else if StagedUpdate::read()?.is_none() {
+        bail!(
+            "You are already on the latest version (or the update check failed — check your network)"
+        );
+    }
 
     let version = apply_staged_update()?;
 

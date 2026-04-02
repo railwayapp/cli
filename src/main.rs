@@ -239,7 +239,10 @@ async fn main() -> Result<()> {
         other => other,
     };
 
-    if is_tty && auto_update_enabled {
+    // Show the "new version available" banner regardless of auto-update
+    // preference — disabling auto-update should stop automatic installation,
+    // not silence release discovery.
+    if is_tty {
         if let Some(ref latest_version) = known_pending {
             let is_skipped = skipped_version.as_deref() == Some(latest_version.as_str());
             if !is_skipped
@@ -258,12 +261,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Only spawn background updates in interactive terminals. Non-TTY
-    // invocations (cron jobs, shell scripts, CI-like automation) should
-    // never silently self-mutate or launch background package-manager updates.
+    // Spawn the background version check for all interactive invocations so
+    // the version cache stays fresh even when auto-update is disabled.
+    // The spawned task only triggers downloads/installs when auto_update_enabled.
     let check_updates_handle = if is_update_management_cmd || is_read_only_invocation {
         None
-    } else if auto_update_enabled && is_tty {
+    } else if is_tty {
         Some(spawn_update_task(
             known_pending,
             auto_update_enabled,
