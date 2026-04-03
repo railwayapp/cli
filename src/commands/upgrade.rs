@@ -38,16 +38,11 @@ fn run_upgrade_command(method: InstallMethod) -> Result<()> {
     })?;
 
     let pid_path = crate::util::self_update::package_update_pid_path()?;
-    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-        if let Some((pid, ts)) = crate::util::check_update::parse_pid_file(&contents) {
-            let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
-            if age_secs < 600 && crate::util::check_update::is_pid_alive(pid) {
-                bail!(
-                    "A background update (pid {pid}) is already running. \
-                     Please wait for it to finish or try again shortly."
-                );
-            }
-        }
+    if let Some(pid) = crate::util::check_update::is_package_update_running(&pid_path) {
+        bail!(
+            "A background update (pid {pid}) is already running. \
+             Please wait for it to finish or try again shortly."
+        );
     }
 
     println!("{} {} {}", "Running:".bold(), program, args.join(" "));

@@ -235,15 +235,10 @@ pub fn spawn_package_manager_update(
         bail!("Package-manager update was spawned recently; waiting before retrying");
     }
 
-    // Guard against an already-running updater: PID file with a 10-minute staleness TTL.
+    // Guard against an already-running updater.
     let pid_path = super::self_update::package_update_pid_path()?;
-    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-        if let Some((pid, ts)) = parse_pid_file(&contents) {
-            let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
-            if age_secs < 600 && is_pid_alive(pid) {
-                bail!("Another update process (pid {pid}) is already running");
-            }
-        }
+    if let Some(pid) = is_package_update_running(&pid_path) {
+        bail!("Another update process (pid {pid}) is already running");
     }
 
     let log_path = super::self_update::auto_update_log_path()?;
@@ -266,12 +261,28 @@ pub fn spawn_package_manager_update(
     Ok(())
 }
 
+/// Maximum age in seconds for a PID file entry before it's considered stale.
+const PID_STALENESS_TTL_SECS: i64 = 600;
+
 /// Parse a PID file containing `"{pid} {timestamp}"`.
 pub fn parse_pid_file(contents: &str) -> Option<(u32, i64)> {
     let mut parts = contents.split_whitespace();
     let pid = parts.next()?.parse().ok()?;
     let ts = parts.next()?.parse().ok()?;
     Some((pid, ts))
+}
+
+/// Returns `true` if a background package-manager update is currently running,
+/// based on the PID file at the given path.
+pub fn is_package_update_running(pid_path: &std::path::Path) -> Option<u32> {
+    let contents = std::fs::read_to_string(pid_path).ok()?;
+    let (pid, ts) = parse_pid_file(&contents)?;
+    let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
+    if age_secs < PID_STALENESS_TTL_SECS && is_pid_alive(pid) {
+        Some(pid)
+    } else {
+        None
+    }
 }
 
 /// Check whether a process with the given PID is still running.

@@ -210,7 +210,6 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
 
     let target = detect_target_triple()?;
 
-    // Quick check before acquiring the lock.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
             if staged_update_dir()
@@ -354,8 +353,9 @@ fn backup_current_binary_no_prune() -> Result<()> {
     };
     let backup_path = dir.join(&backup_name);
 
-    if !backup_path.exists() && fs::hard_link(&current_exe, &backup_path).is_err() {
-        fs::copy(&current_exe, &backup_path).context("Failed to backup current binary")?;
+    if fs::hard_link(&current_exe, &backup_path).is_err() {
+        // hard_link fails if backup already exists or across filesystems — fall back to copy.
+        let _ = fs::copy(&current_exe, &backup_path);
     }
 
     Ok(())

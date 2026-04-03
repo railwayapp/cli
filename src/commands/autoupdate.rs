@@ -51,14 +51,10 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Skip => {
             let update = UpdateCheck::read().unwrap_or_default();
             if let Some(ref version) = update.latest_version {
-                let version = version.clone();
-                UpdateCheck::skip_version(&version);
-                // Clean any staged binary for the skipped version so it isn't
-                // applied on next launch.
+                UpdateCheck::skip_version(version);
                 let _ = crate::util::self_update::clean_staged();
                 println!(
-                    "Skipping v{}. Auto-update will resume when a newer version is released.",
-                    version,
+                    "Skipping v{version}. Auto-update will resume when a newer version is released.",
                 );
             } else {
                 println!("No pending update to skip.");
@@ -126,15 +122,9 @@ pub async fn command(args: Args) -> Result<()> {
                 println!("Last check: {}", label);
             }
 
-            let pid_path = crate::util::self_update::package_update_pid_path().ok();
-            if let Some(ref path) = pid_path {
-                if let Ok(contents) = std::fs::read_to_string(path) {
-                    if let Some((pid, ts)) = crate::util::check_update::parse_pid_file(&contents) {
-                        let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
-                        if age_secs < 600 && crate::util::check_update::is_pid_alive(pid) {
-                            println!("Background update: {} (PID {})", "running".green(), pid);
-                        }
-                    }
+            if let Ok(pid_path) = crate::util::self_update::package_update_pid_path() {
+                if let Some(pid) = crate::util::check_update::is_package_update_running(&pid_path) {
+                    println!("Background update: {} (PID {})", "running".green(), pid);
                 }
             }
         }
