@@ -255,7 +255,8 @@ pub fn spawn_background_download(version: &str) -> Result<()> {
     let mut cmd = std::process::Command::new(exe);
     cmd.env(crate::consts::RAILWAY_STAGE_UPDATE_ENV, version);
 
-    super::spawn_detached(&mut cmd, &log_path)?;
+    let child = super::spawn_detached(&mut cmd, &log_path)?;
+    std::mem::forget(child);
     Ok(())
 }
 
@@ -406,7 +407,7 @@ fn replace_binary(source: &Path, target: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755))?;
 
-        fs::rename(&tmp_path, target).context(
+        super::rename_replacing(&tmp_path, target).context(
             "Failed to replace binary. You may need to run with sudo or use `railway upgrade` manually.",
         )?;
     }
@@ -510,10 +511,6 @@ pub fn try_apply_staged() -> Option<String> {
     #[cfg(windows)]
     clean_old_binary();
 
-    if validate_staged().is_err() {
-        return None;
-    }
-
     let lock_path = match update_lock_path() {
         Ok(p) => p,
         Err(_) => return None,
@@ -525,6 +522,12 @@ pub fn try_apply_staged() -> Option<String> {
     };
 
     if lock_file.try_lock_exclusive().is_err() {
+        return None;
+    }
+
+    // Validate after acquiring the lock so another process can't delete or
+    // replace the staged binary between validation and apply.
+    if validate_staged().is_err() {
         return None;
     }
 

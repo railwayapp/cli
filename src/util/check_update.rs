@@ -5,6 +5,14 @@ use dirs::home_dir;
 
 use super::compare_semver::compare_semver;
 
+/// Best-effort write — logs a warning on failure but does not propagate.
+/// Used by cache mutation methods where a write failure is non-fatal.
+fn try_write(update: &UpdateCheck) {
+    if let Err(e) = update.write() {
+        eprintln!("warning: failed to write update cache: {e}");
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct UpdateCheck {
     pub last_update_check: Option<chrono::DateTime<chrono::Utc>>,
@@ -52,7 +60,7 @@ impl UpdateCheck {
         }
         update.latest_version = version.map(String::from);
         update.download_failures = 0;
-        let _ = update.write();
+        try_write(&update);
     }
 
     /// Clear a stale cached version and reset the daily gate so the next
@@ -64,7 +72,7 @@ impl UpdateCheck {
         update.download_failures = 0;
         update.last_package_manager_spawn = None;
         update.last_update_check = None;
-        let _ = update.write();
+        try_write(&update);
     }
 
     /// Record a version to skip during auto-update (set after rollback).
@@ -75,7 +83,7 @@ impl UpdateCheck {
         update.skipped_version = Some(version.to_string());
         update.last_package_manager_spawn = None;
         update.last_update_check = None;
-        let _ = update.write();
+        try_write(&update);
     }
 
     /// Reset cached update state after a successful upgrade or auto-apply.
@@ -88,7 +96,7 @@ impl UpdateCheck {
         update.download_failures = 0;
         update.last_package_manager_spawn = None;
         update.skipped_version = None;
-        let _ = update.write();
+        try_write(&update);
     }
 
     /// Max consecutive download failures before clearing the cached version.
@@ -106,14 +114,14 @@ impl UpdateCheck {
             update.last_update_check = None;
             update.download_failures = 0;
         }
-        let _ = update.write();
+        try_write(&update);
     }
 
     /// Record that a package-manager update was just spawned.
     pub fn record_package_manager_spawn() {
         let mut update = Self::read().unwrap_or_default();
         update.last_package_manager_spawn = Some(chrono::Utc::now());
-        let _ = update.write();
+        try_write(&update);
     }
 
     /// Returns `true` if enough time has passed since the last package-manager
@@ -247,11 +255,15 @@ pub fn spawn_package_manager_update(
     cmd.args(&args);
 
     let child = super::spawn_detached(&mut cmd, &log_path)?;
+    let child_pid = child.id();
+    // The child is intentionally detached — we never wait on it.  Forget the
+    // handle so dropping it doesn't leak OS resources on Windows.
+    std::mem::forget(child);
 
     // Record the child PID + timestamp so future invocations can detect an
     // in-flight update and expire stale entries.
     let now = chrono::Utc::now().timestamp();
-    let _ = std::fs::write(&pid_path, format!("{} {now}", child.id()));
+    let _ = std::fs::write(&pid_path, format!("{child_pid} {now}"));
 
     // Record spawn time so we don't re-spawn within the next hour.
     UpdateCheck::record_package_manager_spawn();
