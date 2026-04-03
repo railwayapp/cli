@@ -74,19 +74,20 @@ fn spawn_update_task(
     known_version: Option<String>,
     auto_update_enabled: bool,
     skipped_version: Option<String>,
-    daily_gate_armed: bool,
+    check_gate_armed: bool,
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // When the same-day gate is armed the API call returns instantly
-        // (no network request), so we can safely start the background
-        // update from the cached version before the await — the API cannot
-        // return a newer version that would race with this download.
+        // When the check gate is armed (last check was <12h ago) the API
+        // call returns instantly (no network request), so we can safely
+        // start the background update from the cached version before the
+        // await — the API cannot return a newer version that would race
+        // with this download.
         //
         // When the gate is NOT armed, the API call may discover a newer
         // release, so we must not eagerly spawn for a potentially stale
         // cached version.
         let mut eagerly_spawned = false;
-        if auto_update_enabled && daily_gate_armed {
+        if auto_update_enabled && check_gate_armed {
             if let Some(ref version) = known_version {
                 let is_skipped = skipped_version.as_deref() == Some(version.as_str());
                 if !is_skipped {
@@ -101,7 +102,7 @@ fn spawn_update_task(
             }
         }
 
-        // Fresh API check (respects same-day gate).  Fall back to the
+        // Fresh API check (respects 12h gate).  Fall back to the
         // cached version when the gate fires or the API errors.
         let (from_cache, latest_version) = match util::check_update::check_update(false).await {
             Ok(Some(v)) => (false, Some(v)),
@@ -153,7 +154,7 @@ async fn handle_update_task(
     use std::time::Duration;
 
     if let Some(handle) = handle {
-        match tokio::time::timeout(Duration::from_secs(2), handle).await {
+        match tokio::time::timeout(Duration::from_secs(1), handle).await {
             Ok(Ok(Ok(_))) => {}
             Ok(Ok(Err(_))) | Ok(Err(_)) => {} // update error or task panic — non-fatal
             Err(_) => {} // timeout — the API check was slow; next invocation retries
@@ -213,19 +214,22 @@ async fn main() -> Result<()> {
         || matches!(raw_subcommand.as_deref(), Some("help"));
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
-    if auto_update_enabled && is_tty && !is_update_management_cmd && !is_read_only_invocation {
-        util::self_update::try_apply_staged();
-    }
+    let auto_applied_version =
+        if auto_update_enabled && is_tty && !is_update_management_cmd && !is_read_only_invocation {
+            util::self_update::try_apply_staged()
+        } else {
+            None
+        };
 
     let update = UpdateCheck::read().unwrap_or_default();
     let skipped_version = update.skipped_version;
-    let daily_gate_armed = update
+    let check_gate_armed = update
         .last_update_check
-        .map(|t| chrono::Utc::now().date_naive() == t.date_naive())
+        .map(|t| (chrono::Utc::now() - t) < chrono::Duration::hours(12))
         .unwrap_or(false);
 
     // Pass any pending version to spawn_update_task so it can skip the
-    // same-day short-circuit and retry a download that timed out in a
+    // 12h short-circuit and retry a download that timed out in a
     // prior run.  The background task clears latest_version on success.
     //
     // If the running binary has already caught up to (or surpassed) the
@@ -239,10 +243,12 @@ async fn main() -> Result<()> {
         other => other,
     };
 
-    // Show the "new version available" banner regardless of auto-update
-    // preference — disabling auto-update should stop automatic installation,
-    // not silence release discovery.
-    if is_tty {
+    // Show the "new version available" banner when auto-update is disabled
+    // via preference (cautious user — still wants to know about releases).
+    // Suppress it when disabled via env var or CI (scripted environments
+    // where the banner is noise).
+    let env_or_ci_suppressed = telemetry::is_auto_update_disabled_by_env() || Configs::env_is_ci();
+    if is_tty && !env_or_ci_suppressed {
         if let Some(ref latest_version) = known_pending {
             let is_skipped = skipped_version.as_deref() == Some(latest_version.as_str());
             if !is_skipped
@@ -261,20 +267,19 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Spawn the background version check for all interactive invocations so
-    // the version cache stays fresh even when auto-update is disabled.
-    // The spawned task only triggers downloads/installs when auto_update_enabled.
+    // Spawn the background version check for all invocations (including
+    // non-TTY) so the version cache stays fresh.  Downloads and installs
+    // are only triggered when auto_update_enabled; the check itself is a
+    // read-only API call that updates version.json.
     let check_updates_handle = if is_update_management_cmd || is_read_only_invocation {
         None
-    } else if is_tty {
+    } else {
         Some(spawn_update_task(
             known_pending,
             auto_update_enabled,
             skipped_version,
-            daily_gate_armed,
+            check_gate_armed,
         ))
-    } else {
-        None
     };
 
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215
@@ -320,6 +325,22 @@ async fn main() -> Result<()> {
     }
 
     let exec_result = exec_cli(cli).await;
+
+    // Send telemetry for silent auto-update apply (after auth is available).
+    if let Some(ref version) = auto_applied_version {
+        telemetry::send(telemetry::CliTrackEvent {
+            command: "autoupdate_apply".to_string(),
+            sub_command: Some(version.clone()),
+            success: true,
+            error_message: None,
+            duration_ms: 0,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            is_ci: Configs::env_is_ci(),
+        })
+        .await;
+    }
 
     if let Err(e) = exec_result {
         if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string() {

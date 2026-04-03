@@ -17,6 +17,11 @@ pub struct UpdateCheck {
     /// and resumes normally once a newer release is published.
     #[serde(default)]
     pub skipped_version: Option<String>,
+    /// Timestamp of the last package-manager spawn.  We only re-spawn if
+    /// this is older than 1 hour, preventing rapid-fire retries when
+    /// multiple CLI invocations happen before the update finishes.
+    #[serde(default)]
+    pub last_package_manager_spawn: Option<chrono::DateTime<chrono::Utc>>,
 }
 impl UpdateCheck {
     pub fn write(&self) -> anyhow::Result<()> {
@@ -40,6 +45,11 @@ impl UpdateCheck {
     pub fn persist_latest(version: Option<&str>) {
         let mut update = Self::read().unwrap_or_default();
         update.last_update_check = Some(chrono::Utc::now());
+        // Reset package-manager spawn gate when the target version changes
+        // so the new version gets an immediate attempt.
+        if update.latest_version.as_deref() != version {
+            update.last_package_manager_spawn = None;
+        }
         update.latest_version = version.map(String::from);
         update.download_failures = 0;
         let _ = update.write();
@@ -47,21 +57,23 @@ impl UpdateCheck {
 
     /// Clear a stale cached version and reset the daily gate so the next
     /// invocation performs a fresh API check and can discover a hotfix
-    /// published later the same day.
+    /// published after the cache is cleared.
     pub fn clear_latest() {
         let mut update = Self::read().unwrap_or_default();
         update.latest_version = None;
         update.download_failures = 0;
+        update.last_package_manager_spawn = None;
         update.last_update_check = None;
         let _ = update.write();
     }
 
     /// Record a version to skip during auto-update (set after rollback).
     /// Also clears `last_update_check` so the next invocation performs a
-    /// fresh API check and can discover a newer release published the same day.
+    /// fresh API check and can discover a newer release immediately.
     pub fn skip_version(version: &str) {
         let mut update = Self::read().unwrap_or_default();
         update.skipped_version = Some(version.to_string());
+        update.last_package_manager_spawn = None;
         update.last_update_check = None;
         let _ = update.write();
     }
@@ -74,6 +86,7 @@ impl UpdateCheck {
         update.last_update_check = Some(chrono::Utc::now());
         update.latest_version = None;
         update.download_failures = 0;
+        update.last_package_manager_spawn = None;
         update.skipped_version = None;
         let _ = update.write();
     }
@@ -96,6 +109,24 @@ impl UpdateCheck {
         let _ = update.write();
     }
 
+    /// Record that a package-manager update was just spawned.
+    pub fn record_package_manager_spawn() {
+        let mut update = Self::read().unwrap_or_default();
+        update.last_package_manager_spawn = Some(chrono::Utc::now());
+        let _ = update.write();
+    }
+
+    /// Returns `true` if enough time has passed since the last package-manager
+    /// spawn to allow another attempt (or if no spawn has been recorded).
+    pub fn should_spawn_package_manager() -> bool {
+        Self::read()
+            .map(|u| match u.last_package_manager_spawn {
+                Some(t) => (chrono::Utc::now() - t) >= chrono::Duration::hours(1),
+                None => true,
+            })
+            .unwrap_or(true)
+    }
+
     pub fn read() -> anyhow::Result<Self> {
         let home = home_dir().context("Failed to get home directory")?;
         let path = home.join(".railway/version.json");
@@ -116,7 +147,7 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
     if let Some(last_update_check) = update.last_update_check {
         // Dates are compared in UTC; a check near midnight local time may
         // occasionally fire twice, but that is harmless.
-        if chrono::Utc::now().date_naive() == last_update_check.date_naive() && !force {
+        if (chrono::Utc::now() - last_update_check) < chrono::Duration::hours(12) && !force {
             return Ok(None);
         }
     }
@@ -140,9 +171,14 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
             let mut fresh = UpdateCheck::read().unwrap_or_default();
             // Don't arm the daily gate when the latest release is the version
             // the user rolled back from — keep checking so a fix release
-            // published later the same day is discovered promptly.
+            // published shortly after is discovered promptly.
             if fresh.skipped_version.as_deref() != Some(latest_version) {
                 fresh.last_update_check = Some(chrono::Utc::now());
+            }
+            // Reset package-manager spawn gate when a genuinely new version
+            // appears so it gets an immediate attempt.
+            if fresh.latest_version.as_deref() != Some(latest_version) {
+                fresh.last_package_manager_spawn = None;
             }
             fresh.latest_version = Some(latest_version.to_owned());
             fresh.download_failures = 0;
@@ -193,6 +229,12 @@ pub fn spawn_package_manager_update(
         bail!("Auto-updates were disabled while waiting for lock");
     }
 
+    // Only spawn once per hour to avoid rapid-fire retries when multiple
+    // CLI invocations happen before the update finishes.
+    if !UpdateCheck::should_spawn_package_manager() {
+        bail!("Package-manager update was spawned recently; waiting before retrying");
+    }
+
     // Guard against an already-running updater: PID file with a 10-minute staleness TTL.
     let pid_path = super::self_update::package_update_pid_path()?;
     if let Ok(contents) = std::fs::read_to_string(&pid_path) {
@@ -215,6 +257,9 @@ pub fn spawn_package_manager_update(
     // in-flight update and expire stale entries.
     let now = chrono::Utc::now().timestamp();
     let _ = std::fs::write(&pid_path, format!("{} {now}", child.id()));
+
+    // Record spawn time so we don't re-spawn within the next hour.
+    UpdateCheck::record_package_manager_spawn();
 
     // Lock is released on drop after the PID file is written.
 

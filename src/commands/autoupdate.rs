@@ -19,6 +19,8 @@ enum Commands {
     Disable,
     /// Show current auto-update status
     Status,
+    /// Skip the current pending version (useful if a release is broken)
+    Skip,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -39,80 +41,28 @@ pub async fn command(args: Args) -> Result<()> {
             let mut prefs = Preferences::read();
             prefs.auto_update_disabled = true;
             prefs.write().context("Failed to save preferences")?;
-            // Acquire the update lock so we wait for any in-flight background
-            // download to finish before cleaning, and prevent new staging while
-            // we remove the directory.
-            {
-                use fs2::FileExt;
-                let lock_path = crate::util::self_update::update_lock_path()?;
-                if let Some(parent) = lock_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let lock_file = std::fs::File::create(&lock_path)
-                    .context("Failed to create update lock file")?;
-                // Wait for any concurrent stager/applier to finish.
-                lock_file
-                    .lock_exclusive()
-                    .context("Failed to acquire update lock")?;
-                let _ = crate::util::self_update::clean_staged();
-                // Lock released on drop.
-            }
-            // Synchronize with any in-flight spawn_package_manager_update().
-            // Acquiring this lock (blocking) guarantees that if a concurrent
-            // process was mid-spawn, it has finished writing the PID file
-            // before we read it.  After we hold the lock, no new spawns can
-            // start because they will see auto_update_disabled via the
-            // is_auto_update_disabled() re-check inside the lock.
-            {
-                use fs2::FileExt;
-                let pkg_lock_path = crate::util::self_update::package_update_lock_path()?;
-                if let Some(parent) = pkg_lock_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let pkg_lock_file = std::fs::File::create(&pkg_lock_path)
-                    .context("Failed to create package-update lock file")?;
-                pkg_lock_file
-                    .lock_exclusive()
-                    .context("Failed to acquire package-update lock")?;
-
-                let pid_path = crate::util::self_update::package_update_pid_path()?;
-                let mut child_still_alive = false;
-                if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-                    if let Some((pid, ts)) = crate::util::check_update::parse_pid_file(&contents) {
-                        let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
-                        if age_secs < 600 && crate::util::check_update::is_pid_alive(pid) {
-                            eprint!(
-                                "Waiting for in-flight package manager update (PID {pid}) to finish..."
-                            );
-                            let start = std::time::Instant::now();
-                            let timeout = std::time::Duration::from_secs(30);
-                            while crate::util::check_update::is_pid_alive(pid)
-                                && start.elapsed() < timeout
-                            {
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-                            }
-                            if crate::util::check_update::is_pid_alive(pid) {
-                                child_still_alive = true;
-                                eprintln!(" timed out.");
-                                eprintln!(
-                                    "{}: package manager update (PID {}) may still be running in the background.",
-                                    "warning".yellow().bold(),
-                                    pid,
-                                );
-                            } else {
-                                eprintln!(" done.");
-                            }
-                        }
-                    }
-                }
-                // Only remove the PID file if the child actually exited.
-                // Leaving it in place prevents a duplicate updater launch
-                // if auto-updates are re-enabled before the child finishes.
-                if !child_still_alive {
-                    let _ = std::fs::remove_file(&pid_path);
-                }
-            }
+            // Clean any staged binary so it isn't applied on next launch.
+            // Best-effort: if a background download holds the lock, the staged
+            // dir will be left behind but try_apply_staged() checks the
+            // preference and won't apply it.
+            let _ = crate::util::self_update::clean_staged();
             println!("{}", "Auto-updates disabled.".yellow());
+        }
+        Commands::Skip => {
+            let update = UpdateCheck::read().unwrap_or_default();
+            if let Some(ref version) = update.latest_version {
+                let version = version.clone();
+                UpdateCheck::skip_version(&version);
+                // Clean any staged binary for the skipped version so it isn't
+                // applied on next launch.
+                let _ = crate::util::self_update::clean_staged();
+                println!(
+                    "Skipping v{}. Auto-update will resume when a newer version is released.",
+                    version,
+                );
+            } else {
+                println!("No pending update to skip.");
+            }
         }
         Commands::Status => {
             let prefs = Preferences::read();
@@ -145,11 +95,47 @@ pub async fn command(args: Args) -> Result<()> {
             println!("Update strategy: {}", method.update_strategy());
 
             let update = UpdateCheck::read().unwrap_or_default();
+
+            if let Some(ref version) = update.latest_version {
+                println!("Latest known version: {}", format!("v{version}").cyan());
+            }
+
+            if let Some(ref staged) = crate::util::self_update::staged_version() {
+                println!(
+                    "Staged update: {} (will apply on next run)",
+                    format!("v{staged}").green()
+                );
+            }
+
             if let Some(ref skipped) = update.skipped_version {
                 println!(
                     "Skipped version: {} (rolled back; auto-update resumes on next release)",
                     format!("v{skipped}").yellow()
                 );
+            }
+
+            if let Some(last_check) = update.last_update_check {
+                let ago = chrono::Utc::now() - last_check;
+                let label = if ago.num_hours() < 1 {
+                    format!("{}m ago", ago.num_minutes())
+                } else if ago.num_hours() < 24 {
+                    format!("{}h ago", ago.num_hours())
+                } else {
+                    format!("{}d ago", ago.num_days())
+                };
+                println!("Last check: {}", label);
+            }
+
+            let pid_path = crate::util::self_update::package_update_pid_path().ok();
+            if let Some(ref path) = pid_path {
+                if let Ok(contents) = std::fs::read_to_string(path) {
+                    if let Some((pid, ts)) = crate::util::check_update::parse_pid_file(&contents) {
+                        let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
+                        if age_secs < 600 && crate::util::check_update::is_pid_alive(pid) {
+                            println!("Background update: {} (PID {})", "running".green(), pid);
+                        }
+                    }
+                }
             }
         }
     }

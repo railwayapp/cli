@@ -59,10 +59,6 @@ fn release_url(version: &str, asset_name: &str) -> String {
     format!("{RELEASE_BASE_URL}/v{version}/{asset_name}")
 }
 
-fn checksums_url(version: &str) -> String {
-    format!("{RELEASE_BASE_URL}/v{version}/checksums.txt")
-}
-
 fn binary_name() -> &'static str {
     if cfg!(target_os = "windows") {
         "railway.exe"
@@ -125,71 +121,16 @@ pub fn clean_staged() -> Result<()> {
     StagedUpdate::clean()
 }
 
-/// Fetch the checksums.txt file from the release and look up the expected
-/// SHA-256 hash for the given asset filename.
-/// Returns `Ok(None)` if the checksums file is not published (404).
-/// Returns an error if the checksums file exists but the asset is not listed
-/// (indicates a malformed or incomplete release manifest).
-async fn fetch_expected_checksum(
-    client: &reqwest::Client,
-    version: &str,
-    asset_name: &str,
-) -> Result<Option<String>> {
-    let url = checksums_url(version);
-    let response = client
-        .get(&url)
-        .header("User-Agent", "railwayapp")
-        .send()
-        .await
-        .context("Failed to fetch checksums file")?;
-
-    let status = response.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    if !status.is_success() {
-        bail!("Failed to fetch checksums file: HTTP {status}");
-    }
-
-    let body = response
-        .text()
-        .await
-        .context("Failed to read checksums response")?;
-
-    // Format: "<hex_hash>  <filename>" (two-space separated, or tab)
-    for line in body.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(hash) = parts.next() else {
-            continue;
-        };
-        let Some(filename) = parts.last() else {
-            continue;
-        };
-        if filename == asset_name || filename.ends_with(&format!("/{asset_name}")) {
-            return Ok(Some(hash.to_lowercase()));
-        }
-    }
-
-    // checksums.txt exists but our asset is not in it — the release manifest
-    // is incomplete or malformed.  Treat this as an error rather than silently
-    // skipping verification.
-    bail!("checksums.txt for v{version} exists but does not contain an entry for {asset_name}");
-}
-
-/// Verify the SHA-256 hash of the downloaded bytes against the expected hash.
-fn verify_checksum(bytes: &[u8], expected_hex: &str) -> Result<()> {
-    use sha2::{Digest, Sha256};
-    let computed = format!("{:x}", Sha256::digest(bytes));
-    if computed != expected_hex {
-        bail!("Checksum verification failed.\n  Expected: {expected_hex}\n  Got:      {computed}");
-    }
-    Ok(())
+/// Returns the version string of a staged update waiting to be applied,
+/// or `None` if nothing is staged (or the metadata is unreadable).
+pub fn staged_version() -> Option<String> {
+    StagedUpdate::read().ok().flatten().map(|s| s.version)
 }
 
 /// Downloads and stages the update, assuming the caller already holds the
 /// update lock.  Shared by [`download_and_stage`] (background path) and
 /// [`self_update_interactive`] (interactive path).
-async fn download_and_stage_inner(version: &str) -> Result<()> {
+async fn download_and_stage_inner(version: &str, timeout_secs: u64) -> Result<()> {
     let target = detect_target_triple()?;
 
     if let Ok(Some(staged)) = StagedUpdate::read() {
@@ -208,14 +149,9 @@ async fn download_and_stage_inner(version: &str) -> Result<()> {
     let asset_name = release_asset_name(version, target);
     let url = release_url(version, &asset_name);
 
-    // 120 s applies to the interactive `railway upgrade` path.  Background
-    // calls from spawn_update_task are bounded by handle_update_task's 2 s
-    // outer cap, which will abort the tokio task before this fires.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()?;
-
-    let expected_checksum = fetch_expected_checksum(&client, version, &asset_name).await?;
 
     let response = client
         .get(&url)
@@ -232,17 +168,6 @@ async fn download_and_stage_inner(version: &str) -> Result<()> {
         .bytes()
         .await
         .context("Failed to read update response")?;
-
-    if let Some(ref expected) = expected_checksum {
-        verify_checksum(&bytes, expected)?;
-    } else {
-        // checksums.txt was not published for this release.  Proceed but warn
-        // so users know integrity was not verified.
-        eprintln!(
-            "{} no checksums.txt found for v{version}; skipping integrity check",
-            "warning:".yellow().bold()
-        );
-    }
 
     let dir = staged_update_dir()?;
     fs::create_dir_all(&dir)?;
@@ -316,7 +241,7 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    download_and_stage_inner(version).await?;
+    download_and_stage_inner(version, 30).await?;
 
     Ok(true)
 }
@@ -537,68 +462,73 @@ fn apply_staged_update() -> Result<String> {
     Ok(version)
 }
 
-/// Try to apply a previously staged self-update.
-/// Uses file locking to prevent concurrent CLI instances from racing.
-/// Prints a message on success, silently does nothing otherwise.
-pub fn try_apply_staged() {
-    use fs2::FileExt;
-
-    #[cfg(windows)]
-    clean_old_binary();
-
-    let staged = match StagedUpdate::read() {
-        Ok(Some(s)) => s,
-        _ => return,
-    };
+/// Reads and validates the staged update.  Returns `Ok(staged)` when the
+/// staged binary is safe to apply, or an `Err` describing why not.
+/// Cleans up the staged directory when the update is stale, wrong-platform,
+/// not-newer, or skipped.
+fn validate_staged() -> Result<StagedUpdate> {
+    let staged = StagedUpdate::read()?.context("No staged update found")?;
 
     if staged.is_stale() {
         let _ = StagedUpdate::clean();
-        return;
+        bail!("Staged update is too old");
     }
 
-    // Reject staged binary built for a different platform (e.g. shared
-    // ~/.railway directory across machines or after an arch migration).
-    if detect_target_triple()
-        .map(|t| t != staged.target)
-        .unwrap_or(true)
-    {
+    let current_target = detect_target_triple()?;
+    if staged.target != current_target {
         let _ = StagedUpdate::clean();
-        return;
+        bail!(
+            "Staged update is for {}, but this machine is {current_target}",
+            staged.target
+        );
     }
 
-    // Only apply if the staged version is actually newer
     if !matches!(
         crate::util::compare_semver::compare_semver(env!("CARGO_PKG_VERSION"), &staged.version),
         std::cmp::Ordering::Less
     ) {
         let _ = StagedUpdate::clean();
-        return;
+        bail!("You are already on the latest version");
     }
 
-    // Don't apply a version the user explicitly rolled back from.  A detached
-    // download spawned before the rollback may have staged this version.
     if let Ok(check) = crate::util::check_update::UpdateCheck::read() {
         if check.skipped_version.as_deref() == Some(staged.version.as_str()) {
             let _ = StagedUpdate::clean();
-            return;
+            bail!("v{} was previously rolled back", staged.version);
         }
+    }
+
+    Ok(staged)
+}
+
+/// Try to apply a previously staged self-update.
+/// Uses file locking to prevent concurrent CLI instances from racing.
+/// Returns the applied version on success, `None` otherwise.
+pub fn try_apply_staged() -> Option<String> {
+    use fs2::FileExt;
+
+    #[cfg(windows)]
+    clean_old_binary();
+
+    if validate_staged().is_err() {
+        return None;
     }
 
     let lock_path = match update_lock_path() {
         Ok(p) => p,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     let lock_file = match std::fs::File::create(&lock_path) {
         Ok(f) => f,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     if lock_file.try_lock_exclusive().is_err() {
-        return;
+        return None;
     }
 
-    match apply_staged_update() {
+    let result = match apply_staged_update() {
         Ok(version) => {
             crate::util::check_update::UpdateCheck::clear_after_update();
 
@@ -607,16 +537,19 @@ pub fn try_apply_staged() {
                 "Auto-updated Railway CLI to".green().bold(),
                 version,
             );
+            Some(version)
         }
         Err(e) => {
             if e.to_string().contains("Staged binary not found") {
                 let _ = StagedUpdate::clean();
             }
             // Other errors kept for retry; STAGED_UPDATE_MAX_AGE_DAYS handles permanent failures.
+            None
         }
-    }
+    };
 
     drop(lock_file);
+    result
 }
 
 pub async fn self_update_interactive() -> Result<()> {
@@ -645,41 +578,12 @@ pub async fn self_update_interactive() -> Result<()> {
 
     if let Some(ref version) = latest_version {
         println!("{} v{}...", "Downloading".green().bold(), version);
-        download_and_stage_inner(version).await?;
+        download_and_stage_inner(version, 120).await?;
     } else {
-        // Falling back to a staged update — apply the same safety checks
-        // that try_apply_staged() uses so we don't downgrade, re-apply a
-        // rolled-back version, or install a stale/wrong-platform binary.
-        let staged = StagedUpdate::read()?
-            .context("You are already on the latest version (or the update check failed — check your network)")?;
-        if staged.is_stale() {
-            let _ = StagedUpdate::clean();
-            bail!("Staged update is too old. Please retry when online.");
-        }
-        let current_target = detect_target_triple()?;
-        if staged.target != current_target {
-            let _ = StagedUpdate::clean();
-            bail!(
-                "Staged update is for {}, but this machine is {current_target}",
-                staged.target
-            );
-        }
-        if !matches!(
-            crate::util::compare_semver::compare_semver(env!("CARGO_PKG_VERSION"), &staged.version),
-            std::cmp::Ordering::Less
-        ) {
-            let _ = StagedUpdate::clean();
-            bail!("You are already on the latest version");
-        }
-        if let Ok(check) = crate::util::check_update::UpdateCheck::read() {
-            if check.skipped_version.as_deref() == Some(staged.version.as_str()) {
-                let _ = StagedUpdate::clean();
-                bail!(
-                    "v{} was previously rolled back. Run `railway upgrade --rollback` to undo, or wait for a newer release.",
-                    staged.version
-                );
-            }
-        }
+        // Falling back to a staged update — validate before applying.
+        let staged = validate_staged().context(
+            "You are already on the latest version (or the update check failed — check your network)",
+        )?;
         println!("Applying previously downloaded v{}...", staged.version);
     }
 
@@ -806,20 +710,6 @@ pub fn rollback() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verify_checksum_accepts_valid_hash() {
-        let data = b"hello world";
-        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        assert!(verify_checksum(data, expected).is_ok());
-    }
-
-    #[test]
-    fn verify_checksum_rejects_invalid_hash() {
-        let data = b"hello world";
-        let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
-        assert!(verify_checksum(data, wrong).is_err());
-    }
 
     #[test]
     fn prune_backups_removes_oldest() {
