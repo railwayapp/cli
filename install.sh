@@ -515,10 +515,13 @@ printf "$MAGENTA"
  /. ~~ ,\/I          .               Railway is now installed
  \\L__j^\/I       o               Run `railway help` for commands
   \/--v}  I     o   .
-  |    |  I   _________                    
-  |    |  I c(`       ')o            
+  |    |  I   _________
+  |    |  I c(`       ')o
   |    l  I   \.     ,/
-_/j  L l\_!  _//^---^\\_ 
+_/j  L l\_!  _//^---^\\_
 
 EOF
 printf "$NO_COLOR"
+
+info "Railway collects anonymous CLI usage data to improve the developer experience."
+info "You can opt out anytime: ${BOLD}railway telemetry disable${NO_COLOR} or ${BOLD}RAILWAY_NO_TELEMETRY=1${NO_COLOR}"

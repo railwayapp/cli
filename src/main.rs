@@ -191,10 +191,6 @@ async fn main() -> Result<()> {
     // apply, no background update spawn, no extra latency.
     let is_help_or_error = args.as_ref().is_err();
 
-    if is_tty {
-        telemetry::show_notice_if_needed();
-    }
-
     // Peek at the subcommand early so we can skip the staged-update
     // apply and background updater when the user is explicitly managing
     // updates (`railway upgrade` or `railway autoupdate`).
