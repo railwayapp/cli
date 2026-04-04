@@ -86,7 +86,6 @@ fn spawn_update_task(
         // When the gate is NOT armed, the API call may discover a newer
         // release, so we must not eagerly spawn for a potentially stale
         // cached version.
-        let mut eagerly_spawned = false;
         if auto_update_enabled && check_gate_armed {
             if let Some(ref version) = known_version {
                 let is_skipped = skipped_version.as_deref() == Some(version.as_str());
@@ -94,7 +93,6 @@ fn spawn_update_task(
                     let method = util::install_method::InstallMethod::detect();
                     if method.can_self_update() && method.can_write_binary() {
                         let _ = util::self_update::spawn_background_download(version);
-                        eagerly_spawned = true;
                     } else if method.can_auto_run_package_manager() {
                         let _ = util::check_update::spawn_package_manager_update(method);
                     }
@@ -110,34 +108,27 @@ fn spawn_update_task(
         };
 
         if let Some(ref version) = latest_version {
-            let mut needs_persist = from_cache;
-
             if auto_update_enabled {
                 let is_skipped = skipped_version.as_deref() == Some(version.as_str());
 
-                if !is_skipped {
-                    if !from_cache {
-                        // API returned a fresh version — spawn for it.
-                        let method = util::install_method::InstallMethod::detect();
-                        if method.can_self_update() && method.can_write_binary() {
-                            let _ = util::self_update::spawn_background_download(version);
-                            needs_persist = false;
-                        } else if method.can_auto_run_package_manager() {
-                            let _ = util::check_update::spawn_package_manager_update(method);
-                        }
-                    } else if eagerly_spawned {
-                        // Cache hit — download was already started above.
-                        needs_persist = false;
+                if !is_skipped && !from_cache {
+                    // API returned a fresh version — spawn for it.
+                    let method = util::install_method::InstallMethod::detect();
+                    if method.can_self_update() && method.can_write_binary() {
+                        let _ = util::self_update::spawn_background_download(version);
+                    } else if method.can_auto_run_package_manager() {
+                        let _ = util::check_update::spawn_package_manager_update(method);
                     }
-                } else {
-                    // Don't stamp the daily gate for a skipped version.
-                    needs_persist = false;
                 }
             }
 
-            if needs_persist {
-                UpdateCheck::persist_latest(latest_version.as_deref());
-            }
+            // Never refresh `last_update_check` when we only reused a cached
+            // pending version. Otherwise frequent CLI invocations can keep
+            // pushing the 12-hour window forward and prevent a real API check
+            // from discovering newer hotfixes.
+            //
+            // Fresh API results are already persisted inside `check_update()`;
+            // cache hits and API failures should remain read-only here.
         }
 
         Ok(latest_version)
@@ -166,16 +157,25 @@ async fn handle_update_task(
 async fn background_stage_update(version: &str) -> Result<()> {
     use util::check_update::UpdateCheck;
 
-    if telemetry::is_auto_update_disabled() {
-        return Ok(());
+    let result = async {
+        if telemetry::is_auto_update_disabled() {
+            return Ok(());
+        }
+
+        match util::self_update::download_and_stage(version).await {
+            Ok(true) => {}  // Staged successfully; cache stays until try_apply_staged() succeeds.
+            Ok(false) => {} // Lock held by another process, will retry
+            Err(_) => UpdateCheck::record_download_failure(),
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Ok(pid_path) = util::self_update::download_update_pid_path() {
+        let _ = std::fs::remove_file(pid_path);
     }
 
-    match util::self_update::download_and_stage(version).await {
-        Ok(true) => {}  // Staged successfully; cache stays until try_apply_staged() succeeds.
-        Ok(false) => {} // Lock held by another process, will retry
-        Err(_) => UpdateCheck::record_download_failure(),
-    }
-    Ok(())
+    result
 }
 
 #[tokio::main]
@@ -210,6 +210,10 @@ async fn main() -> Result<()> {
         || matches!(raw_subcommand.as_deref(), Some("help"));
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
 
+    // Non-TTY invocations are a supported path for coding agents and other
+    // automated CLI users. They are allowed to refresh the update cache and
+    // kick off background installs, but we keep staged-binary apply TTY-only
+    // so the running binary never changes under a scripted invocation.
     let auto_applied_version =
         if auto_update_enabled && is_tty && !is_update_management_cmd && !is_read_only_invocation {
             util::self_update::try_apply_staged()
@@ -217,8 +221,8 @@ async fn main() -> Result<()> {
             None
         };
 
-    let update = UpdateCheck::read().unwrap_or_default();
-    let skipped_version = update.skipped_version;
+    let update = UpdateCheck::read_normalized();
+    let skipped_version = update.skipped_version.clone();
     let check_gate_armed = update
         .last_update_check
         .map(|t| (chrono::Utc::now() - t) < chrono::Duration::hours(12))
@@ -231,18 +235,16 @@ async fn main() -> Result<()> {
     // If the running binary has already caught up to (or surpassed) the
     // cached version, clear the stale cache so spawn_update_task falls
     // through to a fresh check_update() and can discover newer releases.
-    let known_pending = match update.latest_version {
-        Some(ref v) if !matches!(compare_semver(env!("CARGO_PKG_VERSION"), v), Ordering::Less) => {
-            UpdateCheck::clear_latest();
-            None
-        }
-        other => other,
-    };
+    let known_pending = update.latest_version;
 
-    // Show the "new version available" banner when auto-update is disabled
-    // via preference (cautious user — still wants to know about releases).
-    // Suppress it when disabled via env var or CI (scripted environments
-    // where the banner is noise).
+    // Show the "new version available" banner only for TTY users. Coding
+    // agents and other non-interactive callers should still refresh update
+    // state in the background, but they should not receive human-facing
+    // upgrade prompts in command output.
+    //
+    // When auto-update is disabled via preference, we still show the banner
+    // to cautious interactive users who want release visibility. Suppress it
+    // when disabled via env var or CI, where extra output is noise.
     let env_or_ci_suppressed = telemetry::is_auto_update_disabled_by_env() || Configs::env_is_ci();
     if is_tty && !env_or_ci_suppressed {
         if let Some(ref latest_version) = known_pending {
@@ -264,9 +266,10 @@ async fn main() -> Result<()> {
     }
 
     // Spawn the background version check for all invocations (including
-    // non-TTY) so the version cache stays fresh.  Downloads and installs
-    // are only triggered when auto_update_enabled; the check itself is a
-    // read-only API call that updates version.json.
+    // non-TTY) so the version cache stays fresh for both humans and coding
+    // agents. Non-TTY callers are a first-class auto-update path: they may
+    // trigger background downloads/package-manager installs, but staged-binary
+    // apply and user-facing banners remain TTY-only.
     let check_updates_handle = if is_update_management_cmd || is_read_only_invocation {
         None
     } else {

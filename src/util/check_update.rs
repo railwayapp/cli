@@ -32,6 +32,25 @@ pub struct UpdateCheck {
     pub last_package_manager_spawn: Option<chrono::DateTime<chrono::Utc>>,
 }
 impl UpdateCheck {
+    fn has_stale_latest_version(&self) -> bool {
+        self.latest_version
+            .as_deref()
+            .map(|latest| {
+                !matches!(
+                    compare_semver(env!("CARGO_PKG_VERSION"), latest),
+                    Ordering::Less
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn clear_latest_fields(&mut self) {
+        self.latest_version = None;
+        self.download_failures = 0;
+        self.last_package_manager_spawn = None;
+        self.last_update_check = None;
+    }
+
     pub fn write(&self) -> anyhow::Result<()> {
         let home = home_dir().context("Failed to get home directory")?;
         let path = home.join(".railway/version.json");
@@ -63,16 +82,17 @@ impl UpdateCheck {
         try_write(&update);
     }
 
-    /// Clear a stale cached version and reset the daily gate so the next
-    /// invocation performs a fresh API check and can discover a hotfix
-    /// published after the cache is cleared.
-    pub fn clear_latest() {
+    /// Read the cached update state and clear any pending version that is no
+    /// longer ahead of the currently running binary. This keeps commands like
+    /// `autoupdate status` and `autoupdate skip` aligned with actual pending
+    /// state even when they bypass the normal startup cleanup path.
+    pub fn read_normalized() -> Self {
         let mut update = Self::read().unwrap_or_default();
-        update.latest_version = None;
-        update.download_failures = 0;
-        update.last_package_manager_spawn = None;
-        update.last_update_check = None;
-        try_write(&update);
+        if update.has_stale_latest_version() {
+            update.clear_latest_fields();
+            try_write(&update);
+        }
+        update
     }
 
     /// Record a version to skip during auto-update (set after rollback).
@@ -245,7 +265,7 @@ pub fn spawn_package_manager_update(
 
     // Guard against an already-running updater.
     let pid_path = super::self_update::package_update_pid_path()?;
-    if let Some(pid) = is_package_update_running(&pid_path) {
+    if let Some(pid) = is_background_update_running(&pid_path) {
         bail!("Another update process (pid {pid}) is already running");
     }
 
@@ -256,8 +276,9 @@ pub fn spawn_package_manager_update(
 
     let child = super::spawn_detached(&mut cmd, &log_path)?;
     let child_pid = child.id();
-    // The child is intentionally detached — we never wait on it.  Forget the
-    // handle so dropping it doesn't leak OS resources on Windows.
+    // Intentionally leak the Child handle — we never wait on the detached
+    // process.  On Unix this is harmless; on Windows it leaks a HANDLE,
+    // which is acceptable for a single short-lived spawn per invocation.
     std::mem::forget(child);
 
     // Record the child PID + timestamp so future invocations can detect an
@@ -286,7 +307,7 @@ pub fn parse_pid_file(contents: &str) -> Option<(u32, i64)> {
 
 /// Returns `true` if a background package-manager update is currently running,
 /// based on the PID file at the given path.
-pub fn is_package_update_running(pid_path: &std::path::Path) -> Option<u32> {
+pub fn is_background_update_running(pid_path: &std::path::Path) -> Option<u32> {
     let contents = std::fs::read_to_string(pid_path).ok()?;
     let (pid, ts) = parse_pid_file(&contents)?;
     let age_secs = chrono::Utc::now().timestamp().saturating_sub(ts);
@@ -335,5 +356,64 @@ pub fn is_pid_alive(pid: u32) -> bool {
         // alive and let the 10-minute staleness TTL expire the entry.
         let _ = pid;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn next_version(version: &str) -> String {
+        let mut parts = version
+            .split('-')
+            .next()
+            .unwrap_or(version)
+            .split('.')
+            .map(|part| part.parse::<u8>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        parts.resize(3, 0);
+
+        for idx in (0..parts.len()).rev() {
+            if parts[idx] < u8::MAX {
+                parts[idx] += 1;
+                for part in parts.iter_mut().skip(idx + 1) {
+                    *part = 0;
+                }
+                return format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+            }
+        }
+
+        "255.255.255-rc.1".to_string()
+    }
+
+    #[test]
+    fn stale_latest_version_is_detected_and_cleared() {
+        let mut update = UpdateCheck {
+            last_update_check: Some(chrono::Utc::now()),
+            latest_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            download_failures: 2,
+            skipped_version: Some("0.1.0".to_string()),
+            last_package_manager_spawn: Some(chrono::Utc::now()),
+        };
+
+        assert!(update.has_stale_latest_version());
+
+        update.clear_latest_fields();
+
+        assert!(update.latest_version.is_none());
+        assert_eq!(update.download_failures, 0);
+        assert!(update.last_package_manager_spawn.is_none());
+        assert!(update.last_update_check.is_none());
+        assert_eq!(update.skipped_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn newer_latest_version_is_not_stale() {
+        let update = UpdateCheck {
+            latest_version: Some(next_version(env!("CARGO_PKG_VERSION"))),
+            ..Default::default()
+        };
+
+        assert!(!update.has_stale_latest_version());
     }
 }

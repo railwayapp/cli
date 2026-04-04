@@ -28,6 +28,10 @@ pub fn package_update_pid_path() -> Result<PathBuf> {
     Ok(railway_dir()?.join("package-update.pid"))
 }
 
+pub fn download_update_pid_path() -> Result<PathBuf> {
+    Ok(railway_dir()?.join("download-update.pid"))
+}
+
 pub fn package_update_lock_path() -> Result<PathBuf> {
     Ok(railway_dir()?.join("package-update.lock"))
 }
@@ -64,6 +68,51 @@ fn binary_name() -> &'static str {
         "railway.exe"
     } else {
         "railway"
+    }
+}
+
+fn acquire_update_lock(
+    lock_path: &Path,
+    wait_for_lock: bool,
+    busy_message: &str,
+) -> Result<std::fs::File> {
+    use fs2::FileExt;
+
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let lock_file =
+        std::fs::File::create(lock_path).context("Failed to create update lock file")?;
+
+    if wait_for_lock {
+        lock_file
+            .lock_exclusive()
+            .with_context(|| busy_message.to_string())?;
+    } else {
+        lock_file
+            .try_lock_exclusive()
+            .map_err(|_| anyhow::anyhow!(busy_message.to_string()))?;
+    }
+
+    Ok(lock_file)
+}
+
+fn shell_update_busy_message_for_pid_path(pid_path: &Path) -> String {
+    match crate::util::check_update::is_background_update_running(pid_path) {
+        Some(pid) => format!(
+            "A background shell update (PID {pid}) is already running. Please wait for it to finish or try again shortly."
+        ),
+        None => "A background update is already in progress. Please try again shortly.".to_string(),
+    }
+}
+
+fn shell_update_busy_message() -> String {
+    match download_update_pid_path() {
+        Ok(pid_path) => shell_update_busy_message_for_pid_path(&pid_path),
+        Err(_) => {
+            "A background update is already in progress. Please try again shortly.".to_string()
+        }
     }
 }
 
@@ -121,10 +170,33 @@ pub fn clean_staged() -> Result<()> {
     StagedUpdate::clean()
 }
 
-/// Returns the version string of a staged update waiting to be applied,
-/// or `None` if nothing is staged (or the metadata is unreadable).
-pub fn staged_version() -> Option<String> {
-    StagedUpdate::read().ok().flatten().map(|s| s.version)
+/// Returns the version string of a staged update only if it is still valid
+/// for application on this machine. Invalid staged updates are cleaned up
+/// by the shared validator so status reporting matches runtime behavior.
+pub fn validated_staged_version() -> Option<String> {
+    validate_staged().ok().map(|staged| staged.version)
+}
+
+struct BackgroundPidGuard {
+    path: PathBuf,
+}
+
+impl BackgroundPidGuard {
+    fn create(path: PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let pid = std::process::id();
+        fs::write(&path, format!("{pid} {now}"))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for BackgroundPidGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// Downloads and stages the update, assuming the caller already holds the
@@ -133,6 +205,10 @@ pub fn staged_version() -> Option<String> {
 async fn download_and_stage_inner(version: &str, timeout_secs: u64) -> Result<()> {
     let target = detect_target_triple()?;
 
+    // Authoritative post-lock re-check: `download_and_stage` also checks this
+    // before acquiring the lock as a fast path, but this check is the one that
+    // matters for correctness since no other process can modify staged state
+    // while we hold the lock.
     if let Ok(Some(staged)) = StagedUpdate::read() {
         if staged.version == version && staged.target == target {
             if staged_update_dir()
@@ -240,6 +316,9 @@ pub async fn download_and_stage(version: &str) -> Result<bool> {
         return Ok(false);
     }
 
+    let _pid_guard = BackgroundPidGuard::create(download_update_pid_path()?)
+        .context("Failed to record background download PID")?;
+
     download_and_stage_inner(version, 30).await?;
 
     Ok(true)
@@ -256,6 +335,9 @@ pub fn spawn_background_download(version: &str) -> Result<()> {
     cmd.env(crate::consts::RAILWAY_STAGE_UPDATE_ENV, version);
 
     let child = super::spawn_detached(&mut cmd, &log_path)?;
+    // Intentionally leak the Child handle — we never wait on the detached
+    // process.  On Unix this is harmless; on Windows it leaks a HANDLE,
+    // which is acceptable for a single short-lived spawn per invocation.
     std::mem::forget(child);
     Ok(())
 }
@@ -313,16 +395,16 @@ fn extract_from_zip(bytes: &[u8], bin_name: &str, dest_dir: &Path) -> Result<()>
 
 const BACKUP_PREFIX: &str = "railway-v";
 
-/// Extract the version string from a backup filename.
+/// Parse a backup filename.
 /// Handles both `railway-v{ver}` and `railway-v{ver}_{target}[.exe]` formats.
-fn backup_version(entry: &fs::DirEntry) -> String {
+fn parse_backup_filename(entry: &fs::DirEntry) -> (String, Option<String>) {
     let raw = entry.file_name().to_string_lossy().into_owned();
     let stem = raw
         .trim_start_matches(BACKUP_PREFIX)
         .trim_end_matches(".exe");
     match stem.split_once('_') {
-        Some((ver, _)) => ver.to_string(),
-        None => stem.to_string(),
+        Some((ver, target)) => (ver.to_string(), Some(target.to_string())),
+        None => (stem.to_string(), None),
     }
 }
 
@@ -334,10 +416,30 @@ fn list_backups(dir: &Path) -> Result<Vec<fs::DirEntry>> {
 
     // Sort by version (oldest first) so prune_backups can drop the leading entries.
     entries.sort_by(|a, b| {
-        crate::util::compare_semver::compare_semver(&backup_version(a), &backup_version(b))
+        crate::util::compare_semver::compare_semver(
+            &parse_backup_filename(a).0,
+            &parse_backup_filename(b).0,
+        )
     });
 
     Ok(entries)
+}
+
+fn create_backup(source: &Path, destination: &Path) -> Result<()> {
+    if let Err(link_err) = fs::hard_link(source, destination) {
+        // hard_link fails if the backup already exists or across filesystems —
+        // fall back to copy, but fail closed if that also fails so we never
+        // replace the running binary without a rollback point.
+        fs::copy(source, destination)
+            .map(|_| ())
+            .map_err(|copy_err| {
+                anyhow::anyhow!(
+                    "Failed to back up current binary (hard link: {link_err}; copy: {copy_err})"
+                )
+            })?;
+    }
+
+    Ok(())
 }
 
 fn backup_current_binary_no_prune() -> Result<()> {
@@ -354,22 +456,31 @@ fn backup_current_binary_no_prune() -> Result<()> {
     };
     let backup_path = dir.join(&backup_name);
 
-    if fs::hard_link(&current_exe, &backup_path).is_err() {
-        // hard_link fails if backup already exists or across filesystems — fall back to copy.
-        let _ = fs::copy(&current_exe, &backup_path);
-    }
+    create_backup(&current_exe, &backup_path).context("Failed to create rollback backup")?;
 
     Ok(())
 }
 
 fn backup_current_binary() -> Result<()> {
+    let target = detect_target_triple()?;
     backup_current_binary_no_prune()?;
-    prune_backups(&backups_dir()?, 3)?;
+    prune_backups(&backups_dir()?, 3, target)?;
     Ok(())
 }
 
-fn prune_backups(dir: &Path, keep: usize) -> Result<()> {
-    let entries = list_backups(dir)?;
+fn prune_backups(dir: &Path, keep: usize, target: &str) -> Result<()> {
+    let entries: Vec<_> = list_backups(dir)?
+        .into_iter()
+        .filter(|entry| {
+            let (_, backup_target) = parse_backup_filename(entry);
+            match backup_target {
+                Some(backup_target) => backup_target == target,
+                // Backups created before target tracking was added are assumed
+                // to belong to the current machine's target, matching rollback().
+                None => true,
+            }
+        })
+        .collect();
 
     if entries.len() <= keep {
         return Ok(());
@@ -508,9 +619,6 @@ fn validate_staged() -> Result<StagedUpdate> {
 pub fn try_apply_staged() -> Option<String> {
     use fs2::FileExt;
 
-    #[cfg(windows)]
-    clean_old_binary();
-
     let lock_path = match update_lock_path() {
         Ok(p) => p,
         Err(_) => return None,
@@ -535,6 +643,11 @@ pub fn try_apply_staged() -> Option<String> {
         Ok(version) => {
             crate::util::check_update::UpdateCheck::clear_after_update();
 
+            // Clean up the .old.exe left over from the previous binary
+            // replacement — only worth doing after a successful apply.
+            #[cfg(windows)]
+            clean_old_binary();
+
             eprintln!(
                 "{} v{} (active on next run)",
                 "Auto-updated Railway CLI to".green().bold(),
@@ -556,38 +669,35 @@ pub fn try_apply_staged() -> Option<String> {
 }
 
 pub async fn self_update_interactive() -> Result<()> {
-    use fs2::FileExt;
-
     // Try the network check first.  If it fails and an update is already
     // staged on disk, apply that instead of surfacing a network error.
-    let latest_version = match crate::util::check_update::check_update(true).await {
-        Ok(Some(v)) => Some(v),
-        Ok(None) => None,
-        Err(_) => {
-            // Network failure — fall through and try the staged update.
-            None
-        }
-    };
+    let (latest_version, update_check_failed) =
+        match crate::util::check_update::check_update(true).await {
+            Ok(Some(v)) => (Some(v), false),
+            Ok(None) => (None, false),
+            Err(_) => {
+                // Network failure — fall through and try the staged update.
+                (None, true)
+            }
+        };
 
     let lock_path = update_lock_path()?;
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let lock_file =
-        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
-    lock_file
-        .lock_exclusive()
-        .context("Another update process is already running")?;
+    let busy_message = shell_update_busy_message();
+    let lock_file = acquire_update_lock(&lock_path, false, &busy_message)?;
 
     if let Some(ref version) = latest_version {
         println!("{} v{}...", "Downloading".green().bold(), version);
         download_and_stage_inner(version, 120).await?;
     } else {
-        // Falling back to a staged update — validate before applying.
-        let staged = validate_staged().context(
-            "You are already on the latest version (or the update check failed — check your network)",
-        )?;
-        println!("Applying previously downloaded v{}...", staged.version);
+        match finalize_explicit_upgrade_fallback(validate_staged(), update_check_failed)? {
+            Some(staged) => {
+                println!("Applying previously downloaded v{}...", staged.version);
+            }
+            None => {
+                println!("{}", "Railway CLI is already up to date.".green());
+                return Ok(());
+            }
+        }
     }
 
     let version = apply_staged_update()?;
@@ -601,20 +711,48 @@ pub async fn self_update_interactive() -> Result<()> {
     Ok(())
 }
 
-pub fn rollback() -> Result<()> {
-    use fs2::FileExt;
+fn finalize_explicit_upgrade_fallback(
+    staged: Result<StagedUpdate>,
+    update_check_failed: bool,
+) -> Result<Option<StagedUpdate>> {
+    match staged {
+        Ok(staged) => Ok(Some(staged)),
+        Err(_) if !update_check_failed => Ok(None),
+        Err(err) => Err(err).context("Update check failed and no valid staged update is available"),
+    }
+}
 
+fn choose_rollback_candidate(
+    candidates: Vec<(String, std::path::PathBuf)>,
+    non_interactive: bool,
+) -> Result<(String, std::path::PathBuf)> {
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next().unwrap());
+    }
+
+    if non_interactive {
+        return candidates
+            .into_iter()
+            .next()
+            .context("No rollback candidates found");
+    }
+
+    let labels: Vec<String> = candidates.iter().map(|(v, _)| v.clone()).collect();
+    let selected = inquire::Select::new("Select version to roll back to:", labels)
+        .prompt()
+        .context("Rollback cancelled")?;
+    candidates
+        .into_iter()
+        .find(|(v, _)| *v == selected)
+        .context("Selected rollback candidate was not found")
+}
+
+pub fn rollback(non_interactive: bool) -> Result<()> {
     // Acquire the update lock first so background auto-update processes cannot
     // stage or apply while we are building the candidate list or prompting.
     let lock_path = update_lock_path()?;
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let lock_file =
-        std::fs::File::create(&lock_path).context("Failed to create update lock file")?;
-    lock_file
-        .lock_exclusive()
-        .context("Another update process is running. Please try again.")?;
+    let busy_message = shell_update_busy_message();
+    let lock_file = acquire_update_lock(&lock_path, false, &busy_message)?;
 
     let dir = backups_dir()?;
     let current_target = detect_target_triple()?;
@@ -636,15 +774,7 @@ pub fn rollback() -> Result<()> {
         .iter()
         .rev()
         .filter_map(|e| {
-            let raw = e.file_name().to_string_lossy().into_owned();
-            let stem = raw
-                .trim_start_matches(BACKUP_PREFIX)
-                .trim_end_matches(".exe");
-
-            let (ver, backup_target) = match stem.split_once('_') {
-                Some((v, t)) => (v, Some(t)),
-                None => (stem, None),
-            };
+            let (ver, backup_target) = parse_backup_filename(e);
 
             if ver == current_version {
                 return None;
@@ -657,7 +787,7 @@ pub fn rollback() -> Result<()> {
                 }
             }
 
-            Some((ver.to_string(), e.path()))
+            Some((ver, e.path()))
         })
         .collect();
 
@@ -667,19 +797,7 @@ pub fn rollback() -> Result<()> {
         );
     }
 
-    let (version, backup_path) = if candidates.len() == 1 {
-        candidates.into_iter().next().unwrap()
-    } else {
-        // Multiple candidates: let the user pick.
-        let labels: Vec<String> = candidates.iter().map(|(v, _)| v.clone()).collect();
-        let selected = inquire::Select::new("Select version to roll back to:", labels)
-            .prompt()
-            .context("Rollback cancelled")?;
-        candidates
-            .into_iter()
-            .find(|(v, _)| *v == selected)
-            .expect("selected label must exist in candidates")
-    };
+    let (version, backup_path) = choose_rollback_candidate(candidates, non_interactive)?;
 
     println!("{} v{}...", "Rolling back to".yellow().bold(), version);
 
@@ -696,7 +814,7 @@ pub fn rollback() -> Result<()> {
 
     // Prune after rollback succeeds so the candidate list wasn't reduced
     // before the user picked.
-    let _ = prune_backups(&dir, 3);
+    let _ = prune_backups(&dir, 3, current_target);
 
     drop(lock_file);
 
@@ -723,7 +841,7 @@ mod tests {
             fs::write(&path, format!("binary-{i}")).unwrap();
         }
 
-        prune_backups(dir.path(), 3).unwrap();
+        prune_backups(dir.path(), 3, "x86_64-unknown-linux-musl").unwrap();
 
         let remaining = list_backups(dir.path()).unwrap();
         assert_eq!(remaining.len(), 3);
@@ -745,7 +863,7 @@ mod tests {
             fs::write(&path, "binary").unwrap();
         }
 
-        prune_backups(dir.path(), 3).unwrap();
+        prune_backups(dir.path(), 3, "x86_64-unknown-linux-musl").unwrap();
         assert_eq!(list_backups(dir.path()).unwrap().len(), 2);
     }
 
@@ -759,5 +877,95 @@ mod tests {
         fs::write(dir.path().join("railway.conf"), "config").unwrap();
 
         assert_eq!(list_backups(dir.path()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn create_backup_fails_when_no_backup_can_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("missing-source");
+        let destination = dir.path().join("backup");
+
+        let err = create_backup(&source, &destination)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Failed to back up current binary"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn non_blocking_update_lock_fails_fast_when_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("update.lock");
+        let _first = acquire_update_lock(&lock_path, true, "should acquire").unwrap();
+
+        let err = acquire_update_lock(&lock_path, false, "busy")
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(err, "busy");
+    }
+
+    #[test]
+    fn explicit_upgrade_fallback_returns_success_when_already_up_to_date() {
+        let result = finalize_explicit_upgrade_fallback(Err(anyhow::anyhow!("no staged")), false);
+
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn explicit_upgrade_fallback_preserves_network_failure() {
+        let err = match finalize_explicit_upgrade_fallback(Err(anyhow::anyhow!("no staged")), true)
+        {
+            Ok(_) => panic!("expected network failure to propagate"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("Update check failed"));
+    }
+
+    #[test]
+    fn prune_backups_only_removes_entries_for_current_target() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for version in ["1.0.0", "1.1.0"] {
+            let path = dir
+                .path()
+                .join(format!("railway-v{version}_x86_64-unknown-linux-musl"));
+            fs::write(&path, format!("linux-{version}")).unwrap();
+        }
+
+        for version in ["2.0.0", "2.1.0"] {
+            let path = dir
+                .path()
+                .join(format!("railway-v{version}_aarch64-apple-darwin"));
+            fs::write(&path, format!("mac-{version}")).unwrap();
+        }
+
+        prune_backups(dir.path(), 1, "x86_64-unknown-linux-musl").unwrap();
+
+        let names: Vec<_> = list_backups(dir.path())
+            .unwrap()
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+
+        assert!(!names.contains(&"railway-v1.0.0_x86_64-unknown-linux-musl".to_string()));
+        assert!(names.contains(&"railway-v1.1.0_x86_64-unknown-linux-musl".to_string()));
+        assert!(names.contains(&"railway-v2.0.0_aarch64-apple-darwin".to_string()));
+        assert!(names.contains(&"railway-v2.1.0_aarch64-apple-darwin".to_string()));
+    }
+
+    #[test]
+    fn choose_rollback_candidate_prefers_newest_in_non_interactive_mode() {
+        let candidates = vec![
+            ("2.0.0".to_string(), PathBuf::from("/tmp/railway-v2.0.0")),
+            ("1.9.0".to_string(), PathBuf::from("/tmp/railway-v1.9.0")),
+        ];
+
+        let (version, path) = choose_rollback_candidate(candidates, true).unwrap();
+
+        assert_eq!(version, "2.0.0");
+        assert_eq!(path, PathBuf::from("/tmp/railway-v2.0.0"));
     }
 }

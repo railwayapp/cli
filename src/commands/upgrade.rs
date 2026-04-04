@@ -1,20 +1,65 @@
 use std::process::Command;
 
+use is_terminal::IsTerminal;
+
 use crate::util::install_method::InstallMethod;
-use crate::{consts::NON_INTERACTIVE_FAILURE, interact_or};
 
 use super::*;
 
-/// Upgrade the Railway CLI to the latest version
+/// Upgrade the Railway CLI to the latest version.
+/// Use `--yes` for non-interactive agent/script usage.
 #[derive(Parser)]
 pub struct Args {
     /// Check install method without upgrading
-    #[clap(long)]
+    #[clap(long, conflicts_with = "rollback")]
     check: bool,
 
     /// Rollback to the previous version
-    #[clap(long)]
+    #[clap(long, conflicts_with = "check")]
     rollback: bool,
+
+    /// Run without interactive prompts (useful for agents/scripts)
+    #[clap(short = 'y', long = "yes")]
+    yes: bool,
+}
+
+fn validate_interaction(yes: bool, is_tty: bool) -> Result<()> {
+    if !yes && !is_tty {
+        bail!(
+            "Cannot run `railway upgrade` in non-interactive mode. Use `--yes` to continue without prompts."
+        );
+    }
+
+    Ok(())
+}
+
+fn fail_if_non_interactive_requested(yes: bool, message: &str) -> Result<()> {
+    if yes {
+        bail!(message.to_string());
+    }
+
+    Ok(())
+}
+
+fn retry_command(rollback: bool, yes: bool, elevated: bool) -> String {
+    let mut parts = Vec::new();
+
+    if elevated {
+        parts.push("sudo");
+    }
+
+    parts.push("railway");
+    parts.push("upgrade");
+
+    if rollback {
+        parts.push("--rollback");
+    }
+
+    if yes {
+        parts.push("--yes");
+    }
+
+    parts.join(" ")
 }
 
 fn run_upgrade_command(method: InstallMethod) -> Result<()> {
@@ -38,7 +83,7 @@ fn run_upgrade_command(method: InstallMethod) -> Result<()> {
     })?;
 
     let pid_path = crate::util::self_update::package_update_pid_path()?;
-    if let Some(pid) = crate::util::check_update::is_package_update_running(&pid_path) {
+    if let Some(pid) = crate::util::check_update::is_background_update_running(&pid_path) {
         bail!(
             "A background update (pid {pid}) is already running. \
              Please wait for it to finish or try again shortly."
@@ -93,7 +138,7 @@ pub async fn command(args: Args) -> Result<()> {
                 method.name()
             );
         }
-        interact_or!(NON_INTERACTIVE_FAILURE);
+        validate_interaction(args.yes, std::io::stdout().is_terminal())?;
         if !method.can_write_binary() {
             println!(
                 "{}",
@@ -102,17 +147,21 @@ pub async fn command(args: Args) -> Result<()> {
             println!();
             if cfg!(windows) {
                 println!("To rollback, run the terminal as Administrator and retry:");
-                println!("  {}", "railway upgrade --rollback".bold());
+                println!("  {}", retry_command(true, args.yes, false).bold());
             } else {
                 println!("To rollback, re-run with elevated permissions:");
-                println!("  {}", "sudo railway upgrade --rollback".bold());
+                println!("  {}", retry_command(true, args.yes, true).bold());
             }
+            fail_if_non_interactive_requested(
+                args.yes,
+                "Rollback could not be completed because the CLI binary is not writable by the current user.",
+            )?;
             return Ok(());
         }
-        return crate::util::self_update::rollback();
+        return crate::util::self_update::rollback(args.yes);
     }
 
-    interact_or!(NON_INTERACTIVE_FAILURE);
+    validate_interaction(args.yes, std::io::stdout().is_terminal())?;
 
     println!(
         "{} {} ({})",
@@ -137,14 +186,18 @@ pub async fn command(args: Args) -> Result<()> {
             println!();
             if cfg!(windows) {
                 println!("To upgrade, run the terminal as Administrator and retry:");
-                println!("  {}", "railway upgrade".bold());
+                println!("  {}", retry_command(false, args.yes, false).bold());
             } else {
                 println!("To upgrade, either:");
                 println!("  1. Re-run with elevated permissions:");
-                println!("     {}", "sudo railway upgrade".bold());
+                println!("     {}", retry_command(false, args.yes, true).bold());
                 println!("  2. Reinstall using the install script:");
                 println!("     {}", "bash <(curl -fsSL cli.new)".bold());
             }
+            fail_if_non_interactive_requested(
+                args.yes,
+                "Upgrade could not be completed because the CLI binary is not writable by the current user.",
+            )?;
         }
         InstallMethod::Unknown => {
             println!();
@@ -175,6 +228,10 @@ pub async fn command(args: Args) -> Result<()> {
                 "For more information, visit: {}",
                 "https://docs.railway.com/guides/cli".purple()
             );
+            fail_if_non_interactive_requested(
+                args.yes,
+                "Automatic upgrade could not be completed because the install method could not be detected.",
+            )?;
         }
         method if method.can_auto_upgrade() => {
             println!();
@@ -190,6 +247,10 @@ pub async fn command(args: Args) -> Result<()> {
             );
             println!();
             println!("  {}", "bash <(curl -fsSL cli.new)".cyan());
+            fail_if_non_interactive_requested(
+                args.yes,
+                "Automatic upgrade could not be completed because self-update is not available on this platform.",
+            )?;
         }
         _ => {
             println!();
@@ -201,8 +262,43 @@ pub async fn command(args: Args) -> Result<()> {
                 "Please upgrade manually. For more information, visit: {}",
                 "https://docs.railway.com/guides/cli".purple()
             );
+            fail_if_non_interactive_requested(
+                args.yes,
+                "Automatic upgrade could not be completed for this install method.",
+            )?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, validate_interaction};
+    use clap::Parser;
+
+    #[test]
+    fn parser_rejects_check_and_rollback_together() {
+        let result = Args::try_parse_from(["railway", "--check", "--rollback"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parser_accepts_yes_with_rollback() {
+        let result = Args::try_parse_from(["railway", "--yes", "--rollback"]);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn interactive_upgrade_does_not_require_yes() {
+        assert!(validate_interaction(false, true).is_ok());
+    }
+
+    #[test]
+    fn non_interactive_upgrade_requires_yes() {
+        assert!(validate_interaction(false, false).is_err());
+        assert!(validate_interaction(true, false).is_ok());
+    }
 }
