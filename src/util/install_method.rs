@@ -235,7 +235,7 @@ impl InstallMethod {
             InstallMethod::Homebrew => Some(("brew", vec!["upgrade", "railway"])),
             InstallMethod::Npm => Some(("npm", vec!["update", "-g", "@railway/cli"])),
             InstallMethod::Bun => Some(("bun", vec!["update", "-g", "@railway/cli"])),
-            InstallMethod::Cargo => Some(("cargo", vec!["install", "railwayapp"])),
+            InstallMethod::Cargo => Some(("cargo", vec!["install", "railwayapp", "--locked"])),
             InstallMethod::Scoop => Some(("scoop", vec!["update", "railway"])),
             InstallMethod::Shell | InstallMethod::Unknown => None,
         }

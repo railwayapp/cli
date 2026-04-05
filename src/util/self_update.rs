@@ -610,6 +610,11 @@ fn validate_staged() -> Result<StagedUpdate> {
         }
     }
 
+    if !staged_update_dir()?.join(binary_name()).exists() {
+        let _ = StagedUpdate::clean();
+        bail!("Staged binary missing from disk");
+    }
+
     Ok(staged)
 }
 

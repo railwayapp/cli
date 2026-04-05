@@ -100,11 +100,21 @@ fn spawn_update_task(
             }
         }
 
-        // Fresh API check (respects 12h gate).  Fall back to the
-        // cached version when the gate fires or the API errors.
-        let (from_cache, latest_version) = match util::check_update::check_update(false).await {
-            Ok(Some(v)) => (false, Some(v)),
-            Ok(None) | Err(_) => (known_version.is_some(), known_version),
+        // Skip the network check entirely when auto-update is disabled
+        // and there is no TTY to show a banner on (e.g. CI / scripts).
+        // This avoids a GitHub API call and the exit-time budget for
+        // sessions that have explicitly opted out.
+        let (from_cache, latest_version) = if !auto_update_enabled
+            && !std::io::stdout().is_terminal()
+        {
+            (known_version.is_some(), known_version)
+        } else {
+            // Fresh API check (respects 12h gate).  Fall back to the
+            // cached version when the gate fires or the API errors.
+            match util::check_update::check_update(false).await {
+                Ok(Some(v)) => (false, Some(v)),
+                Ok(None) | Err(_) => (known_version.is_some(), known_version),
+            }
         };
 
         if let Some(ref version) = latest_version {
