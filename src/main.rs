@@ -70,75 +70,61 @@ commands!(
     functions(function, func, fn, funcs, fns)
 );
 
-fn spawn_update_task(
+/// Groups the state needed to decide whether and how to check for / dispatch
+/// a background update.
+struct UpdateContext {
     known_version: Option<String>,
     auto_update_enabled: bool,
     skipped_version: Option<String>,
     check_gate_armed: bool,
+}
+
+/// Routes a pending version to the appropriate background updater.
+fn try_dispatch_update(
+    version: &str,
+    skipped_version: Option<&str>,
+    method: &util::install_method::InstallMethod,
+) {
+    if skipped_version == Some(version) {
+        return;
+    }
+    if method.can_self_update() && method.can_write_binary() {
+        let _ = util::self_update::spawn_background_download(version);
+    } else if method.can_auto_run_package_manager() {
+        let _ = util::check_update::spawn_package_manager_update(*method);
+    }
+}
+
+fn spawn_update_task(
+    ctx: UpdateContext,
 ) -> tokio::task::JoinHandle<anyhow::Result<Option<String>>> {
     tokio::spawn(async move {
-        // When the check gate is armed (last check was <12h ago) the API
-        // call returns instantly (no network request), so we can safely
-        // start the background update from the cached version before the
-        // await — the API cannot return a newer version that would race
-        // with this download.
-        //
-        // When the gate is NOT armed, the API call may discover a newer
-        // release, so we must not eagerly spawn for a potentially stale
-        // cached version.
-        if auto_update_enabled && check_gate_armed {
-            if let Some(ref version) = known_version {
-                let is_skipped = skipped_version.as_deref() == Some(version.as_str());
-                if !is_skipped {
-                    let method = util::install_method::InstallMethod::detect();
-                    if method.can_self_update() && method.can_write_binary() {
-                        let _ = util::self_update::spawn_background_download(version);
-                    } else if method.can_auto_run_package_manager() {
-                        let _ = util::check_update::spawn_package_manager_update(method);
-                    }
-                }
+        let method = util::install_method::InstallMethod::detect();
+
+        // Safe to eagerly dispatch from cache: the gate means no API call
+        // will race with a newer version during this invocation.
+        if ctx.auto_update_enabled && ctx.check_gate_armed {
+            if let Some(ref version) = ctx.known_version {
+                try_dispatch_update(version, ctx.skipped_version.as_deref(), &method);
             }
         }
 
         // Skip the network check entirely when auto-update is disabled
         // and there is no TTY to show a banner on (e.g. CI / scripts).
-        // This avoids a GitHub API call and the exit-time budget for
-        // sessions that have explicitly opted out.
-        let (from_cache, latest_version) = if !auto_update_enabled
-            && !std::io::stdout().is_terminal()
-        {
-            (known_version.is_some(), known_version)
-        } else {
-            // Fresh API check (respects 12h gate).  Fall back to the
-            // cached version when the gate fires or the API errors.
-            match util::check_update::check_update(false).await {
-                Ok(Some(v)) => (false, Some(v)),
-                Ok(None) | Err(_) => (known_version.is_some(), known_version),
-            }
-        };
+        let (from_cache, latest_version) =
+            if !ctx.auto_update_enabled && !std::io::stdout().is_terminal() {
+                (ctx.known_version.is_some(), ctx.known_version)
+            } else {
+                match util::check_update::check_update(false).await {
+                    Ok(Some(v)) => (false, Some(v)),
+                    Ok(None) | Err(_) => (ctx.known_version.is_some(), ctx.known_version),
+                }
+            };
 
         if let Some(ref version) = latest_version {
-            if auto_update_enabled {
-                let is_skipped = skipped_version.as_deref() == Some(version.as_str());
-
-                if !is_skipped && !from_cache {
-                    // API returned a fresh version — spawn for it.
-                    let method = util::install_method::InstallMethod::detect();
-                    if method.can_self_update() && method.can_write_binary() {
-                        let _ = util::self_update::spawn_background_download(version);
-                    } else if method.can_auto_run_package_manager() {
-                        let _ = util::check_update::spawn_package_manager_update(method);
-                    }
-                }
+            if ctx.auto_update_enabled && !from_cache {
+                try_dispatch_update(version, ctx.skipped_version.as_deref(), &method);
             }
-
-            // Never refresh `last_update_check` when we only reused a cached
-            // pending version. Otherwise frequent CLI invocations can keep
-            // pushing the 12-hour window forward and prevent a real API check
-            // from discovering newer hotfixes.
-            //
-            // Fresh API results are already persisted inside `check_update()`;
-            // cache hits and API failures should remain read-only here.
         }
 
         Ok(latest_version)
@@ -283,12 +269,12 @@ async fn main() -> Result<()> {
     let check_updates_handle = if is_update_management_cmd || is_read_only_invocation {
         None
     } else {
-        Some(spawn_update_task(
-            known_pending,
+        Some(spawn_update_task(UpdateContext {
+            known_version: known_pending,
             auto_update_enabled,
             skipped_version,
             check_gate_armed,
-        ))
+        }))
     };
 
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215

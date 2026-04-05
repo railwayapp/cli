@@ -138,16 +138,9 @@ impl StagedUpdate {
     }
 
     fn write(&self) -> Result<()> {
-        let dir = staged_update_dir()?;
-        fs::create_dir_all(&dir)?;
-        let path = dir.join("update.json");
-        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-        let pid = std::process::id();
-        let tmp_path = dir.join(format!("update.tmp.{pid}-{nanos}.json"));
+        let path = staged_update_dir()?.join("update.json");
         let contents = serde_json::to_string_pretty(self)?;
-        fs::write(&tmp_path, contents)?;
-        super::rename_replacing(&tmp_path, &path)?;
-        Ok(())
+        super::write_atomic(&path, &contents)
     }
 
     fn clean() -> Result<()> {

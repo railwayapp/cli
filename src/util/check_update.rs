@@ -54,38 +54,35 @@ impl UpdateCheck {
     pub fn write(&self) -> anyhow::Result<()> {
         let home = home_dir().context("Failed to get home directory")?;
         let path = home.join(".railway/version.json");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-        let pid = std::process::id();
-        let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
         let contents = serde_json::to_string_pretty(&self)?;
-        std::fs::write(&tmp_path, contents)?;
-        super::rename_replacing(&tmp_path, &path)?;
-        Ok(())
+        super::write_atomic(&path, &contents)
+    }
+
+    /// Read-modify-write helper: reads cached state (or default), applies
+    /// the mutation, and writes back.
+    fn mutate(f: impl FnOnce(&mut Self)) {
+        let mut update = Self::read().unwrap_or_default();
+        f(&mut update);
+        try_write(&update);
     }
 
     /// Update the check timestamp, optionally preserving (or clearing) the
     /// cached pending version.  Resets the failure counter.
-    /// Preserves `skipped_version` so a rollback skip survives cache updates.
     pub fn persist_latest(version: Option<&str>) {
-        let mut update = Self::read().unwrap_or_default();
-        update.last_update_check = Some(chrono::Utc::now());
-        // Reset package-manager spawn gate when the target version changes
-        // so the new version gets an immediate attempt.
-        if update.latest_version.as_deref() != version {
-            update.last_package_manager_spawn = None;
-        }
-        update.latest_version = version.map(String::from);
-        update.download_failures = 0;
-        try_write(&update);
+        Self::mutate(|u| {
+            u.last_update_check = Some(chrono::Utc::now());
+            // Reset package-manager spawn gate when the target version changes
+            // so the new version gets an immediate attempt.
+            if u.latest_version.as_deref() != version {
+                u.last_package_manager_spawn = None;
+            }
+            u.latest_version = version.map(String::from);
+            u.download_failures = 0;
+        });
     }
 
     /// Read the cached update state and clear any pending version that is no
-    /// longer ahead of the currently running binary. This keeps commands like
-    /// `autoupdate status` and `autoupdate skip` aligned with actual pending
-    /// state even when they bypass the normal startup cleanup path.
+    /// longer ahead of the currently running binary.
     pub fn read_normalized() -> Self {
         let mut update = Self::read().unwrap_or_default();
         if update.has_stale_latest_version() {
@@ -96,27 +93,24 @@ impl UpdateCheck {
     }
 
     /// Record a version to skip during auto-update (set after rollback).
-    /// Also clears `last_update_check` so the next invocation performs a
-    /// fresh API check and can discover a newer release immediately.
+    /// Clears `last_update_check` so the next invocation re-checks immediately.
     pub fn skip_version(version: &str) {
-        let mut update = Self::read().unwrap_or_default();
-        update.skipped_version = Some(version.to_string());
-        update.last_package_manager_spawn = None;
-        update.last_update_check = None;
-        try_write(&update);
+        Self::mutate(|u| {
+            u.skipped_version = Some(version.to_string());
+            u.last_package_manager_spawn = None;
+            u.last_update_check = None;
+        });
     }
 
     /// Reset cached update state after a successful upgrade or auto-apply.
-    /// Clears both the pending version notification and any rollback skip
-    /// in a single read-write cycle.
     pub fn clear_after_update() {
-        let mut update = Self::read().unwrap_or_default();
-        update.last_update_check = Some(chrono::Utc::now());
-        update.latest_version = None;
-        update.download_failures = 0;
-        update.last_package_manager_spawn = None;
-        update.skipped_version = None;
-        try_write(&update);
+        Self::mutate(|u| {
+            u.last_update_check = Some(chrono::Utc::now());
+            u.latest_version = None;
+            u.download_failures = 0;
+            u.last_package_manager_spawn = None;
+            u.skipped_version = None;
+        });
     }
 
     /// Max consecutive download failures before clearing the cached version.
@@ -124,24 +118,23 @@ impl UpdateCheck {
 
     /// Record a failed download attempt.  After [`Self::MAX_DOWNLOAD_FAILURES`]
     /// consecutive failures the cached pending version is cleared so the next
-    /// invocation re-checks the GitHub API instead of retrying a potentially
-    /// stale version.
+    /// invocation re-checks the GitHub API instead of retrying a stale version.
     pub fn record_download_failure() {
-        let mut update = Self::read().unwrap_or_default();
-        update.download_failures += 1;
-        if update.download_failures >= Self::MAX_DOWNLOAD_FAILURES {
-            update.latest_version = None;
-            update.last_update_check = None;
-            update.download_failures = 0;
-        }
-        try_write(&update);
+        Self::mutate(|u| {
+            u.download_failures += 1;
+            if u.download_failures >= Self::MAX_DOWNLOAD_FAILURES {
+                u.latest_version = None;
+                u.last_update_check = None;
+                u.download_failures = 0;
+            }
+        });
     }
 
     /// Record that a package-manager update was just spawned.
     pub fn record_package_manager_spawn() {
-        let mut update = Self::read().unwrap_or_default();
-        update.last_package_manager_spawn = Some(chrono::Utc::now());
-        try_write(&update);
+        Self::mutate(|u| {
+            u.last_package_manager_spawn = Some(chrono::Utc::now());
+        });
     }
 
     /// Returns `true` if enough time has passed since the last package-manager
@@ -173,8 +166,7 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
     let update = UpdateCheck::read().unwrap_or_default();
 
     if let Some(last_update_check) = update.last_update_check {
-        // Dates are compared in UTC; a check near midnight local time may
-        // occasionally fire twice, but that is harmless.
+        // 12-hour gate: avoid hitting the GitHub API on every invocation.
         if (chrono::Utc::now() - last_update_check) < chrono::Duration::hours(12) && !force {
             return Ok(None);
         }

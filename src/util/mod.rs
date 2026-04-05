@@ -42,6 +42,21 @@ pub fn spawn_detached(
     cmd.spawn().map_err(Into::into)
 }
 
+/// Atomically writes `contents` to `path` via a temp file + rename.
+/// The temp filename includes PID and nanosecond timestamp to avoid
+/// collisions between concurrent processes.
+pub fn write_atomic(path: &std::path::Path, contents: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let pid = std::process::id();
+    let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let tmp_path = path.with_extension(format!("tmp.{pid}-{nanos}.json"));
+    std::fs::write(&tmp_path, contents)?;
+    rename_replacing(&tmp_path, path)?;
+    Ok(())
+}
+
 /// Renames `from` to `to`, overwriting `to` if it already exists.
 /// On Unix `std::fs::rename` already replaces the destination atomically.
 /// On Windows we use `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` for an

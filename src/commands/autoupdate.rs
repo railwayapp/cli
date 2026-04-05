@@ -193,28 +193,21 @@ pub async fn command(args: Args) -> Result<()> {
             let ci = Configs::env_is_ci();
             let auto_update_enabled = !env_disabled && !ci && !prefs.auto_update_disabled;
 
-            if env_disabled {
-                println!(
-                    "Auto-updates: {} (disabled by RAILWAY_NO_AUTO_UPDATE)",
-                    "disabled".yellow()
-                );
-                if should_show_manual_upgrade_hint(method) {
-                    println!("{}", manual_upgrade_hint());
-                }
+            let disabled_reason: Option<String> = if env_disabled {
+                Some("disabled by RAILWAY_NO_AUTO_UPDATE".into())
             } else if ci {
-                println!(
-                    "Auto-updates: {} (disabled in CI environment)",
-                    "disabled".yellow()
-                );
-                if should_show_manual_upgrade_hint(method) {
-                    println!("{}", manual_upgrade_hint());
-                }
+                Some("disabled in CI environment".into())
             } else if prefs.auto_update_disabled {
-                println!(
-                    "Auto-updates: {} (disabled via {})",
-                    "disabled".yellow(),
+                Some(format!(
+                    "disabled via {}",
                     "railway autoupdate disable".bold()
-                );
+                ))
+            } else {
+                None
+            };
+
+            if let Some(reason) = &disabled_reason {
+                println!("Auto-updates: {} ({reason})", "disabled".yellow());
                 if should_show_manual_upgrade_hint(method) {
                     println!("{}", manual_upgrade_hint());
                 }
