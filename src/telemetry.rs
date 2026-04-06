@@ -1,3 +1,5 @@
+use anyhow::Context;
+
 use crate::client::{GQLClient, post_graphql};
 use crate::config::Configs;
 use crate::gql::mutations::{self, cli_event_track};
@@ -25,6 +27,8 @@ fn env_var_is_truthy(name: &str) -> bool {
 pub struct Preferences {
     #[serde(default)]
     pub telemetry_disabled: bool,
+    #[serde(default)]
+    pub auto_update_disabled: bool,
 }
 
 impl Preferences {
@@ -39,17 +43,25 @@ impl Preferences {
             .unwrap_or_default()
     }
 
-    pub fn write(&self) {
-        if let Some(path) = Self::path() {
-            let _ = serde_json::to_string(self)
-                .ok()
-                .map(|contents| std::fs::write(path, contents));
-        }
+    pub fn write(&self) -> anyhow::Result<()> {
+        let path = Self::path().context("Failed to determine home directory")?;
+        let contents = serde_json::to_string(self)?;
+        crate::util::write_atomic(&path, &contents)
     }
 }
 
 pub fn is_telemetry_disabled_by_env() -> bool {
     env_var_is_truthy("DO_NOT_TRACK") || env_var_is_truthy("RAILWAY_NO_TELEMETRY")
+}
+
+pub fn is_auto_update_disabled_by_env() -> bool {
+    env_var_is_truthy("RAILWAY_NO_AUTO_UPDATE")
+}
+
+pub fn is_auto_update_disabled() -> bool {
+    is_auto_update_disabled_by_env()
+        || Preferences::read().auto_update_disabled
+        || crate::config::Configs::env_is_ci()
 }
 
 fn is_telemetry_disabled() -> bool {
