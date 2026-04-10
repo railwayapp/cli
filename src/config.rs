@@ -256,7 +256,7 @@ impl Configs {
     }
 
     pub fn get_closest_linked_project_directory(&self) -> Result<String> {
-        if Self::has_env_var_project_config() || Self::is_using_token_auth() {
+        if Self::has_env_var_project_config() || Self::get_railway_token().is_some() {
             return self.get_current_directory();
         }
 
@@ -301,7 +301,7 @@ impl Configs {
         let path = self.get_closest_linked_project_directory()?;
         let project = self.root_config.projects.get(&path);
 
-        if Self::is_using_token_auth() {
+        if Self::get_railway_token().is_some() {
             let vars = queries::project_token::Variables {};
             let client = GQLClient::new_authorized(self)?;
 
@@ -601,28 +601,6 @@ mod tests {
         let resolved = result.unwrap().expect("should return Some");
         assert_eq!(resolved.project_id, "proj-123");
         assert!(resolved.environment_id.is_none());
-    }
-
-    #[test]
-    fn api_token_auth_uses_current_directory_for_linked_project_resolution() {
-        let result = with_env_vars(
-            &[("RAILWAY_API_TOKEN", Some("api-token"))],
-            || {
-                let configs = Configs::new().unwrap();
-                configs.get_closest_linked_project_directory().unwrap()
-            },
-        );
-
-        let expected = std::env::current_dir().unwrap();
-        assert_eq!(result, expected.to_str().unwrap());
-    }
-
-    #[test]
-    fn api_token_auth_is_supported_as_token_auth() {
-        let result = with_env_vars(&[("RAILWAY_API_TOKEN", Some("api-token"))], || {
-            Configs::is_using_token_auth()
-        });
-        assert!(result);
     }
 
     #[test]
