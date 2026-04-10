@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use rmcp::{ErrorData as McpError, model::*};
 
 use crate::{
-    client::post_graphql,
+    client::{GQLClient, post_graphql},
     controllers::config::environment::fetch_environment_config,
     gql::{mutations, queries},
 };
@@ -142,13 +142,16 @@ impl RailwayMcp {
         let ctx = self
             .resolve_context(params.project_id, params.environment_id)
             .await?;
+        let public_client = GQLClient::new_public().map_err(|e| {
+            McpError::internal_error(format!("Failed to create template client: {e}"), None)
+        })?;
 
         let template_vars = queries::template_detail::Variables {
             code: params.template_code,
         };
 
         let template_resp = post_graphql::<queries::TemplateDetail, _>(
-            &self.client,
+            &public_client,
             self.configs.get_backboard(),
             template_vars,
         )
@@ -188,18 +191,22 @@ impl RailwayMcp {
         &self,
         params: SearchTemplatesParams,
     ) -> Result<CallToolResult, McpError> {
+        let public_client = GQLClient::new_public().map_err(|e| {
+            McpError::internal_error(format!("Failed to create template client: {e}"), None)
+        })?;
         let vars = queries::templates::Variables {
             verified: None,
             recommended: None,
             first: Some(200),
         };
 
-        let resp =
-            post_graphql::<queries::Templates, _>(&self.client, self.configs.get_backboard(), vars)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(format!("Failed to fetch templates: {e}"), None)
-                })?;
+        let resp = post_graphql::<queries::Templates, _>(
+            &public_client,
+            self.configs.get_backboard(),
+            vars,
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("Failed to fetch templates: {e}"), None))?;
 
         let query_lower = params.query.to_lowercase();
         let results: Vec<_> = resp

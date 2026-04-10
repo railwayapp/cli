@@ -20,6 +20,16 @@ use graphql_client::Response as GraphQLResponse;
 pub struct GQLClient;
 
 impl GQLClient {
+    pub fn new_public() -> Result<Client, RailwayError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-source",
+            HeaderValue::from_static(consts::get_user_agent()),
+        );
+
+        Ok(Self::build_client(headers))
+    }
+
     pub fn new_authorized(configs: &Configs) -> Result<Client, RailwayError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &Configs::get_railway_token() {
@@ -36,14 +46,17 @@ impl GQLClient {
             "x-source",
             HeaderValue::from_static(consts::get_user_agent()),
         );
-        let client = Client::builder()
+        Ok(Self::build_client(headers))
+    }
+
+    fn build_client(headers: HeaderMap) -> Client {
+        Client::builder()
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
             .build()
-            .unwrap();
-        Ok(client)
+            .unwrap()
     }
 }
 
@@ -209,5 +222,95 @@ pub async fn post_graphql_skip_none<Q: GraphQLQuery, U: reqwest::IntoUrl>(
         Ok(data)
     } else {
         Err(RailwayError::MissingResponseData)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    use super::*;
+    use crate::gql::queries;
+
+    fn spawn_graphql_server(
+        response_for_request: impl FnOnce(String) -> String + Send + 'static,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let mut content_length = 0usize;
+
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                request.push_str(&line);
+
+                if let Some(value) = line.strip_prefix("Content-Length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+
+                if line == "\r\n" {
+                    break;
+                }
+            }
+
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            request.push_str(std::str::from_utf8(&body).unwrap());
+
+            let response_body = response_for_request(request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn public_client_can_query_templates_without_auth_headers() {
+        let server_url = spawn_graphql_server(|request| {
+            assert!(
+                !request.to_ascii_lowercase().contains("authorization:"),
+                "public template lookup should not send auth headers"
+            );
+
+            serde_json::json!({
+                "data": {
+                    "template": {
+                        "id": "template-id",
+                        "name": "PostgreSQL",
+                        "serializedConfig": null
+                    }
+                }
+            })
+            .to_string()
+        });
+
+        let client = GQLClient::new_public().unwrap();
+        let response = post_graphql::<queries::TemplateDetail, _>(
+            &client,
+            server_url,
+            queries::template_detail::Variables {
+                code: "postgres".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.template.id, "template-id");
+        assert_eq!(response.template.name, "PostgreSQL");
+        assert_eq!(response.template.serialized_config, None);
     }
 }
