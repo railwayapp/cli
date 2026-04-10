@@ -10,7 +10,7 @@ homepage = "https://github.com/railwayapp/cli"
 repository = "https://github.com/railwayapp/cli"
 rust-version = "1.85.0"
 default-run = "railway"
-include = ["src/**/*", "LICENSE", "README.md"]
+include = ["src/**/*", "build.rs", "LICENSE", "README.md"]
 
 [[bin]]
 name = "railway"
