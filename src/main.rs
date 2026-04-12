@@ -306,10 +306,17 @@ async fn main() -> Result<()> {
         "check_updates",
     ];
 
-    let needs_refresh = cli
-        .subcommand_name()
-        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd))
-        .unwrap_or(false);
+    // Check for -p / --prompt flag before subcommand dispatch
+    let is_prompt = cli.contains_id("prompt")
+        && cli.value_source("prompt") == Some(clap::parser::ValueSource::CommandLine);
+
+    let needs_refresh = if is_prompt {
+        true
+    } else {
+        cli.subcommand_name()
+            .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd))
+            .unwrap_or(false)
+    };
 
     if needs_refresh {
         if let Ok(mut configs) = Configs::new() {
@@ -319,7 +326,18 @@ async fn main() -> Result<()> {
         }
     }
 
-    let exec_result = exec_cli(cli).await;
+    let exec_result = if is_prompt {
+        let message = cli.get_one::<String>("prompt").cloned().filter(|s| !s.is_empty());
+        commands::prompt::command(commands::prompt::Args {
+            message,
+            json: false,
+            thread_id: None,
+            service: None,
+            environment: None,
+        }).await
+    } else {
+        exec_cli(cli).await
+    };
 
     // Send telemetry for silent auto-update apply (after auth is available).
     if let Some(ref version) = auto_applied_version {

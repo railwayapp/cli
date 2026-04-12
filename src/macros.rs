@@ -41,6 +41,15 @@ macro_rules! commands {
                         cmd = cmd.subcommand(sub);
                     }
                 )*
+                cmd = cmd.arg(
+                    clap::Arg::new("prompt")
+                        .short('p')
+                        .long("prompt")
+                        .help("Send a natural language prompt to Railway AI")
+                        .value_name("MESSAGE")
+                        .num_args(0..=1)
+                        .default_missing_value("")
+                );
                 cmd
             }
 
