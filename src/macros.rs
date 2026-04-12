@@ -49,6 +49,12 @@ macro_rules! commands {
                         .value_name("MESSAGE")
                         .num_args(0..=1)
                         .default_missing_value("")
+                ).arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .help("Output prompt response as JSON (requires -p)")
+                        .requires("prompt")
+                        .action(clap::ArgAction::SetTrue)
                 );
                 cmd
             }

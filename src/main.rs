@@ -328,13 +328,31 @@ async fn main() -> Result<()> {
 
     let exec_result = if is_prompt {
         let message = cli.get_one::<String>("prompt").cloned().filter(|s| !s.is_empty());
-        commands::prompt::command(commands::prompt::Args {
+        let json = cli.get_flag("json");
+        let start = std::time::Instant::now();
+        let result = commands::prompt::command(commands::prompt::Args {
             message,
-            json: false,
+            json,
             thread_id: None,
             service: None,
             environment: None,
-        }).await
+        }).await;
+        let duration = start.elapsed();
+        telemetry::send(telemetry::CliTrackEvent {
+            command: "prompt".to_string(),
+            sub_command: None,
+            success: result.is_ok(),
+            error_message: result.as_ref().err().map(|e| {
+                let msg = format!("{e}");
+                if msg.len() > 256 { msg[..256].to_string() } else { msg }
+            }),
+            duration_ms: duration.as_millis() as u64,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            is_ci: Configs::env_is_ci(),
+        }).await;
+        result
     } else {
         exec_cli(cli).await
     };
