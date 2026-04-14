@@ -344,14 +344,19 @@ async fn main() -> Result<()> {
             success: result.is_ok(),
             error_message: result.as_ref().err().map(|e| {
                 let msg = format!("{e}");
-                if msg.len() > 256 { msg[..256].to_string() } else { msg }
+                if msg.len() > 256 {
+                    msg[..256].to_string()
+                } else {
+                    msg
+                }
             }),
             duration_ms: duration.as_millis() as u64,
             cli_version: env!("CARGO_PKG_VERSION"),
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             is_ci: Configs::env_is_ci(),
-        }).await;
+        })
+        .await;
         result
     } else {
         exec_cli(cli).await
