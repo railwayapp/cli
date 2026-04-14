@@ -265,6 +265,13 @@ fn handle_event_human(
             }
             eprintln!("{}: {}", "Error".red().bold(), message);
         }
+        ChatEvent::Aborted { reason } => {
+            if let Some(s) = spinner.take() {
+                s.finish_and_clear();
+            }
+            let msg = reason.unwrap_or_else(|| "Request was aborted".to_string());
+            eprintln!("{}: {}", "Aborted".yellow().bold(), msg);
+        }
         ChatEvent::WorkflowCompleted { .. } => {
             println!();
         }
@@ -302,6 +309,10 @@ fn accumulate_json_event(event: ChatEvent, response: &mut JsonResponse) {
         }
         ChatEvent::Error { message } => {
             response.response.push_str(&format!("\nError: {message}"));
+        }
+        ChatEvent::Aborted { reason } => {
+            let msg = reason.unwrap_or_else(|| "Request was aborted".to_string());
+            response.response.push_str(&format!("\nAborted: {msg}"));
         }
         ChatEvent::WorkflowCompleted { .. } => {}
     }

@@ -56,6 +56,10 @@ pub enum ChatEvent {
     Error {
         message: String,
     },
+    Aborted {
+        #[serde(default)]
+        reason: Option<String>,
+    },
     WorkflowCompleted {
         #[serde(rename = "completedAt")]
         completed_at: String,
@@ -66,11 +70,14 @@ pub fn get_chat_url(configs: &Configs) -> String {
     format!("https://backboard.{}/api/v1/chat", configs.get_host())
 }
 
+/// Build an HTTP client for the chat API.
+///
+/// The chat endpoint requires user OAuth tokens — project access tokens
+/// (`RAILWAY_TOKEN`) are not supported. We skip project tokens and only
+/// use the user's OAuth bearer token.
 pub fn build_chat_client(configs: &Configs) -> Result<Client, RailwayError> {
     let mut headers = HeaderMap::new();
-    if let Some(token) = &Configs::get_railway_token() {
-        headers.insert("project-access-token", HeaderValue::from_str(token)?);
-    } else if let Some(token) = configs.get_railway_auth_token() {
+    if let Some(token) = configs.get_railway_auth_token() {
         headers.insert(
             "authorization",
             HeaderValue::from_str(&format!("Bearer {token}"))?,
@@ -156,25 +163,37 @@ pub async fn stream_chat(
 
 fn parse_sse_event(event_type: &str, data: &str) -> Option<ChatEvent> {
     match event_type {
-        "metadata" => serde_json::from_str(data).ok().map(|v: serde_json::Value| {
-            ChatEvent::Metadata {
+        "metadata" => serde_json::from_str(data)
+            .ok()
+            .map(|v: serde_json::Value| ChatEvent::Metadata {
                 thread_id: v["threadId"].as_str().unwrap_or_default().to_string(),
                 stream_id: v["streamId"].as_str().unwrap_or_default().to_string(),
-            }
-        }),
-        "chunk" => serde_json::from_str(data).ok().map(|v: serde_json::Value| {
-            ChatEvent::Chunk {
+            }),
+        "chunk" => serde_json::from_str(data)
+            .ok()
+            .map(|v: serde_json::Value| ChatEvent::Chunk {
                 text: v["text"].as_str().unwrap_or_default().to_string(),
-            }
-        }),
+            }),
         "tool_call_ready" => serde_json::from_str(data).ok(),
         "tool_execution_complete" => serde_json::from_str(data).ok(),
-        "error" => serde_json::from_str(data).ok().map(|v: serde_json::Value| {
-            ChatEvent::Error {
-                message: v["message"].as_str().unwrap_or("Unknown error").to_string(),
-            }
-        }),
+        "error" => serde_json::from_str(data)
+            .ok()
+            .map(|v: serde_json::Value| ChatEvent::Error {
+                message: v["error"]
+                    .as_str()
+                    .or_else(|| v["message"].as_str())
+                    .unwrap_or("Unknown error")
+                    .to_string(),
+            }),
+        "aborted" => serde_json::from_str(data)
+            .ok()
+            .map(|v: serde_json::Value| ChatEvent::Aborted {
+                reason: v["reason"].as_str().map(|s| s.to_string()),
+            }),
         "workflow_completed" => serde_json::from_str(data).ok(),
-        _ => None, // Ignore unknown event types
+        // Ignore events we don't need to surface: started, tool_call_streaming_start,
+        // tool_call_delta, tool_execution_start, tool_output_delta, step_finish,
+        // completed, subagent_start, subagent_complete
+        _ => None,
     }
 }
