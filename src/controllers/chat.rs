@@ -8,10 +8,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::auth_failure_error,
-    commands::Environment,
-    config::Configs,
-    consts,
+    client::auth_failure_error, commands::Environment, config::Configs, consts,
     errors::RailwayError,
 };
 
@@ -163,12 +160,14 @@ pub async fn stream_chat(
 
 fn parse_sse_event(event_type: &str, data: &str) -> Option<ChatEvent> {
     match event_type {
-        "metadata" => serde_json::from_str(data)
-            .ok()
-            .map(|v: serde_json::Value| ChatEvent::Metadata {
-                thread_id: v["threadId"].as_str().unwrap_or_default().to_string(),
-                stream_id: v["streamId"].as_str().unwrap_or_default().to_string(),
-            }),
+        "metadata" => {
+            serde_json::from_str(data)
+                .ok()
+                .map(|v: serde_json::Value| ChatEvent::Metadata {
+                    thread_id: v["threadId"].as_str().unwrap_or_default().to_string(),
+                    stream_id: v["streamId"].as_str().unwrap_or_default().to_string(),
+                })
+        }
         "chunk" => serde_json::from_str(data)
             .ok()
             .map(|v: serde_json::Value| ChatEvent::Chunk {
@@ -185,11 +184,13 @@ fn parse_sse_event(event_type: &str, data: &str) -> Option<ChatEvent> {
                     .unwrap_or("Unknown error")
                     .to_string(),
             }),
-        "aborted" => serde_json::from_str(data)
-            .ok()
-            .map(|v: serde_json::Value| ChatEvent::Aborted {
-                reason: v["reason"].as_str().map(|s| s.to_string()),
-            }),
+        "aborted" => {
+            serde_json::from_str(data)
+                .ok()
+                .map(|v: serde_json::Value| ChatEvent::Aborted {
+                    reason: v["reason"].as_str().map(|s| s.to_string()),
+                })
+        }
         "workflow_completed" => serde_json::from_str(data).ok(),
         // Ignore events we don't need to surface: started, tool_call_streaming_start,
         // tool_call_delta, tool_execution_start, tool_output_delta, step_finish,

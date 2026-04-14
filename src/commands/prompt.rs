@@ -56,12 +56,7 @@ pub async fn command(args: Args) -> Result<()> {
         None => linked_project.environment_id()?.to_string(),
     };
 
-    let service_id = get_or_prompt_service(
-        Some(linked_project),
-        project,
-        args.service,
-    )
-    .await?;
+    let service_id = get_or_prompt_service(Some(linked_project), project, args.service).await?;
 
     let chat_client = build_chat_client(&configs)?;
     let url = get_chat_url(&configs);
@@ -140,12 +135,11 @@ async fn run_repl(
     json: bool,
     is_tty: bool,
 ) -> Result<()> {
-    interact_or!("Interactive mode requires a terminal. Use `railway -p \"your message\"` for non-interactive use.");
-
-    println!(
-        "{}",
-        "Railway AI (type 'exit' or Ctrl+C to quit)".dimmed()
+    interact_or!(
+        "Interactive mode requires a terminal. Use `railway -p \"your message\"` for non-interactive use."
     );
+
+    println!("{}", "Railway AI (type 'exit' or Ctrl+C to quit)".dimmed());
     println!();
 
     let mut thread_id = initial_thread_id;
@@ -160,7 +154,7 @@ async fn run_repl(
                 if msg.trim().eq_ignore_ascii_case("exit")
                     || msg.trim().eq_ignore_ascii_case("quit") =>
             {
-                break
+                break;
             }
             Ok(msg) if msg.trim().is_empty() => continue,
             Ok(msg) => msg,
