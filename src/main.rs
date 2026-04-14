@@ -327,7 +327,10 @@ async fn main() -> Result<()> {
     }
 
     let exec_result = if is_prompt {
-        let message = cli.get_one::<String>("prompt").cloned().filter(|s| !s.is_empty());
+        let message = cli
+            .get_one::<String>("prompt")
+            .cloned()
+            .filter(|s| !s.is_empty());
         let json = cli.get_flag("json");
         let start = std::time::Instant::now();
         let result = commands::prompt::command(commands::prompt::Args {
@@ -336,7 +339,8 @@ async fn main() -> Result<()> {
             thread_id: None,
             service: None,
             environment: None,
-        }).await;
+        })
+        .await;
         let duration = start.elapsed();
         telemetry::send(telemetry::CliTrackEvent {
             command: "prompt".to_string(),
