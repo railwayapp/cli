@@ -1,22 +1,21 @@
-use crate::{
-    consts::NON_INTERACTIVE_FAILURE, interact_or, util::prompt::prompt_confirm_with_default,
-};
-
 use super::*;
 
-/// Open Railway Documentation in default browser
+const DOCS_URL: &str = "https://docs.railway.com";
+const LLMS_TXT_URL: &str = "https://docs.railway.com/llms.txt";
+const LLMS_FULL_URL: &str = "https://docs.railway.com/llms-full.txt";
+
+/// Open Railway Documentation in default browser, or print doc URLs in non-interactive mode
 #[derive(Parser)]
 pub struct Args {}
 
 pub async fn command(_args: Args) -> Result<()> {
-    interact_or!(NON_INTERACTIVE_FAILURE);
-
-    let confirm = prompt_confirm_with_default("Open the browser?", true)?;
-
-    if !confirm {
+    if !crate::macros::is_stdout_terminal() {
+        println!("{DOCS_URL}");
+        println!("{LLMS_TXT_URL}");
+        println!("{LLMS_FULL_URL}");
         return Ok(());
     }
 
-    ::open::that("https://docs.railway.com")?;
+    ::open::that(DOCS_URL)?;
     Ok(())
 }
