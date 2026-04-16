@@ -9,6 +9,7 @@ use crate::{
     },
     errors::RailwayError,
     util::prompt::{PromptService, prompt_options},
+    workspace::{Project, workspaces},
 };
 
 use super::*;
@@ -25,6 +26,10 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
+    /// List services in the current project
+    #[clap(alias = "ls")]
+    List(ListArgs),
+
     /// Link a service to the current project
     Link(LinkArgs),
 
@@ -42,6 +47,21 @@ enum Commands {
 
     /// Scale a service across regions
     Scale(crate::commands::scale::Args),
+}
+
+#[derive(Parser)]
+struct ListArgs {
+    /// Project name or ID to list services for (defaults to linked project)
+    #[clap(short, long)]
+    project: Option<String>,
+
+    /// Environment to list services from (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
 }
 
 #[derive(Parser)]
@@ -92,6 +112,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Commands::List(list_args)) => list_services(list_args).await,
         Some(Commands::Link(link_args)) => link_command(link_args).await,
         Some(Commands::Status(status_args)) => status_command(status_args).await,
         Some(Commands::Logs(logs_args)) => crate::commands::logs::command(logs_args).await,
@@ -104,6 +125,68 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Commands::Scale(scale_args)) => crate::commands::scale::command(scale_args).await,
         None => unreachable!(),
     }
+}
+
+async fn list_services(args: ListArgs) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let linked_project = configs.get_linked_project().await?;
+
+    let project_id = if let Some(project_arg) = args.project {
+        let all_workspaces = workspaces().await?;
+        let all_projects: Vec<Project> = all_workspaces
+            .iter()
+            .flat_map(|w| {
+                w.projects()
+                    .into_iter()
+                    .filter(|p| p.deleted_at().is_none())
+            })
+            .collect();
+
+        if all_projects.is_empty() {
+            bail!(RailwayError::NoProjects);
+        }
+        let found = all_projects.iter().find(|p| {
+            p.id().to_lowercase() == project_arg.to_lowercase()
+                || p.name().to_lowercase() == project_arg.to_lowercase()
+        });
+        match found {
+            Some(p) => p.id().to_string(),
+            None => bail!(RailwayError::ProjectNotFound),
+        }
+    } else {
+        linked_project.project.clone()
+    };
+
+    let project = get_project(&client, &configs, project_id).await?;
+    let env = match args.environment {
+        Some(s) => s,
+        None => linked_project.environment_id()?.to_string(),
+    };
+    let result = get_matched_environment(&project, env)?;
+    let env_id = result.id;
+
+    let service_ids_in_env = get_service_ids_in_env(&project, &env_id);
+    let services: Vec<_> = project
+        .services
+        .edges
+        .iter()
+        .filter(|a| service_ids_in_env.contains(&a.node.id))
+        .map(|e| &e.node)
+        .collect();
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&services)?);
+    } else {
+        if services.is_empty() {
+            println!("No services found");
+        }
+        for service in services {
+            println!("{} ({})", service.name.bold(), service.id.dimmed())
+        }
+    }
+
+    Ok(())
 }
 
 async fn link_command(args: LinkArgs) -> Result<()> {
