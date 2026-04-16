@@ -48,5 +48,5 @@ pub mod variable;
 pub mod volume;
 pub mod whoami;
 
+pub mod agent;
 pub mod check_updates;
-pub mod prompt;

@@ -1,7 +1,21 @@
 use std::io::Write;
 
 use is_terminal::IsTerminal;
+use rand::Rng;
 use serde::Serialize;
+
+const THINKING_MESSAGES: &[&str] = &[
+    "Chugging along...",
+    "Full steam ahead...",
+    "Leaving the station...",
+    "Building up steam...",
+    "Coupling the cars...",
+    "Switching tracks...",
+    "Rolling down the line...",
+    "Stoking the engine...",
+    "Pulling into the yard...",
+    "All aboard...",
+];
 
 use crate::{
     controllers::{
@@ -16,12 +30,35 @@ use crate::{
 
 use super::*;
 
+/// Interact with the Railway Agent
+#[derive(Parser)]
+#[clap(
+    about = "Interact with the Railway Agent",
+    after_help = "Examples:\n\n\
+      railway agent                                             # Interactive mode\n\
+      railway agent -p \"what's the status of my deployment?\"    # Single prompt\n\
+      railway agent -p \"why is my service crashing?\" --json     # JSON output"
+)]
 pub struct Args {
-    pub message: Option<String>,
-    pub json: bool,
-    pub thread_id: Option<String>,
-    pub service: Option<String>,
-    pub environment: Option<String>,
+    /// Send a single prompt (omit for interactive mode)
+    #[clap(short, long, value_name = "MESSAGE")]
+    prompt: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+
+    /// Continue an existing chat thread
+    #[clap(long, value_name = "ID")]
+    thread_id: Option<String>,
+
+    /// Service to scope the chat to (name or ID)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment to use (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
 }
 
 #[derive(Default, Serialize)]
@@ -62,7 +99,7 @@ pub async fn command(args: Args) -> Result<()> {
     let url = get_chat_url(&configs);
     let is_tty = std::io::stdout().is_terminal();
 
-    if let Some(message) = args.message {
+    if let Some(message) = args.prompt {
         run_single_shot(
             &chat_client,
             &url,
@@ -115,7 +152,9 @@ async fn run_single_shot(
 
         // Show a thinking spinner while waiting for the first event
         if is_tty {
-            spinner = Some(create_spinner("Thinking...".dimmed().to_string()));
+            let msg = THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
+            println!();
+            spinner = Some(create_spinner(msg.dimmed().to_string()));
         }
 
         stream_chat(client, url, request, |event| {
@@ -139,7 +178,7 @@ async fn run_repl(
         "Interactive mode requires a terminal. Use `railway -p \"your message\"` for non-interactive use."
     );
 
-    println!("{}", "Railway AI (type 'exit' or Ctrl+C to quit)".dimmed());
+    println!("{}", "Railway Agent (type 'exit' or Ctrl+C to quit)".dimmed());
     println!();
 
     let mut thread_id = initial_thread_id;
@@ -170,8 +209,6 @@ async fn run_repl(
             service_id: service_id.map(|s| s.to_string()),
         };
 
-        println!();
-
         if json {
             let mut response = JsonResponse::default();
 
@@ -192,7 +229,9 @@ async fn run_repl(
             let mut has_printed_text = false;
 
             if is_tty {
-                spinner = Some(create_spinner("Thinking...".dimmed().to_string()));
+                let msg = THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
+            println!();
+            spinner = Some(create_spinner(msg.dimmed().to_string()));
             }
 
             stream_chat(client, url, &request, |event| {
@@ -226,7 +265,7 @@ fn handle_event_human(
             }
             if !*has_printed_text {
                 println!();
-                print!("{} ", "Railway AI:".purple().bold());
+                print!("{} ", "Railway Agent:".purple().bold());
                 *has_printed_text = true;
             }
             print!("{}", text);
@@ -234,21 +273,40 @@ fn handle_event_human(
         }
         ChatEvent::ToolCallReady { tool_name, .. } => {
             if is_tty {
-                // Clear any existing spinner before starting a new one
                 if let Some(s) = spinner.take() {
                     s.finish_and_clear();
                 }
-                *spinner = Some(create_spinner(
-                    format!("Running: {tool_name}").dimmed().to_string(),
-                ));
+                *has_printed_text = false;
+                println!();
+                *spinner = Some(create_spinner(format!(
+                    "{} {}",
+                    "╰─".dimmed(),
+                    format!(" Agent Tool: {tool_name} ")
+                        .truecolor(255, 255, 255)
+                        .on_truecolor(68, 68, 68)
+                )));
             }
         }
         ChatEvent::ToolExecutionComplete { is_error, .. } => {
             if let Some(s) = spinner {
                 if is_error {
-                    fail_spinner(s, "Tool failed".to_string());
+                    fail_spinner(
+                        s,
+                        format!(
+                            "{}",
+                            " Tool failed "
+                                .truecolor(255, 255, 255)
+                                .on_truecolor(68, 68, 68)
+                        ),
+                    );
                 } else {
-                    success_spinner(s, "Done".dimmed().to_string());
+                    success_spinner(
+                        s,
+                        format!(
+                            "{}",
+                            " Done ".truecolor(255, 255, 255).on_truecolor(68, 68, 68)
+                        ),
+                    );
                 }
             }
             *spinner = None;

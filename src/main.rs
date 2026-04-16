@@ -29,6 +29,7 @@ mod telemetry;
 // Specify the modules you want to include in the commands_enum! macro
 commands!(
     add,
+    agent,
     autoupdate,
     bucket,
     completion,
@@ -306,17 +307,10 @@ async fn main() -> Result<()> {
         "check_updates",
     ];
 
-    // Check for -p / --prompt flag before subcommand dispatch
-    let is_prompt = cli.contains_id("prompt")
-        && cli.value_source("prompt") == Some(clap::parser::ValueSource::CommandLine);
-
-    let needs_refresh = if is_prompt {
-        true
-    } else {
-        cli.subcommand_name()
-            .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd))
-            .unwrap_or(false)
-    };
+    let needs_refresh = cli
+        .subcommand_name()
+        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd))
+        .unwrap_or(false);
 
     if needs_refresh {
         if let Ok(mut configs) = Configs::new() {
@@ -326,45 +320,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let exec_result = if is_prompt {
-        let message = cli
-            .get_one::<String>("prompt")
-            .cloned()
-            .filter(|s| !s.is_empty());
-        let json = cli.get_flag("json");
-        let start = std::time::Instant::now();
-        let result = commands::prompt::command(commands::prompt::Args {
-            message,
-            json,
-            thread_id: None,
-            service: None,
-            environment: None,
-        })
-        .await;
-        let duration = start.elapsed();
-        telemetry::send(telemetry::CliTrackEvent {
-            command: "prompt".to_string(),
-            sub_command: None,
-            success: result.is_ok(),
-            error_message: result.as_ref().err().map(|e| {
-                let msg = format!("{e}");
-                if msg.len() > 256 {
-                    msg[..256].to_string()
-                } else {
-                    msg
-                }
-            }),
-            duration_ms: duration.as_millis() as u64,
-            cli_version: env!("CARGO_PKG_VERSION"),
-            os: std::env::consts::OS,
-            arch: std::env::consts::ARCH,
-            is_ci: Configs::env_is_ci(),
-        })
-        .await;
-        result
-    } else {
-        exec_cli(cli).await
-    };
+    let exec_result = exec_cli(cli).await;
 
     // Send telemetry for silent auto-update apply (after auth is available).
     if let Some(ref version) = auto_applied_version {
