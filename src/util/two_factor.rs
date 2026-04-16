@@ -9,7 +9,9 @@ use crate::{
 };
 
 /// Validates 2FA if enabled for the current user.
-/// Skips check entirely for token-based auth (API tokens bypass 2FA on the backend).
+/// Skips check for token-based auth (API tokens bypass 2FA on the backend) and for
+/// OAuth tokens (backboard exempts OAuth from 2FA, and the twoFactorInfoValidate
+/// mutation requires a browser session that OAuth does not have).
 /// For session-based auth, prompts for 2FA code if enabled, or uses provided code.
 pub async fn validate_two_factor_if_enabled(
     client: &reqwest::Client,
@@ -17,8 +19,9 @@ pub async fn validate_two_factor_if_enabled(
     is_terminal: bool,
     two_factor_code: Option<String>,
 ) -> Result<()> {
-    // Skip 2FA check for token-based auth (API tokens bypass 2FA on the backend)
-    if Configs::is_using_token_auth() {
+    // Skip 2FA check for token-based auth and OAuth tokens — backboard does not
+    // enforce 2FA for either, and the validate mutation is unreachable without a session.
+    if Configs::is_using_token_auth() || configs.has_oauth_token() {
         return Ok(());
     }
 
