@@ -178,7 +178,10 @@ async fn run_repl(
         "Interactive mode requires a terminal. Use `railway -p \"your message\"` for non-interactive use."
     );
 
-    println!("{}", "Railway Agent (type 'exit' or Ctrl+C to quit)".dimmed());
+    println!(
+        "{}",
+        "Railway Agent (type 'exit' or Ctrl+C to quit)".dimmed()
+    );
     println!();
 
     let mut thread_id = initial_thread_id;
@@ -229,9 +232,10 @@ async fn run_repl(
             let mut has_printed_text = false;
 
             if is_tty {
-                let msg = THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
-            println!();
-            spinner = Some(create_spinner(msg.dimmed().to_string()));
+                let msg =
+                    THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
+                println!();
+                spinner = Some(create_spinner(msg.dimmed().to_string()));
             }
 
             stream_chat(client, url, &request, |event| {
