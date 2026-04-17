@@ -64,7 +64,7 @@ pub enum ChatEvent {
 }
 
 pub fn get_chat_url(configs: &Configs) -> String {
-    format!("https://backboard.{}/api/v1/chat", configs.get_host())
+    format!("https://backboard.{}/api/v1/agent", configs.get_host())
 }
 
 /// Build an HTTP client for the chat API.

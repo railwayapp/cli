@@ -102,6 +102,7 @@ ratatui = "0.29"
 scopeguard = "1.2"
 schemars = "0.8"
 rmcp = { version = "0.16", features = ["transport-io"] }
+termimad = "0.28"
 
 [profile.release]
 lto = "fat"
