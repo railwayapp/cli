@@ -316,7 +316,11 @@ impl HumanRenderer {
             ChatEvent::ToolExecutionComplete { is_error, .. } => {
                 self.clear_spinner();
                 if self.is_tty {
-                    let label = if is_error { " ✗ Tool failed " } else { " ✓ Done " };
+                    let label = if is_error {
+                        " ✗ Tool failed "
+                    } else {
+                        " ✓ Done "
+                    };
                     println!("{}", tool_badge(label));
                 }
             }
