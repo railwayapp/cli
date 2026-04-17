@@ -54,6 +54,7 @@ commands!(
     run(local),
     service,
     shell,
+    skills,
     ssh,
     starship,
     status,

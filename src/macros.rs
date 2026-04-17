@@ -9,7 +9,10 @@ macro_rules! commands {
                     .about("Railway CLI")
                     .author(clap::crate_authors!())
                     .propagate_version(true)
-                    .about(clap::crate_description!())
+                    .about(concat!(
+                        clap::crate_description!(),
+                        "\n\nTip: Using an AI coding agent? Run `railway skills install` to enhance it with Railway expertise — deploying, debugging, managing services."
+                    ))
                     .long_about(None)
                     .version(clap::crate_version!());
                 $(

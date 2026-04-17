@@ -19,6 +19,26 @@ The Railway CLI allows you to:
 
 And more.
 
+## Agent Skills
+
+Install [Railway agent skills](https://agentskills.io) for AI coding tools (Claude Code, Cursor, Codex, OpenCode, and more):
+
+```bash
+railway skills
+```
+
+Use `--agent` to target a specific tool:
+
+```bash
+railway skills --agent claude-code
+```
+
+You can also install via [skills.sh](https://skills.sh/railwayapp/railway-skills/use-railway):
+
+```bash
+npx skills add https://github.com/railwayapp/railway-skills --skill use-railway
+```
+
 ## Documentation
 
 [View the CLI guide](https://docs.railway.com/guides/cli)
