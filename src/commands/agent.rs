@@ -153,7 +153,6 @@ async fn run_single_shot(
         // Show a thinking spinner while waiting for the first event
         if is_tty {
             let msg = THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
-            println!();
             spinner = Some(create_spinner(msg.dimmed().to_string()));
         }
 
@@ -234,7 +233,6 @@ async fn run_repl(
             if is_tty {
                 let msg =
                     THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
-                println!();
                 spinner = Some(create_spinner(msg.dimmed().to_string()));
             }
 
@@ -264,11 +262,11 @@ fn handle_event_human(
 ) {
     match event {
         ChatEvent::Chunk { text } => {
-            if let Some(s) = spinner.take() {
-                s.finish_and_clear();
-            }
+            let cleared_spinner = spinner.take().map(|s| s.finish_and_clear()).is_some();
             if !*has_printed_text {
-                println!();
+                if !cleared_spinner {
+                    println!();
+                }
                 print!("{} ", "Railway Agent:".purple().bold());
                 *has_printed_text = true;
             }
@@ -277,11 +275,11 @@ fn handle_event_human(
         }
         ChatEvent::ToolCallReady { tool_name, .. } => {
             if is_tty {
-                if let Some(s) = spinner.take() {
-                    s.finish_and_clear();
-                }
+                let cleared_spinner = spinner.take().map(|s| s.finish_and_clear()).is_some();
                 *has_printed_text = false;
-                println!();
+                if !cleared_spinner {
+                    println!();
+                }
                 *spinner = Some(create_spinner(format!(
                     "{} {}",
                     "╰─".dimmed(),
