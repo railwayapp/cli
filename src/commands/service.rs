@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::{
     controllers::{
-        environment::get_matched_environment,
+        environment::{get_matched_environment, get_or_prompt_environment},
         project::{ensure_project_and_environment_exist, get_project, get_service_ids_in_env},
     },
     errors::RailwayError,
@@ -132,6 +132,8 @@ async fn list_services(args: ListArgs) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
 
+    let project_explicitly_specified = args.project.is_some();
+
     let project_id = if let Some(project_arg) = args.project {
         let all_workspaces = workspaces().await?;
         let all_projects: Vec<Project> = all_workspaces
@@ -146,25 +148,28 @@ async fn list_services(args: ListArgs) -> Result<()> {
         if all_projects.is_empty() {
             bail!(RailwayError::NoProjects);
         }
-        let found = all_projects.iter().find(|p| {
-            p.id().to_lowercase() == project_arg.to_lowercase()
-                || p.name().to_lowercase() == project_arg.to_lowercase()
-        });
-        match found {
-            Some(p) => p.id().to_string(),
-            None => bail!(RailwayError::ProjectNotFound),
-        }
+        let project = all_projects
+            .iter()
+            .find(|p| {
+                p.id().to_lowercase() == project_arg.to_lowercase()
+                    || p.name().to_lowercase() == project_arg.to_lowercase()
+            })
+            .ok_or_else(|| RailwayError::ProjectNotFound)?;
+        project.id().to_string()
     } else {
         linked_project.project.clone()
     };
 
-    let project = get_project(&client, &configs, project_id).await?;
-    let env = match args.environment {
-        Some(s) => s,
-        None => linked_project.environment_id()?.to_string(),
+    let project = get_project(&client, &configs, project_id.clone()).await?;
+    let linked = if project_explicitly_specified {
+        None
+    } else {
+        Some(linked_project)
     };
-    let result = get_matched_environment(&project, env)?;
-    let env_id = result.id;
+
+    let env_id = get_or_prompt_environment(linked, &project, args.environment)
+        .await?
+        .ok_or(RailwayError::NoEnvironments)?;
 
     let service_ids_in_env = get_service_ids_in_env(&project, &env_id);
     let services: Vec<_> = project
