@@ -3,9 +3,9 @@ use crate::{
     commands::queries::{RailwayProject, project::ProjectProjectEnvironmentsEdgesNode},
     errors::RailwayError,
     queries::project::ProjectProject,
-    util::prompt::{PromptEnvironment, prompt_select},
+    util::prompt::{PromptEnvironment, prompt_select_with_cancel},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use is_terminal::IsTerminal;
 
 pub fn get_matched_environment(
@@ -26,6 +26,7 @@ pub async fn get_or_prompt_environment(
     linked_project: Option<LinkedProject>,
     project: &ProjectProject,
     environment_arg: Option<String>,
+    json: bool,
 ) -> Result<Option<String>> {
     let environments = project.environments.edges.iter().collect::<Vec<_>>();
 
@@ -47,16 +48,20 @@ pub async fn get_or_prompt_environment(
         if environments.is_empty() {
             // If there are no environments, backboard will generate one for us
             None
+        } else if environments.len() == 1 {
+            // If there is just one, use that
+            Some(environments[0].node.id.clone())
         } else {
             // If there are multiple environments, prompt the user to select one
-            if std::io::stdout().is_terminal() {
+            if std::io::stdout().is_terminal() && !json {
                 let prompt_environments: Vec<_> = environments
                     .iter()
                     .map(|s| PromptEnvironment(&s.node))
                     .collect();
-                let service = prompt_select("Select an environment", prompt_environments)
-                    .context("Please specify an environment via the `--environment` flag.")?;
-                Some(service.0.id.clone())
+                match prompt_select_with_cancel("Select an environment", prompt_environments)? {
+                    Some(env) => Some(env.0.id.clone()),
+                    None => bail!("No environment selected. Use --environment to specify one."),
+                }
             } else {
                 bail!(
                     "Multiple environments found. Please specify an environment via the `--environment` flag."

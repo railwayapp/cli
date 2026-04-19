@@ -167,7 +167,7 @@ async fn list_services(args: ListArgs) -> Result<()> {
         Some(linked_project)
     };
 
-    let env_id = get_or_prompt_environment(linked, &project, args.environment)
+    let env_id = get_or_prompt_environment(linked, &project, args.environment, args.json)
         .await?
         .ok_or(RailwayError::NoEnvironments)?;
 
