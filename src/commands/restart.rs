@@ -5,6 +5,7 @@ use is_terminal::IsTerminal;
 use crate::{
     controllers::project::{
         ensure_project_and_environment_exist, find_service_instance, get_project,
+        select_service_fallback,
     },
     errors::RailwayError,
     subscription::subscribe_graphql,
@@ -41,25 +42,22 @@ pub async fn command(args: Args) -> Result<()> {
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
     let is_terminal = std::io::stdout().is_terminal();
 
-    let service_id = args
-        .service
-        .or_else(|| linked_project.service.clone())
-        .ok_or_else(|| {
-            anyhow!(
-                "No service found. Please link one via `railway link` or specify one via the `--service` flag."
-            )
-        })?;
-    let service = project
-        .services
-        .edges
-        .iter()
-        .find(|s| {
-            s.node.id == service_id || s.node.name.to_lowercase() == service_id.to_lowercase()
-        })
-        .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
+    let service_node = match args.service.or_else(|| linked_project.service.clone()) {
+        Some(service_input) => project
+            .services
+            .edges
+            .iter()
+            .find(|s| {
+                s.node.id == service_input
+                    || s.node.name.to_lowercase() == service_input.to_lowercase()
+            })
+            .map(|s| &s.node)
+            .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_input)))?,
+        None => select_service_fallback(&project.services.edges, false)?,
+    };
 
     let service_in_env =
-        find_service_instance(&project, linked_project.environment_id()?, &service.node.id)
+        find_service_instance(&project, linked_project.environment_id()?, &service_node.id)
             .ok_or_else(|| {
                 anyhow!("The service specified doesn't exist in the current environment")
             })?;
@@ -74,7 +72,7 @@ pub async fn command(args: Args) -> Result<()> {
         prompt_confirm_with_default(
             format!(
                 "Restart the latest deployment from service {} in environment {}?",
-                service.node.name,
+                service_node.name,
                 linked_project
                     .environment_name
                     .clone()
@@ -97,7 +95,7 @@ pub async fn command(args: Args) -> Result<()> {
         !args.json,
         format!(
             "Restarting the latest deployment from service {}...",
-            service.node.name
+            service_node.name
         ),
     );
 
@@ -118,7 +116,7 @@ pub async fn command(args: Args) -> Result<()> {
     let spinner = spinner.unwrap();
     spinner.set_message(format!(
         "Waiting for deployment from service {} to be healthy...",
-        service.node.name
+        service_node.name
     ));
 
     let mut stream =
@@ -144,21 +142,21 @@ pub async fn command(args: Args) -> Result<()> {
                 DeploymentStatus::SUCCESS => {
                     spinner.finish_with_message(format!(
                         "The latest deployment from service {} has been restarted and is healthy",
-                        service.node.name.green()
+                        service_node.name.green()
                     ));
                     return Ok(());
                 }
                 DeploymentStatus::FAILED => {
                     spinner.finish_with_message(format!(
                         "Deployment from service {} failed",
-                        service.node.name.red()
+                        service_node.name.red()
                     ));
                     bail!("Deployment failed");
                 }
                 DeploymentStatus::CRASHED => {
                     spinner.finish_with_message(format!(
                         "Deployment from service {} crashed",
-                        service.node.name.red()
+                        service_node.name.red()
                     ));
                     bail!("Deployment crashed");
                 }
@@ -169,7 +167,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     spinner.finish_with_message(format!(
         "The latest deployment from service {} has been restarted",
-        service.node.name.green()
+        service_node.name.green()
     ));
 
     Ok(())

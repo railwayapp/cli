@@ -71,9 +71,6 @@ pub enum RailwayError {
     #[error("Project has no services.")]
     ProjectHasNoServices,
 
-    #[error("No service linked\nRun `railway service` to link a service")]
-    NoServiceLinked,
-
     #[error("No command provided. Run with `railway run <cmd>`")]
     NoCommandProvided,
 

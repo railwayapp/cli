@@ -132,9 +132,24 @@ async fn link_command(args: LinkArgs) -> Result<()> {
         bail!("No services found")
     } else {
         if !std::io::stdout().is_terminal() {
-            bail!("Service name required in non-interactive mode. Usage: railway service <name>");
+            if services.len() == 1 {
+                services.into_iter().next().unwrap()
+            } else {
+                let names: Vec<&str> = services.iter().take(5).map(|s| s.0.name.as_str()).collect();
+                let suffix = if services.len() > 5 {
+                    format!(", +{} more", services.len() - 5)
+                } else {
+                    String::new()
+                };
+                bail!(
+                    "Multiple services found. Specify one with: railway service <name>\nAvailable: {}{}",
+                    names.join(", "),
+                    suffix
+                )
+            }
+        } else {
+            prompt_options("Select a service", services)?
         }
-        prompt_options("Select a service", services)?
     };
 
     configs.link_service(service.0.id.clone())?;
@@ -223,17 +238,36 @@ async fn status_command(args: StatusArgs) -> Result<()> {
                 .iter()
                 .find(|s| s.id == service_name || s.name == service_name)
                 .ok_or_else(|| RailwayError::ServiceNotFound(service_name.clone()))?
-        } else {
-            // Use linked service
-            let linked_service_id = linked_project
-                .service
-                .as_ref()
-                .context("No service linked. Use --service flag or --all to see all services")?;
-
+        } else if let Some(linked_service_id) = linked_project.service.as_ref() {
             service_statuses
                 .iter()
                 .find(|s| &s.id == linked_service_id)
                 .context("Linked service not found in this environment")?
+        } else {
+            match service_statuses.as_slice() {
+                [] => bail!("No services found in this environment"),
+                [only] => {
+                    eprintln!("No service linked — auto-selecting \"{}\"", only.name);
+                    &service_statuses[0]
+                }
+                _ => {
+                    let names: Vec<&str> = service_statuses
+                        .iter()
+                        .take(5)
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    let suffix = if service_statuses.len() > 5 {
+                        format!(", +{} more", service_statuses.len() - 5)
+                    } else {
+                        String::new()
+                    };
+                    bail!(
+                        "No service linked. Available: {}{}\nUse --service <name>, --all, or run `railway service` to link one.",
+                        names.join(", "),
+                        suffix
+                    )
+                }
+            }
         };
 
         if args.json {

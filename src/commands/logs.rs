@@ -10,7 +10,7 @@ use crate::{
             stream_build_logs, stream_deploy_logs, stream_http_logs,
         },
         environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project},
+        project::{ensure_project_and_environment_exist, get_project, select_service_fallback},
     },
     util::{
         logs::{LogFormat, print_http_log, print_log},
@@ -313,10 +313,9 @@ pub async fn command(args: Args) -> Result<()> {
             .to_owned(),
         // Otherwise if we have a linked service, use that
         (_, Some(linked_service)) => linked_service,
-        // Otherwise it's a user error
-        _ => bail!(
-            "No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."
-        ),
+        _ => select_service_fallback(&project.services.edges, true)?
+            .id
+            .to_owned(),
     };
 
     // Fetch all deployments so we can find a sensible default deployment id if

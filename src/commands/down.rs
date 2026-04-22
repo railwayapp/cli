@@ -1,15 +1,15 @@
 use std::time::Duration;
 
-use anyhow::bail;
-
 use super::{
     queries::{deployments::DeploymentListInput, deployments::DeploymentStatus},
     *,
 };
 use crate::{
     consts::TICK_STRING,
-    controllers::{environment::get_matched_environment, project::get_project},
-    errors::RailwayError,
+    controllers::{
+        environment::get_matched_environment,
+        project::{get_project, select_service_fallback},
+    },
     util::prompt::prompt_confirm_with_default,
 };
 
@@ -56,7 +56,9 @@ pub async fn command(args: Args) -> Result<()> {
         // Otherwise if we have a linked service, use that
         (_, Some(linked_service)) => linked_service,
         // Otherwise it's a user error
-        _ => bail!(RailwayError::NoServiceLinked),
+        _ => select_service_fallback(&project.services.edges, false)?
+            .id
+            .to_owned(),
     };
 
     let vars = queries::deployments::Variables {

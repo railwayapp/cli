@@ -8,7 +8,9 @@ use serde_json::json;
 
 use crate::{
     consts::TICK_STRING,
-    controllers::project::{ensure_project_and_environment_exist, get_project},
+    controllers::project::{
+        ensure_project_and_environment_exist, get_project, select_service_fallback,
+    },
     errors::RailwayError,
 };
 
@@ -175,6 +177,10 @@ pub fn get_service<'a>(
     }
 
     if project.services.edges.len() == 1 {
+        eprintln!(
+            "No service linked — auto-selecting \"{}\"",
+            project.services.edges[0].node.name
+        );
         return Ok(&project.services.edges[0].node);
     }
 
@@ -203,7 +209,7 @@ pub fn get_service<'a>(
         }
     }
 
-    bail!(RailwayError::NoServices);
+    select_service_fallback(&project.services.edges, true)
 }
 
 pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicatif::ProgressBar> {
