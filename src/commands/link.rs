@@ -326,7 +326,11 @@ fn prompt_workspaces(workspaces: Vec<Workspace>) -> Result<Workspace> {
 
 fn prompt_workspace_projects(projects: Vec<Project>) -> Result<Project, anyhow::Error> {
     if !std::io::stdout().is_terminal() {
-        let names: Vec<String> = projects.iter().take(5).map(|p| p.name().to_owned()).collect();
+        let names: Vec<String> = projects
+            .iter()
+            .take(5)
+            .map(|p| p.name().to_owned())
+            .collect();
         let suffix = if projects.len() > 5 {
             format!(", +{} more", projects.len() - 5)
         } else {
