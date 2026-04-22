@@ -36,6 +36,10 @@ pub struct Args {
     #[clap(long, value_name = "SESSION_NAME", default_missing_value = "railway", num_args = 0..=1)]
     session: Option<String>,
 
+    /// Deprecated: native SSH is now the default, this flag has no effect
+    #[clap(long, hide = true)]
+    native: bool,
+
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
@@ -50,6 +54,12 @@ enum Commands {
 pub async fn command(args: Args) -> Result<()> {
     if let Some(Commands::Keys(keys_args)) = args.subcommand {
         return keys::command(keys_args).await;
+    }
+
+    if args.native {
+        eprintln!(
+            "Warning: --native flag is deprecated and has no effect; native SSH is now the default."
+        );
     }
 
     let configs = Configs::new()?;
