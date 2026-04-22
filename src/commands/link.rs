@@ -279,8 +279,7 @@ fn select_project(
                 fake_select("Select a project", &project.to_string());
                 project.clone()
             } else {
-                let available: Vec<&str> =
-                    projects.iter().take(5).map(|p| p.name()).collect();
+                let available: Vec<&str> = projects.iter().take(5).map(|p| p.name()).collect();
                 let suffix = if projects.len() > 5 {
                     format!(", +{} more", projects.len() - 5)
                 } else {
