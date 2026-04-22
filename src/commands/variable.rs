@@ -674,3 +674,140 @@ async fn export_variables(args: ExportArgs) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_env_basic() {
+        let content = "KEY=value\nFOO=bar";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value");
+        assert_eq!(vars[1].key, "FOO");
+        assert_eq!(vars[1].value, "bar");
+    }
+
+    #[test]
+    fn test_parse_env_quoted_double() {
+        let content = r#"KEY="value with spaces""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value with spaces");
+    }
+
+    #[test]
+    fn test_parse_env_quoted_single() {
+        let content = "KEY='no escapes here'";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "no escapes here");
+    }
+
+    #[test]
+    fn test_parse_env_escapes() {
+        let content = r#"KEY="line1\nline2\ttab""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "line1\nline2\ttab");
+    }
+
+    #[test]
+    fn test_parse_env_comments_and_empty() {
+        let content = "\n# This is a comment\nKEY=value\n\n\n# Another comment\nFOO=bar";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[1].key, "FOO");
+    }
+
+    #[test]
+    fn test_parse_env_empty_value() {
+        let content = "KEY=";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "");
+    }
+
+    #[test]
+    fn test_parse_env_whitespace_trimmed() {
+        let content = "  KEY  =  value  ";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value");
+    }
+
+    #[test]
+    fn test_parse_env_invalid_format() {
+        let content = "INVALID_LINE";
+        assert!(parse_env_variables(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_env_empty_key() {
+        let content = "=value";
+        assert!(parse_env_variables(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_json_basic() {
+        let content = r#"{"KEY": "value", "NUM": "123"}"#;
+        let vars = parse_json_variables(content).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value");
+        assert_eq!(vars[1].key, "NUM");
+        assert_eq!(vars[1].value, "123");
+    }
+
+    #[test]
+    fn test_parse_json_empty() {
+        let content = "{}";
+        let vars = parse_json_variables(content).unwrap();
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_invalid() {
+        let content = "not valid json";
+        assert!(parse_json_variables(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_env_value_with_equals() {
+        let content = "KEY=val=ue=with=equals";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "val=ue=with=equals");
+    }
+
+    #[test]
+    fn test_parse_env_unknown_escapes() {
+        let content = r#"KEY="value\x\y\z""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "value\\x\\y\\z");
+    }
+
+    #[test]
+    fn test_parse_env_escaped_quotes() {
+        let content = r#"KEY="say \"hello\"""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "say \"hello\"");
+    }
+
+    #[test]
+    fn test_parse_env_backslash_at_end() {
+        let content = r#"KEY="value\""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "value\\");
+    }
+
+    #[test]
+    fn test_parse_env_unquoted_special() {
+        let content = "KEY=value$with$special\nOTHER=simple";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "value$with$special");
+        assert_eq!(vars[1].value, "simple");
+    }
+}
