@@ -62,6 +62,7 @@ commands!(
     unlink,
     up,
     upgrade,
+    version,
     variable(variables, vars, var),
     whoami,
     volume,
