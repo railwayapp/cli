@@ -145,7 +145,22 @@ fn select_service(
                 fake_select("Select a service", &service.name);
                 Some(service.clone())
             } else {
-                return Err(RailwayError::ServiceNotFound(service).into());
+                let available: Vec<&str> = useful_services
+                    .iter()
+                    .take(5)
+                    .map(|s| s.name.as_str())
+                    .collect();
+                let suffix = if useful_services.len() > 5 {
+                    format!(", +{} more", useful_services.len() - 5)
+                } else {
+                    String::new()
+                };
+                bail!(
+                    "Service \"{}\" not found.\nAvailable: {}{}",
+                    service,
+                    available.join(", "),
+                    suffix
+                );
             }
         } else if std::io::stdout().is_terminal() {
             prompt_options_skippable("Select a service <esc to skip>", useful_services)?
@@ -198,7 +213,23 @@ fn select_environment(
             fake_select("Select an environment", &env.name);
             env.clone()
         } else {
-            return Err(RailwayError::EnvironmentNotFound(environment).into());
+            let available: Vec<&str> = project
+                .environments
+                .iter()
+                .take(5)
+                .map(|e| e.name.as_str())
+                .collect();
+            let suffix = if project.environments.len() > 5 {
+                format!(", +{} more", project.environments.len() - 5)
+            } else {
+                String::new()
+            };
+            bail!(
+                "Environment \"{}\" not found.\nAvailable: {}{}",
+                environment,
+                available.join(", "),
+                suffix
+            );
         }
     } else if project.environments.len() == 1 {
         let env = project.environments[0].clone();
@@ -240,19 +271,28 @@ fn select_project(
 
     let project = NormalisedProject::from({
         if let Some(project) = project {
-            let proj = projects.into_iter().find(|pro| {
+            let proj = projects.iter().find(|pro| {
                 (pro.id().to_lowercase() == project.to_lowercase())
                     || (pro.name().to_lowercase() == project.to_lowercase())
             });
             if let Some(project) = proj {
                 fake_select("Select a project", &project.to_string());
-                project
+                project.clone()
             } else {
-                return Err(RailwayError::ProjectNotFoundInWorkspace(
+                let available: Vec<&str> =
+                    projects.iter().take(5).map(|p| p.name()).collect();
+                let suffix = if projects.len() > 5 {
+                    format!(", +{} more", projects.len() - 5)
+                } else {
+                    String::new()
+                };
+                bail!(
+                    "Project \"{}\" not found in workspace \"{}\".\nAvailable: {}{}",
                     project,
-                    workspace.name().to_owned(),
-                )
-                .into());
+                    workspace.name(),
+                    available.join(", "),
+                    suffix
+                );
             }
         } else {
             prompt_workspace_projects(projects)?

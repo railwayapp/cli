@@ -59,9 +59,6 @@ pub enum RailwayError {
     )]
     EnvironmentNotFound(String),
 
-    #[error("Project \"{0}\" was not found in the \"{1}\" workspace.")]
-    ProjectNotFoundInWorkspace(String, String),
-
     #[error("Workspace \"{0}\" not found.")]
     WorkspaceNotFound(String),
 
