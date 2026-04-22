@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 use reqwest::Client;
 use std::process::{Command, Stdio};
+use std::thread::sleep;
+use std::time::Duration;
 
 use crate::client::post_graphql;
 use crate::config::Configs;
@@ -53,7 +55,6 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     });
 
     if let Some(key) = registered_local {
-        // Already registered - just use it
         eprintln!("Using SSH key: {}", key.path.display());
         return Ok(());
     }
@@ -114,39 +115,75 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     Ok(())
 }
 
-/// Check if native SSH is available (local SSH key exists)
-pub fn native_ssh_available() -> bool {
-    find_local_ssh_keys()
-        .map(|keys| !keys.is_empty())
-        .unwrap_or(false)
+/// Connect via SSH into a persistent tmux session, reconnecting on dropped connections.
+/// Installs tmux in the container if it isn't already present.
+pub fn run_native_ssh_with_session(ssh_target: &str, session_name: &str) -> Result<()> {
+    let target = format!("{}@{}", ssh_target, SSH_HOST);
+
+    // Ensure tmux is installed (suppress output — users don't need to see apt noise)
+    eprintln!("Ensuring tmux is installed...");
+    let install = Command::new("ssh")
+        .args(["-T", &target])
+        .arg("which tmux || (apt-get update -qq && apt-get install -y -qq tmux)")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to check/install tmux")?;
+
+    if !install.success() {
+        bail!("Failed to install tmux in the container");
+    }
+
+    let tmux_cmd = format!(
+        "exec tmux new-session -A -s {} \\; set -g mouse on",
+        session_name
+    );
+
+    loop {
+        let status = Command::new("ssh")
+            .args(["-t", &target, "--", &tmux_cmd])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to execute ssh command")?;
+
+        match status.code().unwrap_or(255) {
+            0 => break, // clean exit or detach — don't reconnect
+            _ => {
+                eprintln!("\r\nConnection lost. Reconnecting...");
+                sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
+    Ok(())
 }
 
-/// Run SSH command with the given service instance ID
-/// Optionally executes a command instead of starting an interactive shell
+/// Run SSH command with the given service instance ID.
+/// Optionally executes a command instead of starting an interactive shell.
 pub fn run_native_ssh(service_instance_id: &str, command: Option<&[String]>) -> Result<i32> {
     let target = format!("{}@{}", service_instance_id, SSH_HOST);
 
     let mut ssh_cmd = Command::new("ssh");
+
+    if command.is_some() {
+        ssh_cmd.arg("-T");
+    }
+
     ssh_cmd.arg(&target);
 
     if let Some(cmd_args) = command {
-        // Pass command as SSH args (exec channel)
         for arg in cmd_args {
             ssh_cmd.arg(arg);
         }
-        ssh_cmd.stdin(Stdio::inherit());
-        ssh_cmd.stdout(Stdio::inherit());
-        ssh_cmd.stderr(Stdio::inherit());
-
-        let status = ssh_cmd.status().context("Failed to execute ssh command")?;
-        Ok(status.code().unwrap_or(1))
-    } else {
-        // Interactive shell - inherit everything
-        ssh_cmd.stdin(Stdio::inherit());
-        ssh_cmd.stdout(Stdio::inherit());
-        ssh_cmd.stderr(Stdio::inherit());
-
-        let status = ssh_cmd.status().context("Failed to execute ssh command")?;
-        Ok(status.code().unwrap_or(1))
     }
+
+    ssh_cmd.stdin(Stdio::inherit());
+    ssh_cmd.stdout(Stdio::inherit());
+    ssh_cmd.stderr(Stdio::inherit());
+
+    let status = ssh_cmd.status().context("Failed to execute ssh command")?;
+    Ok(status.code().unwrap_or(1))
 }

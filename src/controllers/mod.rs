@@ -9,7 +9,6 @@ pub mod project;
 pub mod regions;
 pub mod service;
 pub mod ssh_keys;
-pub mod terminal;
 pub mod upload;
 pub mod user;
 pub mod variables;
