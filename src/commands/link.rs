@@ -149,7 +149,26 @@ fn select_service(
             }
         } else if std::io::stdout().is_terminal() {
             prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+        } else if useful_services.len() == 1 {
+            let svc = useful_services.into_iter().next().unwrap();
+            eprintln!("No service specified — auto-selecting \"{}\"", svc.name);
+            Some(svc)
         } else {
+            let names: Vec<&str> = useful_services
+                .iter()
+                .take(5)
+                .map(|s| s.name.as_str())
+                .collect();
+            let suffix = if useful_services.len() > 5 {
+                format!(", +{} more", useful_services.len() - 5)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "Multiple services available — use --service <name> to link one.\nAvailable: {}{}",
+                names.join(", "),
+                suffix
+            );
             None
         }
     } else {
@@ -187,8 +206,21 @@ fn select_environment(
         env
     } else {
         if !std::io::stdout().is_terminal() {
+            let names: Vec<&str> = project
+                .environments
+                .iter()
+                .take(5)
+                .map(|e| e.name.as_str())
+                .collect();
+            let suffix = if project.environments.len() > 5 {
+                format!(", +{} more", project.environments.len() - 5)
+            } else {
+                String::new()
+            };
             bail!(
-                "--environment required in non-interactive mode (multiple environments available)"
+                "--environment required in non-interactive mode.\nAvailable: {}{}",
+                names.join(", "),
+                suffix
             );
         }
         prompt_options("Select an environment", project.environments.clone())?
@@ -277,14 +309,34 @@ fn prompt_workspaces(workspaces: Vec<Workspace>) -> Result<Workspace> {
         return Ok(workspaces[0].clone());
     }
     if !std::io::stdout().is_terminal() {
-        bail!("--workspace required in non-interactive mode (multiple workspaces available)");
+        let names: Vec<&str> = workspaces.iter().take(5).map(|w| w.name()).collect();
+        let suffix = if workspaces.len() > 5 {
+            format!(", +{} more", workspaces.len() - 5)
+        } else {
+            String::new()
+        };
+        bail!(
+            "--workspace required in non-interactive mode.\nAvailable: {}{}",
+            names.join(", "),
+            suffix
+        );
     }
     prompt_options("Select a workspace", workspaces)
 }
 
 fn prompt_workspace_projects(projects: Vec<Project>) -> Result<Project, anyhow::Error> {
     if !std::io::stdout().is_terminal() {
-        bail!("--project required in non-interactive mode");
+        let names: Vec<String> = projects.iter().take(5).map(|p| p.name().to_owned()).collect();
+        let suffix = if projects.len() > 5 {
+            format!(", +{} more", projects.len() - 5)
+        } else {
+            String::new()
+        };
+        bail!(
+            "--project required in non-interactive mode.\nAvailable: {}{}",
+            names.join(", "),
+            suffix
+        );
     }
     prompt_options("Select a project", projects)
 }
