@@ -1,7 +1,9 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Parser;
 
-use crate::{client::GQLClient, config::Configs};
+use crate::{client::GQLClient, config::Configs, telemetry};
 
 mod common;
 mod keys;
@@ -40,6 +42,11 @@ pub struct Args {
     #[clap(long, hide = true)]
     native: bool,
 
+    /// Path to identity (private key) file to use, like `ssh -i`.
+    /// Skips the local ~/.ssh scan; forwarded directly to ssh.
+    #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
+    identity_file: Option<PathBuf>,
+
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
@@ -65,7 +72,9 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    native::ensure_ssh_key(&client, &configs).await?;
+    if args.identity_file.is_none() {
+        native::ensure_ssh_key(&client, &configs).await?;
+    }
 
     let ssh_target = if let Some(ref instance_id) = args.deployment_instance {
         instance_id.clone()
@@ -80,8 +89,10 @@ pub async fn command(args: Args) -> Result<()> {
         .await?
     };
 
+    let identity_file = args.identity_file.as_deref();
+
     if let Some(session_name) = args.session {
-        return native::run_native_ssh_with_session(&ssh_target, &session_name);
+        return native::run_native_ssh_with_session(&ssh_target, &session_name, identity_file);
     }
 
     let command = if args.command.is_empty() {
@@ -89,8 +100,24 @@ pub async fn command(args: Args) -> Result<()> {
     } else {
         Some(args.command.as_slice())
     };
-    let exit_code = native::run_native_ssh(&ssh_target, command)?;
+    let exit_code = native::run_native_ssh(&ssh_target, command, identity_file)?;
     if exit_code != 0 {
+        // ssh::command is about to std::process::exit, which bypasses the
+        // global telemetry hook in the commands! macro. Report the failure
+        // here so connection errors (ssh's 255, auth failures, remote command
+        // exits) still show up in CLI telemetry.
+        telemetry::send(telemetry::CliTrackEvent {
+            command: "ssh".to_string(),
+            sub_command: Some("ssh_exit_nonzero".to_string()),
+            success: false,
+            error_message: Some(format!("ssh exited with code {exit_code}")),
+            duration_ms: 0,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            is_ci: Configs::env_is_ci(),
+        })
+        .await;
         std::process::exit(exit_code);
     }
 

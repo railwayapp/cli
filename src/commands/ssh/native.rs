@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 use reqwest::Client;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
@@ -117,12 +118,20 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
 /// Connect via SSH into a persistent tmux session, reconnecting on dropped connections.
 /// Installs tmux in the container if it isn't already present.
-pub fn run_native_ssh_with_session(ssh_target: &str, session_name: &str) -> Result<()> {
+pub fn run_native_ssh_with_session(
+    ssh_target: &str,
+    session_name: &str,
+    identity_file: Option<&Path>,
+) -> Result<()> {
     let target = format!("{}@{}", ssh_target, SSH_HOST);
 
     // Ensure tmux is installed (suppress output — users don't need to see apt noise)
     eprintln!("Ensuring tmux is installed...");
-    let install = Command::new("ssh")
+    let mut install_cmd = Command::new("ssh");
+    if let Some(key) = identity_file {
+        install_cmd.arg("-i").arg(key);
+    }
+    let install = install_cmd
         .args(["-T", &target])
         .arg("which tmux || (apt-get update -qq && apt-get install -y -qq tmux)")
         .stdin(Stdio::inherit())
@@ -141,7 +150,11 @@ pub fn run_native_ssh_with_session(ssh_target: &str, session_name: &str) -> Resu
     );
 
     loop {
-        let status = Command::new("ssh")
+        let mut session_cmd = Command::new("ssh");
+        if let Some(key) = identity_file {
+            session_cmd.arg("-i").arg(key);
+        }
+        let status = session_cmd
             .args(["-t", &target, "--", &tmux_cmd])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -170,12 +183,20 @@ pub fn run_native_ssh_with_session(ssh_target: &str, session_name: &str) -> Resu
 ///   - command + non-TTY    → `-T` (clean pipes for scripts)
 ///   - no command + TTY     → ssh default (interactive shell with PTY)
 ///   - no command + non-TTY → `-T` (avoid mangling piped stdin)
-pub fn run_native_ssh(service_instance_id: &str, command: Option<&[String]>) -> Result<i32> {
+pub fn run_native_ssh(
+    service_instance_id: &str,
+    command: Option<&[String]>,
+    identity_file: Option<&Path>,
+) -> Result<i32> {
     let target = format!("{}@{}", service_instance_id, SSH_HOST);
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
     let mut ssh_cmd = Command::new("ssh");
+
+    if let Some(key) = identity_file {
+        ssh_cmd.arg("-i").arg(key);
+    }
 
     match command {
         Some(_) if stdin_tty && stdout_tty => {
