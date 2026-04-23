@@ -23,7 +23,11 @@ use crate::{
             ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode, VolumeState,
         },
     },
-    util::prompt::{PromptService, prompt_options},
+    util::{
+        progress::create_spinner_if,
+        prompt::{PromptService, fake_select, prompt_confirm_with_default, prompt_options},
+        two_factor::validate_two_factor_if_enabled,
+    },
 };
 
 use super::*;
@@ -43,6 +47,10 @@ enum Commands {
     /// List services in the current environment
     #[clap(alias = "ls")]
     List(ListArgs),
+
+    /// Delete a service from an environment
+    #[clap(alias = "remove", alias = "rm")]
+    Delete(DeleteArgs),
 
     /// Link a service to the current project
     Link(LinkArgs),
@@ -78,6 +86,29 @@ struct ListArgs {
     /// Output in JSON format
     #[clap(long)]
     json: bool,
+}
+
+#[derive(Parser)]
+struct DeleteArgs {
+    /// Service name or ID to delete (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment to delete the service from (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Skip confirmation dialog
+    #[clap(short = 'y', long = "yes")]
+    yes: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+
+    /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+    #[clap(long = "2fa-code")]
+    two_factor_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -194,6 +225,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     match args.command {
         Some(Commands::List(list_args)) => list_command(list_args).await,
+        Some(Commands::Delete(delete_args)) => delete_command(delete_args).await,
         Some(Commands::Link(link_args)) => link_command(link_args).await,
         Some(Commands::Status(status_args)) => status_command(status_args).await,
         Some(Commands::Logs(logs_args)) => crate::commands::logs::command(logs_args).await,
@@ -277,6 +309,203 @@ async fn list_command(args: ListArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn delete_command(args: DeleteArgs) -> Result<()> {
+    let mut configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let linked_project = configs.get_linked_project().await?;
+    let local_linked_project = configs.get_local_linked_project().ok();
+    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let is_terminal = std::io::stdout().is_terminal();
+    let environment =
+        resolve_environment_to_delete(&project, &linked_project, args.environment.as_deref())?;
+    let environment_id = environment.id.clone();
+    let environment_name = environment.name.clone();
+
+    let service_ids_in_env = get_service_ids_in_env(&project, &environment_id);
+    let services_in_env: Vec<_> = project
+        .services
+        .edges
+        .iter()
+        .filter(|edge| service_ids_in_env.contains(&edge.node.id))
+        .map(|edge| &edge.node)
+        .collect();
+
+    let service = select_service_to_delete(
+        services_in_env,
+        args.service.as_deref(),
+        linked_project.service.as_deref(),
+        &environment_name,
+        !args.json,
+        is_terminal,
+    )?;
+    let service_id = service.id.clone();
+    let service_name = service.name.clone();
+
+    let confirmed = if args.yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
+            format!(
+                "Are you sure you want to delete service \"{}\" from environment \"{}\"? This will permanently delete all its deployments.",
+                service_name, environment_name
+            )
+            .as_str(),
+            false,
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
+
+    if !confirmed {
+        if !args.json {
+            println!("Deletion cancelled.");
+        }
+        return Ok(());
+    }
+
+    validate_two_factor_if_enabled(&client, &configs, is_terminal, args.two_factor_code).await?;
+
+    let spinner = create_spinner_if(!args.json, format!("Deleting service {}...", service_name));
+
+    post_graphql::<mutations::ServiceDelete, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::service_delete::Variables {
+            service_id: service_id.clone(),
+            environment_id: environment_id.clone(),
+        },
+    )
+    .await?;
+
+    let unlink_path = local_linked_project.as_ref().and_then(|project| {
+        (project.project == linked_project.project
+            && project.service.as_deref() == Some(service_id.as_str())
+            && project.environment_id().ok() == Some(environment_id.as_str()))
+        .then(|| project.project_path.clone())
+    });
+    let should_unlink = unlink_path.is_some();
+    if let Some(path) = unlink_path {
+        let linked_project = configs
+            .root_config
+            .projects
+            .get_mut(&path)
+            .ok_or(RailwayError::ProjectNotFound)?;
+        linked_project.service = None;
+        configs.write()?;
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": service_id,
+                "name": service_name,
+                "environmentId": environment_id,
+                "environmentName": environment_name,
+                "unlinked": should_unlink,
+            }))?
+        );
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "Deleted service {} from {}",
+            service_name.green(),
+            environment_name.blue()
+        ));
+    }
+
+    Ok(())
+}
+
+fn resolve_environment_to_delete(
+    project: &crate::gql::queries::project::ProjectProject,
+    linked_project: &crate::LinkedProject,
+    environment_arg: Option<&str>,
+) -> Result<crate::gql::queries::project::ProjectProjectEnvironmentsEdgesNode> {
+    if project.deleted_at.is_some() {
+        bail!(RailwayError::ProjectDeleted);
+    }
+
+    let environment = if let Some(environment_arg) = environment_arg {
+        get_matched_environment(project, environment_arg.to_string())?
+    } else {
+        let linked_environment = match linked_project
+            .environment_name
+            .clone()
+            .or_else(|| linked_project.environment.clone())
+        {
+            Some(environment) => environment,
+            None => linked_project.environment_id()?.to_string(),
+        };
+
+        get_matched_environment(project, linked_environment)?
+    };
+
+    if environment.deleted_at.is_some() {
+        bail!(RailwayError::EnvironmentDeleted);
+    }
+
+    Ok(environment)
+}
+
+fn select_service_to_delete<'a>(
+    services_in_env: Vec<&'a crate::gql::queries::project::ProjectProjectServicesEdgesNode>,
+    service_arg: Option<&str>,
+    linked_service_id: Option<&str>,
+    environment_name: &str,
+    echo_selection: bool,
+    is_terminal: bool,
+) -> Result<&'a crate::gql::queries::project::ProjectProjectServicesEdgesNode> {
+    if services_in_env.is_empty() {
+        bail!("No services found in environment '{}'", environment_name);
+    }
+
+    if let Some(service_arg) = service_arg {
+        let service = services_in_env
+            .iter()
+            .copied()
+            .find(|service| {
+                service.id.eq_ignore_ascii_case(service_arg)
+                    || service.name.eq_ignore_ascii_case(service_arg)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Service \"{}\" not found in environment '{}'",
+                    service_arg,
+                    environment_name
+                )
+            })?;
+        if echo_selection {
+            fake_select("Select a service to delete", &service.name);
+        }
+        return Ok(service);
+    }
+
+    if let Some(linked_service_id) = linked_service_id {
+        if let Some(service) = services_in_env
+            .iter()
+            .copied()
+            .find(|service| service.id == linked_service_id)
+        {
+            return Ok(service);
+        }
+    }
+
+    if !is_terminal {
+        bail!(
+            "Service must be specified when not running in a terminal. Use --service <id or name>"
+        );
+    }
+
+    let service = prompt_options(
+        "Select a service to delete",
+        services_in_env.iter().copied().map(PromptService).collect(),
+    )?;
+
+    Ok(service.0)
 }
 
 fn build_service_output(
