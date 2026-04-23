@@ -116,16 +116,13 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     Ok(())
 }
 
-/// Connect via SSH into a persistent tmux session, reconnecting on dropped connections.
-/// Installs tmux in the container if it isn't already present.
-pub fn run_native_ssh_with_session(
-    ssh_target: &str,
-    session_name: &str,
-    identity_file: Option<&Path>,
-) -> Result<()> {
+/// Ensure tmux is installed inside the target container.
+///
+/// Split out from the session loop so that a tmux-install failure is
+/// distinguishable from a session connect failure in telemetry.
+pub fn ensure_tmux_installed(ssh_target: &str, identity_file: Option<&Path>) -> Result<()> {
     let target = format!("{}@{}", ssh_target, SSH_HOST);
 
-    // Ensure tmux is installed (suppress output — users don't need to see apt noise)
     eprintln!("Ensuring tmux is installed...");
     let mut install_cmd = Command::new("ssh");
     if let Some(key) = identity_file {
@@ -144,6 +141,21 @@ pub fn run_native_ssh_with_session(
         bail!("Failed to install tmux in the container");
     }
 
+    Ok(())
+}
+
+/// Connect to a persistent tmux session, reconnecting on dropped connections.
+/// Assumes `ensure_tmux_installed` has already succeeded.
+///
+/// Returns `Err` only if the local `ssh` binary fails to spawn. The loop
+/// itself retries on any non-zero exit until the user disconnects cleanly,
+/// which matches users' expectation that a tmux session survives flaps.
+pub fn run_tmux_session(
+    ssh_target: &str,
+    session_name: &str,
+    identity_file: Option<&Path>,
+) -> Result<()> {
+    let target = format!("{}@{}", ssh_target, SSH_HOST);
     let tmux_cmd = format!(
         "exec tmux new-session -A -s {} \\; set -g mouse on",
         session_name

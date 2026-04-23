@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
-use crate::{client::GQLClient, config::Configs, telemetry};
+use crate::{client::GQLClient, config::Configs};
 
 mod common;
 mod keys;
 mod native;
+mod tel;
 
 use common::*;
 
@@ -73,18 +74,26 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     if args.identity_file.is_none() {
-        native::ensure_ssh_key(&client, &configs).await?;
+        tel::track("key_setup", native::ensure_ssh_key(&client, &configs).await).await?;
     }
 
     let ssh_target = if let Some(ref instance_id) = args.deployment_instance {
         instance_id.clone()
     } else {
-        let params = get_ssh_connect_params(args.clone(), &configs, &client).await?;
-        native::get_service_instance_id(
-            &client,
-            &configs,
-            &params.environment_id,
-            &params.service_id,
+        let params = tel::track(
+            "resolve_target",
+            get_ssh_connect_params(args.clone(), &configs, &client).await,
+        )
+        .await?;
+        tel::track(
+            "instance_lookup",
+            native::get_service_instance_id(
+                &client,
+                &configs,
+                &params.environment_id,
+                &params.service_id,
+            )
+            .await,
         )
         .await?
     };
@@ -92,7 +101,16 @@ pub async fn command(args: Args) -> Result<()> {
     let identity_file = args.identity_file.as_deref();
 
     if let Some(session_name) = args.session {
-        return native::run_native_ssh_with_session(&ssh_target, &session_name, identity_file);
+        tel::track(
+            "tmux_install",
+            native::ensure_tmux_installed(&ssh_target, identity_file),
+        )
+        .await?;
+        return tel::track(
+            "session_connect",
+            native::run_tmux_session(&ssh_target, &session_name, identity_file),
+        )
+        .await;
     }
 
     let command = if args.command.is_empty() {
@@ -100,24 +118,17 @@ pub async fn command(args: Args) -> Result<()> {
     } else {
         Some(args.command.as_slice())
     };
-    let exit_code = native::run_native_ssh(&ssh_target, command, identity_file)?;
+    let exit_code = tel::track(
+        "spawn",
+        native::run_native_ssh(&ssh_target, command, identity_file),
+    )
+    .await?;
     if exit_code != 0 {
         // ssh::command is about to std::process::exit, which bypasses the
         // global telemetry hook in the commands! macro. Report the failure
         // here so connection errors (ssh's 255, auth failures, remote command
         // exits) still show up in CLI telemetry.
-        telemetry::send(telemetry::CliTrackEvent {
-            command: "ssh".to_string(),
-            sub_command: Some("ssh_exit_nonzero".to_string()),
-            success: false,
-            error_message: Some(format!("ssh exited with code {exit_code}")),
-            duration_ms: 0,
-            cli_version: env!("CARGO_PKG_VERSION"),
-            os: std::env::consts::OS,
-            arch: std::env::consts::ARCH,
-            is_ci: Configs::env_is_ci(),
-        })
-        .await;
+        tel::report_failure("exit_nonzero", &format!("ssh exited with code {exit_code}")).await;
         std::process::exit(exit_code);
     }
 

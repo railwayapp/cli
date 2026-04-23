@@ -99,13 +99,17 @@ enum Commands {
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
-        Some(Commands::List) | None => list_keys().await,
-        Some(Commands::Add { key, name }) => add_key(key, name).await,
+        Some(Commands::List) | None => super::tel::track("keys_list", list_keys().await).await,
+        Some(Commands::Add { key, name }) => {
+            super::tel::track("keys_add", add_key(key, name).await).await
+        }
         Some(Commands::Remove {
             key,
             two_factor_code,
-        }) => remove_key(key, two_factor_code).await,
-        Some(Commands::Github) => import_github_keys().await,
+        }) => super::tel::track("keys_remove", remove_key(key, two_factor_code).await).await,
+        Some(Commands::Github) => {
+            super::tel::track("keys_github", import_github_keys().await).await
+        }
     }
 }
 
