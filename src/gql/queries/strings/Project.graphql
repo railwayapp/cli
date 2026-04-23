@@ -29,6 +29,7 @@ query Project($id: String!) {
                 serviceId
                 serviceName
                 environmentId
+                numReplicas
                 latestDeployment {
                   canRedeploy
                   id
@@ -36,12 +37,21 @@ query Project($id: String!) {
                   status
                   createdAt
                   deploymentStopped
+                  instances {
+                    id
+                    status
+                  }
                 }
                 activeDeployments {
                   id
                   status
                   createdAt
                   meta
+                  deploymentStopped
+                  instances {
+                    id
+                    status
+                  }
                 }
                 source {
                   repo
@@ -73,6 +83,7 @@ query Project($id: String!) {
                 environmentId
                 currentSizeMB
                 sizeMB
+                state
                 volume {
                   name
                   id
