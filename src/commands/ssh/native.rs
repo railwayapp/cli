@@ -163,13 +163,31 @@ pub fn run_native_ssh_with_session(ssh_target: &str, session_name: &str) -> Resu
 
 /// Run SSH command with the given service instance ID.
 /// Optionally executes a command instead of starting an interactive shell.
+///
+/// PTY allocation is autodetected from stdin/stdout TTY state, mirroring
+/// the behavior of `docker exec` / `kubectl exec`:
+///   - command + both TTYs  → `-t` (vim/htop work)
+///   - command + non-TTY    → `-T` (clean pipes for scripts)
+///   - no command + TTY     → ssh default (interactive shell with PTY)
+///   - no command + non-TTY → `-T` (avoid mangling piped stdin)
 pub fn run_native_ssh(service_instance_id: &str, command: Option<&[String]>) -> Result<i32> {
     let target = format!("{}@{}", service_instance_id, SSH_HOST);
+    let stdin_tty = std::io::stdin().is_terminal();
+    let stdout_tty = std::io::stdout().is_terminal();
 
     let mut ssh_cmd = Command::new("ssh");
 
-    if command.is_some() {
-        ssh_cmd.arg("-T");
+    match command {
+        Some(_) if stdin_tty && stdout_tty => {
+            ssh_cmd.arg("-t");
+        }
+        Some(_) => {
+            ssh_cmd.arg("-T");
+        }
+        None if !stdin_tty => {
+            ssh_cmd.arg("-T");
+        }
+        None => {}
     }
 
     ssh_cmd.arg(&target);
