@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
+use crate::controllers::ssh_keys::{
+    find_local_ssh_keys, register_ssh_key, resolve_token_workspace,
+};
 use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
@@ -32,7 +34,11 @@ pub async fn get_service_instance_id(
     Ok(response.service_instance.id)
 }
 
-/// Ensure SSH key is registered, prompting user if needed
+/// Ensure SSH key is registered, prompting user if needed.
+///
+/// Under a workspace-scoped API token, the preflight operates on that
+/// workspace's keys (personal keys would be rejected by the backend anyway).
+/// Otherwise it operates on the authenticated user's personal keys.
 pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     let local_keys = find_local_ssh_keys()?;
 
@@ -44,11 +50,15 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         );
     }
 
-    // Check which local keys are registered (personal keys only — the
-    // pre-flight auto-registration path only covers the user's own keys;
-    // workspace keys are added explicitly via `railway ssh keys add --workspace`).
-    let registered_keys =
-        crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs, None).await?;
+    let token_workspace = resolve_token_workspace(client, configs).await?;
+    let workspace_id = token_workspace.as_ref().map(|w| w.id.clone());
+
+    let registered_keys = crate::controllers::ssh_keys::get_registered_ssh_keys(
+        client,
+        configs,
+        workspace_id.clone(),
+    )
+    .await?;
 
     // Find a local key that's already registered
     let registered_local = local_keys.iter().find(|local| {
@@ -64,13 +74,28 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     // No local key is registered - need to register one
     if !std::io::stdin().is_terminal() {
+        if let Some(ws) = token_workspace.as_ref() {
+            bail!(
+                "No local SSH key is registered for workspace {} ({}).\n\
+                Register one (as a workspace ADMIN) with:\n  railway ssh keys add",
+                ws.name,
+                ws.id
+            );
+        }
         bail!(
             "No registered SSH keys found. Register one with:\n  railway ssh keys add\n\n\
             Or import from GitHub:\n  railway ssh keys github"
         );
     }
 
-    println!("No SSH keys registered with Railway.");
+    if let Some(ws) = token_workspace.as_ref() {
+        println!(
+            "No SSH keys registered for workspace {} ({}).",
+            ws.name, ws.id
+        );
+    } else {
+        println!("No SSH keys registered with Railway.");
+    }
 
     let key_to_register = if local_keys.len() == 1 {
         &local_keys[0]
@@ -116,11 +141,18 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         configs,
         &key_name,
         &key_to_register.public_key,
-        None,
+        workspace_id,
     )
     .await?;
 
-    println!("SSH key registered successfully!");
+    if let Some(ws) = token_workspace {
+        println!(
+            "SSH key registered for workspace {} ({}) successfully!",
+            ws.name, ws.id
+        );
+    } else {
+        println!("SSH key registered successfully!");
+    }
 
     Ok(())
 }

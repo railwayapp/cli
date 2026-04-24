@@ -7,12 +7,15 @@ use is_terminal::IsTerminal;
 use crate::client::GQLClient;
 use crate::config::Configs;
 use crate::controllers::ssh_keys::{
-    LocalSshKey, compute_fingerprint_from_pubkey, delete_ssh_key, find_local_ssh_keys,
-    get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
+    LocalSshKey, TokenWorkspace, compute_fingerprint_from_pubkey, delete_ssh_key,
+    find_local_ssh_keys, get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
+    resolve_token_workspace,
 };
 use crate::gql::queries::git_hub_ssh_keys::GitHubSshKeysGitHubSshKeys;
 use crate::gql::queries::ssh_public_keys::SshPublicKeysSshPublicKeysEdgesNode;
 use crate::util::prompt::{prompt_options, prompt_text};
+
+use reqwest::Client;
 
 /// Wrapper for LocalSshKey to implement Display for prompts
 struct LocalKeyOption(LocalSshKey);
@@ -64,8 +67,9 @@ pub struct Args {
     command: Option<Commands>,
 
     /// Operate on workspace-owned keys instead of your personal keys.
-    /// Requires workspace ADMIN access for add/remove. Also accepted as
-    /// a subcommand-level flag (e.g. `railway ssh keys add --workspace W`).
+    /// Requires workspace ADMIN access for add/remove. Auto-detected when
+    /// `RAILWAY_API_TOKEN` is a workspace-scoped token. Also accepted as a
+    /// subcommand-level flag (e.g. `railway ssh keys add --workspace W`).
     #[clap(long, global = true, value_name = "WORKSPACE_ID")]
     workspace: Option<String>,
 }
@@ -104,7 +108,18 @@ enum Commands {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let workspace_id = args.workspace;
+    if Configs::get_railway_token().is_some() {
+        bail!(
+            "SSH key management is not supported with project tokens (`RAILWAY_TOKEN`). \
+            Use a workspace API token (`RAILWAY_API_TOKEN`) or run `railway login`."
+        );
+    }
+
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    let workspace_id = resolve_workspace_arg(&client, &configs, args.workspace.as_deref()).await?;
+
     match args.command {
         Some(Commands::List) | None => {
             super::tel::track("keys_list", list_keys(workspace_id).await).await
@@ -131,6 +146,41 @@ pub async fn command(args: Args) -> Result<()> {
                 );
             }
             super::tel::track("keys_github", import_github_keys().await).await
+        }
+    }
+}
+
+/// Reconcile an explicit `--workspace` flag with the workspace implied by
+/// the current API token:
+///   - no flag, no token workspace → personal keys (`None`)
+///   - no flag, token workspace → auto-use it
+///   - flag, no token workspace → use the flag
+///   - flag + token workspace → they must match, else error
+async fn resolve_workspace_arg(
+    client: &Client,
+    configs: &Configs,
+    flag: Option<&str>,
+) -> Result<Option<String>> {
+    let from_token = resolve_token_workspace(client, configs).await?;
+
+    match (flag, from_token) {
+        (None, None) => Ok(None),
+        (None, Some(TokenWorkspace { id, name })) => {
+            eprintln!("Using workspace from API token: {name} ({id})");
+            Ok(Some(id))
+        }
+        (Some(flag_id), None) => Ok(Some(flag_id.to_string())),
+        (Some(flag_id), Some(token_ws)) => {
+            if flag_id == token_ws.id {
+                Ok(Some(flag_id.to_string()))
+            } else {
+                bail!(
+                    "`--workspace {flag_id}` does not match the workspace the current API token \
+                    is scoped to ({} / {}). Omit `--workspace` or use a token for that workspace.",
+                    token_ws.name,
+                    token_ws.id
+                )
+            }
         }
     }
 }

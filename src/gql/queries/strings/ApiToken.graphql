@@ -1,0 +1,8 @@
+query ApiToken {
+  apiToken {
+    workspaces {
+      id
+      name
+    }
+  }
+}
