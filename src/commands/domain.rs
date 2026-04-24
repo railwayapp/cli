@@ -318,6 +318,14 @@ async fn create_custom_domain(
     Ok(())
 }
 
+pub(crate) fn format_verification_txt_value(token: &str) -> String {
+    if token.starts_with("railway-verify=") {
+        token.to_string()
+    } else {
+        format!("railway-verify={token}")
+    }
+}
+
 fn print_dns(
     domains: Vec<
         mutations::custom_domain_create::CustomDomainCreateCustomDomainCreateStatusDnsRecords,
@@ -333,7 +341,7 @@ fn print_dns(
             (Some(host), Some(token)) => {
                 // Strip the zone suffix from the verification DNS host (e.g., "_railway-verify.example.com" -> "_railway-verify")
                 let host_label = host.strip_suffix(&format!(".{}", zone)).unwrap_or(host);
-                Some((host_label.to_string(), format!("railway-verify={}", token)))
+                Some((host_label.to_string(), format_verification_txt_value(token)))
             }
             _ => None,
         }
@@ -407,6 +415,27 @@ fn print_dns(
             width_type = padding_type,
             width_host = padding_hostlabel,
             width_value = padding_value
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_verification_txt_value;
+
+    #[test]
+    fn preserves_existing_railway_verify_prefix() {
+        assert_eq!(
+            format_verification_txt_value("railway-verify=abc123"),
+            "railway-verify=abc123"
+        );
+    }
+
+    #[test]
+    fn adds_prefix_when_token_is_bare() {
+        assert_eq!(
+            format_verification_txt_value("abc123"),
+            "railway-verify=abc123"
         );
     }
 }
