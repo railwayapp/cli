@@ -170,12 +170,6 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "IPV6_EGRESS"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "MAGIC_CONFIG"
             },
             {
@@ -213,6 +207,12 @@
         {
           "description": null,
           "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "AGENT_USAGE_BILLING"
+            },
             {
               "deprecationReason": null,
               "description": null,
@@ -277,19 +277,25 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "ENABLE_RAW_SQL_QUERIES"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "FOCUSED_PR_ENVIRONMENTS"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "GITHUB_PERMISSION_NOTIFICATION_ROLLOUT"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "INLINE_NOTIFICATION_PROCESSING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "IN_DASHBOARD_SUPPORT"
             },
             {
               "deprecationReason": null,
@@ -319,6 +325,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "RADAR_AUTO_EVALUATE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "SERVICEINSTANCE_DATALOADER_FOR_STATIC_URL"
             },
             {
@@ -326,6 +338,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "SPLIT_USAGE_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_NEW_ACCOUNTS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_SHADOW_ENABLED"
             },
             {
               "deprecationReason": null,
@@ -7684,7 +7708,7 @@
           "possibleTypes": null
         },
         {
-          "description": "\nEnvironmentConfig is a custom scalar type that represents the serializedConfig for an environment.\nJSON Schema: https://backboard.railway.com/schema/environment.schema.json\n",
+          "description": "\nEnvironmentConfig is a custom scalar type that represents the serializedConfig for an environment.\nJSON Schema: https://backboard.railway-develop.com/schema/environment.schema.json\n",
           "enumValues": null,
           "fields": null,
           "inputFields": null,
@@ -17084,7 +17108,7 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Creates a new SSH public key for the authenticated user.",
+              "description": "Creates a new SSH public key. When workspaceId is provided, the key is owned by the workspace and can be used by anyone authenticating as that workspace via native SSH; requires workspace ADMIN access. Otherwise the key is owned by the authenticated user.",
               "isDeprecated": false,
               "name": "sshPublicKeyCreate",
               "type": {
@@ -21603,6 +21627,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "AGENT_USAGE_BILLING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "ALLOW_REPLICA_METRICS"
             },
             {
@@ -21663,19 +21693,25 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "ENABLE_RAW_SQL_QUERIES"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "FOCUSED_PR_ENVIRONMENTS"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "GITHUB_PERMISSION_NOTIFICATION_ROLLOUT"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "INLINE_NOTIFICATION_PROCESSING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "IN_DASHBOARD_SUPPORT"
             },
             {
               "deprecationReason": null,
@@ -21705,6 +21741,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "RADAR_AUTO_EVALUATE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "SERVICEINSTANCE_DATALOADER_FOR_STATIC_URL"
             },
             {
@@ -21712,6 +21754,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "SPLIT_USAGE_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_NEW_ACCOUNTS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_SHADOW_ENABLED"
             },
             {
               "deprecationReason": null,
@@ -31618,10 +31672,20 @@
                     "name": "Int",
                     "ofType": null
                   }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "workspaceId",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
                 }
               ],
               "deprecationReason": null,
-              "description": "Gets all SSH public keys for the authenticated user.",
+              "description": "Gets SSH public keys. If workspaceId is provided, returns the keys owned by that workspace (requires workspace MEMBER access); otherwise returns the authenticated user's personal keys.",
               "isDeprecated": false,
               "name": "sshPublicKeys",
               "type": {
@@ -35930,7 +35994,7 @@
           "possibleTypes": null
         },
         {
-          "description": "\nSerializedTemplateConfig is a custom scalar type that represents the serializedConfig for a template.\nJSON Schema: https://backboard.railway.com/schema/template.schema.json\n",
+          "description": "\nSerializedTemplateConfig is a custom scalar type that represents the serializedConfig for a template.\nJSON Schema: https://backboard.railway-develop.com/schema/template.schema.json\n",
           "enumValues": null,
           "fields": null,
           "inputFields": null,
@@ -38830,6 +38894,30 @@
                   "ofType": null
                 }
               }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "userId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
             }
           ],
           "inputFields": null,
@@ -38875,6 +38963,16 @@
                   "name": "String",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "workspaceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
               }
             }
           ],
@@ -42832,6 +42930,30 @@
           "description": null,
           "enumValues": null,
           "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "agentHardLimitCents",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Int",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "agentSoftLimitCents",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Int",
+                "ofType": null
+              }
+            },
             {
               "args": [],
               "deprecationReason": null,

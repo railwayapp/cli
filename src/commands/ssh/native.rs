@@ -44,9 +44,11 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         );
     }
 
-    // Check which local keys are registered
+    // Check which local keys are registered (personal keys only — the
+    // pre-flight auto-registration path only covers the user's own keys;
+    // workspace keys are added explicitly via `railway ssh keys add --workspace`).
     let registered_keys =
-        crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs).await?;
+        crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs, None).await?;
 
     // Find a local key that's already registered
     let registered_local = local_keys.iter().find(|local| {
@@ -109,7 +111,14 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         .unwrap_or("ssh-key")
         .to_string();
 
-    register_ssh_key(client, configs, &key_name, &key_to_register.public_key).await?;
+    register_ssh_key(
+        client,
+        configs,
+        &key_name,
+        &key_to_register.public_key,
+        None,
+    )
+    .await?;
 
     println!("SSH key registered successfully!");
 
