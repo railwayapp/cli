@@ -9,9 +9,7 @@ use crate::gql::mutations::{
     SshPublicKeyCreate, SshPublicKeyDelete, ValidateTwoFactor, ssh_public_key_create,
     ssh_public_key_delete, validate_two_factor,
 };
-use crate::gql::queries::{
-    ApiToken, GitHubSshKeys, SshPublicKeys, api_token, git_hub_ssh_keys, ssh_public_keys,
-};
+use crate::gql::queries::{GitHubSshKeys, SshPublicKeys, git_hub_ssh_keys, ssh_public_keys};
 
 /// Local SSH key info
 #[derive(Debug, Clone)]
@@ -217,44 +215,6 @@ pub async fn delete_ssh_key(
         post_graphql::<SshPublicKeyDelete, _>(client, configs.get_backboard(), vars).await?;
 
     Ok(response.ssh_public_key_delete)
-}
-
-/// Workspace info resolved from the current API token, when the token is
-/// scoped to exactly one workspace.
-#[derive(Debug, Clone)]
-pub struct TokenWorkspace {
-    pub id: String,
-    pub name: String,
-}
-
-/// Introspect the current API token (`RAILWAY_API_TOKEN`) and return its
-/// workspace iff the token maps to a single workspace — the workspace-scoped
-/// API token case. Returns `Ok(None)` under session auth, project tokens
-/// (`RAILWAY_TOKEN`), or user API tokens with access to zero or multiple
-/// workspaces (there, the caller must still pass `--workspace` explicitly).
-pub async fn resolve_token_workspace(
-    client: &Client,
-    configs: &Configs,
-) -> Result<Option<TokenWorkspace>> {
-    // Project tokens go in a different header and don't carry user/workspace
-    // identity on the wire; don't bother the backend.
-    if Configs::get_railway_api_token().is_none() {
-        return Ok(None);
-    }
-
-    let vars = api_token::Variables {};
-    let response = post_graphql::<ApiToken, _>(client, configs.get_backboard(), vars).await?;
-
-    let mut workspaces = response.api_token.workspaces;
-    if workspaces.len() == 1 {
-        let w = workspaces.remove(0);
-        Ok(Some(TokenWorkspace {
-            id: w.id,
-            name: w.name,
-        }))
-    } else {
-        Ok(None)
-    }
 }
 
 /// Get SSH public keys from the user's GitHub account
