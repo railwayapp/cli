@@ -1,7 +1,7 @@
 use crate::{
     controllers::{
         environment::get_matched_environment,
-        project::find_service_instance,
+        project::{find_service_instance, select_service_fallback},
         regions::{convert_hashmap_to_map, merge_config, prompt_for_regions},
     },
     util::progress::create_spinner_if,
@@ -139,23 +139,27 @@ fn get_existing_config(
     environment: &str,
 ) -> Result<(Value, String)> {
     let environment_id = get_matched_environment(project, environment.to_string())?.id;
-    let service_input = match args.service.as_ref() {
-        Some(s) => s,
-        None => linked_project.service.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("No service linked. Please either specify a service with the --service flag or link one with `railway service`")
-        })?,
+    let service_id = match args
+        .service
+        .clone()
+        .or_else(|| linked_project.service.clone())
+    {
+        Some(service_input) => project
+            .services
+            .edges
+            .iter()
+            .find(|p| {
+                p.node.id == service_input
+                    || p.node.name.to_lowercase() == service_input.to_lowercase()
+            })
+            .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in project", service_input))?
+            .node
+            .id
+            .clone(),
+        None => select_service_fallback(&project.services.edges, false)?
+            .id
+            .clone(),
     };
-
-    let service = project.services.edges.iter().find(|p| {
-        (p.node.id == *service_input)
-            || (p.node.name.to_lowercase() == service_input.to_lowercase())
-    });
-
-    let Some(service) = service else {
-        bail!("Service '{}' not found in project", service_input);
-    };
-
-    let service_id = service.node.id.clone();
 
     // check that service exists in that environment
     let instance = find_service_instance(project, &environment_id, &service_id);

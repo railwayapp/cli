@@ -1,7 +1,9 @@
 use super::*;
 use crate::client::post_graphql;
 use crate::controllers::environment::get_matched_environment;
-use crate::controllers::project::{ensure_project_and_environment_exist, get_project};
+use crate::controllers::project::{
+    ensure_project_and_environment_exist, get_project, select_service_fallback,
+};
 use crate::gql::queries::deployments::{DeploymentStatus, ResponseData, Variables};
 use chrono::{DateTime, Local, Utc};
 use serde::Serialize;
@@ -128,9 +130,9 @@ async fn list_deployments(
     } else if let Some(linked_service_id) = linked_project.service {
         linked_service_id
     } else {
-        bail!(
-            "No service specified and no service linked. Use 'railway link' to link a service or specify one with the service argument."
-        );
+        select_service_fallback(&project.services.edges, true)?
+            .id
+            .clone()
     };
 
     let variables = Variables {

@@ -1,8 +1,9 @@
-use anyhow::bail;
 use std::collections::BTreeMap;
 
 use crate::{
-    controllers::project::{ensure_project_and_environment_exist, get_project},
+    controllers::project::{
+        ensure_project_and_environment_exist, get_project, select_service_fallback,
+    },
     controllers::variables::get_service_variables,
     errors::RailwayError,
 };
@@ -81,7 +82,16 @@ pub async fn command(args: Args) -> Result<()> {
 
         all_variables.append(&mut variables);
     } else {
-        bail!("No service linked. Please link one with `railway service`");
+        let service_node = select_service_fallback(&project.services.edges, true)?;
+        let mut variables = get_service_variables(
+            &client,
+            &configs,
+            linked_project.project.clone(),
+            linked_project.environment_id()?.to_string(),
+            service_node.id.clone(),
+        )
+        .await?;
+        all_variables.append(&mut variables);
     }
 
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {

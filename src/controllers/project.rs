@@ -12,7 +12,7 @@ use crate::{
             self,
             project::{
                 ProjectProject, ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-                ProjectProjectServicesEdgesNode,
+                ProjectProjectServicesEdges, ProjectProjectServicesEdgesNode,
             },
         },
     },
@@ -59,6 +59,42 @@ pub fn get_service(
     }
 
     bail!(RailwayError::ServiceNotFound(service_name))
+}
+
+/// Selects a service when neither an explicit arg nor a linked service is available.
+///
+/// - `auto_select: true` — safe for read-only commands. Auto-selects when exactly one
+///   service exists and prints the choice to stderr.
+/// - `auto_select: false` — for write/destructive commands. Always bails with the
+///   available service names so the caller must be explicit via `--service`.
+pub fn select_service_fallback(
+    services: &[ProjectProjectServicesEdges],
+    auto_select: bool,
+) -> Result<&ProjectProjectServicesEdgesNode> {
+    match services {
+        [] => bail!(RailwayError::NoServices),
+        [only] if auto_select => {
+            eprintln!("No service linked — auto-selecting \"{}\"", only.node.name);
+            Ok(&only.node)
+        }
+        _ => {
+            let shown: Vec<&str> = services
+                .iter()
+                .take(5)
+                .map(|s| s.node.name.as_str())
+                .collect();
+            let suffix = if services.len() > 5 {
+                format!(", +{} more", services.len() - 5)
+            } else {
+                String::new()
+            };
+            bail!(
+                "No service linked. Available: {}{}\nUse --service <name> or run `railway service` to link one.",
+                shown.join(", "),
+                suffix
+            )
+        }
+    }
 }
 
 pub async fn ensure_project_and_environment_exist(
@@ -180,7 +216,10 @@ pub async fn resolve_service_context(
                 .unwrap_or_else(|| linked_service.clone());
             (linked_service, name)
         }
-        _ => bail!(RailwayError::NoServiceLinked),
+        _ => {
+            let s = select_service_fallback(services, true)?;
+            (s.id.clone(), s.name.clone())
+        }
     };
 
     Ok(ServiceContext {
