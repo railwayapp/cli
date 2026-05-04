@@ -404,13 +404,10 @@ pub async fn command(args: Args) -> Result<()> {
         None
     };
 
-    // Resolve service instance ID for native SSH (needed for DB stats).
-    // Skip if preflight already failed -- the GraphQL call would succeed but
-    // the eventual SSH would fail with the same message.
-    let service_instance_id = if db_type.is_some()
-        && (args.watch || include_db_stats)
-        && db_stats_preflight_error.is_none()
-    {
+    // Resolve service instance ID for native SSH (needed for DB stats). Keep
+    // it even after a preflight failure so watch mode can retry after the user
+    // fixes local SSH setup and presses refresh.
+    let service_instance_id = if db_type.is_some() && (args.watch || include_db_stats) {
         service_instance.map(|service_instance| service_instance.id.clone())
     } else {
         None
@@ -693,28 +690,6 @@ fn format_window_label(since: &str, until: Option<&str>) -> String {
             format!("last {}", format_time_bound_label(since, None))
         }
         None => format!("since {since}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_window_label;
-
-    #[test]
-    fn window_label_includes_until_when_present() {
-        assert_eq!(
-            format_window_label("1h", Some("30m")),
-            "from 1h ago until 30m ago"
-        );
-    }
-
-    #[test]
-    fn window_label_preserves_unbounded_relative_and_absolute_since() {
-        assert_eq!(format_window_label("6h", None), "last 6h");
-        assert_eq!(
-            format_window_label("2024-01-15T10:00:00Z", None),
-            "since 2024-01-15T10:00:00Z"
-        );
     }
 }
 
@@ -2091,5 +2066,27 @@ fn detect_database_type(source_image: Option<&str>) -> Option<DatabaseType> {
         Some(DatabaseType::MySQL)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_window_label;
+
+    #[test]
+    fn window_label_includes_until_when_present() {
+        assert_eq!(
+            format_window_label("1h", Some("30m")),
+            "from 1h ago until 30m ago"
+        );
+    }
+
+    #[test]
+    fn window_label_preserves_unbounded_relative_and_absolute_since() {
+        assert_eq!(format_window_label("6h", None), "last 6h");
+        assert_eq!(
+            format_window_label("2024-01-15T10:00:00Z", None),
+            "since 2024-01-15T10:00:00Z"
+        );
     }
 }

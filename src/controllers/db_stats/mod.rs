@@ -7,6 +7,7 @@ pub mod types;
 use std::process::Stdio;
 
 use anyhow::{Result, bail};
+use tokio::io::AsyncWriteExt;
 
 use crate::controllers::database::DatabaseType;
 use crate::controllers::ssh_keys::find_local_ssh_keys;
@@ -115,18 +116,25 @@ fn cli_tool_missing(db_type: &DatabaseType, lower_err: &str) -> bool {
 async fn exec_command_in_container(service_instance_id: &str, command: &str) -> Result<String> {
     let target = format!("{service_instance_id}@{SSH_HOST}");
 
-    let output = tokio::process::Command::new("ssh")
+    let mut child = tokio::process::Command::new("ssh")
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg(&target)
         .arg("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(Stdio::null())
+        .arg("-s")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await?;
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(command.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+    } else {
+        bail!("Failed to open stdin for SSH command");
+    }
+
+    let output = child.wait_with_output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
