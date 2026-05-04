@@ -158,6 +158,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "CDN_CACHING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "DEBUG_SMART_DIAGNOSIS"
             },
             {
@@ -171,6 +177,12 @@
               "description": null,
               "isDeprecated": false,
               "name": "MAGIC_CONFIG"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "POSTGRES_HA"
             },
             {
               "deprecationReason": null,

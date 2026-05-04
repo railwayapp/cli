@@ -29,6 +29,7 @@ pub mod login;
 pub mod logout;
 pub mod logs;
 pub mod mcp;
+pub mod metrics;
 pub mod open;
 pub mod project;
 pub mod redeploy;

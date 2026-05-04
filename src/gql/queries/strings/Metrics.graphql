@@ -1,20 +1,27 @@
 query Metrics(
+  $projectId: String
   $serviceId: String
   $environmentId: String
   $startDate: DateTime!
   $endDate: DateTime
   $measurements: [MetricMeasurement!]!
   $sampleRateSeconds: Int
+  $groupBy: [MetricTag!]
 ) {
   metrics(
+    projectId: $projectId
     serviceId: $serviceId
     environmentId: $environmentId
     startDate: $startDate
     endDate: $endDate
     measurements: $measurements
     sampleRateSeconds: $sampleRateSeconds
+    groupBy: $groupBy
   ) {
     measurement
+    tags {
+      serviceId
+    }
     values {
       ts
       value

@@ -49,6 +49,7 @@ commands!(
     logout,
     logs,
     mcp,
+    metrics,
     open,
     project,
     run(local),
