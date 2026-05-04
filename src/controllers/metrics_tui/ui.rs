@@ -61,10 +61,15 @@ fn error_rate_color(rate: f64) -> Color {
 /// Convert raw metric data points to (f64, f64) for Chart datasets.
 /// X = seconds since first point, Y = value
 fn to_chart_data(points: &[MetricDataPoint]) -> Vec<(f64, f64)> {
-    if points.is_empty() {
+    let Some(first) = points.first() else {
         return vec![];
-    }
-    let t0 = points[0].ts as f64;
+    };
+    to_chart_data_from(points, first.ts)
+}
+
+/// Convert points to chart coordinates using a shared timestamp origin.
+fn to_chart_data_from(points: &[MetricDataPoint], origin_ts: i64) -> Vec<(f64, f64)> {
+    let t0 = origin_ts as f64;
     points.iter().map(|p| (p.ts as f64 - t0, p.value)).collect()
 }
 
@@ -73,8 +78,32 @@ fn time_bounds_and_labels(points: &[MetricDataPoint]) -> (f64, f64, Vec<String>)
     if points.is_empty() {
         return (0.0, 1.0, vec![]);
     }
-    let t0 = points[0].ts as f64;
-    let t_end = points.last().unwrap().ts as f64;
+    time_bounds_and_labels_from_range(points[0].ts, points.last().unwrap().ts)
+}
+
+/// Build shared X-axis bounds and labels for multiple series in one chart.
+fn time_bounds_and_labels_for_series(
+    series: &[&[MetricDataPoint]],
+) -> (i64, f64, f64, Vec<String>) {
+    let Some(start_ts) = series
+        .iter()
+        .filter_map(|points| points.first().map(|point| point.ts))
+        .min()
+    else {
+        return (0, 0.0, 1.0, vec![]);
+    };
+    let end_ts = series
+        .iter()
+        .filter_map(|points| points.last().map(|point| point.ts))
+        .max()
+        .unwrap_or(start_ts);
+    let (x_min, x_max, labels) = time_bounds_and_labels_from_range(start_ts, end_ts);
+    (start_ts, x_min, x_max, labels)
+}
+
+fn time_bounds_and_labels_from_range(start_ts: i64, end_ts: i64) -> (f64, f64, Vec<String>) {
+    let t0 = start_ts as f64;
+    let t_end = end_ts as f64;
     let range = (t_end - t0).max(1.0);
 
     let num_labels = 4;
@@ -251,13 +280,11 @@ fn render_metrics_content(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     }
     if net_vol_combined {
         chart_rows += 1;
-    } else {
-        if show_net_req {
-            chart_rows += 1;
-        }
-        if show_err_resp {
-            chart_rows += 1;
-        }
+    } else if show_net_req {
+        chart_rows += 1;
+    }
+    if show_err_resp {
+        chart_rows += 1;
     }
     let chart_rows = chart_rows.max(1);
 
@@ -270,9 +297,11 @@ fn render_metrics_content(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         if show_net_req {
             constraints.push(Constraint::Ratio(1, chart_rows));
         }
-        if show_err_resp {
-            constraints.push(Constraint::Ratio(1, chart_rows));
-        }
+    }
+    if show_err_resp {
+        constraints.push(Constraint::Ratio(1, chart_rows));
+    }
+    if !net_vol_combined {
         if show_vol {
             constraints.push(Constraint::Length(6));
         }
@@ -300,19 +329,19 @@ fn render_metrics_content(app: &MetricsApp, frame: &mut Frame, area: Rect) {
             render_network_http(app, frame, chunks[idx]);
             idx += 1;
         }
-        if show_err_resp {
-            let row3_cols =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .spacing(CARD_SPACING)
-                    .split(chunks[idx]);
-            render_error_rate_chart(app, frame, row3_cols[0]);
-            render_http_latency(app, frame, row3_cols[1]);
-            idx += 1;
-        }
-        if show_vol {
-            render_volume(app, frame, chunks[idx]);
-            idx += 1;
-        }
+    }
+    if show_err_resp {
+        let row3_cols =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .spacing(CARD_SPACING)
+                .split(chunks[idx]);
+        render_error_rate_chart(app, frame, row3_cols[0]);
+        render_http_latency(app, frame, row3_cols[1]);
+        idx += 1;
+    }
+    if !net_vol_combined && show_vol {
+        render_volume(app, frame, chunks[idx]);
+        idx += 1;
     }
 
     if let Some(ref err) = app.error_message {
@@ -575,27 +604,31 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     ])
     .split(inner);
 
-    let ref_points = app
+    let tx_points = app
         .network_tx
         .as_ref()
-        .filter(|t| !t.raw_values.is_empty())
-        .or(app.network_rx.as_ref())
-        .map(|m| &m.raw_values[..])
+        .map(|m| m.raw_values.as_slice())
+        .unwrap_or(&[]);
+    let rx_points = app
+        .network_rx
+        .as_ref()
+        .map(|m| m.raw_values.as_slice())
         .unwrap_or(&[]);
 
-    let (x_min, x_max, x_labels) = time_bounds_and_labels(ref_points);
+    let (origin_ts, x_min, x_max, x_labels) =
+        time_bounds_and_labels_for_series(&[tx_points, rx_points]);
 
     let tx_data = app
         .network_tx
         .as_ref()
         .filter(|_| app.show_egress)
-        .map(|t| to_chart_data(&t.raw_values))
+        .map(|t| to_chart_data_from(&t.raw_values, origin_ts))
         .unwrap_or_default();
     let rx_data = app
         .network_rx
         .as_ref()
         .filter(|_| app.show_ingress)
-        .map(|r| to_chart_data(&r.raw_values))
+        .map(|r| to_chart_data_from(&r.raw_values, origin_ts))
         .unwrap_or_default();
 
     let mut y_max = 0.0f64;
@@ -701,37 +734,32 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 
     if has_ts {
         let ts = http.time_series.as_ref().unwrap();
+        let (origin_ts, x_min, x_max, x_labels) = time_bounds_and_labels_for_series(&[
+            &ts.status_2xx_ts,
+            &ts.status_3xx_ts,
+            &ts.status_4xx_ts,
+            &ts.status_5xx_ts,
+        ]);
         let data_2xx = if app.show_2xx {
-            to_chart_data(&ts.status_2xx_ts)
+            to_chart_data_from(&ts.status_2xx_ts, origin_ts)
         } else {
             vec![]
         };
         let data_3xx = if app.show_3xx {
-            to_chart_data(&ts.status_3xx_ts)
+            to_chart_data_from(&ts.status_3xx_ts, origin_ts)
         } else {
             vec![]
         };
         let data_4xx = if app.show_4xx {
-            to_chart_data(&ts.status_4xx_ts)
+            to_chart_data_from(&ts.status_4xx_ts, origin_ts)
         } else {
             vec![]
         };
         let data_5xx = if app.show_5xx {
-            to_chart_data(&ts.status_5xx_ts)
+            to_chart_data_from(&ts.status_5xx_ts, origin_ts)
         } else {
             vec![]
         };
-
-        let ref_ts = if !ts.status_2xx_ts.is_empty() {
-            &ts.status_2xx_ts
-        } else if !ts.status_5xx_ts.is_empty() {
-            &ts.status_5xx_ts
-        } else if !ts.status_4xx_ts.is_empty() {
-            &ts.status_4xx_ts
-        } else {
-            &ts.status_3xx_ts
-        };
-        let (x_min, x_max, x_labels) = time_bounds_and_labels(ref_ts);
 
         let mut y_max = 0.0f64;
         for (_, v) in data_2xx
@@ -984,27 +1012,28 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     ])
     .split(inner);
 
+    let (origin_ts, x_min, x_max, x_labels) =
+        time_bounds_and_labels_for_series(&[&ts.p50_ts, &ts.p90_ts, &ts.p95_ts, &ts.p99_ts]);
     let p50_data = if app.show_p50 {
-        to_chart_data(&ts.p50_ts)
+        to_chart_data_from(&ts.p50_ts, origin_ts)
     } else {
         vec![]
     };
     let p90_data = if app.show_p90 {
-        to_chart_data(&ts.p90_ts)
+        to_chart_data_from(&ts.p90_ts, origin_ts)
     } else {
         vec![]
     };
     let p95_data = if app.show_p95 {
-        to_chart_data(&ts.p95_ts)
+        to_chart_data_from(&ts.p95_ts, origin_ts)
     } else {
         vec![]
     };
     let p99_data = if app.show_p99 {
-        to_chart_data(&ts.p99_ts)
+        to_chart_data_from(&ts.p99_ts, origin_ts)
     } else {
         vec![]
     };
-    let (x_min, x_max, x_labels) = time_bounds_and_labels(&ts.p50_ts);
 
     let mut y_max = 0.0f64;
     for (_, v) in p50_data
