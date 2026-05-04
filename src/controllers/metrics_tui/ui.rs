@@ -669,7 +669,10 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .collect::<Vec<_>>(),
         );
 
-    let chart = Chart::new(datasets).x_axis(x_axis).y_axis(y_axis);
+    let chart = Chart::new(datasets)
+        .x_axis(x_axis)
+        .y_axis(y_axis)
+        .legend_position(None);
     frame.render_widget(chart, parts[0]);
 
     let mut spans = vec![Span::raw(pad)];
