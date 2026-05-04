@@ -119,6 +119,7 @@ pub struct Args {
     path: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Sections {
     pub(crate) cpu: bool,
     pub(crate) memory: bool,

@@ -7,9 +7,9 @@ use futures::FutureExt;
 use crate::controllers::db_stats::{self, DatabaseStats};
 use crate::controllers::metrics::{
     FetchHttpMetricsParams, FetchProjectMetricsParams, FetchResourceMetricsParams,
-    HttpMetricsResult, MetricSummary, ServiceMetricsSummary, VolumeMetrics, compute_sample_rate,
-    fetch_http_metrics, fetch_project_metrics, fetch_resource_metrics, find_metric,
-    get_volume_metrics, is_database_service,
+    HttpMetricsResult, MetricSummary, ResourceMetricsResult, ServiceMetricsSummary, VolumeMetrics,
+    compute_sample_rate, fetch_http_metrics, fetch_project_metrics, fetch_resource_metrics,
+    find_metric, get_volume_metrics, is_database_service,
 };
 use crate::controllers::project::find_service_instance;
 use crate::util::time::parse_time;
@@ -25,6 +25,7 @@ pub enum ActiveTab {
 }
 
 type MetricMeasurement = crate::gql::queries::metrics::MetricMeasurement;
+type FetchResult<T> = Result<T, String>;
 
 fn build_measurements(
     cpu: bool,
@@ -52,6 +53,87 @@ fn build_measurements(
         m.push(MetricMeasurement::CPU_USAGE);
     }
     m
+}
+
+#[derive(Clone, Copy)]
+pub struct ServiceRefreshOptions {
+    show_cpu: bool,
+    show_memory: bool,
+    show_network: bool,
+    show_volume: bool,
+    show_http: bool,
+    is_db: bool,
+}
+
+impl ServiceRefreshOptions {
+    pub fn from_app(app: &MetricsApp) -> Self {
+        Self {
+            show_cpu: app.show_cpu,
+            show_memory: app.show_memory,
+            show_network: app.show_network,
+            show_volume: app.show_volume,
+            show_http: app.show_http,
+            is_db: app.is_db,
+        }
+    }
+}
+
+pub struct ServiceRefreshResult {
+    pub request_id: u64,
+    pub time_range_idx: usize,
+    pub resource: Option<FetchResult<ResourceMetricsResult>>,
+    pub http: Option<FetchResult<Option<HttpMetricsResult>>>,
+    pub fetched_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ProjectRefreshOptions {
+    show_cpu: bool,
+    show_memory: bool,
+    show_network: bool,
+    show_volume: bool,
+    show_http: bool,
+}
+
+impl ProjectRefreshOptions {
+    pub fn from_app(app: &ProjectApp) -> Self {
+        Self {
+            show_cpu: app.show_cpu,
+            show_memory: app.show_memory,
+            show_network: app.show_network,
+            show_volume: app.show_volume,
+            show_http: app.show_http,
+        }
+    }
+}
+
+pub struct ProjectRefreshResult {
+    pub request_id: u64,
+    pub time_range_idx: usize,
+    pub services: FetchResult<Vec<ServiceMetricsSummary>>,
+    pub fetched_at: DateTime<Utc>,
+}
+
+pub struct ProjectDetailRequest {
+    pub request_id: u64,
+    pub time_range_idx: usize,
+    pub service_id: String,
+    pub is_database: bool,
+    pub volumes: Vec<VolumeMetrics>,
+    pub options: ProjectRefreshOptions,
+}
+
+pub struct ProjectDetailResult {
+    pub request_id: u64,
+    pub service_id: String,
+    pub entry: FetchResult<DetailCacheEntry>,
+}
+
+pub struct ProjectHttpResult {
+    pub request_id: u64,
+    pub time_range_idx: usize,
+    pub service_id: String,
+    pub http: FetchResult<Option<HttpMetricsResult>>,
 }
 
 /// Single-service metrics app state
@@ -114,6 +196,7 @@ pub struct MetricsApp {
     pub error_message: Option<String>,
     pub show_help: bool,
     pub force_refresh: bool,
+    pub refreshing: bool,
 }
 
 impl MetricsApp {
@@ -163,6 +246,7 @@ impl MetricsApp {
             error_message: None,
             show_help: false,
             force_refresh: false,
+            refreshing: false,
         }
     }
 
@@ -172,6 +256,50 @@ impl MetricsApp {
 
     pub fn poll_interval_secs(&self) -> u64 {
         POLL_INTERVALS_SECS[self.time_range_idx]
+    }
+
+    pub fn mark_refreshing(&mut self) {
+        self.refreshing = true;
+    }
+
+    pub fn apply_refresh_result(&mut self, result: ServiceRefreshResult) {
+        if result.time_range_idx != self.time_range_idx {
+            return;
+        }
+        let fetched_at = result.fetched_at;
+
+        if let Some(result) = result.resource {
+            match result {
+                Ok(result) => {
+                    self.cpu = find_metric(&result.metrics, "CPU_USAGE").cloned();
+                    self.cpu_limit = find_metric(&result.metrics, "CPU_LIMIT").cloned();
+                    self.memory = find_metric(&result.metrics, "MEMORY_USAGE_GB").cloned();
+                    self.memory_limit = find_metric(&result.metrics, "MEMORY_LIMIT_GB").cloned();
+                    self.network_tx = find_metric(&result.metrics, "NETWORK_TX_GB").cloned();
+                    self.network_rx = find_metric(&result.metrics, "NETWORK_RX_GB").cloned();
+                    self.disk = find_metric(&result.metrics, "DISK_USAGE_GB").cloned();
+                    self.error_message = None;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Resource fetch failed: {e}"));
+                }
+            }
+        }
+
+        if let Some(result) = result.http {
+            match result {
+                Ok(result) => {
+                    self.http = result;
+                    self.error_message = None;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("HTTP fetch failed: {e}"));
+                }
+            }
+        }
+
+        self.last_refresh = Some(fetched_at);
+        self.refreshing = false;
     }
 
     pub fn maybe_start_db_stats_fetch(&mut self, params: &ServiceTuiParams) {
@@ -191,114 +319,6 @@ impl MetricsApp {
                 db_stats::fetch_db_stats(&instance_id, &db_type).await
             }));
         }
-    }
-
-    pub async fn refresh(&mut self, params: &ServiceTuiParams) {
-        let now = Utc::now();
-        let since_str = TIME_RANGES[self.time_range_idx];
-        let start_date = match parse_time(since_str) {
-            Ok(t) => t,
-            Err(e) => {
-                self.error_message = Some(format!("Failed to parse time range: {e}"));
-                return;
-            }
-        };
-
-        let duration = now - start_date;
-        let sample_rate = compute_sample_rate(duration);
-
-        let needs_resource =
-            self.show_cpu || self.show_memory || self.show_network || self.show_volume;
-        let measurements = if needs_resource {
-            build_measurements(
-                self.show_cpu,
-                self.show_memory,
-                self.show_network,
-                self.show_volume,
-            )
-        } else {
-            vec![]
-        };
-
-        let wants_http = self.show_http && !self.is_db;
-
-        // Fetch resource and HTTP metrics in parallel
-        let resource_fut = async {
-            if needs_resource {
-                Some(
-                    fetch_resource_metrics(FetchResourceMetricsParams {
-                        client: &params.client,
-                        backboard: &params.backboard,
-                        service_id: &params.service_id,
-                        environment_id: &params.environment_id,
-                        start_date,
-                        end_date: None,
-                        measurements,
-                        sample_rate_seconds: Some(sample_rate),
-                        include_raw: true,
-                    })
-                    .await,
-                )
-            } else {
-                None
-            }
-        };
-
-        let http_fut = async {
-            if wants_http {
-                Some(
-                    fetch_http_metrics(FetchHttpMetricsParams {
-                        client: &params.client,
-                        backboard: &params.backboard,
-                        service_id: &params.service_id,
-                        environment_id: &params.environment_id,
-                        start_date,
-                        end_date: now,
-                        step_seconds: Some(sample_rate),
-                        method: params.method.clone(),
-                        path: params.path.clone(),
-                        include_time_series: true,
-                    })
-                    .await,
-                )
-            } else {
-                None
-            }
-        };
-
-        let (resource_result, http_result) = tokio::join!(resource_fut, http_fut);
-
-        if let Some(result) = resource_result {
-            match result {
-                Ok(result) => {
-                    self.cpu = find_metric(&result.metrics, "CPU_USAGE").cloned();
-                    self.cpu_limit = find_metric(&result.metrics, "CPU_LIMIT").cloned();
-                    self.memory = find_metric(&result.metrics, "MEMORY_USAGE_GB").cloned();
-                    self.memory_limit = find_metric(&result.metrics, "MEMORY_LIMIT_GB").cloned();
-                    self.network_tx = find_metric(&result.metrics, "NETWORK_TX_GB").cloned();
-                    self.network_rx = find_metric(&result.metrics, "NETWORK_RX_GB").cloned();
-                    self.disk = find_metric(&result.metrics, "DISK_USAGE_GB").cloned();
-                    self.error_message = None;
-                }
-                Err(e) => {
-                    self.error_message = Some(format!("Resource fetch failed: {e}"));
-                }
-            }
-        }
-
-        if let Some(result) = http_result {
-            match result {
-                Ok(result) => {
-                    self.http = result;
-                    self.error_message = None;
-                }
-                Err(e) => {
-                    self.error_message = Some(format!("HTTP fetch failed: {e}"));
-                }
-            }
-        }
-
-        self.last_refresh = Some(Utc::now());
     }
 
     /// Handle mouse click events (tab switching)
@@ -324,7 +344,7 @@ impl MetricsApp {
 
     /// Check if the background db_stats fetch has completed.
     /// Call this from the event loop before each draw.
-    pub fn poll_db_stats(&mut self, params: &ServiceTuiParams) {
+    pub fn poll_db_stats(&mut self, params: &ServiceTuiParams) -> bool {
         if let Some(ref handle) = self.db_stats_handle {
             if handle.is_finished() {
                 let handle = self.db_stats_handle.take().unwrap();
@@ -346,8 +366,10 @@ impl MetricsApp {
                     }
                     None => {} // shouldn't happen since is_finished() was true
                 }
+                return true;
             }
         }
+        false
     }
 
     /// Returns true if the user wants to quit
@@ -441,6 +463,100 @@ impl MetricsApp {
     }
 }
 
+pub async fn fetch_service_refresh(
+    params: ServiceTuiParams,
+    request_id: u64,
+    time_range_idx: usize,
+    options: ServiceRefreshOptions,
+) -> ServiceRefreshResult {
+    let now = Utc::now();
+    let since_str = TIME_RANGES[time_range_idx];
+    let start_date = match parse_time(since_str) {
+        Ok(t) => t,
+        Err(e) => {
+            return ServiceRefreshResult {
+                request_id,
+                time_range_idx,
+                resource: Some(Err(format!("Failed to parse time range: {e}"))),
+                http: None,
+                fetched_at: Utc::now(),
+            };
+        }
+    };
+
+    let duration = now - start_date;
+    let sample_rate = compute_sample_rate(duration);
+
+    let needs_resource =
+        options.show_cpu || options.show_memory || options.show_network || options.show_volume;
+    let measurements = if needs_resource {
+        build_measurements(
+            options.show_cpu,
+            options.show_memory,
+            options.show_network,
+            options.show_volume,
+        )
+    } else {
+        vec![]
+    };
+    let wants_http = options.show_http && !options.is_db;
+
+    let resource_fut = async {
+        if needs_resource {
+            Some(
+                fetch_resource_metrics(FetchResourceMetricsParams {
+                    client: &params.client,
+                    backboard: &params.backboard,
+                    service_id: &params.service_id,
+                    environment_id: &params.environment_id,
+                    start_date,
+                    end_date: None,
+                    measurements,
+                    sample_rate_seconds: Some(sample_rate),
+                    include_raw: true,
+                })
+                .await
+                .map_err(|e| format!("{e:#}")),
+            )
+        } else {
+            None
+        }
+    };
+
+    let http_fut = async {
+        if wants_http {
+            Some(
+                fetch_http_metrics(FetchHttpMetricsParams {
+                    client: &params.client,
+                    backboard: &params.backboard,
+                    service_id: &params.service_id,
+                    environment_id: &params.environment_id,
+                    start_date,
+                    end_date: now,
+                    step_seconds: Some(sample_rate),
+                    method: params.method.clone(),
+                    path: params.path.clone(),
+                    include_time_series: true,
+                })
+                .await
+                .map_err(|e| format!("{e:#}")),
+            )
+        } else {
+            None
+        }
+    };
+
+    let (resource, http) = tokio::join!(resource_fut, http_fut);
+
+    ServiceRefreshResult {
+        request_id,
+        time_range_idx,
+        resource,
+        http,
+        fetched_at: Utc::now(),
+    }
+}
+
 /// Cached time-series data for one service's detail view
 pub struct DetailCacheEntry {
     pub cpu: Option<MetricSummary>,
@@ -476,6 +592,7 @@ pub struct ProjectApp {
     // Detail panel cache (keyed by service_id)
     pub detail_cache: HashMap<String, DetailCacheEntry>,
     pub detail_loading: bool,
+    pub detail_loading_service_id: Option<String>,
 
     // Section toggles (shared across detail views)
     pub show_cpu: bool,
@@ -499,6 +616,7 @@ pub struct ProjectApp {
     pub error_message: Option<String>,
     pub show_help: bool,
     pub force_refresh: bool,
+    pub refreshing: bool,
 }
 
 impl ProjectApp {
@@ -518,6 +636,7 @@ impl ProjectApp {
             table_scroll_offset: 0,
             detail_cache: HashMap::new(),
             detail_loading: false,
+            detail_loading_service_id: None,
             show_cpu: params.sections.cpu,
             show_memory: params.sections.memory,
             show_network: params.sections.network,
@@ -537,6 +656,7 @@ impl ProjectApp {
             error_message: None,
             show_help: false,
             force_refresh: false,
+            refreshing: false,
         }
     }
 
@@ -562,7 +682,23 @@ impl ProjectApp {
     }
 
     pub fn needs_detail_fetch(&self) -> bool {
-        !self.detail_loading && self.selected_detail().is_none()
+        let Some(svc) = self.services.get(self.selected_idx) else {
+            return false;
+        };
+        self.selected_detail().is_none()
+            && self.detail_loading_service_id.as_deref() != Some(svc.service_id.as_str())
+    }
+
+    pub fn selected_detail_request(&self, request_id: u64) -> Option<ProjectDetailRequest> {
+        let svc = self.services.get(self.selected_idx)?;
+        Some(ProjectDetailRequest {
+            request_id,
+            time_range_idx: self.time_range_idx,
+            service_id: svc.service_id.clone(),
+            is_database: svc.is_database,
+            volumes: svc.volumes.clone(),
+            options: ProjectRefreshOptions::from_app(self),
+        })
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -607,210 +743,43 @@ impl ProjectApp {
         self.force_refresh = true;
     }
 
-    pub async fn refresh_selected_detail(&mut self, params: &ProjectTuiParams) {
-        let svc = match self.services.get(self.selected_idx) {
-            Some(s) => s,
-            None => return,
-        };
-        let service_id = svc.service_id.clone();
-        let is_database = svc.is_database;
-        let volumes = svc.volumes.clone();
-
-        self.detail_loading = true;
-
-        let now = Utc::now();
-        let since_str = TIME_RANGES[self.time_range_idx];
-        let start_date = match parse_time(since_str) {
-            Ok(t) => t,
-            Err(_) => {
-                self.detail_loading = false;
-                return;
-            }
-        };
-        let duration = now - start_date;
-        let sample_rate = compute_sample_rate(duration);
-
-        let measurements = build_measurements(
-            self.show_cpu,
-            self.show_memory,
-            self.show_network,
-            self.show_volume,
-        );
-
-        let wants_http = self.show_http && !is_database;
-
-        let resource_fut = async {
-            Some(
-                fetch_resource_metrics(FetchResourceMetricsParams {
-                    client: &params.client,
-                    backboard: &params.backboard,
-                    service_id: &service_id,
-                    environment_id: &params.environment_id,
-                    start_date,
-                    end_date: None,
-                    measurements,
-                    sample_rate_seconds: Some(sample_rate),
-                    include_raw: true,
-                })
-                .await,
-            )
-        };
-
-        let http_fut = async {
-            if wants_http {
-                Some(
-                    fetch_http_metrics(FetchHttpMetricsParams {
-                        client: &params.client,
-                        backboard: &params.backboard,
-                        service_id: &service_id,
-                        environment_id: &params.environment_id,
-                        start_date,
-                        end_date: now,
-                        step_seconds: Some(sample_rate),
-                        method: params.method.clone(),
-                        path: params.path.clone(),
-                        include_time_series: true,
-                    })
-                    .await,
-                )
-            } else {
-                None
-            }
-        };
-
-        let (resource_result, http_result) = tokio::join!(resource_fut, http_fut);
-
-        let mut entry = DetailCacheEntry {
-            cpu: None,
-            cpu_limit: None,
-            memory: None,
-            memory_limit: None,
-            network_tx: None,
-            network_rx: None,
-            disk: None,
-            volumes,
-            http: None,
-            is_database,
-            fetched_at: Utc::now(),
-            time_range_idx: self.time_range_idx,
-        };
-
-        if let Some(Ok(result)) = resource_result {
-            entry.cpu = find_metric(&result.metrics, "CPU_USAGE").cloned();
-            entry.cpu_limit = find_metric(&result.metrics, "CPU_LIMIT").cloned();
-            entry.memory = find_metric(&result.metrics, "MEMORY_USAGE_GB").cloned();
-            entry.memory_limit = find_metric(&result.metrics, "MEMORY_LIMIT_GB").cloned();
-            entry.network_tx = find_metric(&result.metrics, "NETWORK_TX_GB").cloned();
-            entry.network_rx = find_metric(&result.metrics, "NETWORK_RX_GB").cloned();
-            entry.disk = find_metric(&result.metrics, "DISK_USAGE_GB").cloned();
-        }
-
-        if let Some(Ok(result)) = http_result {
-            entry.http = result;
-        }
-
-        self.detail_cache.insert(service_id, entry);
-        self.detail_loading = false;
+    pub fn mark_refreshing(&mut self) {
+        self.refreshing = true;
     }
 
-    pub async fn refresh(&mut self, params: &ProjectTuiParams) {
-        let now = Utc::now();
-        let since_str = TIME_RANGES[self.time_range_idx];
-        let start_date = match parse_time(since_str) {
-            Ok(t) => t,
-            Err(e) => {
-                self.error_message = Some(format!("Failed to parse time range: {e}"));
-                return;
-            }
-        };
+    pub fn mark_detail_loading(&mut self, service_id: String) {
+        self.detail_loading = true;
+        self.detail_loading_service_id = Some(service_id);
+    }
 
-        let duration = now - start_date;
-        let sample_rate = compute_sample_rate(duration);
+    pub fn apply_refresh_result(&mut self, result: ProjectRefreshResult) -> bool {
+        if result.time_range_idx != self.time_range_idx {
+            return false;
+        }
+        let fetched_at = result.fetched_at;
+        let mut applied_services = false;
 
-        let measurements =
-            build_measurements(self.show_cpu, self.show_memory, self.show_network, false);
-
-        // Preserve selection by service_id across refreshes (list reorders by CPU)
-        let prev_selected_id = self.selected_service().map(|s| s.service_id.clone());
-
-        match fetch_project_metrics(
-            FetchProjectMetricsParams {
-                client: &params.client,
-                backboard: &params.backboard,
-                project_id: &params.project_id,
-                environment_id: &params.environment_id,
-                start_date,
-                end_date: None,
-                measurements,
-                sample_rate_seconds: Some(sample_rate),
-            },
-            &params.project,
-        )
-        .await
-        {
+        match result.services {
             Ok(mut services) => {
-                if self.show_volume {
-                    for svc in &mut services {
-                        svc.volumes = get_volume_metrics(
-                            &params.project,
-                            &params.environment_id,
-                            &svc.service_id,
-                        );
-                    }
-                }
-
-                if self.show_http {
-                    let end = now;
-
-                    for svc in &mut services {
-                        let service_instance = find_service_instance(
-                            &params.project,
-                            &params.environment_id,
-                            &svc.service_id,
-                        );
-                        let source_image = service_instance
-                            .and_then(|si| si.source.as_ref())
-                            .and_then(|src| src.image.as_deref());
-                        svc.is_database = is_database_service(source_image);
-                    }
-
-                    let http_futures: Vec<_> = services
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, svc)| !svc.is_database)
-                        .map(|(i, svc)| {
-                            let params = FetchHttpMetricsParams {
-                                client: &params.client,
-                                backboard: &params.backboard,
-                                service_id: &svc.service_id,
-                                environment_id: &params.environment_id,
-                                start_date,
-                                end_date: end,
-                                step_seconds: Some(sample_rate),
-                                method: params.method.clone(),
-                                path: params.path.clone(),
-                                include_time_series: false,
-                            };
-                            async move { (i, fetch_http_metrics(params).await) }
-                        })
-                        .collect();
-
-                    let results = futures::future::join_all(http_futures).await;
-                    for (i, result) in results {
-                        if let Ok(http) = result {
-                            services[i].http = http;
-                        }
+                applied_services = true;
+                let prev_selected_id = self.selected_service().map(|s| s.service_id.clone());
+                let previous_http = self
+                    .services
+                    .iter()
+                    .filter_map(|svc| svc.http.clone().map(|http| (svc.service_id.clone(), http)))
+                    .collect::<HashMap<_, _>>();
+                for svc in &mut services {
+                    if svc.http.is_none() {
+                        svc.http = previous_http.get(&svc.service_id).cloned();
                     }
                 }
 
                 self.services = services;
                 self.error_message = None;
 
-                // Evict cache entries for services no longer in the project
                 self.detail_cache
                     .retain(|id, _| self.services.iter().any(|s| s.service_id == *id));
 
-                // Restore selection by service_id
                 if let Some(id) = prev_selected_id {
                     if let Some(idx) = self.services.iter().position(|s| s.service_id == id) {
                         self.selected_idx = idx;
@@ -823,9 +792,62 @@ impl ProjectApp {
             }
         }
 
-        self.last_refresh = Some(Utc::now());
+        self.last_refresh = Some(fetched_at);
+        self.refreshing = false;
+        applied_services
+    }
 
-        self.refresh_selected_detail(params).await;
+    pub fn apply_detail_result(&mut self, result: ProjectDetailResult) {
+        let selected_id = self.selected_service().map(|s| s.service_id.as_str());
+        if selected_id != Some(result.service_id.as_str()) {
+            if self.detail_loading_service_id.as_deref() == Some(result.service_id.as_str()) {
+                self.detail_loading = false;
+                self.detail_loading_service_id = None;
+            }
+            return;
+        }
+
+        match result.entry {
+            Ok(entry) if entry.time_range_idx == self.time_range_idx => {
+                self.detail_cache.insert(result.service_id, entry);
+                self.detail_loading = false;
+                self.detail_loading_service_id = None;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                self.error_message = Some(format!("Detail fetch failed: {e}"));
+                self.detail_loading = false;
+                self.detail_loading_service_id = None;
+            }
+        }
+    }
+
+    pub fn http_summary_jobs(&self) -> Vec<String> {
+        if !self.show_http {
+            return vec![];
+        }
+        self.services
+            .iter()
+            .filter(|svc| !svc.is_database)
+            .map(|svc| svc.service_id.clone())
+            .collect()
+    }
+
+    pub fn apply_http_result(&mut self, result: ProjectHttpResult) {
+        if result.time_range_idx != self.time_range_idx {
+            return;
+        }
+        let Some(service) = self
+            .services
+            .iter_mut()
+            .find(|svc| svc.service_id == result.service_id)
+        else {
+            return;
+        };
+
+        if let Ok(http) = result.http {
+            service.http = http;
+        }
     }
 
     /// Returns true if the user wants to quit
@@ -897,5 +919,243 @@ impl ProjectApp {
             _ => {}
         }
         false
+    }
+}
+
+pub async fn fetch_project_refresh(
+    params: ProjectTuiParams,
+    request_id: u64,
+    time_range_idx: usize,
+    options: ProjectRefreshOptions,
+) -> ProjectRefreshResult {
+    let now = Utc::now();
+    let since_str = TIME_RANGES[time_range_idx];
+    let start_date = match parse_time(since_str) {
+        Ok(t) => t,
+        Err(e) => {
+            return ProjectRefreshResult {
+                request_id,
+                time_range_idx,
+                services: Err(format!("Failed to parse time range: {e}")),
+                fetched_at: Utc::now(),
+            };
+        }
+    };
+
+    let duration = now - start_date;
+    let sample_rate = compute_sample_rate(duration);
+    let measurements = build_measurements(
+        options.show_cpu,
+        options.show_memory,
+        options.show_network,
+        false,
+    );
+
+    let services = match fetch_project_metrics(
+        FetchProjectMetricsParams {
+            client: &params.client,
+            backboard: &params.backboard,
+            project_id: &params.project_id,
+            environment_id: &params.environment_id,
+            start_date,
+            end_date: None,
+            measurements,
+            sample_rate_seconds: Some(sample_rate),
+        },
+        &params.project,
+    )
+    .await
+    {
+        Ok(mut services) => {
+            if options.show_volume {
+                for svc in &mut services {
+                    svc.volumes = get_volume_metrics(
+                        &params.project,
+                        &params.environment_id,
+                        &svc.service_id,
+                    );
+                }
+            }
+
+            for svc in &mut services {
+                let service_instance =
+                    find_service_instance(&params.project, &params.environment_id, &svc.service_id);
+                let source_image = service_instance
+                    .and_then(|si| si.source.as_ref())
+                    .and_then(|src| src.image.as_deref());
+                svc.is_database = is_database_service(source_image);
+            }
+
+            Ok(services)
+        }
+        Err(e) => Err(format!("{e:#}")),
+    };
+
+    ProjectRefreshResult {
+        request_id,
+        time_range_idx,
+        services,
+        fetched_at: Utc::now(),
+    }
+}
+
+pub async fn fetch_project_http_summary(
+    params: ProjectTuiParams,
+    request_id: u64,
+    time_range_idx: usize,
+    service_id: String,
+) -> ProjectHttpResult {
+    let now = Utc::now();
+    let since_str = TIME_RANGES[time_range_idx];
+    let start_date = match parse_time(since_str) {
+        Ok(t) => t,
+        Err(e) => {
+            return ProjectHttpResult {
+                request_id,
+                time_range_idx,
+                service_id,
+                http: Err(format!("Failed to parse time range: {e}")),
+            };
+        }
+    };
+
+    let duration = now - start_date;
+    let sample_rate = compute_sample_rate(duration);
+    let http = fetch_http_metrics(FetchHttpMetricsParams {
+        client: &params.client,
+        backboard: &params.backboard,
+        service_id: &service_id,
+        environment_id: &params.environment_id,
+        start_date,
+        end_date: now,
+        step_seconds: Some(sample_rate),
+        method: params.method.clone(),
+        path: params.path.clone(),
+        include_time_series: false,
+    })
+    .await
+    .map_err(|e| format!("{e:#}"));
+
+    ProjectHttpResult {
+        request_id,
+        time_range_idx,
+        service_id,
+        http,
+    }
+}
+
+pub async fn fetch_project_detail(
+    params: ProjectTuiParams,
+    request: ProjectDetailRequest,
+) -> ProjectDetailResult {
+    let now = Utc::now();
+    let since_str = TIME_RANGES[request.time_range_idx];
+    let start_date = match parse_time(since_str) {
+        Ok(t) => t,
+        Err(e) => {
+            return ProjectDetailResult {
+                request_id: request.request_id,
+                service_id: request.service_id,
+                entry: Err(format!("Failed to parse time range: {e}")),
+            };
+        }
+    };
+
+    let duration = now - start_date;
+    let sample_rate = compute_sample_rate(duration);
+    let measurements = build_measurements(
+        request.options.show_cpu,
+        request.options.show_memory,
+        request.options.show_network,
+        request.options.show_volume,
+    );
+    let wants_http = request.options.show_http && !request.is_database;
+
+    let resource_fut = async {
+        fetch_resource_metrics(FetchResourceMetricsParams {
+            client: &params.client,
+            backboard: &params.backboard,
+            service_id: &request.service_id,
+            environment_id: &params.environment_id,
+            start_date,
+            end_date: None,
+            measurements,
+            sample_rate_seconds: Some(sample_rate),
+            include_raw: true,
+        })
+        .await
+    };
+
+    let http_fut = async {
+        if wants_http {
+            Some(
+                fetch_http_metrics(FetchHttpMetricsParams {
+                    client: &params.client,
+                    backboard: &params.backboard,
+                    service_id: &request.service_id,
+                    environment_id: &params.environment_id,
+                    start_date,
+                    end_date: now,
+                    step_seconds: Some(sample_rate),
+                    method: params.method.clone(),
+                    path: params.path.clone(),
+                    include_time_series: true,
+                })
+                .await,
+            )
+        } else {
+            None
+        }
+    };
+
+    let (resource_result, http_result) = tokio::join!(resource_fut, http_fut);
+
+    let mut entry = DetailCacheEntry {
+        cpu: None,
+        cpu_limit: None,
+        memory: None,
+        memory_limit: None,
+        network_tx: None,
+        network_rx: None,
+        disk: None,
+        volumes: request.volumes,
+        http: None,
+        is_database: request.is_database,
+        fetched_at: Utc::now(),
+        time_range_idx: request.time_range_idx,
+    };
+
+    let entry_result = match resource_result {
+        Ok(result) => {
+            entry.cpu = find_metric(&result.metrics, "CPU_USAGE").cloned();
+            entry.cpu_limit = find_metric(&result.metrics, "CPU_LIMIT").cloned();
+            entry.memory = find_metric(&result.metrics, "MEMORY_USAGE_GB").cloned();
+            entry.memory_limit = find_metric(&result.metrics, "MEMORY_LIMIT_GB").cloned();
+            entry.network_tx = find_metric(&result.metrics, "NETWORK_TX_GB").cloned();
+            entry.network_rx = find_metric(&result.metrics, "NETWORK_RX_GB").cloned();
+            entry.disk = find_metric(&result.metrics, "DISK_USAGE_GB").cloned();
+
+            if let Some(http_result) = http_result {
+                match http_result {
+                    Ok(http) => entry.http = http,
+                    Err(e) => {
+                        return ProjectDetailResult {
+                            request_id: request.request_id,
+                            service_id: request.service_id,
+                            entry: Err(format!("{e:#}")),
+                        };
+                    }
+                }
+            }
+
+            Ok(entry)
+        }
+        Err(e) => Err(format!("{e:#}")),
+    };
+
+    ProjectDetailResult {
+        request_id: request.request_id,
+        service_id: request.service_id,
+        entry: entry_result,
     }
 }

@@ -19,6 +19,14 @@ pub struct MetricDataPoint {
     pub value: f64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ChartData {
+    pub x_min: f64,
+    pub x_max: f64,
+    pub points: Vec<(f64, f64)>,
+    pub labels: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MetricSummary {
     pub measurement: String,
@@ -29,6 +37,8 @@ pub struct MetricSummary {
     pub data_points: usize,
     #[serde(skip_serializing)]
     pub raw_values: Vec<MetricDataPoint>,
+    #[serde(skip_serializing)]
+    pub chart_data: ChartData,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +58,11 @@ pub struct HttpTimeSeries {
     pub p90_ts: Vec<MetricDataPoint>,
     pub p95_ts: Vec<MetricDataPoint>,
     pub p99_ts: Vec<MetricDataPoint>,
+    pub error_rate_chart: ChartData,
+    pub p50_chart: ChartData,
+    pub p90_chart: ChartData,
+    pub p95_chart: ChartData,
+    pub p99_chart: ChartData,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +188,52 @@ fn sort_project_services(services: &mut [ServiceMetricsSummary], sort_by_cpu: bo
     });
 }
 
+fn chart_data_from_points(points: &[MetricDataPoint]) -> ChartData {
+    let Some(first) = points.first() else {
+        return ChartData {
+            x_min: 0.0,
+            x_max: 1.0,
+            ..ChartData::default()
+        };
+    };
+
+    chart_data_from_points_with_origin(points, first.ts)
+}
+
+fn chart_data_from_points_with_origin(points: &[MetricDataPoint], origin_ts: i64) -> ChartData {
+    let end_ts = points.last().map(|point| point.ts).unwrap_or(origin_ts);
+    let range = (end_ts - origin_ts).max(1) as f64;
+    let labels = time_labels(origin_ts, end_ts);
+    let origin = origin_ts as f64;
+    let chart_points = points
+        .iter()
+        .map(|point| (point.ts as f64 - origin, point.value))
+        .collect();
+
+    ChartData {
+        x_min: 0.0,
+        x_max: range,
+        points: chart_points,
+        labels,
+    }
+}
+
+fn time_labels(start_ts: i64, end_ts: i64) -> Vec<String> {
+    let range = (end_ts - start_ts).max(1) as f64;
+    let step = range / 4.0;
+    (0..=4)
+        .map(|i| {
+            let ts = start_ts as f64 + step * i as f64;
+            chrono::DateTime::from_timestamp(ts as i64, 0)
+                .map(|dt| {
+                    let local: chrono::DateTime<chrono::Local> = dt.into();
+                    local.format("%-I:%M %p").to_string()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 pub async fn fetch_project_metrics(
     params: FetchProjectMetricsParams<'_>,
     project: &ProjectProject,
@@ -256,6 +317,11 @@ fn summarize_metric(m: &queries::metrics::MetricsMetrics, include_raw: bool) -> 
             max: 0.0,
             data_points: 0,
             raw_values: vec![],
+            chart_data: ChartData {
+                x_min: 0.0,
+                x_max: 1.0,
+                ..ChartData::default()
+            },
         }
     } else {
         let values: Vec<f64> = m.values.iter().map(|v| v.value).collect();
@@ -275,6 +341,7 @@ fn summarize_metric(m: &queries::metrics::MetricsMetrics, include_raw: bool) -> 
         } else {
             vec![]
         };
+        let chart_data = chart_data_from_points(&raw_values);
 
         MetricSummary {
             measurement: format!("{:?}", m.measurement),
@@ -284,6 +351,7 @@ fn summarize_metric(m: &queries::metrics::MetricsMetrics, include_raw: bool) -> 
             max,
             data_points: values.len(),
             raw_values,
+            chart_data,
         }
     }
 }
@@ -486,53 +554,67 @@ pub async fn fetch_http_metrics(
     };
 
     let time_series = if params.include_time_series {
-        let request_rate_ts = ts_totals
+        let request_rate_ts: Vec<MetricDataPoint> = ts_totals
             .iter()
             .map(|(&ts, &(total, _))| MetricDataPoint { ts, value: total })
             .collect();
-        let error_rate_ts = ts_totals
+        let error_rate_ts: Vec<MetricDataPoint> = ts_totals
             .iter()
             .map(|(&ts, &(_, errors))| MetricDataPoint { ts, value: errors })
             .collect();
-        let p50_ts = samples
+        let p50_ts: Vec<MetricDataPoint> = samples
             .iter()
             .map(|s| MetricDataPoint {
                 ts: s.ts,
                 value: s.p50,
             })
             .collect();
-        let p90_ts = samples
+        let p90_ts: Vec<MetricDataPoint> = samples
             .iter()
             .map(|s| MetricDataPoint {
                 ts: s.ts,
                 value: s.p90,
             })
             .collect();
-        let p95_ts = samples
+        let p95_ts: Vec<MetricDataPoint> = samples
             .iter()
             .map(|s| MetricDataPoint {
                 ts: s.ts,
                 value: s.p95,
             })
             .collect();
-        let p99_ts = samples
+        let p99_ts: Vec<MetricDataPoint> = samples
             .iter()
             .map(|s| MetricDataPoint {
                 ts: s.ts,
                 value: s.p99,
             })
             .collect();
+        let error_rate_chart = chart_data_from_points(&error_rate_ts);
+        let status_2xx_ts = btree_to_vec(&ts_2xx);
+        let status_3xx_ts = btree_to_vec(&ts_3xx);
+        let status_4xx_ts = btree_to_vec(&ts_4xx);
+        let status_5xx_ts = btree_to_vec(&ts_5xx);
+        let p50_chart = chart_data_from_points(&p50_ts);
+        let p90_chart = chart_data_from_points(&p90_ts);
+        let p95_chart = chart_data_from_points(&p95_ts);
+        let p99_chart = chart_data_from_points(&p99_ts);
         Some(HttpTimeSeries {
             request_rate_ts,
             error_rate_ts,
-            status_2xx_ts: btree_to_vec(&ts_2xx),
-            status_3xx_ts: btree_to_vec(&ts_3xx),
-            status_4xx_ts: btree_to_vec(&ts_4xx),
-            status_5xx_ts: btree_to_vec(&ts_5xx),
+            status_2xx_ts,
+            status_3xx_ts,
+            status_4xx_ts,
+            status_5xx_ts,
             p50_ts,
             p90_ts,
             p95_ts,
             p99_ts,
+            error_rate_chart,
+            p50_chart,
+            p90_chart,
+            p95_chart,
+            p99_chart,
         })
     } else {
         None

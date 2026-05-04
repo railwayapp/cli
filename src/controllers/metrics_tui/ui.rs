@@ -58,27 +58,10 @@ fn error_rate_color(rate: f64) -> Color {
 
 // ─── Data helpers ────────────────────────────────────────────────────────────
 
-/// Convert raw metric data points to (f64, f64) for Chart datasets.
-/// X = seconds since first point, Y = value
-fn to_chart_data(points: &[MetricDataPoint]) -> Vec<(f64, f64)> {
-    let Some(first) = points.first() else {
-        return vec![];
-    };
-    to_chart_data_from(points, first.ts)
-}
-
 /// Convert points to chart coordinates using a shared timestamp origin.
 fn to_chart_data_from(points: &[MetricDataPoint], origin_ts: i64) -> Vec<(f64, f64)> {
     let t0 = origin_ts as f64;
     points.iter().map(|p| (p.ts as f64 - t0, p.value)).collect()
-}
-
-/// Build X-axis time labels from data points
-fn time_bounds_and_labels(points: &[MetricDataPoint]) -> (f64, f64, Vec<String>) {
-    if points.is_empty() {
-        return (0.0, 1.0, vec![]);
-    }
-    time_bounds_and_labels_from_range(points[0].ts, points.last().unwrap().ts)
 }
 
 /// Build shared X-axis bounds and labels for multiple series in one chart.
@@ -399,6 +382,11 @@ fn render_header(app: &MetricsApp, frame: &mut Frame, area: Rect) {
             format!("refreshed {refresh_str}"),
             Style::default().fg(LABEL_COLOR),
         ),
+        if app.refreshing {
+            Span::styled("  ·  refreshing", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
     ]);
 
     frame.render_widget(Paragraph::new(vec![header, Line::from("")]), area);
@@ -462,8 +450,10 @@ fn render_metric_chart(
             ])
             .split(inner);
 
-            let chart_data = to_chart_data(&m.raw_values);
-            let (x_min, x_max, x_labels) = time_bounds_and_labels(&m.raw_values);
+            let chart_data = &m.chart_data.points;
+            let x_min = m.chart_data.x_min;
+            let x_max = m.chart_data.x_max;
+            let x_labels = &m.chart_data.labels;
 
             let y_max = m.max * 1.15;
             let y_max = if y_max < 0.001 { 1.0 } else { y_max };
@@ -472,7 +462,7 @@ fn render_metric_chart(
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(color))
-                .data(&chart_data);
+                .data(chart_data);
 
             let mut datasets = vec![dataset];
 
@@ -491,10 +481,10 @@ fn render_metric_chart(
             let x_axis = Axis::default()
                 .style(Style::default().fg(LABEL_COLOR))
                 .bounds([x_min, x_max])
-                .labels(x_labels.clone());
+                .labels(x_labels.to_vec());
 
             let y_label_strs = vec!["0".to_string(), format_fn(y_max / 2.0), format_fn(y_max)];
-            let pad = chart_left_pad(&y_label_strs, &x_labels);
+            let pad = chart_left_pad(&y_label_strs, x_labels);
 
             let y_axis = Axis::default()
                 .style(Style::default().fg(LABEL_COLOR))
@@ -931,9 +921,6 @@ fn render_error_rate_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     };
 
     let ts = http.time_series.as_ref().unwrap();
-    let err_data = to_chart_data(&ts.error_rate_ts);
-    let (x_min, x_max, x_labels) = time_bounds_and_labels(&ts.error_rate_ts);
-
     let err_pct_data: Vec<(f64, f64)> = ts
         .error_rate_ts
         .iter()
@@ -948,11 +935,22 @@ fn render_error_rate_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let chart_data = if !err_pct_data.is_empty() {
-        &err_pct_data
-    } else {
-        &err_data
-    };
+    let (chart_data, x_min, x_max, x_labels): (&[(f64, f64)], f64, f64, Vec<String>) =
+        if !err_pct_data.is_empty() {
+            (
+                &err_pct_data,
+                ts.error_rate_chart.x_min,
+                ts.error_rate_chart.x_max,
+                ts.error_rate_chart.labels.clone(),
+            )
+        } else {
+            (
+                &ts.error_rate_chart.points,
+                ts.error_rate_chart.x_min,
+                ts.error_rate_chart.x_max,
+                ts.error_rate_chart.labels.clone(),
+            )
+        };
 
     let mut y_max = 0.0f64;
     for (_, v) in chart_data.iter() {
@@ -1012,27 +1010,28 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     ])
     .split(inner);
 
-    let (origin_ts, x_min, x_max, x_labels) =
-        time_bounds_and_labels_for_series(&[&ts.p50_ts, &ts.p90_ts, &ts.p95_ts, &ts.p99_ts]);
-    let p50_data = if app.show_p50 {
-        to_chart_data_from(&ts.p50_ts, origin_ts)
+    let x_min = ts.p50_chart.x_min;
+    let x_max = ts.p50_chart.x_max;
+    let x_labels = ts.p50_chart.labels.clone();
+    let p50_data: &[(f64, f64)] = if app.show_p50 {
+        &ts.p50_chart.points
     } else {
-        vec![]
+        &[]
     };
-    let p90_data = if app.show_p90 {
-        to_chart_data_from(&ts.p90_ts, origin_ts)
+    let p90_data: &[(f64, f64)] = if app.show_p90 {
+        &ts.p90_chart.points
     } else {
-        vec![]
+        &[]
     };
-    let p95_data = if app.show_p95 {
-        to_chart_data_from(&ts.p95_ts, origin_ts)
+    let p95_data: &[(f64, f64)] = if app.show_p95 {
+        &ts.p95_chart.points
     } else {
-        vec![]
+        &[]
     };
-    let p99_data = if app.show_p99 {
-        to_chart_data_from(&ts.p99_ts, origin_ts)
+    let p99_data: &[(f64, f64)] = if app.show_p99 {
+        &ts.p99_chart.points
     } else {
-        vec![]
+        &[]
     };
 
     let mut y_max = 0.0f64;
@@ -1064,7 +1063,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(P50_COLOR))
-                .data(&p50_data),
+                .data(p50_data),
         );
     }
     if !p90_data.is_empty() {
@@ -1074,7 +1073,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(P90_COLOR))
-                .data(&p90_data),
+                .data(p90_data),
         );
     }
     if !p95_data.is_empty() {
@@ -1084,7 +1083,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(P95_COLOR))
-                .data(&p95_data),
+                .data(p95_data),
         );
     }
     if !p99_data.is_empty() {
@@ -1094,7 +1093,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(P99_COLOR))
-                .data(&p99_data),
+                .data(p99_data),
         );
     }
 
@@ -1764,6 +1763,11 @@ fn render_project_header(app: &ProjectApp, frame: &mut Frame, area: Rect) {
             format!("refreshed {refresh_str}"),
             Style::default().fg(LABEL_COLOR),
         ),
+        if app.refreshing {
+            Span::styled("  ·  refreshing", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw("")
+        },
         Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
         Span::raw(format!("{} services", app.services.len())),
     ]);
@@ -1998,6 +2002,7 @@ fn render_detail_panel(app: &ProjectApp, frame: &mut Frame, area: Rect) {
         error_message: None,
         show_help: false,
         force_refresh: false,
+        refreshing: false,
     };
 
     render_detail_charts(&temp_app, frame, parts[1]);
