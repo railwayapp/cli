@@ -777,8 +777,9 @@ impl ProjectApp {
                 self.services = services;
                 self.error_message = None;
 
-                self.detail_cache
-                    .retain(|id, _| self.services.iter().any(|s| s.service_id == *id));
+                // Detail panels contain time-series data, so refresh them whenever
+                // the project summary refreshes instead of reusing stale charts.
+                self.detail_cache.clear();
 
                 if let Some(id) = prev_selected_id {
                     if let Some(idx) = self.services.iter().position(|s| s.service_id == id) {
@@ -1157,5 +1158,97 @@ pub async fn fetch_project_detail(
         request_id: request.request_id,
         service_id: request.service_id,
         entry: entry_result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service_summary(service_id: &str) -> ServiceMetricsSummary {
+        ServiceMetricsSummary {
+            service_id: service_id.to_string(),
+            service_name: "api".to_string(),
+            cpu: None,
+            cpu_limit: None,
+            memory: None,
+            memory_limit: None,
+            network_tx: None,
+            network_rx: None,
+            http: None,
+            volumes: vec![],
+            is_database: false,
+        }
+    }
+
+    fn detail_entry(time_range_idx: usize) -> DetailCacheEntry {
+        DetailCacheEntry {
+            cpu: None,
+            cpu_limit: None,
+            memory: None,
+            memory_limit: None,
+            network_tx: None,
+            network_rx: None,
+            disk: None,
+            volumes: vec![],
+            http: None,
+            is_database: false,
+            fetched_at: Utc::now(),
+            time_range_idx,
+        }
+    }
+
+    fn project_app_with_cached_detail() -> ProjectApp {
+        let services = vec![service_summary("svc_1")];
+        let detail_cache = HashMap::from([("svc_1".to_string(), detail_entry(0))]);
+
+        ProjectApp {
+            project_name: "project".to_string(),
+            environment_name: "production".to_string(),
+            time_range_idx: 0,
+            time_range_changed: false,
+            services,
+            selected_idx: 0,
+            table_scroll_offset: 0,
+            detail_cache,
+            detail_loading: false,
+            detail_loading_service_id: None,
+            show_cpu: true,
+            show_memory: true,
+            show_network: true,
+            show_volume: true,
+            show_http: true,
+            show_egress: true,
+            show_ingress: true,
+            show_2xx: true,
+            show_3xx: true,
+            show_4xx: true,
+            show_5xx: true,
+            show_p50: true,
+            show_p90: true,
+            show_p95: true,
+            show_p99: true,
+            last_refresh: None,
+            error_message: None,
+            show_help: false,
+            force_refresh: false,
+            refreshing: true,
+        }
+    }
+
+    #[test]
+    fn project_refresh_invalidates_selected_detail_cache() {
+        let mut app = project_app_with_cached_detail();
+
+        let applied = app.apply_refresh_result(ProjectRefreshResult {
+            request_id: 1,
+            time_range_idx: 0,
+            services: Ok(vec![service_summary("svc_1")]),
+            fetched_at: Utc::now(),
+        });
+
+        assert!(applied);
+        assert!(app.detail_cache.is_empty());
+        assert!(app.needs_detail_fetch());
     }
 }
