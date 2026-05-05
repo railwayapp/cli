@@ -56,11 +56,16 @@ pub async fn command(args: Args) -> Result<()> {
     });
 
     let environment_config = if let Some(environment) = environment {
-        Some(
-            fetch_environment_config(&client, &configs, &environment.node.id, false)
-                .await?
-                .config,
-        )
+        match fetch_environment_config(&client, &configs, &environment.node.id, false).await {
+            Ok(config) => Some(config.config),
+            Err(error) => {
+                eprintln!(
+                    "{}: unable to load bucket details: {error}",
+                    "Warning".yellow()
+                );
+                None
+            }
+        }
     } else {
         None
     };
