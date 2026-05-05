@@ -35,10 +35,10 @@ enum Commands {
 }
 
 #[derive(Clone)]
-struct CodingTool {
-    slug: &'static str,
-    name: &'static str,
-    global_parent: PathBuf,
+pub(super) struct CodingTool {
+    pub slug: &'static str,
+    pub name: &'static str,
+    pub global_parent: PathBuf,
     skills_dir_name: &'static str,
 }
 
@@ -56,7 +56,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 }
 
-fn coding_tools(home: &Path) -> Vec<CodingTool> {
+pub(super) fn coding_tools(home: &Path) -> Vec<CodingTool> {
     vec![
         CodingTool {
             slug: "universal",
@@ -91,7 +91,7 @@ fn coding_tools(home: &Path) -> Vec<CodingTool> {
     ]
 }
 
-fn resolve_tools(home: &Path, agent_filter: &[String]) -> Result<Vec<CodingTool>> {
+pub(super) fn resolve_tools(home: &Path, agent_filter: &[String]) -> Result<Vec<CodingTool>> {
     let all_tools = coding_tools(home);
 
     if agent_filter.is_empty() {
@@ -240,7 +240,7 @@ fn write_skills_to_target(target: &InstallTarget, skills: &SkillFiles) -> Result
     Ok(())
 }
 
-async fn install_skills(agent_filter: &[String]) -> Result<()> {
+pub(super) async fn install_skills(agent_filter: &[String]) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let tools = resolve_tools(&home, agent_filter)?;
     let targets = build_targets(&tools);

@@ -53,6 +53,7 @@ commands!(
     project,
     run(local),
     service,
+    setup,
     shell,
     skills,
     ssh,
@@ -566,6 +567,26 @@ mod cli_tests {
             assert_parses(&["variable", "set", "KEY", "--stdin"]);
             assert_parses(&["variable", "set", "MY_VAR", "--stdin", "-s", "myservice"]);
             assert_parses(&["variable", "set", "SECRET", "--stdin", "--skip-deploys"]);
+        }
+
+        #[test]
+        fn setup_agent_subcommand() {
+            assert_subcommand(&["setup", "agent"], "setup");
+            assert_parses(&["setup", "agent"]);
+            assert_parses(&["setup", "agent", "--yes"]);
+            assert_parses(&["setup", "agent", "-y"]);
+            assert_parses(&["setup", "agent", "--remote"]);
+            assert_parses(&["setup", "agent", "--remote", "-y"]);
+        }
+
+        #[test]
+        fn mcp_install_subcommand() {
+            assert_parses(&["mcp"]); // no subcommand: still launches server
+            assert_parses(&["mcp", "install"]);
+            assert_parses(&["mcp", "install", "--agent", "cursor"]);
+            assert_parses(&["mcp", "install", "--agent", "cursor", "--agent", "claude-code"]);
+            assert_parses(&["mcp", "install", "--remote"]);
+            assert_parses(&["mcp", "install", "--remote", "--agent", "cursor"]);
         }
     }
 }
