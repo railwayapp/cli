@@ -925,7 +925,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Search for Railway templates by name or code. Returns the top 5 matching templates with their codes."
+        description = "Search for Railway templates using Railway's backend-ranked template search. Returns matching templates with their codes."
     )]
     async fn search_templates(
         &self,
