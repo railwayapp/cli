@@ -632,22 +632,6 @@ pub async fn fetch_http_metrics(
     }))
 }
 
-pub fn is_database_service(source_image: Option<&str>) -> bool {
-    source_image
-        .map(|img| img.to_lowercase())
-        .is_some_and(|img| {
-            img.contains("postgres")
-                || img.contains("postgis")
-                || img.contains("timescale")
-                || img.contains("redis")
-                || img.contains("mongo")
-                || img.contains("mysql")
-                || img.contains("mariadb")
-                || img.contains("memcached")
-                || img.contains("valkey")
-        })
-}
-
 pub fn get_volume_metrics(
     project: &ProjectProject,
     environment_id: &str,

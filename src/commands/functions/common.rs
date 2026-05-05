@@ -11,6 +11,7 @@ use crate::{
     queries::project::{
         ProjectProjectEnvironmentsEdges, ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
     },
+    resources::is_function_service,
     util::prompt::{fake_select, prompt_confirm_with_default, prompt_path},
 };
 
@@ -38,17 +39,6 @@ pub fn unlink_function(id: &str) -> Result<()> {
     c.unlink_function(id.to_owned())?;
     c.write()?;
     Ok(())
-}
-
-fn is_function_service(
-    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> bool {
-    service_instance.node.source.clone().is_some_and(|source| {
-        source
-            .image
-            .unwrap_or_default()
-            .starts_with("ghcr.io/railwayapp/function")
-    })
 }
 
 pub fn confirm(arg: Option<bool>, terminal: bool, message: &str) -> Result<bool> {

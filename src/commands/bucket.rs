@@ -6,6 +6,7 @@ use crate::{
         project::{ensure_project_and_environment_exist, get_project},
     },
     errors::RailwayError,
+    resources::project_bucket_name,
     util::{
         progress::create_spinner_if,
         prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
@@ -736,15 +737,6 @@ fn resolve_environment_buckets(
             .then_with(|| left.id.cmp(&right.id))
     });
     buckets
-}
-
-fn project_bucket_name(project: &queries::RailwayProject, bucket_id: &str) -> Option<String> {
-    project
-        .buckets
-        .edges
-        .iter()
-        .find(|edge| edge.node.id == bucket_id)
-        .map(|edge| edge.node.name.clone())
 }
 
 fn project_has_bucket(project: &queries::RailwayProject, bucket_input: &str) -> bool {
