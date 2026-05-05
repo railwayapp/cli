@@ -9,9 +9,10 @@ use crate::controllers::metrics::{
     FetchHttpMetricsParams, FetchProjectMetricsParams, FetchResourceMetricsParams,
     HttpMetricsResult, MetricSummary, ResourceMetricsResult, ServiceMetricsSummary, VolumeMetrics,
     compute_sample_rate, fetch_http_metrics, fetch_project_metrics, fetch_resource_metrics,
-    find_metric, get_volume_metrics, is_database_service,
+    find_metric, get_volume_metrics,
 };
 use crate::controllers::project::find_service_instance;
+use crate::resources::is_database_service;
 use crate::util::time::parse_time;
 
 use tokio::task::JoinHandle;

@@ -7,11 +7,12 @@ use crate::{
             FetchHttpMetricsParams, FetchProjectMetricsParams, FetchResourceMetricsParams,
             HttpMetricsResult, ResourceMetricsResult, ServiceMetricsSummary, VolumeMetrics,
             compute_sample_rate, fetch_http_metrics, fetch_project_metrics, fetch_resource_metrics,
-            find_metric, format_count, format_cpu, format_gb, format_mb, get_volume_metrics,
-            is_database_service, pct, utilization,
+            find_metric, format_count, format_cpu, format_gb, format_mb, get_volume_metrics, pct,
+            utilization,
         },
         project::{ensure_project_and_environment_exist, find_service_instance, get_project},
     },
+    resources::is_database_service,
     util::{progress::create_spinner_if, time::parse_time},
 };
 

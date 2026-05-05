@@ -31,6 +31,7 @@ pub mod logs;
 pub mod mcp;
 pub mod metrics;
 pub mod open;
+mod output;
 pub mod project;
 pub mod redeploy;
 pub mod restart;

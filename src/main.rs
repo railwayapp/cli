@@ -16,6 +16,7 @@ mod controllers;
 mod errors;
 mod gql;
 mod oauth;
+mod resources;
 mod subscription;
 mod table;
 mod util;
