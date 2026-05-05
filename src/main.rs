@@ -61,6 +61,7 @@ commands!(
     starship,
     status,
     telemetry_cmd(telemetry),
+    templates,
     unlink,
     up,
     upgrade,
@@ -307,6 +308,7 @@ async fn main() -> Result<()> {
         "upgrade",
         "autoupdate",
         "telemetry_cmd",
+        "templates",
         "check_updates",
     ];
 

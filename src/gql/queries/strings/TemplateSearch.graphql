@@ -1,0 +1,36 @@
+query TemplateSearch(
+  $query: String!
+  $first: Int
+  $after: String
+  $verified: Boolean
+  $category: String
+) {
+  templateSearch(
+    query: $query
+    first: $first
+    after: $after
+    verified: $verified
+    category: $category
+  ) {
+    edges {
+      cursor
+      node {
+        id
+        code
+        name
+        description
+        image
+        deploymentCount
+        healthScore
+        creatorName
+        isVerified
+      }
+    }
+    pageInfo {
+      hasNextPage
+      hasPreviousPage
+      startCursor
+      endCursor
+    }
+  }
+}
