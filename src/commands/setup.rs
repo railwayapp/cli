@@ -128,11 +128,7 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
             .filter(|c| c.detected)
             .map(|c| c.slug.to_string())
             .collect();
-        println!(
-            "{} {}\n",
-            "Detected:".bold(),
-            detected.join(", ").cyan()
-        );
+        println!("{} {}\n", "Detected:".bold(), detected.join(", ").cyan());
         detected
     } else {
         let default_indices: Vec<usize> = choices
@@ -142,14 +138,11 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
             .map(|(i, _)| i)
             .collect();
 
-        let picked = inquire::MultiSelect::new(
-            "Which editors should we set up?",
-            choices.clone(),
-        )
-        .with_default(&default_indices)
-        .with_render_config(Configs::get_render_config())
-        .prompt()
-        .context("Failed to prompt for editor selection")?;
+        let picked = inquire::MultiSelect::new("Which editors should we set up?", choices.clone())
+            .with_default(&default_indices)
+            .with_render_config(Configs::get_render_config())
+            .prompt()
+            .context("Failed to prompt for editor selection")?;
 
         if picked.is_empty() {
             println!("{}", "No editors selected. Nothing to do.".yellow());

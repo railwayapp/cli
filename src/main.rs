@@ -595,7 +595,14 @@ mod cli_tests {
             assert_parses(&["mcp"]); // no subcommand: still launches server
             assert_parses(&["mcp", "install"]);
             assert_parses(&["mcp", "install", "--agent", "cursor"]);
-            assert_parses(&["mcp", "install", "--agent", "cursor", "--agent", "claude-code"]);
+            assert_parses(&[
+                "mcp",
+                "install",
+                "--agent",
+                "cursor",
+                "--agent",
+                "claude-code",
+            ]);
             assert_parses(&["mcp", "install", "--remote"]);
             assert_parses(&["mcp", "install", "--remote", "--agent", "cursor"]);
         }

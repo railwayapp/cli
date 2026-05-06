@@ -47,10 +47,7 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result
     if configurable.is_empty() {
         // The skills command auto-includes "universal", which has no MCP target.
         // Tell the user nothing was configured rather than silently no-op.
-        println!(
-            "{}",
-            "No MCP-capable tools selected or detected.".yellow()
-        );
+        println!("{}", "No MCP-capable tools selected or detected.".yellow());
         if tools.iter().any(|t| t.slug == "universal") {
             println!(
                 "{} The universal `.agents` directory has no MCP convention; pass --agent to target a specific tool.",
@@ -266,9 +263,8 @@ fn read_json_or_empty(path: &Path) -> Result<JsonValue> {
         // We always write back strict JSON, so this only loosens the read.
         Ok(s) => match serde_json::from_str(&s) {
             Ok(v) => Ok(v),
-            Err(_) => serde_json::from_str(&strip_jsonc(&s)).with_context(|| {
-                format!("Failed to parse existing JSON at {}", path.display())
-            }),
+            Err(_) => serde_json::from_str(&strip_jsonc(&s))
+                .with_context(|| format!("Failed to parse existing JSON at {}", path.display())),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(JsonValue::Object(Default::default()))

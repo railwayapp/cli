@@ -66,11 +66,17 @@ fn agent_setup_is_current(state: &AgentState) -> bool {
 }
 
 fn disabled_by_env() -> bool {
-    matches!(std::env::var(DISABLE_ENV).as_deref(), Ok("0" | "false" | "off"))
+    matches!(
+        std::env::var(DISABLE_ENV).as_deref(),
+        Ok("0" | "false" | "off")
+    )
 }
 
 fn is_agent_environment() -> bool {
-    if matches!(std::env::var(FORCE_ENV).as_deref(), Ok("1" | "true" | "yes")) {
+    if matches!(
+        std::env::var(FORCE_ENV).as_deref(),
+        Ok("1" | "true" | "yes")
+    ) {
         return true;
     }
 
@@ -87,7 +93,9 @@ fn is_agent_environment() -> bool {
 
     const AGENT_ENV_PREFIXES: &[&str] = &["CLAUDE_CODE_", "CODEX_", "OPENCODE_"];
 
-    AGENT_ENV_VARS.iter().any(|name| std::env::var_os(name).is_some())
+    AGENT_ENV_VARS
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
         || std::env::vars_os().any(|(key, _)| {
             key.to_str()
                 .map(|key| {
