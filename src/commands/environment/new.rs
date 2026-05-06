@@ -293,10 +293,7 @@ fn select_duplicate_id_new(
         });
         if let Some(env) = env {
             if !env.node.can_access {
-                bail!(
-                    "Environment \"{}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment.",
-                    env.node.name
-                );
+                bail!(RailwayError::EnvironmentRestricted(env.node.name.clone()));
             }
             fake_select("Duplicate from", &env.node.name);
             Some(env.node.id.clone())

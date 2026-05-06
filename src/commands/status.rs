@@ -125,24 +125,28 @@ async fn project_json_with_environment_instances(
     let mut project_json = serde_json::to_value(project)?;
     initialize_environment_instance_fields(&mut project_json);
 
-    for environment in project
+    let environment_ids = project
         .environments
         .edges
         .iter()
         .filter(|env| env.node.can_access)
-    {
-        let instances = get_environment_instances(
-            client,
-            configs,
-            &linked_project.project,
-            &environment.node.id,
-        )
+        .map(|environment| environment.node.id.clone())
+        .collect::<Vec<_>>();
+    let project_id = linked_project.project.clone();
+    let instances_by_environment =
+        futures::future::try_join_all(environment_ids.into_iter().map(|environment_id| {
+            let project_id = project_id.clone();
+            async move {
+                let instances =
+                    get_environment_instances(client, configs, &project_id, &environment_id)
+                        .await?;
+                Ok::<_, anyhow::Error>((environment_id, instances))
+            }
+        }))
         .await?;
-        add_environment_instances_to_project_json(
-            &mut project_json,
-            &environment.node.id,
-            &instances,
-        );
+
+    for (environment_id, instances) in instances_by_environment {
+        add_environment_instances_to_project_json(&mut project_json, &environment_id, &instances);
     }
 
     Ok(project_json)

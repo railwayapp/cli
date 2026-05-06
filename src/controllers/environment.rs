@@ -15,12 +15,19 @@ pub fn get_matched_environment(
         .find(|env| env.node.name == environment || env.node.id == environment)
         .ok_or_else(|| RailwayError::EnvironmentNotFound(environment))?;
 
-    if !environment.node.can_access {
-        bail!(
-            "Environment \"{}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment.",
-            environment.node.name
-        );
-    }
+    ensure_environment_accessible(&environment.node)?;
 
     Ok(environment.node.clone())
+}
+
+pub fn ensure_environment_accessible(
+    environment: &ProjectProjectEnvironmentsEdgesNode,
+) -> Result<()> {
+    if !environment.can_access {
+        bail!(RailwayError::EnvironmentRestricted(
+            environment.name.clone()
+        ));
+    }
+
+    Ok(())
 }

@@ -48,6 +48,11 @@ pub enum RailwayError {
     #[error("Environment is deleted. Run `railway environment` to connect to an environment.")]
     EnvironmentDeleted,
 
+    #[error(
+        "Environment \"{0}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment."
+    )]
+    EnvironmentRestricted(String),
+
     #[error("No projects found. Run `railway init` to create a new project")]
     NoProjects,
 

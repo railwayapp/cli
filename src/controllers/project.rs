@@ -103,12 +103,13 @@ pub async fn ensure_project_and_environment_exist(
                     bail!(RailwayError::EnvironmentDeleted);
                 }
             }
-            Err(error) => {
-                if error.downcast_ref::<RailwayError>().is_some() {
+            Err(error) => match error.downcast_ref::<RailwayError>() {
+                Some(RailwayError::EnvironmentNotFound(_)) => {
                     bail!(RailwayError::EnvironmentDeleted);
                 }
-                return Err(error);
-            }
+                Some(RailwayError::EnvironmentRestricted(_)) => return Err(error),
+                _ => return Err(error),
+            },
         };
     }
 
@@ -135,9 +136,17 @@ pub async fn get_environment_instances(
             queries::environment_instances::Variables {
                 project_id: project_id.to_string(),
                 environment_id: environment_id.to_string(),
-                service_instances_first: Some(ENVIRONMENT_INSTANCE_PAGE_SIZE),
+                service_instances_first: Some(if service_done {
+                    0
+                } else {
+                    ENVIRONMENT_INSTANCE_PAGE_SIZE
+                }),
                 service_instances_after: service_after.clone(),
-                volume_instances_first: Some(ENVIRONMENT_INSTANCE_PAGE_SIZE),
+                volume_instances_first: Some(if volume_done {
+                    0
+                } else {
+                    ENVIRONMENT_INSTANCE_PAGE_SIZE
+                }),
                 volume_instances_after: volume_after.clone(),
             },
         )

@@ -3,7 +3,7 @@ use crate::{
     client::GQLClient,
     config::Configs,
     controllers::{
-        environment::get_matched_environment,
+        environment::ensure_environment_accessible,
         project::{get_environment_instances, get_project},
     },
     errors::RailwayError,
@@ -130,7 +130,7 @@ pub async fn command(args: Args) -> Result<()> {
                 || (e.node.name.to_lowercase() == environment_input.to_lowercase())
         })
         .ok_or_else(|| RailwayError::EnvironmentNotFound(environment_input))?;
-    get_matched_environment(&project, environment.node.id.clone())?;
+    ensure_environment_accessible(&environment.node)?;
 
     let environment_instances = get_environment_instances(
         &client,

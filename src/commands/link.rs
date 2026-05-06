@@ -198,7 +198,7 @@ fn select_environment(
     project: &NormalisedProject,
 ) -> Result<NormalisedEnvironment, anyhow::Error> {
     if project.environments.is_empty() {
-        if project.has_restricted_environments {
+        if !project.restricted_environments.is_empty() {
             bail!("All environments in this project are restricted");
         } else {
             bail!("Project has no environments");
@@ -217,7 +217,7 @@ fn select_environment(
             (e.name.to_lowercase() == environment.to_lowercase())
                 || (e.id.to_lowercase() == environment.to_lowercase())
         }) {
-            bail!(restricted_environment_message(&env.name));
+            bail!(RailwayError::EnvironmentRestricted(env.name.clone()));
         } else {
             let available: Vec<&str> = project
                 .environments
@@ -237,9 +237,7 @@ fn select_environment(
                 suffix
             );
         }
-    } else if project.environments.len() == 1
-        && (!std::io::stdout().is_terminal() || project.restricted_environments.is_empty())
-    {
+    } else if project.environments.len() == 1 {
         let env = project.environments[0].clone();
         fake_select("Select an environment", &env.name);
         env
@@ -265,13 +263,6 @@ fn select_environment(
         prompt_options("Select an environment", project.environments.clone())?
     };
     Ok(environment)
-}
-
-fn restricted_environment_message(name: &str) -> String {
-    format!(
-        "Environment \"{}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment.",
-        name
-    )
 }
 
 fn select_project(
@@ -422,8 +413,6 @@ structstruck::strike! {
             /// Service name
             name: String,
         }>,
-        /// Whether the project has restricted environments
-        has_restricted_environments: bool,
     }
 }
 
@@ -441,7 +430,6 @@ impl From<Project> for NormalisedProject {
                         restricted_envs.push(normalised);
                     }
                 }
-                let has_restricted = !restricted_envs.is_empty();
                 NormalisedProject::new(
                     project.id,
                     project.name,
@@ -453,7 +441,6 @@ impl From<Project> for NormalisedProject {
                         .into_iter()
                         .map(|service| NormalisedService::new(service.node.id, service.node.name))
                         .collect(),
-                    has_restricted,
                 )
             }
             Project::Workspace(project) => {
@@ -467,7 +454,6 @@ impl From<Project> for NormalisedProject {
                         restricted_envs.push(normalised);
                     }
                 }
-                let has_restricted = !restricted_envs.is_empty();
                 NormalisedProject::new(
                     project.id,
                     project.name,
@@ -479,7 +465,6 @@ impl From<Project> for NormalisedProject {
                         .into_iter()
                         .map(|service| NormalisedService::new(service.node.id, service.node.name))
                         .collect(),
-                    has_restricted,
                 )
             }
         }

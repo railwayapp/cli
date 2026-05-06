@@ -39,7 +39,9 @@ pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Re
                     && (env.node.id == environment
                         || env.node.name.to_lowercase() == environment.to_lowercase())
             }) {
-                bail!(restricted_environment_message(&restricted.node.name));
+                bail!(RailwayError::EnvironmentRestricted(
+                    restricted.node.name.clone()
+                ));
             }
 
             let environment = environments
@@ -55,7 +57,7 @@ pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Re
         None => {
             interact_or!("Environment must be specified when not running in a terminal");
 
-            if all_environments.len() == 1 && environments.len() == 1 {
+            if environments.len() == 1 {
                 match environments.first() {
                     // Project has only one environment, so use that one
                     Some(environment) => environment.clone(),
@@ -95,11 +97,4 @@ pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Re
     }
 
     Ok(())
-}
-
-fn restricted_environment_message(name: &str) -> String {
-    format!(
-        "Environment \"{}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment.",
-        name
-    )
 }
