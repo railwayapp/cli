@@ -356,7 +356,7 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    util::agent_advisory::maybe_show(&raw_args, subcommand_name.as_deref());
+    util::agent_advisory::maybe_show(&raw_args, subcommand_name.as_deref()).await;
 
     handle_update_task(check_updates_handle).await;
 

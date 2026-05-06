@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
-use crate::util;
+use crate::{telemetry, util};
 
 const STATE_VERSION: u32 = 1;
 const ADVISORY_INTERVAL_HOURS: i64 = 24;
@@ -140,7 +140,7 @@ fn advisory_is_recent(state: &AgentState, command: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn maybe_show(raw_args: &[String], command: Option<&str>) {
+pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
     if disabled_by_env() || should_skip_for_args(raw_args) || !is_agent_environment() {
         return;
     }
@@ -174,6 +174,19 @@ pub fn maybe_show(raw_args: &[String], command: Option<&str>) {
     );
 
     let _ = write_state(&state);
+
+    telemetry::send(telemetry::CliTrackEvent {
+        command: "agent_advisory".to_string(),
+        sub_command: Some(command.to_string()),
+        success: true,
+        error_message: None,
+        duration_ms: 0,
+        cli_version: env!("CARGO_PKG_VERSION"),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        is_ci: crate::config::Configs::env_is_ci(),
+    })
+    .await;
 }
 
 pub fn record_setup_complete() -> Result<()> {
