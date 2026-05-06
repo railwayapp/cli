@@ -196,7 +196,8 @@ async fn main() -> Result<()> {
     // Check raw args too so that help/error paths (where clap returns Err)
     // are also detected — e.g. `railway upgrade --help` should not apply
     // a staged update as a side effect.
-    let raw_subcommand = std::env::args().nth(1).filter(|a| !a.starts_with('-'));
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_subcommand = raw_args.iter().find(|a| !a.starts_with('-')).cloned();
 
     let is_update_management_cmd = matches!(
         raw_subcommand.as_deref(),
@@ -322,6 +323,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    let subcommand_name = cli.subcommand_name().map(str::to_string);
     let exec_result = exec_cli(cli).await;
 
     // Send telemetry for silent auto-update apply (after auth is available).
@@ -350,6 +352,8 @@ async fn main() -> Result<()> {
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);
     }
+
+    util::agent_advisory::maybe_show(&raw_args, subcommand_name.as_deref());
 
     handle_update_task(check_updates_handle).await;
 

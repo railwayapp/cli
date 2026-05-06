@@ -63,6 +63,45 @@ impl fmt::Display for ToolChoice {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum McpChoice {
+    Local,
+    Remote,
+    Skip,
+}
+
+impl fmt::Display for McpChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            McpChoice::Local => write!(
+                f,
+                "Local (default)  {}",
+                "— runs `railway mcp` as a stdio server".dimmed()
+            ),
+            McpChoice::Remote => write!(
+                f,
+                "Remote           {}",
+                "— https://mcp.railway.com (HTTP)".dimmed()
+            ),
+            McpChoice::Skip => write!(f, "Skip             {}", "— don't configure MCP".dimmed()),
+        }
+    }
+}
+
+fn pick_mcp_choice(remote_flag: bool, non_interactive: bool) -> Result<McpChoice> {
+    if remote_flag {
+        return Ok(McpChoice::Remote);
+    }
+    if non_interactive {
+        return Ok(McpChoice::Local);
+    }
+    let options = vec![McpChoice::Local, McpChoice::Remote, McpChoice::Skip];
+    inquire::Select::new("Configure MCP server:", options)
+        .with_render_config(Configs::get_render_config())
+        .prompt()
+        .context("Failed to prompt for MCP transport")
+}
+
 async fn agent_setup(args: AgentArgs) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     // Treat the run as non-interactive if the user passed -y, OR if stdout
@@ -130,8 +169,20 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
     // Step 1: skills install
     skills::install_skills(&selected_slugs).await?;
 
-    // Step 2: MCP install (skips universal internally — no MCP convention)
-    mcp_install::install_mcp(&selected_slugs, args.remote).await?;
+    // Step 2: MCP install (skips universal internally — no MCP convention).
+    // `--remote` short-circuits the prompt; `-y`/non-TTY defaults to local.
+    let mcp_choice = pick_mcp_choice(args.remote, non_interactive)?;
+    match mcp_choice {
+        McpChoice::Local => mcp_install::install_mcp(&selected_slugs, false).await?,
+        McpChoice::Remote => mcp_install::install_mcp(&selected_slugs, true).await?,
+        McpChoice::Skip => {
+            println!(
+                "\n{} {}",
+                "-".dimmed(),
+                "Skipping MCP install. Run `railway mcp install` later to configure.".dimmed()
+            );
+        }
+    }
 
     // Step 3: login
     if non_interactive {
@@ -147,6 +198,10 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
         "Setup complete. Learn more:".bold(),
         DOCS_URL.purple()
     );
+
+    if let Err(e) = crate::util::agent_advisory::record_setup_complete() {
+        eprintln!("{}: {e}", "Warning: failed to record agent setup".yellow());
+    }
 
     Ok(())
 }
