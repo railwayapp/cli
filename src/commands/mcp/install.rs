@@ -254,7 +254,8 @@ fn write_codex_toml(path: &Path) -> Result<()> {
     servers.insert("railway".to_string(), toml::Value::Table(railway));
 
     let serialized = toml::to_string_pretty(&doc).context("Failed to serialize TOML")?;
-    std::fs::write(path, serialized).with_context(|| format!("Failed to write {}", path.display()))
+    crate::util::write_atomic(path, &serialized)
+        .with_context(|| format!("Failed to write {}", path.display()))
 }
 
 fn read_json_or_empty(path: &Path) -> Result<JsonValue> {
@@ -340,5 +341,6 @@ fn strip_jsonc(input: &str) -> String {
 
 fn write_json_pretty(path: &Path, value: &JsonValue) -> Result<()> {
     let s = serde_json::to_string_pretty(value).context("Failed to serialize JSON")?;
-    std::fs::write(path, s).with_context(|| format!("Failed to write {}", path.display()))
+    crate::util::write_atomic(path, &s)
+        .with_context(|| format!("Failed to write {}", path.display()))
 }
