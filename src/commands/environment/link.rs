@@ -34,6 +34,14 @@ pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Re
     let environment = match environment_arg {
         // If the environment is specified, find it in the list of environments
         Some(environment) => {
+            if let Some(restricted) = all_environments.iter().find(|env| {
+                !env.node.can_access
+                    && (env.node.id == environment
+                        || env.node.name.to_lowercase() == environment.to_lowercase())
+            }) {
+                bail!(restricted_environment_message(&restricted.node.name));
+            }
+
             let environment = environments
                 .iter()
                 .find(|env| {
@@ -47,7 +55,7 @@ pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Re
         None => {
             interact_or!("Environment must be specified when not running in a terminal");
 
-            if environments.len() == 1 {
+            if all_environments.len() == 1 && environments.len() == 1 {
                 match environments.first() {
                     // Project has only one environment, so use that one
                     Some(environment) => environment.clone(),
@@ -87,4 +95,11 @@ pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Re
     }
 
     Ok(())
+}
+
+fn restricted_environment_message(name: &str) -> String {
+    format!(
+        "Environment \"{}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment.",
+        name
+    )
 }

@@ -9,14 +9,14 @@ use serde_json::Value;
 use crate::{
     client::post_graphql,
     config::Configs,
-    controllers::project::find_service_instance,
+    controllers::project::{
+        ProjectEnvironmentInstances, ProjectServiceInstanceNode, find_service_instance,
+        volume_instances_in_env,
+    },
     gql::queries::{
         self,
-        project::{
-            DeploymentInstanceStatus, DeploymentStatus,
-            ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-            ProjectProjectServicesEdgesNode, VolumeState,
-        },
+        environment_instances::{DeploymentInstanceStatus, DeploymentStatus, VolumeState},
+        project::ProjectProjectServicesEdgesNode,
     },
 };
 
@@ -90,17 +90,16 @@ struct DeploymentSnapshot {
 }
 
 pub(in crate::commands) fn build_service_output(
-    project: &queries::RailwayProject,
-    env_id: &str,
+    environment_instances: &ProjectEnvironmentInstances,
     service: &ProjectProjectServicesEdgesNode,
     linked_service_id: Option<&str>,
     region_locations: &HashMap<String, String>,
 ) -> ServiceOutput {
     let id = service.id.clone();
     let is_linked = linked_service_id == Some(id.as_str());
-    let instance = find_service_instance(project, env_id, &id);
+    let instance = find_service_instance(environment_instances, &id);
 
-    let volumes = volumes_for_service(project, env_id, &id);
+    let volumes = volumes_for_service(environment_instances, &id);
     let volume_migrating = volumes
         .iter()
         .any(|v| matches!(v.state, Some(VolumeState::MIGRATING)));
@@ -474,31 +473,20 @@ fn friendly_region_fallback(region: &str) -> Option<String> {
 }
 
 fn volumes_for_service(
-    project: &queries::RailwayProject,
-    env_id: &str,
+    environment_instances: &ProjectEnvironmentInstances,
     service_id: &str,
 ) -> Vec<VolumeOutput> {
-    project
-        .environments
-        .edges
+    volume_instances_in_env(environment_instances)
         .iter()
-        .find(|e| e.node.id == env_id)
-        .map(|env| {
-            env.node
-                .volume_instances
-                .edges
-                .iter()
-                .filter(|vi| vi.node.service_id.as_deref() == Some(service_id))
-                .map(|vi| VolumeOutput {
-                    name: vi.node.volume.name.clone(),
-                    mount_path: vi.node.mount_path.clone(),
-                    current_size_mb: vi.node.current_size_mb,
-                    size_mb: vi.node.size_mb,
-                    state: vi.node.state.clone(),
-                })
-                .collect()
+        .filter(|vi| vi.node.service_id.as_deref() == Some(service_id))
+        .map(|vi| VolumeOutput {
+            name: vi.node.volume.name.clone(),
+            mount_path: vi.node.mount_path.clone(),
+            current_size_mb: vi.node.current_size_mb,
+            size_mb: vi.node.size_mb,
+            state: vi.node.state.clone(),
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn derived_status_line(row: &ServiceOutput) -> String {
@@ -654,18 +642,14 @@ fn format_volume_line(volume: &VolumeOutput) -> String {
     )
 }
 
-fn source_from_instance(
-    instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-) -> Option<ServiceSourceOutput> {
+fn source_from_instance(instance: &ProjectServiceInstanceNode) -> Option<ServiceSourceOutput> {
     let source = instance.source.as_ref()?;
     let repo = source.repo.clone().filter(|s| !s.is_empty());
     let image = source.image.clone().filter(|s| !s.is_empty());
     (repo.is_some() || image.is_some()).then_some(ServiceSourceOutput { repo, image })
 }
 
-fn url_from_instance(
-    instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-) -> Option<String> {
+fn url_from_instance(instance: &ProjectServiceInstanceNode) -> Option<String> {
     instance
         .domains
         .custom_domains

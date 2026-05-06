@@ -10,16 +10,32 @@ use crate::{
         Configs,
         queries::{
             self,
-            project::{
-                ProjectProject, ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-                ProjectProjectServicesEdgesNode,
+            environment_instances::{
+                EnvironmentInstancesEnvironmentServiceInstancesEdges,
+                EnvironmentInstancesEnvironmentServiceInstancesEdgesNode,
+                EnvironmentInstancesEnvironmentVolumeInstancesEdges,
+                EnvironmentInstancesEnvironmentVolumeInstancesEdgesNode,
             },
+            project::{ProjectProject, ProjectProjectServicesEdgesNode},
         },
     },
     errors::RailwayError,
 };
 
 use super::environment::get_matched_environment;
+
+pub type ProjectServiceInstanceEdge = EnvironmentInstancesEnvironmentServiceInstancesEdges;
+pub type ProjectServiceInstanceNode = EnvironmentInstancesEnvironmentServiceInstancesEdgesNode;
+pub type ProjectVolumeInstanceEdge = EnvironmentInstancesEnvironmentVolumeInstancesEdges;
+pub type ProjectVolumeInstanceNode = EnvironmentInstancesEnvironmentVolumeInstancesEdgesNode;
+
+const ENVIRONMENT_INSTANCE_PAGE_SIZE: i64 = 500;
+
+#[derive(Debug, Clone, Default)]
+pub struct ProjectEnvironmentInstances {
+    pub service_instances: Vec<ProjectServiceInstanceEdge>,
+    pub volume_instances: Vec<ProjectVolumeInstanceEdge>,
+}
 
 pub async fn get_project(
     client: &Client,
@@ -87,50 +103,104 @@ pub async fn ensure_project_and_environment_exist(
                     bail!(RailwayError::EnvironmentDeleted);
                 }
             }
-            Err(_) => bail!(RailwayError::EnvironmentDeleted),
+            Err(error) => {
+                if error.downcast_ref::<RailwayError>().is_some() {
+                    bail!(RailwayError::EnvironmentDeleted);
+                }
+                return Err(error);
+            }
         };
     }
 
     Ok(())
 }
 
+pub async fn get_environment_instances(
+    client: &Client,
+    configs: &Configs,
+    project_id: &str,
+    environment_id: &str,
+) -> Result<ProjectEnvironmentInstances> {
+    let mut service_instances = Vec::new();
+    let mut volume_instances = Vec::new();
+    let mut service_after = None;
+    let mut volume_after = None;
+    let mut service_done = false;
+    let mut volume_done = false;
+
+    loop {
+        let response = post_graphql::<queries::EnvironmentInstances, _>(
+            client,
+            configs.get_backboard(),
+            queries::environment_instances::Variables {
+                project_id: project_id.to_string(),
+                environment_id: environment_id.to_string(),
+                service_instances_first: Some(ENVIRONMENT_INSTANCE_PAGE_SIZE),
+                service_instances_after: service_after.clone(),
+                volume_instances_first: Some(ENVIRONMENT_INSTANCE_PAGE_SIZE),
+                volume_instances_after: volume_after.clone(),
+            },
+        )
+        .await?;
+
+        if !service_done {
+            let connection = response.environment.service_instances;
+            service_done = !connection.page_info.has_next_page;
+            service_after = connection.page_info.end_cursor;
+            service_instances.extend(connection.edges);
+        }
+
+        if !volume_done {
+            let connection = response.environment.volume_instances;
+            volume_done = !connection.page_info.has_next_page;
+            volume_after = connection.page_info.end_cursor;
+            volume_instances.extend(connection.edges);
+        }
+
+        if service_done && volume_done {
+            break;
+        }
+    }
+
+    Ok(ProjectEnvironmentInstances {
+        service_instances,
+        volume_instances,
+    })
+}
+
 /// Get all service IDs that have instances in a given environment
-pub fn get_service_ids_in_env(project: &ProjectProject, environment_id: &str) -> HashSet<String> {
-    project
-        .environments
-        .edges
+pub fn get_service_ids_in_env(instances: &ProjectEnvironmentInstances) -> HashSet<String> {
+    instances
+        .service_instances
         .iter()
-        .find(|e| e.node.id == environment_id)
-        .map(|e| {
-            e.node
-                .service_instances
-                .edges
-                .iter()
-                .map(|si| si.node.service_id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+        .map(|si| si.node.service_id.clone())
+        .collect()
+}
+
+/// Find all service instances within a specific environment.
+pub fn service_instances_in_env<'a>(
+    instances: &'a ProjectEnvironmentInstances,
+) -> &'a [ProjectServiceInstanceEdge] {
+    instances.service_instances.as_slice()
+}
+
+/// Find all volume instances within a specific environment.
+pub fn volume_instances_in_env<'a>(
+    instances: &'a ProjectEnvironmentInstances,
+) -> &'a [ProjectVolumeInstanceEdge] {
+    instances.volume_instances.as_slice()
 }
 
 /// Find a service instance within a specific environment
 pub fn find_service_instance<'a>(
-    project: &'a ProjectProject,
-    environment_id: &str,
+    instances: &'a ProjectEnvironmentInstances,
     service_id: &str,
-) -> Option<&'a ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode> {
-    project
-        .environments
-        .edges
+) -> Option<&'a ProjectServiceInstanceNode> {
+    instances
+        .service_instances
         .iter()
-        .find(|e| e.node.id == environment_id)
-        .and_then(|e| {
-            e.node
-                .service_instances
-                .edges
-                .iter()
-                .find(|si| si.node.service_id == service_id)
-                .map(|si| &si.node)
-        })
+        .find(|si| si.node.service_id == service_id)
+        .map(|si| &si.node)
 }
 
 /// Resolved context for service operations (variables, etc.)

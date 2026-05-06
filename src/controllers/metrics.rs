@@ -8,8 +8,10 @@ use serde::Serialize;
 use crate::{
     client::post_graphql,
     controllers::deployment::{FetchLogsParams, fetch_http_logs},
+    controllers::project::{
+        ProjectEnvironmentInstances, service_instances_in_env, volume_instances_in_env,
+    },
     gql::queries,
-    queries::project::ProjectProject,
     util::logs::HttpLogLike,
 };
 
@@ -236,7 +238,7 @@ fn time_labels(start_ts: i64, end_ts: i64) -> Vec<String> {
 
 pub async fn fetch_project_metrics(
     params: FetchProjectMetricsParams<'_>,
-    project: &ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
 ) -> Result<Vec<ServiceMetricsSummary>> {
     let sort_by_cpu = params
         .measurements
@@ -255,28 +257,19 @@ pub async fn fetch_project_metrics(
 
     let resp = post_graphql::<queries::Metrics, _>(params.client, params.backboard, vars).await?;
 
-    let mut by_service: HashMap<String, ServiceMetricsSummary> = project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.id == params.environment_id)
-        .map(|env| {
-            env.node
-                .service_instances
-                .edges
-                .iter()
-                .map(|service_instance| {
-                    (
+    let mut by_service: HashMap<String, ServiceMetricsSummary> =
+        service_instances_in_env(environment_instances)
+            .iter()
+            .map(|service_instance| {
+                (
+                    service_instance.node.service_id.clone(),
+                    empty_service_metrics_summary(
                         service_instance.node.service_id.clone(),
-                        empty_service_metrics_summary(
-                            service_instance.node.service_id.clone(),
-                            service_instance.node.service_name.clone(),
-                        ),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                        service_instance.node.service_name.clone(),
+                    ),
+                )
+            })
+            .collect();
 
     for m in &resp.metrics {
         let Some(service_id) = m.tags.service_id.clone() else {
@@ -633,33 +626,19 @@ pub async fn fetch_http_metrics(
 }
 
 pub fn get_volume_metrics(
-    project: &ProjectProject,
-    environment_id: &str,
+    environment_instances: &ProjectEnvironmentInstances,
     service_id: &str,
 ) -> Vec<VolumeMetrics> {
-    project
-        .environments
-        .edges
+    volume_instances_in_env(environment_instances)
         .iter()
-        .find(|e| e.node.id == environment_id)
-        .map(|env| {
-            env.node
-                .volume_instances
-                .edges
-                .iter()
-                .filter(|vi| {
-                    vi.node.service_id.as_deref() == Some(service_id)
-                        && vi.node.environment_id == environment_id
-                })
-                .map(|vi| VolumeMetrics {
-                    volume_name: vi.node.volume.name.clone(),
-                    mount_path: vi.node.mount_path.clone(),
-                    current_size_mb: vi.node.current_size_mb,
-                    limit_size_mb: vi.node.size_mb as f64,
-                })
-                .collect()
+        .filter(|vi| vi.node.service_id.as_deref() == Some(service_id))
+        .map(|vi| VolumeMetrics {
+            volume_name: vi.node.volume.name.clone(),
+            mount_path: vi.node.mount_path.clone(),
+            current_size_mb: vi.node.current_size_mb,
+            limit_size_mb: vi.node.size_mb as f64,
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// Maps time window duration to an appropriate sample rate in seconds,

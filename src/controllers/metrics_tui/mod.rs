@@ -24,6 +24,7 @@ use app::{
 
 use crate::commands::metrics::Sections;
 use crate::controllers::database::DatabaseType;
+use crate::controllers::project::ProjectEnvironmentInstances;
 use crate::queries::project::ProjectProject;
 
 /// Parameters for single-service metrics TUI
@@ -57,6 +58,7 @@ pub struct ProjectTuiParams {
     pub backboard: String,
     pub project_id: String,
     pub project: ProjectProject,
+    pub environment_instances: ProjectEnvironmentInstances,
     pub environment_id: String,
     pub environment_name: String,
     pub method: Option<String>,

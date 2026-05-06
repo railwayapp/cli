@@ -10,7 +10,10 @@ use crate::{
             find_metric, format_count, format_cpu, format_gb, format_mb, get_volume_metrics, pct,
             utilization,
         },
-        project::{ensure_project_and_environment_exist, find_service_instance, get_project},
+        project::{
+            ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
+            get_project,
+        },
     },
     resources::is_database_service,
     util::{progress::create_spinner_if, time::parse_time},
@@ -228,6 +231,9 @@ pub async fn command(args: Args) -> Result<()> {
     let environment = get_matched_environment(&project, environment)?;
     let environment_id = environment.id.clone();
     let environment_name = environment.name.clone();
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
+            .await?;
 
     // Cross-service mode: --all
     let show_spinner = !args.json && !args.raw && !args.watch;
@@ -246,6 +252,7 @@ pub async fn command(args: Args) -> Result<()> {
                     backboard: backboard.clone(),
                     project_id: linked_project.project.clone(),
                     project: project.clone(),
+                    environment_instances: environment_instances.clone(),
                     environment_id: environment_id.clone(),
                     environment_name: environment_name.clone(),
                     method: args.method.as_ref().map(|m| m.to_string()),
@@ -281,14 +288,14 @@ pub async fn command(args: Args) -> Result<()> {
                 measurements,
                 sample_rate_seconds: Some(sample_rate),
             },
-            &project,
+            &environment_instances,
         )
         .await?;
 
         // Populate volume data per service
         if sections.volume {
             for svc in &mut services {
-                svc.volumes = get_volume_metrics(&project, &environment_id, &svc.service_id);
+                svc.volumes = get_volume_metrics(&environment_instances, &svc.service_id);
             }
         }
 
@@ -301,7 +308,7 @@ pub async fn command(args: Args) -> Result<()> {
             // Determine which services are databases
             for svc in &mut services {
                 let service_instance =
-                    find_service_instance(&project, &environment_id, &svc.service_id);
+                    find_service_instance(&environment_instances, &svc.service_id);
                 let source_image = service_instance
                     .and_then(|si| si.source.as_ref())
                     .and_then(|src| src.image.as_deref());
@@ -389,7 +396,7 @@ pub async fn command(args: Args) -> Result<()> {
     let sections = Sections::from_args(&args);
 
     // Detect if service is a database (and which type)
-    let service_instance = find_service_instance(&project, &environment_id, &service_id);
+    let service_instance = find_service_instance(&environment_instances, &service_id);
     let source_image = service_instance
         .and_then(|si| si.source.as_ref())
         .and_then(|src| src.image.as_deref());
@@ -418,7 +425,7 @@ pub async fn command(args: Args) -> Result<()> {
     // Live TUI for single service
     if args.watch {
         let volumes = if sections.volume {
-            get_volume_metrics(&project, &environment_id, &service_id)
+            get_volume_metrics(&environment_instances, &service_id)
         } else {
             vec![]
         };
@@ -491,7 +498,7 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     let volume_metrics = if sections.volume {
-        get_volume_metrics(&project, &environment_id, &service_id)
+        get_volume_metrics(&environment_instances, &service_id)
     } else {
         vec![]
     };

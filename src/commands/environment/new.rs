@@ -6,6 +6,10 @@ use crate::{
         self, EnvironmentConfig, PatchEntry,
         environment::{fetch_environment_config, prepare_config_for_duplication},
     },
+    controllers::project::{
+        ProjectEnvironmentInstances, ProjectServiceInstanceEdge, get_environment_instances,
+        service_instances_in_env,
+    },
     util::progress::create_spinner_if,
 };
 
@@ -53,11 +57,13 @@ pub async fn new_environment(args: Args) -> Result<()> {
         let source_config = prepare_config_for_duplication(source_config);
 
         // Get any --service-config overrides
+        let source_instances =
+            get_environment_instances(&client, &configs, &project.id, source_env_id).await?;
         let override_config = edit_services_select(
             &args,
             &client,
             &configs,
-            &project,
+            &source_instances,
             source_env_id.clone(),
             source_config.clone(),
         )
@@ -102,7 +108,7 @@ pub async fn edit_services_select(
     args: &Args,
     client: &reqwest::Client,
     configs: &Configs,
-    project: &queries::project::ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment_id: String,
     exisiting_config: EnvironmentConfig,
 ) -> Result<EnvironmentConfig> {
@@ -114,7 +120,7 @@ pub async fn edit_services_select(
 
     if has_non_interactive {
         // Non-interactive: parse --service-config and --service-variable flags
-        return parse_non_interactive_configs(&all_configs, project, &environment_id);
+        return parse_non_interactive_configs(&all_configs, environment_instances);
     }
 
     if !is_terminal {
@@ -126,7 +132,7 @@ pub async fn edit_services_select(
     parse_interactive_configs(
         client,
         configs,
-        project,
+        environment_instances,
         &environment_id,
         Some(exisiting_config),
     )
@@ -136,10 +142,9 @@ pub async fn edit_services_select(
 /// Parse --service-config flags into EnvironmentConfig
 pub fn parse_non_interactive_configs(
     service_configs: &[String],
-    project: &queries::project::ProjectProject,
-    environment_id: &str,
+    environment_instances: &ProjectEnvironmentInstances,
 ) -> Result<EnvironmentConfig> {
-    let services = get_environment_services(project, environment_id)?;
+    let services = get_environment_services(environment_instances);
     let mut entries: Vec<PatchEntry> = Vec::new();
     let mut configured_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -210,11 +215,11 @@ fn get_config_display_field(path: &str) -> String {
 pub async fn parse_interactive_configs(
     client: &reqwest::Client,
     configs: &Configs,
-    project: &queries::project::ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment_id: &str,
     existing_config: Option<EnvironmentConfig>,
 ) -> Result<EnvironmentConfig> {
-    let services = get_environment_services(project, environment_id)?;
+    let services = get_environment_services(environment_instances);
 
     // Use provided config or fetch existing environment config for placeholders
     let existing_config = match existing_config {
@@ -269,17 +274,11 @@ pub async fn parse_interactive_configs(
 
 /// Get service instances for an environment
 pub fn get_environment_services<'a>(
-    project: &'a queries::project::ProjectProject,
-    environment_id: &str,
-) -> Result<&'a Vec<queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges>> {
-    let environment = project
-        .environments
-        .edges
+    environment_instances: &'a ProjectEnvironmentInstances,
+) -> Vec<&'a ProjectServiceInstanceEdge> {
+    service_instances_in_env(environment_instances)
         .iter()
-        .find(|env| env.node.id == environment_id)
-        .ok_or_else(|| anyhow::anyhow!("Environment not found: {}", environment_id))?;
-
-    Ok(&environment.node.service_instances.edges)
+        .collect()
 }
 
 fn select_duplicate_id_new(
@@ -293,6 +292,12 @@ fn select_duplicate_id_new(
                 || (env.node.id == *duplicate)
         });
         if let Some(env) = env {
+            if !env.node.can_access {
+                bail!(
+                    "Environment \"{}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment.",
+                    env.node.name
+                );
+            }
             fake_select("Duplicate from", &env.node.name);
             Some(env.node.id.clone())
         } else {

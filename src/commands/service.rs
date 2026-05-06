@@ -9,7 +9,10 @@ use crate::{
     },
     controllers::{
         environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project, get_service_ids_in_env},
+        project::{
+            ensure_project_and_environment_exist, get_environment_instances, get_project,
+            get_service_ids_in_env, service_instances_in_env,
+        },
     },
     errors::RailwayError,
     util::{
@@ -186,7 +189,9 @@ async fn list_command(args: ListArgs) -> Result<()> {
         .map(|env| env.node.name.clone())
         .expect("environment resolved above");
 
-    let service_ids_in_env = get_service_ids_in_env(&project, &env_id);
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &env_id).await?;
+    let service_ids_in_env = get_service_ids_in_env(&environment_instances);
     let linked_service_id = linked_project.service.as_deref();
 
     let mut services: Vec<_> = project
@@ -201,8 +206,7 @@ async fn list_command(args: ListArgs) -> Result<()> {
         .iter()
         .map(|edge| {
             build_service_output(
-                &project,
-                &env_id,
+                &environment_instances,
                 &edge.node,
                 linked_service_id,
                 &region_locations,
@@ -243,7 +247,10 @@ async fn delete_command(args: DeleteArgs) -> Result<()> {
     let environment_id = environment.id.clone();
     let environment_name = environment.name.clone();
 
-    let service_ids_in_env = get_service_ids_in_env(&project, &environment_id);
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
+            .await?;
+    let service_ids_in_env = get_service_ids_in_env(&environment_instances);
     let services_in_env: Vec<_> = project
         .services
         .edges
@@ -436,7 +443,14 @@ async fn link_command(args: LinkArgs) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    let service_ids_in_env = get_service_ids_in_env(&project, linked_project.environment_id()?);
+    let environment_instances = get_environment_instances(
+        &client,
+        &configs,
+        &linked_project.project,
+        linked_project.environment_id()?,
+    )
+    .await?;
+    let service_ids_in_env = get_service_ids_in_env(&environment_instances);
     let services: Vec<_> = project
         .services
         .edges
@@ -499,15 +513,11 @@ async fn status_command(args: StatusArgs) -> Result<()> {
 
     // Collect service instances for the environment
     let mut service_statuses: Vec<ServiceStatusOutput> = Vec::new();
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
+            .await?;
 
-    let env = project
-        .environments
-        .edges
-        .iter()
-        .find(|e| e.node.id == environment_id)
-        .context("Environment not found")?;
-
-    for instance_edge in &env.node.service_instances.edges {
+    for instance_edge in service_instances_in_env(&environment_instances) {
         let instance = &instance_edge.node;
         let deployment = &instance.latest_deployment;
 

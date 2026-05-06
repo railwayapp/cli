@@ -1,5 +1,6 @@
 use crate::{
     commands::functions::common::unlink_function,
+    controllers::project::{ProjectEnvironmentInstances, ProjectServiceInstanceEdge},
     queries::project::ProjectProjectEnvironmentsEdges,
     util::{
         progress::{create_spinner, success_spinner},
@@ -12,12 +13,16 @@ use is_terminal::IsTerminal;
 
 use super::*;
 
-pub async fn delete(environment: &ProjectProjectEnvironmentsEdges, args: Delete) -> Result<()> {
+pub async fn delete(
+    environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
+    args: Delete,
+) -> Result<()> {
     let terminal = std::io::stdout().is_terminal();
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let services = common::get_functions_in_environment(environment);
+    let services = common::get_functions_in_environment(environment_instances);
     let function = select_function_to_delete(&args, services.as_slice(), terminal)?;
 
     if !common::confirm(
@@ -36,9 +41,9 @@ pub async fn delete(environment: &ProjectProjectEnvironmentsEdges, args: Delete)
 
 fn select_function_to_delete<'a>(
     args: &Delete,
-    services: &'a [&queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges],
+    services: &'a [&ProjectServiceInstanceEdge],
     terminal: bool,
-) -> Result<&'a queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges> {
+) -> Result<&'a ProjectServiceInstanceEdge> {
     if let Some(fun) = &args.function {
         find_function_by_identifier(services, fun)
     } else if terminal {
@@ -49,9 +54,9 @@ fn select_function_to_delete<'a>(
 }
 
 fn find_function_by_identifier<'a>(
-    services: &'a [&queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges],
+    services: &'a [&ProjectServiceInstanceEdge],
     identifier: &str,
-) -> Result<&'a queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges> {
+) -> Result<&'a ProjectServiceInstanceEdge> {
     let found = services.iter().find(|f| {
         (f.node.id.to_lowercase() == identifier.to_lowercase())
             || (f.node.service_name.to_lowercase() == identifier.to_lowercase())
@@ -69,7 +74,7 @@ fn find_function_by_identifier<'a>(
 async fn delete_function_service(
     client: &reqwest::Client,
     configs: &mut Configs,
-    function: &queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    function: &ProjectServiceInstanceEdge,
     environment: &ProjectProjectEnvironmentsEdges,
 ) -> Result<()> {
     let mut spinner = create_spinner("Deleting function".into());

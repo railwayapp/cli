@@ -1,4 +1,5 @@
 use super::*;
+use crate::controllers::project::ProjectEnvironmentInstances;
 use crate::{
     mutations::service_create::ServiceSourceInput,
     subscription::subscribe_graphql,
@@ -25,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 pub async fn new(
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     project: ProjectProject,
     args: New,
 ) -> Result<()> {
@@ -42,7 +44,15 @@ pub async fn new(
     )?;
 
     if args.watch {
-        watch_for_file_changes(service_id, environment, info, args.path, args.terminal).await?;
+        watch_for_file_changes(
+            service_id,
+            environment,
+            environment_instances,
+            info,
+            args.path,
+            args.terminal,
+        )
+        .await?;
     } else {
         println!("{info}");
     }
@@ -270,13 +280,14 @@ fn append_cron_info(info: &mut String, cron: &Option<String>) {
 pub async fn watch_for_file_changes(
     service_id: String,
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     info: String,
     path: PathBuf,
     terminal: bool,
 ) -> Result<()> {
     if terminal {
         clear()?;
-        if let Some(f) = common::find_service(environment, &service_id) {
+        if let Some(f) = common::find_service(environment_instances, &service_id) {
             if let Some(ld) = f.latest_deployment {
                 display_deployment_info(info.as_str(), &ld.status.into(), ld.deployment_stopped);
             }
