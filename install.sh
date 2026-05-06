@@ -338,7 +338,7 @@ is_build_available() {
 UNINSTALL=0
 HELP=0
 
-DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name": "v.*"' | cut -d'"' -f4 | cut -c2-)
+DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-)
 
 if [ -z "$DEFAULT_VERSION" ]; then
   error "Failed to fetch latest version from GitHub"

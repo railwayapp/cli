@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fmt::Display;
 
 use super::{
@@ -17,18 +18,22 @@ pub async fn workspaces() -> Result<Vec<Workspace>> {
     let response =
         post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
 
+    // Member variants are yielded first so that a workspace the user both owns
+    // and is an external member of keeps the richer Member representation.
+    let mut seen: HashSet<String> = HashSet::new();
     let mut workspaces: Vec<Workspace> = response
         .me
         .workspaces
         .into_iter()
         .map(Workspace::Member)
+        .chain(
+            response
+                .external_workspaces
+                .into_iter()
+                .map(Workspace::External),
+        )
+        .filter(|w| seen.insert(w.id().to_string()))
         .collect();
-    workspaces.extend(
-        response
-            .external_workspaces
-            .into_iter()
-            .map(Workspace::External),
-    );
     workspaces.sort_by(|a, b| b.id().cmp(a.id()));
     Ok(workspaces)
 }

@@ -158,6 +158,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "CDN_CACHING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "DEBUG_SMART_DIAGNOSIS"
             },
             {
@@ -170,13 +176,13 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "IPV6_EGRESS"
+              "name": "MAGIC_CONFIG"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "MAGIC_CONFIG"
+              "name": "POSTGRES_HA"
             },
             {
               "deprecationReason": null,
@@ -213,6 +219,12 @@
         {
           "description": null,
           "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "AGENT_USAGE_BILLING"
+            },
             {
               "deprecationReason": null,
               "description": null,
@@ -277,19 +289,25 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "ENABLE_RAW_SQL_QUERIES"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "FOCUSED_PR_ENVIRONMENTS"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "GITHUB_PERMISSION_NOTIFICATION_ROLLOUT"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "INLINE_NOTIFICATION_PROCESSING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "IN_DASHBOARD_SUPPORT"
             },
             {
               "deprecationReason": null,
@@ -319,6 +337,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "RADAR_AUTO_EVALUATE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "SERVICEINSTANCE_DATALOADER_FOR_STATIC_URL"
             },
             {
@@ -326,6 +350,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "SPLIT_USAGE_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_NEW_ACCOUNTS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_SHADOW_ENABLED"
             },
             {
               "deprecationReason": null,
@@ -7684,7 +7720,7 @@
           "possibleTypes": null
         },
         {
-          "description": "\nEnvironmentConfig is a custom scalar type that represents the serializedConfig for an environment.\nJSON Schema: https://backboard.railway.com/schema/environment.schema.json\n",
+          "description": "\nEnvironmentConfig is a custom scalar type that represents the serializedConfig for an environment.\nJSON Schema: https://backboard.railway-develop.com/schema/environment.schema.json\n",
           "enumValues": null,
           "fields": null,
           "inputFields": null,
@@ -17084,7 +17120,7 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Creates a new SSH public key for the authenticated user.",
+              "description": "Creates a new SSH public key. When workspaceId is provided, the key is owned by the workspace and can be used by anyone authenticating as that workspace via native SSH; requires workspace ADMIN access. Otherwise the key is owned by the authenticated user.",
               "isDeprecated": false,
               "name": "sshPublicKeyCreate",
               "type": {
@@ -21603,6 +21639,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "AGENT_USAGE_BILLING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "ALLOW_REPLICA_METRICS"
             },
             {
@@ -21663,19 +21705,25 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
-              "name": "ENABLE_RAW_SQL_QUERIES"
-            },
-            {
-              "deprecationReason": null,
-              "description": null,
-              "isDeprecated": false,
               "name": "FOCUSED_PR_ENVIRONMENTS"
             },
             {
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "GITHUB_PERMISSION_NOTIFICATION_ROLLOUT"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "INLINE_NOTIFICATION_PROCESSING"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "IN_DASHBOARD_SUPPORT"
             },
             {
               "deprecationReason": null,
@@ -21705,6 +21753,12 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "RADAR_AUTO_EVALUATE"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "SERVICEINSTANCE_DATALOADER_FOR_STATIC_URL"
             },
             {
@@ -21712,6 +21766,18 @@
               "description": null,
               "isDeprecated": false,
               "name": "SPLIT_USAGE_QUERIES"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_NEW_ACCOUNTS"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "STRIPE_METERS_SHADOW_ENABLED"
             },
             {
               "deprecationReason": null,
@@ -31618,10 +31684,20 @@
                     "name": "Int",
                     "ofType": null
                   }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "workspaceId",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
                 }
               ],
               "deprecationReason": null,
-              "description": "Gets all SSH public keys for the authenticated user.",
+              "description": "Gets SSH public keys. If workspaceId is provided, returns the keys owned by that workspace (requires workspace MEMBER access); otherwise returns the authenticated user's personal keys.",
               "isDeprecated": false,
               "name": "sshPublicKeys",
               "type": {
@@ -31873,6 +31949,97 @@
                 "ofType": {
                   "kind": "OBJECT",
                   "name": "TemplateMetrics",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "after",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "before",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "If set, only templates in this category will be returned.",
+                  "name": "category",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "first",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "last",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Search term to filter templates. Empty query returns browse-style results.",
+                  "name": "query",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "If set, only templates matching this verification state will be returned.",
+                  "name": "verified",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Boolean",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Search published templates using the backend-ranked template search index.",
+              "isDeprecated": false,
+              "name": "templateSearch",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "QueryTemplateSearchConnection",
                   "ofType": null
                 }
               }
@@ -35930,7 +36097,7 @@
           "possibleTypes": null
         },
         {
-          "description": "\nSerializedTemplateConfig is a custom scalar type that represents the serializedConfig for a template.\nJSON Schema: https://backboard.railway.com/schema/template.schema.json\n",
+          "description": "\nSerializedTemplateConfig is a custom scalar type that represents the serializedConfig for a template.\nJSON Schema: https://backboard.railway-develop.com/schema/template.schema.json\n",
           "enumValues": null,
           "fields": null,
           "inputFields": null,
@@ -38830,6 +38997,30 @@
                   "ofType": null
                 }
               }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "userId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "workspaceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
             }
           ],
           "inputFields": null,
@@ -38875,6 +39066,16 @@
                   "name": "String",
                   "ofType": null
                 }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "workspaceId",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
               }
             }
           ],
@@ -42020,6 +42221,239 @@
               "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
+              "name": "edges",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "QueryTemplateSearchConnectionEdge",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "pageInfo",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "PageInfo",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "QueryTemplateSearchConnection",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "cursor",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "node",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "TemplateSearchResult",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "QueryTemplateSearchConnectionEdge",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "code",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "creatorName",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "deploymentCount",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Int",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "description",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "healthScore",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Float",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "id",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "image",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "isVerified",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "name",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "TemplateSearchResult",
+          "possibleTypes": null
+        },
+        {
+          "description": null,
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
               "name": "config",
               "type": {
                 "kind": "NON_NULL",
@@ -42832,6 +43266,30 @@
           "description": null,
           "enumValues": null,
           "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "agentHardLimitCents",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Int",
+                "ofType": null
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "agentSoftLimitCents",
+              "type": {
+                "kind": "SCALAR",
+                "name": "Int",
+                "ofType": null
+              }
+            },
             {
               "args": [],
               "deprecationReason": null,

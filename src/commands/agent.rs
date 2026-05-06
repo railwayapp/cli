@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use colored::ColoredString;
 use is_terminal::IsTerminal;
 use rand::Rng;
 use serde::Serialize;
@@ -25,7 +26,7 @@ use crate::{
         service::get_or_prompt_service,
     },
     interact_or,
-    util::progress::{create_spinner, fail_spinner, success_spinner},
+    util::progress::create_spinner,
 };
 
 use super::*;
@@ -137,31 +138,12 @@ async fn run_single_shot(
     is_tty: bool,
 ) -> Result<()> {
     if json {
-        let mut response = JsonResponse::default();
-
-        stream_chat(client, url, request, |event| {
-            accumulate_json_event(event, &mut response);
-        })
-        .await?;
-
+        let response = stream_json(client, url, request).await?;
         println!("{}", serde_json::to_string_pretty(&response).unwrap());
-        Ok(())
     } else {
-        let mut spinner: Option<indicatif::ProgressBar> = None;
-        let mut has_printed_text = false;
-
-        // Show a thinking spinner while waiting for the first event
-        if is_tty {
-            let msg = THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
-            println!();
-            spinner = Some(create_spinner(msg.dimmed().to_string()));
-        }
-
-        stream_chat(client, url, request, |event| {
-            handle_event_human(event, &mut spinner, &mut has_printed_text, is_tty);
-        })
-        .await
+        stream_human(client, url, request, is_tty).await?;
     }
+    Ok(())
 }
 
 async fn run_repl(
@@ -213,41 +195,13 @@ async fn run_repl(
         };
 
         if json {
-            let mut response = JsonResponse::default();
-
-            stream_chat(client, url, &request, |event| {
-                if let ChatEvent::Metadata {
-                    thread_id: ref tid, ..
-                } = event
-                {
-                    thread_id = Some(tid.clone());
-                }
-                accumulate_json_event(event, &mut response);
-            })
-            .await?;
-
-            println!("{}", serde_json::to_string_pretty(&response).unwrap());
-        } else {
-            let mut spinner: Option<indicatif::ProgressBar> = None;
-            let mut has_printed_text = false;
-
-            if is_tty {
-                let msg =
-                    THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
-                println!();
-                spinner = Some(create_spinner(msg.dimmed().to_string()));
+            let response = stream_json(client, url, &request).await?;
+            if let Some(tid) = response.thread_id.clone() {
+                thread_id = Some(tid);
             }
-
-            stream_chat(client, url, &request, |event| {
-                if let ChatEvent::Metadata {
-                    thread_id: ref tid, ..
-                } = event
-                {
-                    thread_id = Some(tid.clone());
-                }
-                handle_event_human(event, &mut spinner, &mut has_printed_text, is_tty);
-            })
-            .await?;
+            println!("{}", serde_json::to_string_pretty(&response).unwrap());
+        } else if let Some(new_tid) = stream_human(client, url, &request, is_tty).await? {
+            thread_id = Some(new_tid);
         }
 
         println!();
@@ -256,85 +210,164 @@ async fn run_repl(
     Ok(())
 }
 
-fn handle_event_human(
-    event: ChatEvent,
-    spinner: &mut Option<indicatif::ProgressBar>,
-    has_printed_text: &mut bool,
+async fn stream_human(
+    client: &reqwest::Client,
+    url: &str,
+    request: &ChatRequest,
     is_tty: bool,
-) {
-    match event {
-        ChatEvent::Chunk { text } => {
-            if let Some(s) = spinner.take() {
-                s.finish_and_clear();
-            }
-            if !*has_printed_text {
-                println!();
-                print!("{} ", "Railway Agent:".purple().bold());
-                *has_printed_text = true;
-            }
-            print!("{}", text);
-            let _ = std::io::stdout().flush();
+) -> Result<Option<String>> {
+    let mut renderer = HumanRenderer::new(is_tty);
+    let mut thread_id = None;
+    renderer.start_thinking();
+
+    stream_chat(client, url, request, |event| {
+        if let ChatEvent::Metadata {
+            thread_id: ref tid, ..
+        } = event
+        {
+            thread_id = Some(tid.clone());
         }
-        ChatEvent::ToolCallReady { tool_name, .. } => {
-            if is_tty {
-                if let Some(s) = spinner.take() {
-                    s.finish_and_clear();
-                }
-                *has_printed_text = false;
-                println!();
-                *spinner = Some(create_spinner(format!(
-                    "{} {}",
-                    "╰─".dimmed(),
-                    format!(" Agent Tool: {tool_name} ")
-                        .truecolor(255, 255, 255)
-                        .on_truecolor(68, 68, 68)
-                )));
-            }
-        }
-        ChatEvent::ToolExecutionComplete { is_error, .. } => {
-            if let Some(s) = spinner {
-                if is_error {
-                    fail_spinner(
-                        s,
-                        format!(
-                            "{}",
-                            " Tool failed "
-                                .truecolor(255, 255, 255)
-                                .on_truecolor(68, 68, 68)
-                        ),
-                    );
-                } else {
-                    success_spinner(
-                        s,
-                        format!(
-                            "{}",
-                            " Done ".truecolor(255, 255, 255).on_truecolor(68, 68, 68)
-                        ),
-                    );
-                }
-            }
-            *spinner = None;
-        }
-        ChatEvent::Error { message } => {
-            if let Some(s) = spinner.take() {
-                s.finish_and_clear();
-            }
-            eprintln!("{}: {}", "Error".red().bold(), message);
-        }
-        ChatEvent::Aborted { reason } => {
-            if let Some(s) = spinner.take() {
-                s.finish_and_clear();
-            }
-            let msg = reason.unwrap_or_else(|| "Request was aborted".to_string());
-            eprintln!("{}: {}", "Aborted".yellow().bold(), msg);
-        }
-        ChatEvent::WorkflowCompleted { .. } => {
-            println!();
-        }
-        ChatEvent::Metadata { .. } => {
-            // Thread ID captured by caller; no output
+        renderer.handle(event);
+    })
+    .await?;
+
+    Ok(thread_id)
+}
+
+async fn stream_json(
+    client: &reqwest::Client,
+    url: &str,
+    request: &ChatRequest,
+) -> Result<JsonResponse> {
+    let mut response = JsonResponse::default();
+    stream_chat(client, url, request, |event| {
+        accumulate_json_event(event, &mut response);
+    })
+    .await?;
+    Ok(response)
+}
+
+struct HumanRenderer {
+    spinner: Option<indicatif::ProgressBar>,
+    has_printed_text: bool,
+    pending_markdown: String,
+    block_start_pos: Option<(u16, u16)>,
+    is_tty: bool,
+}
+
+impl HumanRenderer {
+    fn new(is_tty: bool) -> Self {
+        Self {
+            spinner: None,
+            has_printed_text: false,
+            pending_markdown: String::new(),
+            block_start_pos: None,
+            is_tty,
         }
     }
+
+    fn start_thinking(&mut self) {
+        if self.is_tty {
+            let msg = THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
+            println!();
+            self.spinner = Some(create_spinner(msg.dimmed().to_string()));
+        }
+    }
+
+    fn clear_spinner(&mut self) -> bool {
+        self.spinner.take().map(|s| s.finish_and_clear()).is_some()
+    }
+
+    fn handle(&mut self, event: ChatEvent) {
+        match event {
+            ChatEvent::Chunk { text } => {
+                let cleared = self.clear_spinner();
+                if !self.has_printed_text {
+                    if !cleared {
+                        // Two newlines to guarantee one visible blank line between
+                        // this response and whatever came before.
+                        print!("\n\n");
+                    }
+                    if self.is_tty {
+                        let _ = std::io::stdout().flush();
+                        self.block_start_pos = crossterm::cursor::position().ok();
+                    }
+                    print!("{} ", "Railway Agent:".purple().bold());
+                    self.has_printed_text = true;
+                    self.pending_markdown.clear();
+                }
+                self.pending_markdown.push_str(&text);
+                print!("{}", text);
+                let _ = std::io::stdout().flush();
+            }
+            ChatEvent::ToolCallReady { tool_name, .. } => {
+                if !self.is_tty {
+                    return;
+                }
+                self.flush_pending();
+                self.clear_spinner();
+                self.has_printed_text = false;
+                self.spinner = Some(create_spinner(format!(
+                    "{} {}",
+                    "╰─".dimmed(),
+                    tool_badge(&format!(" Agent Tool: {tool_name} "))
+                )));
+            }
+            ChatEvent::ToolExecutionComplete { is_error, .. } => {
+                self.clear_spinner();
+                if self.is_tty {
+                    let label = if is_error {
+                        " ✗ Tool failed "
+                    } else {
+                        " ✓ Done "
+                    };
+                    println!("{}", tool_badge(label));
+                }
+            }
+            ChatEvent::Error { message } => {
+                self.clear_spinner();
+                eprintln!("{}: {}", "Error".red().bold(), message);
+            }
+            ChatEvent::Aborted { reason } => {
+                self.clear_spinner();
+                let msg = reason.unwrap_or_else(|| "Request was aborted".to_string());
+                eprintln!("{}: {}", "Aborted".yellow().bold(), msg);
+            }
+            ChatEvent::WorkflowCompleted { .. } => {
+                if !self.flush_pending() {
+                    println!();
+                }
+            }
+            ChatEvent::Metadata { .. } => {}
+        }
+    }
+
+    fn flush_pending(&mut self) -> bool {
+        if self.pending_markdown.is_empty() {
+            return false;
+        }
+
+        if let Some((col, row)) = self.block_start_pos.take() {
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::cursor::MoveTo(col, row),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+            );
+        } else {
+            println!();
+        }
+
+        println!("{}", "Railway Agent:".purple().bold());
+        termimad::MadSkin::default().print_text(&self.pending_markdown);
+
+        self.pending_markdown.clear();
+        let _ = std::io::stdout().flush();
+        true
+    }
+}
+
+fn tool_badge(text: &str) -> ColoredString {
+    text.truecolor(255, 255, 255).on_truecolor(68, 68, 68)
 }
 
 fn accumulate_json_event(event: ChatEvent, response: &mut JsonResponse) {

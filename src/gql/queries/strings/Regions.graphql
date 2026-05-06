@@ -1,6 +1,7 @@
 query Regions {
     regions {
         name
+        region
         country
         railwayMetal
         location

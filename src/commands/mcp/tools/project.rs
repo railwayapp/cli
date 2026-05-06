@@ -1,6 +1,11 @@
 use rmcp::{ErrorData as McpError, model::*};
 
-use crate::{client::post_graphql, gql::mutations, workspace::workspaces};
+use crate::{
+    client::post_graphql,
+    controllers::project::{get_environment_instances, service_instances_in_env},
+    gql::mutations,
+    workspace::workspaces,
+};
 
 use super::super::handler::RailwayMcp;
 use super::super::params::{
@@ -277,7 +282,18 @@ impl RailwayMcp {
         output.push_str("Service | Status | Active Deployments | Latest Deploy\n");
         output.push_str("--------|--------|-------------------|---------------\n");
 
-        for si_edge in &env.node.service_instances.edges {
+        let environment_instances =
+            get_environment_instances(&self.client, &self.configs, &ctx.project_id, &env.node.id)
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!("Failed to get environment instances: {e}"),
+                        None,
+                    )
+                })?;
+        let service_instances = service_instances_in_env(&environment_instances);
+
+        for si_edge in service_instances {
             let node = &si_edge.node;
             let status = node
                 .latest_deployment
@@ -297,7 +313,7 @@ impl RailwayMcp {
             ));
         }
 
-        if env.node.service_instances.edges.is_empty() {
+        if service_instances.is_empty() {
             output.push_str("No services in this environment.\n");
         }
 

@@ -11,8 +11,8 @@ use std::{
 
 use crate::{
     commands::{Configs, queries::project::ProjectProjectServicesEdgesNode},
+    controllers::project::ProjectServiceInstanceNode,
     controllers::variables::Variable,
-    queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
 };
 use anyhow::{Context, Result};
 
@@ -197,9 +197,7 @@ impl Display for PromptService<'_> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PromptServiceInstance<'a>(
-    pub &'a ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-);
+pub struct PromptServiceInstance<'a>(pub &'a ProjectServiceInstanceNode);
 
 impl Display for PromptServiceInstance<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -12,7 +12,8 @@ use crate::{
     errors::RailwayError,
 };
 
-pub const CLI_SCOPES: &str = "openid email profile offline_access workspace:admin project:admin";
+pub const CLI_SCOPES: &str =
+    "openid email profile offline_access workspace:admin project:admin ssh_keys";
 
 const DEFAULT_OAUTH_CLIENT_ID: &str = "rlwy_oaci_onEklvmksh1hRUiCo7E2zX12";
 

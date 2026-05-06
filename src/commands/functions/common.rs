@@ -8,19 +8,18 @@ use base64::prelude::*;
 use std::{path::Path, str::FromStr};
 
 use crate::{
-    queries::project::{
-        ProjectProjectEnvironmentsEdges, ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    controllers::project::{
+        ProjectEnvironmentInstances, ProjectServiceInstanceEdge, ProjectServiceInstanceNode,
+        service_instances_in_env,
     },
+    resources::is_function_service,
     util::prompt::{fake_select, prompt_confirm_with_default, prompt_path},
 };
 
-pub fn get_functions_in_environment(
-    environment: &ProjectProjectEnvironmentsEdges,
-) -> Vec<&ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges> {
-    environment
-        .node
-        .service_instances
-        .edges
+pub fn get_functions_in_environment<'a>(
+    environment_instances: &'a ProjectEnvironmentInstances,
+) -> Vec<&'a ProjectServiceInstanceEdge> {
+    service_instances_in_env(environment_instances)
         .iter()
         .filter(|service_instance| is_function_service(service_instance))
         .collect()
@@ -38,17 +37,6 @@ pub fn unlink_function(id: &str) -> Result<()> {
     c.unlink_function(id.to_owned())?;
     c.write()?;
     Ok(())
-}
-
-fn is_function_service(
-    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> bool {
-    service_instance.node.source.clone().is_some_and(|source| {
-        source
-            .image
-            .unwrap_or_default()
-            .starts_with("ghcr.io/railwayapp/function")
-    })
 }
 
 pub fn confirm(arg: Option<bool>, terminal: bool, message: &str) -> Result<bool> {
@@ -120,16 +108,16 @@ pub fn get_function_from_path(path: Option<PathBuf>) -> Result<(String, PathBuf)
     Ok((id, path.clone()))
 }
 
-pub fn has_domains(function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges) -> bool {
+pub fn has_domains(function: &ProjectServiceInstanceEdge) -> bool {
     !function.node.domains.custom_domains.is_empty()
         || !function.node.domains.service_domains.is_empty()
 }
 
 pub fn find_service(
-    environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     id: &str,
-) -> Option<queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode> {
-    let c = common::get_functions_in_environment(environment);
+) -> Option<ProjectServiceInstanceNode> {
+    let c = common::get_functions_in_environment(environment_instances);
     c.iter()
         .find(|f| f.node.service_id == id)
         .map(|f| f.node.clone())
@@ -181,9 +169,7 @@ pub fn calculate_diff(old_content: &str, new_content: &str) -> DiffStats {
     }
 }
 
-pub fn extract_function_content(
-    function: &queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-) -> Result<String> {
+pub fn extract_function_content(function: &ProjectServiceInstanceNode) -> Result<String> {
     let cmd = function
         .start_command
         .as_ref()

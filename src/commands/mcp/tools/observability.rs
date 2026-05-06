@@ -1,10 +1,11 @@
 use rmcp::{ErrorData as McpError, model::*};
 
 use crate::{
-    client::post_graphql,
-    controllers::deployment::{FetchLogsParams, fetch_http_logs},
+    controllers::metrics::{
+        FetchResourceMetricsParams, compute_http_metrics, fetch_http_logs_for_deployment,
+        fetch_resource_metrics,
+    },
     gql::queries,
-    util::logs::HttpLogLike,
 };
 
 use super::super::handler::RailwayMcp;
@@ -31,25 +32,16 @@ impl RailwayMcp {
             }
         };
 
-        let mut logs: Vec<queries::http_logs::HttpLogFields> = Vec::new();
         let backboard = self.configs.get_backboard();
-        let fetch_params = FetchLogsParams {
-            client: &self.client,
-            backboard: &backboard,
+        fetch_http_logs_for_deployment(
+            &self.client,
+            &backboard,
             deployment_id,
-            limit: Some(lines.unwrap_or(200)),
-            filter: None,
-            start_date: None,
-            end_date: None,
-        };
-
-        fetch_http_logs(fetch_params, |log| {
-            logs.push(log);
-        })
+            lines.unwrap_or(200),
+            None,
+        )
         .await
-        .map_err(|e| McpError::internal_error(format!("Failed to fetch HTTP logs: {e}"), None))?;
-
-        Ok(logs)
+        .map_err(|e| McpError::internal_error(format!("Failed to fetch HTTP logs: {e}"), None))
     }
 
     pub(crate) async fn do_service_metrics(
@@ -89,47 +81,36 @@ impl RailwayMcp {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let vars = queries::metrics::Variables {
-            service_id: Some(ctx.service_id),
-            environment_id: Some(ctx.environment_id),
+        let backboard = self.configs.get_backboard();
+        let result = fetch_resource_metrics(FetchResourceMetricsParams {
+            client: &self.client,
+            backboard: &backboard,
+            service_id: &ctx.service_id,
+            environment_id: &ctx.environment_id,
             start_date,
             end_date: None,
             measurements,
             sample_rate_seconds: params.sample_rate_seconds,
-        };
+            include_raw: false,
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Failed to fetch metrics: {e}"), None))?;
 
-        let resp =
-            post_graphql::<queries::Metrics, _>(&self.client, self.configs.get_backboard(), vars)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(format!("Failed to fetch metrics: {e}"), None)
-                })?;
-
-        if resp.metrics.is_empty() {
+        if result.metrics.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
                 "No metrics data available for this service.".to_string(),
             )]));
         }
 
         let mut output = String::new();
-        for metric in &resp.metrics {
-            output.push_str(&format!("\n### {:?}\n", metric.measurement));
-            if metric.values.is_empty() {
+        for metric in &result.metrics {
+            output.push_str(&format!("\n### {}\n", metric.measurement));
+            if metric.data_points == 0 {
                 output.push_str("No data points.\n");
             } else {
-                let last_n: Vec<_> = metric.values.iter().rev().take(5).collect();
-                for point in last_n.into_iter().rev() {
-                    let ts = chrono::DateTime::from_timestamp(point.ts, 0)
-                        .map(|dt| dt.format("%H:%M:%S UTC").to_string())
-                        .unwrap_or_else(|| point.ts.to_string());
-                    output.push_str(&format!("  {ts} -> {:.4}\n", point.value));
-                }
-                let avg =
-                    metric.values.iter().map(|p| p.value).sum::<f64>() / metric.values.len() as f64;
                 output.push_str(&format!(
-                    "  Average ({}pts): {:.4}\n",
-                    metric.values.len(),
-                    avg
+                    "  Current: {:.4}\n  Average ({}pts): {:.4}\n  Min: {:.4}\n  Max: {:.4}\n",
+                    metric.current, metric.data_points, metric.average, metric.min, metric.max
                 ));
             }
         }
@@ -151,27 +132,19 @@ impl RailwayMcp {
             )
             .await?;
 
-        let total = logs.len();
-        if total == 0 {
-            return Ok(CallToolResult::success(vec![Content::text(
+        match compute_http_metrics(&logs) {
+            Some(result) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "HTTP Requests:\n  Total: {}\n  2xx: {}\n  3xx: {}\n  4xx: {}\n  5xx: {}",
+                result.total,
+                result.status_counts[2],
+                result.status_counts[3],
+                result.status_counts[4],
+                result.status_counts[5]
+            ))])),
+            None => Ok(CallToolResult::success(vec![Content::text(
                 "No HTTP logs found.".to_string(),
-            )]));
+            )])),
         }
-
-        let mut counts = [0usize; 6]; // index by status/100: 0=other,1=1xx,2=2xx,3=3xx,4=4xx,5=5xx
-        for log in &logs {
-            let bucket = (log.http_status() / 100) as usize;
-            if bucket < counts.len() {
-                counts[bucket] += 1;
-            } else {
-                counts[0] += 1;
-            }
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "HTTP Requests (sampled {} logs):\n  Total: {}\n  2xx: {}\n  3xx: {}\n  4xx: {}\n  5xx: {}",
-            total, total, counts[2], counts[3], counts[4], counts[5]
-        ))]))
     }
 
     pub(crate) async fn do_http_error_rate(
@@ -188,25 +161,25 @@ impl RailwayMcp {
             )
             .await?;
 
-        let total = logs.len();
-        if total == 0 {
-            return Ok(CallToolResult::success(vec![Content::text(
+        match compute_http_metrics(&logs) {
+            Some(result) => {
+                let errors = result.status_counts[4] + result.status_counts[5];
+                let error_rate = if result.total > 0 {
+                    (errors as f64 / result.total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let success_rate = 100.0 - error_rate;
+                let success = result.total - errors;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "HTTP Error Rate (sampled {} requests):\n  Errors (4xx+5xx): {} ({:.1}%)\n  Success: {} ({:.1}%)",
+                    result.total, errors, error_rate, success, success_rate
+                ))]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(
                 "No HTTP logs found.".to_string(),
-            )]));
+            )])),
         }
-
-        let errors = logs.iter().filter(|l| l.http_status() >= 400).count();
-
-        let rate = (errors as f64 / total as f64) * 100.0;
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "HTTP Error Rate (sampled {} requests):\n  Errors (4xx+5xx): {} ({:.1}%)\n  Success (1xx-3xx): {} ({:.1}%)",
-            total,
-            errors,
-            rate,
-            total - errors,
-            100.0 - rate
-        ))]))
     }
 
     pub(crate) async fn do_http_response_time(
@@ -223,29 +196,14 @@ impl RailwayMcp {
             )
             .await?;
 
-        let total = logs.len();
-        if total == 0 {
-            return Ok(CallToolResult::success(vec![Content::text(
+        match compute_http_metrics(&logs) {
+            Some(result) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "HTTP Response Times (sampled {} requests):\n  p50: {}ms\n  p90: {}ms\n  p95: {}ms\n  p99: {}ms",
+                result.total, result.p50_ms, result.p90_ms, result.p95_ms, result.p99_ms
+            ))])),
+            None => Ok(CallToolResult::success(vec![Content::text(
                 "No HTTP logs found.".to_string(),
-            )]));
+            )])),
         }
-
-        let mut durations: Vec<i64> = logs.iter().map(|l| l.total_duration()).collect();
-        durations.sort_unstable();
-
-        let percentile = |p: f64| -> i64 {
-            let idx = ((durations.len() as f64 * p / 100.0) as usize)
-                .min(durations.len().saturating_sub(1));
-            durations[idx]
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "HTTP Response Times (sampled {} requests):\n  p50: {}ms\n  p90: {}ms\n  p95: {}ms\n  p99: {}ms",
-            total,
-            percentile(50.0),
-            percentile(90.0),
-            percentile(95.0),
-            percentile(99.0),
-        ))]))
     }
 }

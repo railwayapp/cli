@@ -4,5 +4,7 @@ mutation SshPublicKeyCreate($input: SshPublicKeyCreateInput!) {
     name
     publicKey
     fingerprint
+    userId
+    workspaceId
   }
 }

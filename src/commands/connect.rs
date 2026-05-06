@@ -8,7 +8,7 @@ use which::which;
 use crate::controllers::{
     database::DatabaseType,
     environment::get_matched_environment,
-    project::{find_service_instance, get_project},
+    project::{find_service_instance, get_environment_instances, get_project},
     variables::get_service_variables,
 };
 use crate::errors::RailwayError;
@@ -68,6 +68,9 @@ pub async fn command(args: Args) -> Result<()> {
 
     let environment_id = get_matched_environment(&project, environment)?.id;
     let service_id = service.id.clone();
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
+            .await?;
     let variables = get_service_variables(
         &client,
         &configs,
@@ -77,7 +80,7 @@ pub async fn command(args: Args) -> Result<()> {
     )
     .await?;
     let database_type = {
-        let service_instance = find_service_instance(&project, &environment_id, &service_id);
+        let service_instance = find_service_instance(&environment_instances, &service_id);
 
         service_instance
             .and_then(|si| si.source.clone())

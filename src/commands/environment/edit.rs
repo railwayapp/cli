@@ -6,7 +6,8 @@ use super::{Edit as Args, *};
 use crate::{
     controllers::{
         config::{self, EnvironmentConfig},
-        project::get_project,
+        environment::get_matched_environment,
+        project::{ProjectEnvironmentInstances, get_environment_instances, get_project},
     },
     errors::RailwayError,
     util::prompt::{fake_select, prompt_confirm_with_default},
@@ -37,13 +38,16 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         .find(|e| e.node.id == environment_id)
         .map(|e| e.node.name.clone())
         .unwrap_or_else(|| environment_id.clone());
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
+            .await?;
 
     // Get config from stdin (if piped), CLI flags, or interactive prompts
     let env_config = get_edit_config(
         &args,
         &client,
         &configs,
-        &project,
+        &environment_instances,
         &environment_id,
         stdin_is_terminal,
     )
@@ -171,23 +175,18 @@ fn resolve_environment(
         });
 
         if let Some(env) = env {
-            fake_select("Environment", &env.node.name);
-            Ok(env.node.id.clone())
+            let environment = get_matched_environment(project, env.node.id.clone())?;
+            fake_select("Environment", &environment.name);
+            Ok(environment.id)
         } else {
             bail!(RailwayError::EnvironmentNotFound(env_input.clone()))
         }
     } else {
         // Use linked environment
         let env_id = linked_project.environment_id()?.to_string();
-        let env_name = project
-            .environments
-            .edges
-            .iter()
-            .find(|e| e.node.id == env_id)
-            .map(|e| e.node.name.clone())
-            .unwrap_or_else(|| env_id.clone());
-        fake_select("Environment", &env_name);
-        Ok(env_id)
+        let environment = get_matched_environment(project, env_id)?;
+        fake_select("Environment", &environment.name);
+        Ok(environment.id)
     }
 }
 
@@ -196,7 +195,7 @@ async fn get_edit_config(
     args: &Args,
     client: &reqwest::Client,
     configs: &Configs,
-    project: &queries::project::ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment_id: &str,
     stdin_is_terminal: bool,
 ) -> Result<EnvironmentConfig> {
@@ -205,17 +204,24 @@ async fn get_edit_config(
 
     // Priority 1: Piped stdin JSON (auto-detected)
     if !stdin_is_terminal {
-        return read_config_from_stdin(project, environment_id);
+        return read_config_from_stdin(environment_instances);
     }
 
     // Priority 2: CLI flags (--service-config, --service-variable)
     if has_cli_flags {
-        return parse_non_interactive_configs(&all_configs, project, environment_id);
+        return parse_non_interactive_configs(&all_configs, environment_instances);
     }
 
     // Priority 3: Interactive prompts (terminal only)
     if std::io::stdout().is_terminal() {
-        return parse_interactive_configs(client, configs, project, environment_id, None).await;
+        return parse_interactive_configs(
+            client,
+            configs,
+            environment_instances,
+            environment_id,
+            None,
+        )
+        .await;
     }
 
     // No input available
@@ -224,8 +230,7 @@ async fn get_edit_config(
 
 /// Read and parse JSON config from stdin
 fn read_config_from_stdin(
-    project: &queries::project::ProjectProject,
-    environment_id: &str,
+    environment_instances: &ProjectEnvironmentInstances,
 ) -> Result<EnvironmentConfig> {
     let stdin = std::io::stdin();
     let mut input = String::new();
@@ -241,7 +246,7 @@ fn read_config_from_stdin(
         .context("Failed to parse stdin as JSON. Expected EnvironmentConfig format.")?;
 
     // Validate that referenced services exist
-    let services = get_environment_services(project, environment_id)?;
+    let services = get_environment_services(environment_instances);
     let service_ids: Vec<&str> = services
         .iter()
         .map(|s| s.node.service_id.as_str())

@@ -1,0 +1,3 @@
+mutation ServiceInstanceDeployLatestCommit($environmentId: String!, $serviceId: String!) {
+  serviceInstanceDeploy(environmentId: $environmentId, serviceId: $serviceId, latestCommit: true)
+}

@@ -16,7 +16,7 @@ use crate::{
     controllers::{
         deployment::{FetchLogsParams, fetch_build_logs, fetch_deploy_logs, fetch_http_logs},
         environment::get_matched_environment,
-        project::get_project,
+        project::{get_environment_instances, get_project, get_service_ids_in_env},
         upload::{create_deploy_tarball, upload_deploy_tarball},
         user::get_user,
         variables::get_service_variables,
@@ -674,6 +674,7 @@ impl RailwayMcp {
         Parameters(params): Parameters<LinkServiceParams>,
     ) -> Result<CallToolResult, McpError> {
         let linked = self.configs.get_linked_project().await.ok();
+        let requested_project_id = params.project_id.clone();
         let project_id = params
             .project_id
             .or_else(|| linked.as_ref().map(|l| l.project.clone()))
@@ -684,22 +685,43 @@ impl RailwayMcp {
                 )
             })?;
 
-        let project = get_project(&self.client, &self.configs, project_id)
+        let project = get_project(&self.client, &self.configs, project_id.clone())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
         // Filter to services present in the linked environment (matches CLI behavior)
-        let environment_id = linked.as_ref().and_then(|l| l.environment.as_deref());
-        let env_service_ids = environment_id
-            .and_then(|eid| project.environments.edges.iter().find(|e| e.node.id == eid))
-            .map(|e| {
-                e.node
-                    .service_instances
-                    .edges
-                    .iter()
-                    .map(|si| si.node.service_id.clone())
-                    .collect::<std::collections::HashSet<String>>()
-            });
+        let environment_id = linked
+            .as_ref()
+            .filter(|l| {
+                requested_project_id
+                    .as_ref()
+                    .is_none_or(|requested| requested == &l.project)
+            })
+            .and_then(|l| l.environment.as_deref());
+        let env_service_ids = if let Some(eid) = environment_id {
+            let environment = get_matched_environment(&project, eid.to_string()).map_err(|e| {
+                let available = format_environments(&project);
+                McpError::invalid_params(
+                    format!(
+                        "Failed to resolve environment: {e}. Available environments:\n{available}"
+                    ),
+                    None,
+                )
+            })?;
+            let instances = get_environment_instances(
+                &self.client,
+                &self.configs,
+                &project_id,
+                &environment.id,
+            )
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to get environment instances: {e}"), None)
+            })?;
+            Some(get_service_ids_in_env(&instances))
+        } else {
+            None
+        };
 
         let services_in_env: Vec<_> = project
             .services
@@ -925,7 +947,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Search for Railway templates by name or code. Returns the top 5 matching templates with their codes."
+        description = "Search for Railway templates using Railway's backend-ranked template search. Returns matching templates with their codes."
     )]
     async fn search_templates(
         &self,

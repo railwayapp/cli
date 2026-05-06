@@ -194,48 +194,58 @@ impl RailwayMcp {
         let public_client = GQLClient::new_public().map_err(|e| {
             McpError::internal_error(format!("Failed to create template client: {e}"), None)
         })?;
-        let vars = queries::templates::Variables {
-            verified: None,
-            recommended: None,
-            first: Some(200),
+        let vars = queries::template_search::Variables {
+            query: params.query.clone(),
+            first: Some(params.limit.unwrap_or(5).clamp(1, 50)),
+            after: params.after,
+            verified: params.verified,
+            category: params.category,
         };
 
-        let resp = post_graphql::<queries::Templates, _>(
+        let resp = post_graphql::<queries::TemplateSearch, _>(
             &public_client,
             self.configs.get_backboard(),
             vars,
         )
         .await
-        .map_err(|e| McpError::internal_error(format!("Failed to fetch templates: {e}"), None))?;
+        .map_err(|e| McpError::internal_error(format!("Failed to search templates: {e}"), None))?;
 
-        let query_lower = params.query.to_lowercase();
-        let results: Vec<_> = resp
-            .templates
-            .edges
-            .iter()
-            .filter(|e| {
-                e.node.name.to_lowercase().contains(&query_lower)
-                    || e.node.code.to_lowercase().contains(&query_lower)
-            })
-            .take(5)
-            .collect();
-
-        if results.is_empty() {
+        if resp.template_search.edges.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "No templates found matching '{}'.",
                 params.query
             ))]));
         }
 
-        let output = results
+        let output = resp
+            .template_search
+            .edges
             .iter()
-            .map(|e| format!("- {} (code: {})", e.node.name, e.node.code))
+            .map(|template| {
+                let template = &template.node;
+                let description = template.description.as_deref().unwrap_or("No description");
+                format!(
+                    "- {} (code: {}) - {}",
+                    template.name, template.code, description
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
+        let next_page = if resp.template_search.page_info.has_next_page {
+            resp.template_search
+                .page_info
+                .end_cursor
+                .as_deref()
+                .map(|cursor| format!("\n\nNext page cursor: {cursor}"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Templates matching '{}':\n{}\n\nUse deploy_template with the code to deploy.",
-            params.query, output
+            "Templates matching '{}':\n{}{}\n\nUse deploy_template with the code to deploy.",
+            params.query, output, next_page
         ))]))
     }
 }

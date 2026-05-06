@@ -350,8 +350,20 @@ pub struct DeployTemplateParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchTemplatesParams {
-    /// Search query to match against template names and codes.
+    /// Search query to send to Railway template search.
     pub query: String,
+    /// Maximum number of templates to return. Defaults to 5.
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Cursor from pageInfo.endCursor for fetching the next page.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Optional template category filter.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Optional verification-state filter.
+    #[serde(default)]
+    pub verified: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

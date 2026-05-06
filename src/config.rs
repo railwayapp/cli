@@ -237,12 +237,6 @@ impl Configs {
         }
     }
 
-    /// Returns the host and path for relay server without protocol (e.g. "backboard.railway.com/relay")
-    /// Protocol is omitted to allow flexibility between https:// and wss:// usage
-    pub fn get_relay_host_path(&self) -> String {
-        format!("backboard.{}/relay", self.get_host())
-    }
-
     pub fn get_backboard(&self) -> String {
         format!("https://backboard.{}/graphql/v2", self.get_host())
     }

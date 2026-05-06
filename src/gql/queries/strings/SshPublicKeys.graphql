@@ -1,11 +1,13 @@
-query SshPublicKeys {
-  sshPublicKeys(first: 100) {
+query SshPublicKeys($workspaceId: String) {
+  sshPublicKeys(first: 100, workspaceId: $workspaceId) {
     edges {
       node {
         id
         name
         publicKey
         fingerprint
+        userId
+        workspaceId
       }
     }
   }

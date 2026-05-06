@@ -22,64 +22,6 @@ query Project($id: String!) {
           canAccess
           deletedAt
           unmergedChangesCount
-          serviceInstances {
-            edges {
-              node {
-                id
-                serviceId
-                serviceName
-                environmentId
-                latestDeployment {
-                  canRedeploy
-                  id
-                  meta
-                  status
-                  createdAt
-                  deploymentStopped
-                }
-                activeDeployments {
-                  id
-                  status
-                  createdAt
-                  meta
-                }
-                source {
-                  repo
-                  image
-                }
-                domains {
-                  serviceDomains {
-                    id
-                    domain
-                    targetPort
-                  }
-                  customDomains {
-                    id
-                    domain
-                    targetPort
-                  }
-                }
-                cronSchedule
-                nextCronRunAt
-                startCommand
-              }
-            }
-          }
-          volumeInstances {
-            edges {
-              node {
-                serviceId
-                mountPath
-                environmentId
-                currentSizeMB
-                sizeMB
-                volume {
-                  name
-                  id
-                }
-              }
-            }
-          }
         }
       }
     }

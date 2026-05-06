@@ -1,0 +1,25 @@
+query HttpMetricsByStatus(
+  $serviceId: String!
+  $environmentId: String!
+  $startDate: DateTime!
+  $endDate: DateTime!
+  $stepSeconds: Int
+  $method: String
+  $path: String
+) {
+  httpMetricsGroupedByStatus(
+    serviceId: $serviceId
+    environmentId: $environmentId
+    startDate: $startDate
+    endDate: $endDate
+    stepSeconds: $stepSeconds
+    method: $method
+    path: $path
+  ) {
+    statusCode
+    samples {
+      ts
+      value
+    }
+  }
+}

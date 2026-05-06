@@ -16,6 +16,7 @@ mod controllers;
 mod errors;
 mod gql;
 mod oauth;
+mod resources;
 mod subscription;
 mod table;
 mod util;
@@ -49,6 +50,7 @@ commands!(
     logout,
     logs,
     mcp,
+    metrics,
     open,
     project,
     run(local),
@@ -60,6 +62,7 @@ commands!(
     starship,
     status,
     telemetry_cmd(telemetry),
+    templates,
     unlink,
     up,
     upgrade,
@@ -310,6 +313,7 @@ async fn main() -> Result<()> {
         "upgrade",
         "autoupdate",
         "telemetry_cmd",
+        "templates",
         "check_updates",
     ];
 

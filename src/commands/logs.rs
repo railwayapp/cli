@@ -25,7 +25,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum HttpMethod {
+pub enum HttpMethod {
     #[value(name = "GET")]
     Get,
     #[value(name = "POST")]
@@ -57,7 +57,7 @@ impl fmt::Display for HttpMethod {
 }
 
 #[derive(Debug, Clone)]
-enum StatusFilter {
+pub enum StatusFilter {
     Exact(u16),
     Comparison { op: &'static str, value: u16 },
     Range { low: u16, high: u16 },
@@ -112,27 +112,44 @@ impl FromStr for StatusFilter {
 }
 
 fn build_http_filter(args: &Args) -> Option<String> {
+    compose_http_filter(
+        args.method.as_ref(),
+        args.status.as_ref(),
+        args.path.as_deref(),
+        args.request_id.as_deref(),
+        args.filter.as_deref(),
+    )
+}
+
+/// Build a Railway query filter string from typed HTTP filter components.
+pub fn compose_http_filter(
+    method: Option<&HttpMethod>,
+    status: Option<&StatusFilter>,
+    path: Option<&str>,
+    request_id: Option<&str>,
+    raw_filter: Option<&str>,
+) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
-    if let Some(ref method) = args.method {
+    if let Some(method) = method {
         parts.push(format!("@method:{method}"));
     }
 
-    if let Some(ref status) = args.status {
+    if let Some(status) = status {
         parts.push(status.to_filter_expr());
     }
 
-    if let Some(ref path) = args.path {
+    if let Some(path) = path {
         parts.push(format!("@path:{path}"));
     }
 
-    if let Some(ref request_id) = args.request_id {
+    if let Some(request_id) = request_id {
         parts.push(format!("@requestId:{request_id}"));
     }
 
-    if let Some(ref raw_filter) = args.filter {
+    if let Some(raw_filter) = raw_filter {
         if !raw_filter.is_empty() {
-            parts.push(raw_filter.clone());
+            parts.push(raw_filter.to_string());
         }
     }
 

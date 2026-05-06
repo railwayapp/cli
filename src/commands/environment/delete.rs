@@ -25,6 +25,9 @@ pub async fn delete_environment(args: Args) -> Result<()> {
             (e.node.id.to_lowercase() == environment)
                 || (e.node.name.to_lowercase() == environment.to_lowercase())
         }) {
+            if !env.node.can_access {
+                bail!(RailwayError::EnvironmentRestricted(env.node.name.clone()));
+            }
             fake_select("Select the environment to delete", &env.node.name);
             (env.node.id.clone(), env.node.name.clone())
         } else {

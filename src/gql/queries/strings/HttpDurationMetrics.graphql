@@ -1,0 +1,29 @@
+query HttpDurationMetrics(
+  $serviceId: String!
+  $environmentId: String!
+  $startDate: DateTime!
+  $endDate: DateTime!
+  $stepSeconds: Int
+  $method: String
+  $path: String
+  $statusCode: Int
+) {
+  httpDurationMetrics(
+    serviceId: $serviceId
+    environmentId: $environmentId
+    startDate: $startDate
+    endDate: $endDate
+    stepSeconds: $stepSeconds
+    method: $method
+    path: $path
+    statusCode: $statusCode
+  ) {
+    samples {
+      ts
+      p50
+      p90
+      p95
+      p99
+    }
+  }
+}

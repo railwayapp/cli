@@ -2,9 +2,10 @@ use anyhow::bail;
 use colored::*;
 use is_terminal::IsTerminal;
 use serde::Serialize;
-use std::fmt::Display;
+use std::{collections::HashSet, fmt::Display};
 
 use crate::{
+    controllers::project::{get_environment_instances, get_service_ids_in_env},
     errors::RailwayError,
     util::prompt::{fake_select, prompt_options, prompt_options_skippable},
     workspace::{Project, Workspace, workspaces},
@@ -79,7 +80,11 @@ pub async fn command(args: Args) -> Result<()> {
 
     let environment = select_environment(args.environment, &project)?;
 
-    let service = select_service(&project, &environment, args.service)?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let environment_instances =
+        get_environment_instances(&client, &configs, &project.id, &environment.id).await?;
+    let service_ids = get_service_ids_in_env(&environment_instances);
+    let service = select_service(&project, &service_ids, args.service)?;
 
     configs.link_project(
         project.id.clone(),
@@ -121,17 +126,13 @@ pub async fn command(args: Args) -> Result<()> {
 
 fn select_service(
     project: &NormalisedProject,
-    environment: &NormalisedEnvironment,
+    service_ids: &HashSet<String>,
     service: Option<String>,
 ) -> Result<Option<NormalisedService>, anyhow::Error> {
     let useful_services = project
         .services
         .iter()
-        .filter(|&a| {
-            a.service_instances
-                .iter()
-                .any(|instance| instance == &environment.id)
-        })
+        .filter(|&a| service_ids.contains(&a.id))
         .cloned()
         .collect::<Vec<NormalisedService>>();
 
@@ -145,11 +146,45 @@ fn select_service(
                 fake_select("Select a service", &service.name);
                 Some(service.clone())
             } else {
-                return Err(RailwayError::ServiceNotFound(service).into());
+                let available: Vec<&str> = useful_services
+                    .iter()
+                    .take(5)
+                    .map(|s| s.name.as_str())
+                    .collect();
+                let suffix = if useful_services.len() > 5 {
+                    format!(", +{} more", useful_services.len() - 5)
+                } else {
+                    String::new()
+                };
+                bail!(
+                    "Service \"{}\" not found.\nAvailable: {}{}",
+                    service,
+                    available.join(", "),
+                    suffix
+                );
             }
         } else if std::io::stdout().is_terminal() {
             prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+        } else if useful_services.len() == 1 {
+            let svc = useful_services.into_iter().next().unwrap();
+            eprintln!("No service specified — auto-selecting \"{}\"", svc.name);
+            Some(svc)
         } else {
+            let names: Vec<&str> = useful_services
+                .iter()
+                .take(5)
+                .map(|s| s.name.as_str())
+                .collect();
+            let suffix = if useful_services.len() > 5 {
+                format!(", +{} more", useful_services.len() - 5)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "Multiple services available — use --service <name> to link one.\nAvailable: {}{}",
+                names.join(", "),
+                suffix
+            );
             None
         }
     } else {
@@ -163,7 +198,7 @@ fn select_environment(
     project: &NormalisedProject,
 ) -> Result<NormalisedEnvironment, anyhow::Error> {
     if project.environments.is_empty() {
-        if project.has_restricted_environments {
+        if !project.restricted_environments.is_empty() {
             bail!("All environments in this project are restricted");
         } else {
             bail!("Project has no environments");
@@ -178,8 +213,29 @@ fn select_environment(
         if let Some(env) = env {
             fake_select("Select an environment", &env.name);
             env.clone()
+        } else if let Some(env) = project.restricted_environments.iter().find(|e| {
+            (e.name.to_lowercase() == environment.to_lowercase())
+                || (e.id.to_lowercase() == environment.to_lowercase())
+        }) {
+            bail!(RailwayError::EnvironmentRestricted(env.name.clone()));
         } else {
-            return Err(RailwayError::EnvironmentNotFound(environment).into());
+            let available: Vec<&str> = project
+                .environments
+                .iter()
+                .take(5)
+                .map(|e| e.name.as_str())
+                .collect();
+            let suffix = if project.environments.len() > 5 {
+                format!(", +{} more", project.environments.len() - 5)
+            } else {
+                String::new()
+            };
+            bail!(
+                "Environment \"{}\" not found.\nAvailable: {}{}",
+                environment,
+                available.join(", "),
+                suffix
+            );
         }
     } else if project.environments.len() == 1 {
         let env = project.environments[0].clone();
@@ -187,8 +243,21 @@ fn select_environment(
         env
     } else {
         if !std::io::stdout().is_terminal() {
+            let names: Vec<&str> = project
+                .environments
+                .iter()
+                .take(5)
+                .map(|e| e.name.as_str())
+                .collect();
+            let suffix = if project.environments.len() > 5 {
+                format!(", +{} more", project.environments.len() - 5)
+            } else {
+                String::new()
+            };
             bail!(
-                "--environment required in non-interactive mode (multiple environments available)"
+                "--environment required in non-interactive mode.\nAvailable: {}{}",
+                names.join(", "),
+                suffix
             );
         }
         prompt_options("Select an environment", project.environments.clone())?
@@ -208,19 +277,27 @@ fn select_project(
 
     let project = NormalisedProject::from({
         if let Some(project) = project {
-            let proj = projects.into_iter().find(|pro| {
+            let proj = projects.iter().find(|pro| {
                 (pro.id().to_lowercase() == project.to_lowercase())
                     || (pro.name().to_lowercase() == project.to_lowercase())
             });
             if let Some(project) = proj {
                 fake_select("Select a project", &project.to_string());
-                project
+                project.clone()
             } else {
-                return Err(RailwayError::ProjectNotFoundInWorkspace(
+                let available: Vec<&str> = projects.iter().take(5).map(|p| p.name()).collect();
+                let suffix = if projects.len() > 5 {
+                    format!(", +{} more", projects.len() - 5)
+                } else {
+                    String::new()
+                };
+                bail!(
+                    "Project \"{}\" not found in workspace \"{}\".\nAvailable: {}{}",
                     project,
-                    workspace.name().to_owned(),
-                )
-                .into());
+                    workspace.name(),
+                    available.join(", "),
+                    suffix
+                );
             }
         } else {
             prompt_workspace_projects(projects)?
@@ -277,14 +354,38 @@ fn prompt_workspaces(workspaces: Vec<Workspace>) -> Result<Workspace> {
         return Ok(workspaces[0].clone());
     }
     if !std::io::stdout().is_terminal() {
-        bail!("--workspace required in non-interactive mode (multiple workspaces available)");
+        let names: Vec<&str> = workspaces.iter().take(5).map(|w| w.name()).collect();
+        let suffix = if workspaces.len() > 5 {
+            format!(", +{} more", workspaces.len() - 5)
+        } else {
+            String::new()
+        };
+        bail!(
+            "--workspace required in non-interactive mode.\nAvailable: {}{}",
+            names.join(", "),
+            suffix
+        );
     }
     prompt_options("Select a workspace", workspaces)
 }
 
 fn prompt_workspace_projects(projects: Vec<Project>) -> Result<Project, anyhow::Error> {
     if !std::io::stdout().is_terminal() {
-        bail!("--project required in non-interactive mode");
+        let names: Vec<String> = projects
+            .iter()
+            .take(5)
+            .map(|p| p.name().to_owned())
+            .collect();
+        let suffix = if projects.len() > 5 {
+            format!(", +{} more", projects.len() - 5)
+        } else {
+            String::new()
+        };
+        bail!(
+            "--project required in non-interactive mode.\nAvailable: {}{}",
+            names.join(", "),
+            suffix
+        );
     }
     prompt_options("Select a project", projects)
 }
@@ -303,96 +404,67 @@ structstruck::strike! {
             /// Environment Name
             name: String
         }>,
+        /// Project environments the current user cannot access
+        restricted_environments: Vec<NormalisedEnvironment>,
         /// Project services
         services: Vec<struct NormalisedService {
             /// Service ID
             id: String,
             /// Service name
             name: String,
-            /// A `Vec` of environment IDs where the service is present
-            ///
-            /// _**note**_: this isn't what the API returns, we are just extracting what we need
-            service_instances: Vec<String>,
         }>,
-        /// Whether the project has restricted environments
-        has_restricted_environments: bool,
     }
-}
-
-// unfortunately, due to the graphql client returning 3 different types for some reason (despite them all being identical)
-// we need to write 3 match arms to convert it to our normalised project type
-macro_rules! build_service_env_map {
-    ($environments:expr) => {{
-        let mut map: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for env in $environments {
-            for si in &env.node.service_instances.edges {
-                map.entry(si.node.service_id.clone())
-                    .or_default()
-                    .push(env.node.id.clone());
-            }
-        }
-        map
-    }};
 }
 
 impl From<Project> for NormalisedProject {
     fn from(value: Project) -> Self {
         match value {
             Project::External(project) => {
-                let total_envs = project.environments.edges.len();
-                let mut service_env_map = build_service_env_map!(&project.environments.edges);
-                let accessible_envs: Vec<_> = project
-                    .environments
-                    .edges
-                    .into_iter()
-                    .filter(|env| env.node.can_access)
-                    .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
-                    .collect();
-                let has_restricted = total_envs > accessible_envs.len();
+                let mut accessible_envs = Vec::new();
+                let mut restricted_envs = Vec::new();
+                for env in project.environments.edges {
+                    let normalised = NormalisedEnvironment::new(env.node.id, env.node.name);
+                    if env.node.can_access {
+                        accessible_envs.push(normalised);
+                    } else {
+                        restricted_envs.push(normalised);
+                    }
+                }
                 NormalisedProject::new(
                     project.id,
                     project.name,
                     accessible_envs,
+                    restricted_envs,
                     project
                         .services
                         .edges
                         .into_iter()
-                        .map(|service| {
-                            let env_ids =
-                                service_env_map.remove(&service.node.id).unwrap_or_default();
-                            NormalisedService::new(service.node.id, service.node.name, env_ids)
-                        })
+                        .map(|service| NormalisedService::new(service.node.id, service.node.name))
                         .collect(),
-                    has_restricted,
                 )
             }
             Project::Workspace(project) => {
-                let total_envs = project.environments.edges.len();
-                let mut service_env_map = build_service_env_map!(&project.environments.edges);
-                let accessible_envs: Vec<_> = project
-                    .environments
-                    .edges
-                    .into_iter()
-                    .filter(|env| env.node.can_access)
-                    .map(|env| NormalisedEnvironment::new(env.node.id, env.node.name))
-                    .collect();
-                let has_restricted = total_envs > accessible_envs.len();
+                let mut accessible_envs = Vec::new();
+                let mut restricted_envs = Vec::new();
+                for env in project.environments.edges {
+                    let normalised = NormalisedEnvironment::new(env.node.id, env.node.name);
+                    if env.node.can_access {
+                        accessible_envs.push(normalised);
+                    } else {
+                        restricted_envs.push(normalised);
+                    }
+                }
                 NormalisedProject::new(
                     project.id,
                     project.name,
                     accessible_envs,
+                    restricted_envs,
                     project
                         .services
                         .edges
                         .into_iter()
-                        .map(|service| {
-                            let env_ids =
-                                service_env_map.remove(&service.node.id).unwrap_or_default();
-                            NormalisedService::new(service.node.id, service.node.name, env_ids)
-                        })
+                        .map(|service| NormalisedService::new(service.node.id, service.node.name))
                         .collect(),
-                    has_restricted,
                 )
             }
         }

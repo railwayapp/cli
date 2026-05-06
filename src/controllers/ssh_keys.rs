@@ -153,12 +153,15 @@ pub fn compute_fingerprint_from_pubkey(pubkey: &str) -> Result<String> {
     }
 }
 
-/// Get all SSH public keys registered for the current user
+/// Get registered SSH public keys. When `workspace_id` is `Some`, returns
+/// the workspace's keys (requires workspace MEMBER+ access); otherwise
+/// returns the authenticated user's personal keys.
 pub async fn get_registered_ssh_keys(
     client: &Client,
     configs: &Configs,
+    workspace_id: Option<String>,
 ) -> Result<Vec<ssh_public_keys::SshPublicKeysSshPublicKeysEdgesNode>> {
-    let vars = ssh_public_keys::Variables {};
+    let vars = ssh_public_keys::Variables { workspace_id };
     let response = post_graphql::<SshPublicKeys, _>(client, configs.get_backboard(), vars).await?;
 
     let keys: Vec<_> = response
@@ -171,17 +174,21 @@ pub async fn get_registered_ssh_keys(
     Ok(keys)
 }
 
-/// Register an SSH public key with Railway
+/// Register an SSH public key with Railway. Pass `workspace_id` to register
+/// a workspace-owned key (requires workspace ADMIN access); otherwise the
+/// key is registered to the authenticated user.
 pub async fn register_ssh_key(
     client: &Client,
     configs: &Configs,
     name: &str,
     public_key: &str,
+    workspace_id: Option<String>,
 ) -> Result<ssh_public_key_create::SshPublicKeyCreateSshPublicKeyCreate> {
     let vars = ssh_public_key_create::Variables {
         input: ssh_public_key_create::SshPublicKeyCreateInput {
             name: name.to_string(),
             public_key: public_key.to_string(),
+            workspace_id,
         },
     };
 

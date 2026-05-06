@@ -1,10 +1,13 @@
 use super::*;
 use crate::{
-    controllers::project::{ensure_project_and_environment_exist, get_project},
-    errors::RailwayError,
-    queries::project::{
-        ProjectProject, ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode,
+    controllers::environment::get_matched_environment,
+    controllers::project::{
+        ProjectEnvironmentInstances, ProjectVolumeInstanceNode,
+        ensure_project_and_environment_exist, get_environment_instances, get_project,
+        volume_instances_in_env,
     },
+    errors::RailwayError,
+    queries::project::ProjectProject,
     util::{
         progress::create_spinner,
         prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
@@ -134,17 +137,31 @@ pub async fn command(args: Args) -> Result<()> {
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
     let service = args.service.or_else(|| linked_project.service.clone());
-    let environment = match args.environment.clone() {
+    let environment_input = match args.environment.clone() {
         Some(env) => env,
         None => linked_project.environment_id()?.to_string(),
     };
+    let environment = get_matched_environment(&project, environment_input)?.id;
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment).await?;
 
     match args.command {
-        Commands::Add(a) => add(service, environment, a.mount_path, project, a.json).await?,
-        Commands::List(l) => list(environment, project, l.json).await?,
+        Commands::Add(a) => {
+            add(
+                service,
+                environment,
+                &environment_instances,
+                project,
+                a.mount_path,
+                a.json,
+            )
+            .await?
+        }
+        Commands::List(l) => list(environment, &environment_instances, project, l.json).await?,
         Commands::Delete(d) => {
             delete(
                 environment,
+                &environment_instances,
                 d.volume,
                 project,
                 d.yes,
@@ -154,11 +171,39 @@ pub async fn command(args: Args) -> Result<()> {
             .await?
         }
         Commands::Update(u) => {
-            update(environment, u.volume, u.mount_path, u.name, project, u.json).await?
+            update(
+                environment,
+                &environment_instances,
+                u.volume,
+                u.mount_path,
+                u.name,
+                project,
+                u.json,
+            )
+            .await?
         }
-        Commands::Detach(d) => detach(environment, d.volume, project, d.yes, d.json).await?,
+        Commands::Detach(d) => {
+            detach(
+                environment,
+                &environment_instances,
+                d.volume,
+                project,
+                d.yes,
+                d.json,
+            )
+            .await?
+        }
         Commands::Attach(a) => {
-            attach(environment, a.volume, service, project, a.yes, a.json).await?
+            attach(
+                environment,
+                &environment_instances,
+                a.volume,
+                service,
+                project,
+                a.yes,
+                a.json,
+            )
+            .await?
         }
     }
 
@@ -167,6 +212,7 @@ pub async fn command(args: Args) -> Result<()> {
 
 async fn attach(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     service: Option<String>,
     project: ProjectProject,
@@ -176,7 +222,14 @@ async fn attach(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project.clone(), environment.as_str(), volume, is_terminal)?.0;
+    let volume = select_volume(
+        project.clone(),
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?
+    .0;
     let service = service.ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
     let service_name = &project
         .services
@@ -250,6 +303,7 @@ async fn attach(
 
 async fn detach(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     project: ProjectProject,
     yes: bool,
@@ -258,7 +312,14 @@ async fn detach(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project.clone(), environment.as_str(), volume, is_terminal)?.0;
+    let volume = select_volume(
+        project.clone(),
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?
+    .0;
 
     if volume.service_id.is_none() {
         bail!(
@@ -321,6 +382,7 @@ async fn detach(
 
 async fn update(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     mount_path: Option<String>,
     name: Option<String>,
@@ -330,7 +392,13 @@ async fn update(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project, environment.as_str(), volume, is_terminal)?;
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?;
 
     if mount_path.is_none() && name.is_none() {
         bail!(
@@ -399,6 +467,7 @@ async fn update(
 
 async fn delete(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     project: ProjectProject,
     yes: bool,
@@ -408,7 +477,13 @@ async fn delete(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project, environment.as_str(), volume, is_terminal)?;
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?;
 
     let confirm = if yes {
         true
@@ -451,16 +526,21 @@ async fn delete(
     Ok(())
 }
 
-async fn list(environment: String, project: ProjectProject, json: bool) -> Result<()> {
-    let env = project
+async fn list(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    project: ProjectProject,
+    json: bool,
+) -> Result<()> {
+    let environment_name = project
         .environments
         .edges
         .iter()
         .find(|e| e.node.id == environment)
+        .map(|e| e.node.name.clone())
         .ok_or_else(|| anyhow!("Environment not found"))?;
-    let environment_name = env.node.name.clone();
 
-    let volumes = &env.node.volume_instances.edges;
+    let volumes = volume_instances_in_env(environment_instances);
 
     if volumes.is_empty() {
         if json {
@@ -539,8 +619,9 @@ async fn list(environment: String, project: ProjectProject, json: bool) -> Resul
 async fn add(
     service: Option<String>,
     environment: String,
-    mount: Option<String>,
+    environment_instances: &ProjectEnvironmentInstances,
     project: ProjectProject,
+    mount: Option<String>,
     json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
@@ -578,16 +659,15 @@ async fn add(
         .unwrap();
 
     // check if there is a volume already mounted on the service in that environment
-    let env = project
+    if !project
         .environments
         .edges
         .iter()
-        .find(|e| e.node.id == environment)
-        .ok_or_else(|| anyhow!("Environment not found"))?;
-    if env
-        .node
-        .volume_instances
-        .edges
+        .any(|e| e.node.id == environment)
+    {
+        bail!("Environment not found");
+    }
+    if volume_instances_in_env(environment_instances)
         .iter()
         .any(|a| a.node.service_id == Some(service.clone()))
     {
@@ -649,20 +729,18 @@ async fn add(
 
 fn select_volume(
     project: ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment: &str,
     volume: Option<String>,
     is_terminal: bool,
 ) -> Result<Volume, anyhow::Error> {
-    let env = project
+    project
         .environments
         .edges
         .iter()
         .find(|e| e.node.id == environment)
         .ok_or_else(|| anyhow!("Environment not found"))?;
-    let volumes: Vec<Volume> = env
-        .node
-        .volume_instances
-        .edges
+    let volumes: Vec<Volume> = volume_instances_in_env(environment_instances)
         .iter()
         .map(|a| Volume(a.node.clone()))
         .collect();
@@ -687,7 +765,7 @@ fn select_volume(
 }
 
 #[derive(Debug, Clone)]
-struct Volume(ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode);
+struct Volume(ProjectVolumeInstanceNode);
 
 impl Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

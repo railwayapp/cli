@@ -62,6 +62,13 @@ impl fmt::Display for GitHubKeyOption {
 pub struct Args {
     #[clap(subcommand)]
     command: Option<Commands>,
+
+    /// Operate on workspace-owned keys instead of your personal keys.
+    /// Requires workspace ADMIN access for add/remove. Auto-detected when
+    /// `RAILWAY_API_TOKEN` is a workspace-scoped token. Also accepted as a
+    /// subcommand-level flag (e.g. `railway ssh keys add --workspace W`).
+    #[clap(long, global = true, value_name = "WORKSPACE_ID")]
+    workspace: Option<String>,
 }
 
 #[derive(Parser, Clone)]
@@ -98,30 +105,69 @@ enum Commands {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    if Configs::get_railway_token().is_some() {
+        bail!(
+            "SSH key management is not supported with project tokens (`RAILWAY_TOKEN`). \
+            Use a workspace API token (`RAILWAY_API_TOKEN`) or run `railway login`."
+        );
+    }
+
+    let workspace_id = args.workspace;
+
     match args.command {
-        Some(Commands::List) | None => list_keys().await,
-        Some(Commands::Add { key, name }) => add_key(key, name).await,
+        Some(Commands::List) | None => {
+            super::tel::track("keys_list", list_keys(workspace_id).await).await
+        }
+        Some(Commands::Add { key, name }) => {
+            super::tel::track("keys_add", add_key(key, name, workspace_id).await).await
+        }
         Some(Commands::Remove {
             key,
             two_factor_code,
-        }) => remove_key(key, two_factor_code).await,
-        Some(Commands::Github) => import_github_keys().await,
+        }) => {
+            super::tel::track(
+                "keys_remove",
+                remove_key(key, two_factor_code, workspace_id).await,
+            )
+            .await
+        }
+        Some(Commands::Github) => {
+            if workspace_id.is_some() {
+                bail!(
+                    "`--workspace` is not supported for GitHub import — GitHub keys belong to \
+                    your personal account. Add them to a workspace by running \
+                    `railway ssh keys add --workspace <id> --key <path>` after importing."
+                );
+            }
+            super::tel::track("keys_github", import_github_keys().await).await
+        }
     }
 }
 
-async fn list_keys() -> Result<()> {
+async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let registered_keys = get_registered_ssh_keys(&client, &configs).await?;
+    let registered_keys = get_registered_ssh_keys(&client, &configs, workspace_id.clone()).await?;
     let local_keys = find_local_ssh_keys()?;
-    let github_keys = get_github_ssh_keys(&client, &configs)
-        .await
-        .unwrap_or_default();
+    // GitHub import is a user-only concept; skip when listing workspace keys.
+    let github_keys = if workspace_id.is_none() {
+        get_github_ssh_keys(&client, &configs)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let heading = if workspace_id.is_some() {
+        "Registered Workspace SSH Keys:"
+    } else {
+        "Registered SSH Keys:"
+    };
 
     // Show registered Railway keys
     if !registered_keys.is_empty() {
-        println!("Registered SSH Keys:");
+        println!("{heading}");
 
         for key in &registered_keys {
             let local_match = local_keys.iter().find(|l| l.fingerprint == key.fingerprint);
@@ -193,10 +239,17 @@ async fn list_keys() -> Result<()> {
         .collect();
 
     if registered_keys.is_empty() && github_keys.is_empty() {
-        println!("No SSH keys registered with Railway.");
-        println!();
-        println!("Add a key with: railway ssh keys add");
-        println!("Or register at: https://railway.com/account/ssh-keys");
+        if let Some(ws) = workspace_id.as_deref() {
+            println!("No SSH keys registered for workspace {ws}.");
+            println!();
+            println!("Add a key with: railway ssh keys add --workspace {ws}");
+            println!("Or register at: https://railway.com/workspace/ssh-keys?workspaceId={ws}");
+        } else {
+            println!("No SSH keys registered with Railway.");
+            println!();
+            println!("Add a key with: railway ssh keys add");
+            println!("Or register at: https://railway.com/account/ssh-keys");
+        }
         return Ok(());
     }
 
@@ -225,7 +278,11 @@ async fn list_keys() -> Result<()> {
     Ok(())
 }
 
-async fn add_key(key_path: Option<String>, name: Option<String>) -> Result<()> {
+async fn add_key(
+    key_path: Option<String>,
+    name: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
@@ -238,7 +295,7 @@ async fn add_key(key_path: Option<String>, name: Option<String>) -> Result<()> {
         );
     }
 
-    let registered_keys = get_registered_ssh_keys(&client, &configs).await?;
+    let registered_keys = get_registered_ssh_keys(&client, &configs, workspace_id.clone()).await?;
 
     // Filter to unregistered keys
     let unregistered: Vec<_> = local_keys
@@ -293,18 +350,36 @@ async fn add_key(key_path: Option<String>, name: Option<String>) -> Result<()> {
         key_to_add.fingerprint
     );
 
-    register_ssh_key(&client, &configs, &key_name, &key_to_add.public_key).await?;
+    register_ssh_key(
+        &client,
+        &configs,
+        &key_name,
+        &key_to_add.public_key,
+        workspace_id.clone(),
+    )
+    .await?;
 
-    println!("SSH key '{}' registered successfully!", key_name);
+    if let Some(ws) = workspace_id.as_deref() {
+        println!(
+            "SSH key '{}' registered for workspace {} successfully!",
+            key_name, ws
+        );
+    } else {
+        println!("SSH key '{}' registered successfully!", key_name);
+    }
 
     Ok(())
 }
 
-async fn remove_key(key: Option<String>, two_factor_code: Option<String>) -> Result<()> {
+async fn remove_key(
+    key: Option<String>,
+    two_factor_code: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let registered_keys = get_registered_ssh_keys(&client, &configs).await?;
+    let registered_keys = get_registered_ssh_keys(&client, &configs, workspace_id).await?;
 
     if registered_keys.is_empty() {
         println!("No SSH keys registered with Railway.");
@@ -387,7 +462,8 @@ async fn import_github_keys() -> Result<()> {
         return Ok(());
     }
 
-    let registered_keys = get_registered_ssh_keys(&client, &configs).await?;
+    // GitHub import targets user keys only.
+    let registered_keys = get_registered_ssh_keys(&client, &configs, None).await?;
 
     // Filter to keys not already registered (compare by fingerprint)
     let unregistered: Vec<_> = github_keys
@@ -434,7 +510,14 @@ async fn import_github_keys() -> Result<()> {
 
     println!("Importing key: {}", key_to_import.title);
 
-    register_ssh_key(&client, &configs, &key_to_import.title, &key_to_import.key).await?;
+    register_ssh_key(
+        &client,
+        &configs,
+        &key_to_import.title,
+        &key_to_import.key,
+        None,
+    )
+    .await?;
 
     println!("SSH key '{}' imported successfully!", key_to_import.title);
 
