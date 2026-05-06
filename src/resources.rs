@@ -1,5 +1,6 @@
-use crate::gql::queries::{
-    self, project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+use crate::{
+    controllers::project::ProjectServiceInstanceEdge,
+    gql::queries::{self},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11,7 +12,7 @@ pub(crate) enum ResourceKind {
 }
 
 pub(crate) fn classify_service_instance(
-    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    service_instance: &ProjectServiceInstanceEdge,
 ) -> ResourceKind {
     if service_instance.node.cron_schedule.is_some() {
         ResourceKind::CronJob
@@ -24,9 +25,7 @@ pub(crate) fn classify_service_instance(
     }
 }
 
-pub(crate) fn is_function_service(
-    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> bool {
+pub(crate) fn is_function_service(service_instance: &ProjectServiceInstanceEdge) -> bool {
     service_instance.node.source.as_ref().is_some_and(|source| {
         source
             .image
@@ -36,9 +35,7 @@ pub(crate) fn is_function_service(
     })
 }
 
-pub(crate) fn is_database_instance(
-    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> bool {
+pub(crate) fn is_database_instance(service_instance: &ProjectServiceInstanceEdge) -> bool {
     is_database_service(source_image(service_instance))
 }
 
@@ -59,7 +56,7 @@ pub(crate) fn is_database_service(source_image: Option<&str>) -> bool {
 }
 
 pub(crate) fn database_label(
-    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    service_instance: &ProjectServiceInstanceEdge,
 ) -> Option<&'static str> {
     let image = source_image(service_instance)?.to_lowercase();
     if image.contains("postgres") || image.contains("postgis") || image.contains("timescale") {
@@ -95,9 +92,7 @@ pub(crate) fn project_bucket_name(
         .map(|edge| edge.node.name.clone())
 }
 
-fn source_image(
-    service_instance: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> Option<&str> {
+fn source_image(service_instance: &ProjectServiceInstanceEdge) -> Option<&str> {
     service_instance
         .node
         .source

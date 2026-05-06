@@ -21,13 +21,17 @@ impl std::fmt::Display for project::ProjectProjectServicesEdges {
     }
 }
 
-impl std::fmt::Display for project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges {
+impl std::fmt::Display
+    for environment_instances::EnvironmentInstancesEnvironmentServiceInstancesEdges
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.node.service_name)
     }
 }
 
-impl std::fmt::Display for project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode {
+impl std::fmt::Display
+    for environment_instances::EnvironmentInstancesEnvironmentServiceInstancesEdgesNode
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.service_name)
     }
@@ -193,6 +197,14 @@ pub struct Environments;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/EnvironmentInstances.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq"
+)]
+pub struct EnvironmentInstances;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/WorkflowStatus.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
@@ -259,25 +271,47 @@ pub struct GitHubSshKeys;
 pub struct ServiceInstance;
 
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
-impl From<project::DeploymentStatus> for SubscriptionDeploymentStatus {
-    fn from(value: project::DeploymentStatus) -> Self {
+impl From<environment_instances::DeploymentStatus> for SubscriptionDeploymentStatus {
+    fn from(value: environment_instances::DeploymentStatus) -> Self {
         match value {
-            project::DeploymentStatus::BUILDING => SubscriptionDeploymentStatus::BUILDING,
-            project::DeploymentStatus::CRASHED => SubscriptionDeploymentStatus::CRASHED,
-            project::DeploymentStatus::DEPLOYING => SubscriptionDeploymentStatus::DEPLOYING,
-            project::DeploymentStatus::FAILED => SubscriptionDeploymentStatus::FAILED,
-            project::DeploymentStatus::INITIALIZING => SubscriptionDeploymentStatus::INITIALIZING,
-            project::DeploymentStatus::NEEDS_APPROVAL => {
+            environment_instances::DeploymentStatus::BUILDING => {
+                SubscriptionDeploymentStatus::BUILDING
+            }
+            environment_instances::DeploymentStatus::CRASHED => {
+                SubscriptionDeploymentStatus::CRASHED
+            }
+            environment_instances::DeploymentStatus::DEPLOYING => {
+                SubscriptionDeploymentStatus::DEPLOYING
+            }
+            environment_instances::DeploymentStatus::FAILED => SubscriptionDeploymentStatus::FAILED,
+            environment_instances::DeploymentStatus::INITIALIZING => {
+                SubscriptionDeploymentStatus::INITIALIZING
+            }
+            environment_instances::DeploymentStatus::NEEDS_APPROVAL => {
                 SubscriptionDeploymentStatus::NEEDS_APPROVAL
             }
-            project::DeploymentStatus::QUEUED => SubscriptionDeploymentStatus::QUEUED,
-            project::DeploymentStatus::REMOVED => SubscriptionDeploymentStatus::REMOVED,
-            project::DeploymentStatus::REMOVING => SubscriptionDeploymentStatus::REMOVING,
-            project::DeploymentStatus::SKIPPED => SubscriptionDeploymentStatus::SKIPPED,
-            project::DeploymentStatus::SLEEPING => SubscriptionDeploymentStatus::SLEEPING,
-            project::DeploymentStatus::SUCCESS => SubscriptionDeploymentStatus::SUCCESS,
-            project::DeploymentStatus::WAITING => SubscriptionDeploymentStatus::WAITING,
-            project::DeploymentStatus::Other(s) => SubscriptionDeploymentStatus::Other(s),
+            environment_instances::DeploymentStatus::QUEUED => SubscriptionDeploymentStatus::QUEUED,
+            environment_instances::DeploymentStatus::REMOVED => {
+                SubscriptionDeploymentStatus::REMOVED
+            }
+            environment_instances::DeploymentStatus::REMOVING => {
+                SubscriptionDeploymentStatus::REMOVING
+            }
+            environment_instances::DeploymentStatus::SKIPPED => {
+                SubscriptionDeploymentStatus::SKIPPED
+            }
+            environment_instances::DeploymentStatus::SLEEPING => {
+                SubscriptionDeploymentStatus::SLEEPING
+            }
+            environment_instances::DeploymentStatus::SUCCESS => {
+                SubscriptionDeploymentStatus::SUCCESS
+            }
+            environment_instances::DeploymentStatus::WAITING => {
+                SubscriptionDeploymentStatus::WAITING
+            }
+            environment_instances::DeploymentStatus::Other(s) => {
+                SubscriptionDeploymentStatus::Other(s)
+            }
         }
     }
 }

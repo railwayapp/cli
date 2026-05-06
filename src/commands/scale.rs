@@ -1,7 +1,7 @@
 use crate::{
     controllers::{
         environment::get_matched_environment,
-        project::find_service_instance,
+        project::{ProjectEnvironmentInstances, find_service_instance, get_environment_instances},
         regions::{convert_hashmap_to_map, merge_config, prompt_for_regions},
     },
     util::progress::create_spinner_if,
@@ -57,8 +57,12 @@ pub async fn command(args: Args) -> Result<()> {
         Some(env) => env,
         None => linked_project.environment_id()?.to_string(),
     };
+    let environment_id = get_matched_environment(&project, environment)?.id;
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
+            .await?;
     let (existing, service_id) =
-        get_existing_config(&args, &linked_project, &project, &environment)?;
+        get_existing_config(&args, &linked_project, &project, &environment_instances)?;
     let new_config = convert_hashmap_to_map(
         if args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
             prompt_for_regions(&configs, &client, &existing).await?
@@ -75,7 +79,6 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
     let region_data = merge_config(existing, new_config);
-    let environment_id = get_matched_environment(&project, environment)?.id;
     update_regions_and_redeploy(
         configs,
         client,
@@ -136,9 +139,8 @@ fn get_existing_config(
     args: &Args,
     linked_project: &LinkedProject,
     project: &queries::project::ProjectProject,
-    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
 ) -> Result<(Value, String)> {
-    let environment_id = get_matched_environment(project, environment.to_string())?.id;
     let service_input = match args.service.as_ref() {
         Some(s) => s,
         None => linked_project.service.as_ref().ok_or_else(|| {
@@ -158,7 +160,7 @@ fn get_existing_config(
     let service_id = service.node.id.clone();
 
     // check that service exists in that environment
-    let instance = find_service_instance(project, &environment_id, &service_id);
+    let instance = find_service_instance(environment_instances, &service_id);
     let service_meta = if let Some(instance) = instance {
         if let Some(latest) = &instance.latest_deployment {
             if let Some(meta) = &latest.meta {

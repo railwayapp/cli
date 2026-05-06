@@ -1,6 +1,6 @@
 use crate::{
     commands::functions::common::link_function,
-    queries::project::ProjectProjectEnvironmentsEdges,
+    controllers::project::ProjectEnvironmentInstances,
     util::prompt::{fake_select, prompt_path, prompt_select},
 };
 use anyhow::bail;
@@ -8,10 +8,10 @@ use is_terminal::IsTerminal;
 
 use super::*;
 
-pub async fn link(environment: &ProjectProjectEnvironmentsEdges, args: Link) -> Result<()> {
+pub async fn link(environment_instances: &ProjectEnvironmentInstances, args: Link) -> Result<()> {
     let terminal = std::io::stdout().is_terminal();
 
-    let functions = common::get_functions_in_environment(environment);
+    let functions = common::get_functions_in_environment(environment_instances);
 
     let function = if let Some(function) = args.function {
         let f = functions.iter().find(|f| {

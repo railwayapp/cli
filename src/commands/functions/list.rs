@@ -1,19 +1,18 @@
-use crate::queries::project::DeploymentStatus;
+use crate::queries::environment_instances::DeploymentStatus;
 
 use super::*;
+use crate::controllers::project::{ProjectEnvironmentInstances, ProjectServiceInstanceEdge};
 use chrono_humanize::HumanTime;
 use pathdiff::diff_paths;
-use queries::project::{
-    ProjectProject, ProjectProjectEnvironmentsEdges,
-    ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-};
+use queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges};
 use std::{fmt::Write as _, path::Path};
 
 pub async fn list(
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     project: ProjectProject,
 ) -> Result<()> {
-    let functions = common::get_functions_in_environment(environment);
+    let functions = common::get_functions_in_environment(environment_instances);
     if functions.is_empty() {
         display_no_functions_message(&project, environment);
         return Ok(());
@@ -25,9 +24,7 @@ pub async fn list(
     Ok(())
 }
 
-fn format_functions_list(
-    functions: &[&ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges],
-) -> Result<String> {
+fn format_functions_list(functions: &[&ProjectServiceInstanceEdge]) -> Result<String> {
     let configs = Configs::new()?;
     let closest = configs.get_functions_in_directory(
         Path::new(&configs.get_closest_linked_project_directory()?).to_path_buf(),
@@ -44,7 +41,7 @@ fn format_functions_list(
 }
 
 fn format_function_entry(
-    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    function: &ProjectServiceInstanceEdge,
     closest: Vec<(PathBuf, String)>,
 ) -> Result<String> {
     let mut entry = String::new();
@@ -60,9 +57,7 @@ fn format_function_entry(
     Ok(entry)
 }
 
-fn get_colored_function_name(
-    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> colored::ColoredString {
+fn get_colored_function_name(function: &ProjectServiceInstanceEdge) -> colored::ColoredString {
     if let Some(ref deployment) = function.node.latest_deployment {
         match deployment.status {
             DeploymentStatus::BUILDING
@@ -81,10 +76,7 @@ fn get_colored_function_name(
     }
 }
 
-fn append_runtime_info(
-    entry: &mut String,
-    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> Result<()> {
+fn append_runtime_info(entry: &mut String, function: &ProjectServiceInstanceEdge) -> Result<()> {
     if let Some(ref source) = function.node.source {
         if let Some(image) = &source.image {
             if let Some(runtime_info) = parse_runtime_from_image(image) {
@@ -109,10 +101,7 @@ fn parse_runtime_from_image(image: &str) -> Option<(String, String)> {
     Some((runtime_name, runtime_version))
 }
 
-fn append_next_cron_run(
-    entry: &mut String,
-    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> Result<()> {
+fn append_next_cron_run(entry: &mut String, function: &ProjectServiceInstanceEdge) -> Result<()> {
     if let Some(next_run) = function.node.next_cron_run_at {
         let human_time = HumanTime::from(next_run);
         write!(entry, " (next run {})", human_time.to_string().yellow())?;
@@ -120,10 +109,7 @@ fn append_next_cron_run(
     Ok(())
 }
 
-fn append_domain_info(
-    entry: &mut String,
-    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-) -> Result<()> {
+fn append_domain_info(entry: &mut String, function: &ProjectServiceInstanceEdge) -> Result<()> {
     if common::has_domains(function) {
         write!(entry, " ({})", "http".blue())?;
     }
@@ -132,7 +118,7 @@ fn append_domain_info(
 
 fn append_linked_information(
     entry: &mut String,
-    function: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    function: &ProjectServiceInstanceEdge,
     closest: Vec<(PathBuf, String)>,
 ) -> Result<()> {
     if !closest.is_empty() {

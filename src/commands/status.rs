@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono_humanize::HumanTime;
+use serde_json::Value;
 
 use crate::{
     commands::{
@@ -8,14 +9,15 @@ use crate::{
             build_service_output, fetch_region_locations, format_size_pair, print_service_card,
             service_resource_details,
         },
-        queries::project::{
-            ProjectProject, ProjectProjectEnvironmentsEdges,
-            ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
-        },
+        queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges},
     },
     controllers::{
         config::{EnvironmentConfig, environment::fetch_environment_config},
-        project::{ensure_project_and_environment_exist, get_project},
+        project::{
+            ProjectEnvironmentInstances, ProjectServiceInstanceEdge,
+            ensure_project_and_environment_exist, get_environment_instances, get_project,
+            service_instances_in_env, volume_instances_in_env,
+        },
     },
     resources::{
         ResourceKind, classify_service_instance, database_label, name_mentions, project_bucket_name,
@@ -40,13 +42,6 @@ pub async fn command(args: Args) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&project)?);
-        return Ok(());
-    }
-
-    let region_locations = fetch_region_locations(&client, &configs).await;
-
     let environment = linked_project.environment.as_deref().and_then(|eid| {
         project
             .environments
@@ -54,6 +49,16 @@ pub async fn command(args: Args) -> Result<()> {
             .iter()
             .find(|env| env.node.id == eid)
     });
+
+    if args.json {
+        let project_json =
+            project_json_with_environment_instances(&client, &configs, &linked_project, &project)
+                .await?;
+        println!("{}", serde_json::to_string_pretty(&project_json)?);
+        return Ok(());
+    }
+
+    let region_locations = fetch_region_locations(&client, &configs).await;
 
     let environment_config = if let Some(environment) = environment {
         match fetch_environment_config(&client, &configs, &environment.node.id, false).await {
@@ -70,17 +75,126 @@ pub async fn command(args: Args) -> Result<()> {
         None
     };
 
+    let environment_instances = if let Some(environment) = environment {
+        Some(
+            get_environment_instances(
+                &client,
+                &configs,
+                &linked_project.project,
+                &environment.node.id,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     print_context(&project, environment);
-    print_linked_service(&project, &linked_project, environment, &region_locations);
+    print_linked_service(
+        &project,
+        &linked_project,
+        environment,
+        environment_instances.as_ref(),
+        &region_locations,
+    );
     if let (Some(environment), Some(environment_config)) =
         (environment, environment_config.as_ref())
     {
         print_divider();
-        print_project_resources(&project, environment, environment_config, &region_locations);
+        print_project_resources(
+            &project,
+            environment,
+            environment_instances
+                .as_ref()
+                .expect("instances fetched when environment exists"),
+            environment_config,
+            &region_locations,
+        );
     }
     println!();
 
     Ok(())
+}
+
+async fn project_json_with_environment_instances(
+    client: &reqwest::Client,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+    project: &ProjectProject,
+) -> Result<Value> {
+    let mut project_json = serde_json::to_value(project)?;
+    initialize_environment_instance_fields(&mut project_json);
+
+    let environment_ids = project
+        .environments
+        .edges
+        .iter()
+        .filter(|env| env.node.can_access)
+        .map(|environment| environment.node.id.clone())
+        .collect::<Vec<_>>();
+    let project_id = linked_project.project.clone();
+    let instances_by_environment =
+        futures::future::try_join_all(environment_ids.into_iter().map(|environment_id| {
+            let project_id = project_id.clone();
+            async move {
+                let instances =
+                    get_environment_instances(client, configs, &project_id, &environment_id)
+                        .await?;
+                Ok::<_, anyhow::Error>((environment_id, instances))
+            }
+        }))
+        .await?;
+
+    for (environment_id, instances) in instances_by_environment {
+        add_environment_instances_to_project_json(&mut project_json, &environment_id, &instances);
+    }
+
+    Ok(project_json)
+}
+
+fn initialize_environment_instance_fields(project_json: &mut Value) {
+    let Some(environment_edges) = project_json
+        .get_mut("environments")
+        .and_then(|environments| environments.get_mut("edges"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for environment_node in environment_edges
+        .iter_mut()
+        .filter_map(|edge| edge.get_mut("node"))
+    {
+        environment_node["serviceInstances"] = serde_json::json!({ "edges": [] });
+        environment_node["volumeInstances"] = serde_json::json!({ "edges": [] });
+    }
+}
+
+fn add_environment_instances_to_project_json(
+    project_json: &mut Value,
+    environment_id: &str,
+    instances: &ProjectEnvironmentInstances,
+) {
+    let Some(environment_edges) = project_json
+        .get_mut("environments")
+        .and_then(|environments| environments.get_mut("edges"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    let Some(environment_node) = environment_edges
+        .iter_mut()
+        .filter_map(|edge| edge.get_mut("node"))
+        .find(|node| node.get("id").and_then(Value::as_str) == Some(environment_id))
+    else {
+        return;
+    };
+
+    environment_node["serviceInstances"] =
+        serde_json::json!({ "edges": &instances.service_instances });
+    environment_node["volumeInstances"] =
+        serde_json::json!({ "edges": &instances.volume_instances });
 }
 
 const FIELD_LABEL_WIDTH: usize = 16;
@@ -127,6 +241,7 @@ fn print_linked_service(
     project: &ProjectProject,
     linked_project: &LinkedProject,
     environment: Option<&ProjectProjectEnvironmentsEdges>,
+    environment_instances: Option<&ProjectEnvironmentInstances>,
     region_locations: &HashMap<String, String>,
 ) {
     println!();
@@ -155,17 +270,16 @@ fn print_linked_service(
         return;
     };
 
-    let Some(environment) = environment else {
+    if environment.is_none() {
         print_indented_field("Service:", &service.node.name.green().bold());
         print_indented_field("Service ID:", &service.node.id.clone().dimmed());
         println!();
         return;
-    };
+    }
 
-    let in_environment = environment
-        .node
-        .service_instances
-        .edges
+    let in_environment = environment_instances
+        .map(service_instances_in_env)
+        .unwrap_or_default()
         .iter()
         .any(|instance| instance.node.service_id == linked_service_id);
     if !in_environment {
@@ -180,8 +294,7 @@ fn print_linked_service(
     }
 
     let row = build_service_output(
-        project,
-        &environment.node.id,
+        environment_instances.expect("instances fetched when environment exists"),
         &service.node,
         Some(linked_service_id),
         region_locations,
@@ -192,6 +305,7 @@ fn print_linked_service(
 fn print_project_resources(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     environment_config: &EnvironmentConfig,
     region_locations: &HashMap<String, String>,
 ) {
@@ -199,20 +313,40 @@ fn print_project_resources(
     println!();
     print_resource_section(
         "Services",
-        service_resources(project, environment, region_locations),
+        service_resources(
+            project,
+            environment,
+            environment_instances,
+            region_locations,
+        ),
     );
     print_resource_section(
         "Databases",
-        database_resources(project, environment, region_locations),
+        database_resources(
+            project,
+            environment,
+            environment_instances,
+            region_locations,
+        ),
     );
-    print_resource_section("Volumes", detached_volume_resources(environment));
+    print_resource_section("Volumes", detached_volume_resources(environment_instances));
     print_resource_section(
         "Functions",
-        function_resources(project, environment, region_locations),
+        function_resources(
+            project,
+            environment,
+            environment_instances,
+            region_locations,
+        ),
     );
     print_resource_section(
         "Cron jobs",
-        cron_job_resources(project, environment, region_locations),
+        cron_job_resources(
+            project,
+            environment,
+            environment_instances,
+            region_locations,
+        ),
     );
     print_resource_section("Buckets", bucket_resources(project, environment_config));
 }
@@ -244,27 +378,31 @@ fn print_resource_section(label: &str, resources: Vec<ResourceLine>) {
 fn service_resources(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     region_locations: &HashMap<String, String>,
 ) -> Vec<ResourceLine> {
-    environment
-        .node
-        .service_instances
-        .edges
+    service_instances_in_env(environment_instances)
         .iter()
         .filter(|service| classify_service_instance(service) == ResourceKind::Service)
-        .map(|service| resource_line(project, environment, service, region_locations))
+        .map(|service| {
+            resource_line(
+                project,
+                environment,
+                environment_instances,
+                service,
+                region_locations,
+            )
+        })
         .collect()
 }
 
 fn database_resources(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     region_locations: &HashMap<String, String>,
 ) -> Vec<ResourceLine> {
-    environment
-        .node
-        .service_instances
-        .edges
+    service_instances_in_env(environment_instances)
         .iter()
         .filter(|service| classify_service_instance(service) == ResourceKind::Database)
         .map(|service| {
@@ -276,16 +414,22 @@ fn database_resources(
             } else {
                 name.clone()
             };
-            resource_line_with_name(project, environment, service, name, region_locations)
+            resource_line_with_name(
+                project,
+                environment,
+                environment_instances,
+                service,
+                name,
+                region_locations,
+            )
         })
         .collect()
 }
 
-fn detached_volume_resources(environment: &ProjectProjectEnvironmentsEdges) -> Vec<ResourceLine> {
-    environment
-        .node
-        .volume_instances
-        .edges
+fn detached_volume_resources(
+    environment_instances: &ProjectEnvironmentInstances,
+) -> Vec<ResourceLine> {
+    volume_instances_in_env(environment_instances)
         .iter()
         .filter(|instance| instance.node.service_id.is_none())
         .map(|instance| {
@@ -309,17 +453,21 @@ fn detached_volume_resources(environment: &ProjectProjectEnvironmentsEdges) -> V
 fn function_resources(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     region_locations: &HashMap<String, String>,
 ) -> Vec<ResourceLine> {
-    environment
-        .node
-        .service_instances
-        .edges
+    service_instances_in_env(environment_instances)
         .iter()
         .filter(|service| classify_service_instance(service) == ResourceKind::Function)
         .map(|function| ResourceLine {
             name: function.node.service_name.clone(),
-            details: resource_details(project, environment, function, region_locations),
+            details: resource_details(
+                project,
+                environment,
+                environment_instances,
+                function,
+                region_locations,
+            ),
         })
         .collect()
 }
@@ -327,16 +475,20 @@ fn function_resources(
 fn cron_job_resources(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     region_locations: &HashMap<String, String>,
 ) -> Vec<ResourceLine> {
-    environment
-        .node
-        .service_instances
-        .edges
+    service_instances_in_env(environment_instances)
         .iter()
         .filter(|service| classify_service_instance(service) == ResourceKind::CronJob)
         .map(|service| {
-            let mut details = resource_details(project, environment, service, region_locations);
+            let mut details = resource_details(
+                project,
+                environment,
+                environment_instances,
+                service,
+                region_locations,
+            );
             if let Some(schedule) = &service.node.cron_schedule {
                 details.push(schedule.clone());
             }
@@ -376,12 +528,14 @@ fn bucket_resources(
 fn resource_line(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
-    service: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    environment_instances: &ProjectEnvironmentInstances,
+    service: &ProjectServiceInstanceEdge,
     region_locations: &HashMap<String, String>,
 ) -> ResourceLine {
     resource_line_with_name(
         project,
         environment,
+        environment_instances,
         service,
         service.node.service_name.clone(),
         region_locations,
@@ -391,20 +545,28 @@ fn resource_line(
 fn resource_line_with_name(
     project: &ProjectProject,
     environment: &ProjectProjectEnvironmentsEdges,
-    service: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    environment_instances: &ProjectEnvironmentInstances,
+    service: &ProjectServiceInstanceEdge,
     name: String,
     region_locations: &HashMap<String, String>,
 ) -> ResourceLine {
     ResourceLine {
         name,
-        details: resource_details(project, environment, service, region_locations),
+        details: resource_details(
+            project,
+            environment,
+            environment_instances,
+            service,
+            region_locations,
+        ),
     }
 }
 
 fn resource_details(
     project: &ProjectProject,
-    environment: &ProjectProjectEnvironmentsEdges,
-    service: &ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges,
+    _environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
+    service: &ProjectServiceInstanceEdge,
     region_locations: &HashMap<String, String>,
 ) -> Vec<String> {
     let Some(service_edge) = project
@@ -417,8 +579,7 @@ fn resource_details(
     };
 
     let row = build_service_output(
-        project,
-        &environment.node.id,
+        environment_instances,
         &service_edge.node,
         None,
         region_locations,

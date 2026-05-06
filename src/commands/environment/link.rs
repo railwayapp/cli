@@ -34,6 +34,16 @@ pub async fn link_environment(environment_arg: Option<String>, json: bool) -> Re
     let environment = match environment_arg {
         // If the environment is specified, find it in the list of environments
         Some(environment) => {
+            if let Some(restricted) = all_environments.iter().find(|env| {
+                !env.node.can_access
+                    && (env.node.id == environment
+                        || env.node.name.to_lowercase() == environment.to_lowercase())
+            }) {
+                bail!(RailwayError::EnvironmentRestricted(
+                    restricted.node.name.clone()
+                ));
+            }
+
             let environment = environments
                 .iter()
                 .find(|env| {

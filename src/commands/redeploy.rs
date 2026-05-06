@@ -3,7 +3,8 @@ use is_terminal::IsTerminal;
 
 use crate::{
     controllers::project::{
-        ensure_project_and_environment_exist, find_service_instance, get_project,
+        ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
+        get_project,
     },
     errors::RailwayError,
     util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
@@ -64,7 +65,10 @@ pub async fn command(args: Args) -> Result<()> {
         .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
     let service_name = &service.node.name;
 
-    let service_in_env = find_service_instance(&project, &environment_id, &service.node.id)
+    let environment_instances =
+        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
+            .await?;
+    let service_in_env = find_service_instance(&environment_instances, &service.node.id)
         .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
 
     let latest_deployment_id = if args.from_source {

@@ -964,24 +964,21 @@ pub async fn fetch_project_refresh(
             measurements,
             sample_rate_seconds: Some(sample_rate),
         },
-        &params.project,
+        &params.environment_instances,
     )
     .await
     {
         Ok(mut services) => {
             if options.show_volume {
                 for svc in &mut services {
-                    svc.volumes = get_volume_metrics(
-                        &params.project,
-                        &params.environment_id,
-                        &svc.service_id,
-                    );
+                    svc.volumes =
+                        get_volume_metrics(&params.environment_instances, &svc.service_id);
                 }
             }
 
             for svc in &mut services {
                 let service_instance =
-                    find_service_instance(&params.project, &params.environment_id, &svc.service_id);
+                    find_service_instance(&params.environment_instances, &svc.service_id);
                 let source_image = service_instance
                     .and_then(|si| si.source.as_ref())
                     .and_then(|src| src.image.as_deref());
