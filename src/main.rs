@@ -307,7 +307,6 @@ async fn main() -> Result<()> {
         "logout",
         "completion",
         "docs",
-        "mcp",
         "setup",
         "skills",
         "upgrade",
@@ -317,9 +316,14 @@ async fn main() -> Result<()> {
         "check_updates",
     ];
 
+    let is_mcp_install = matches!(
+        cli.subcommand(),
+        Some(("mcp", mcp_matches)) if mcp_matches.subcommand_name() == Some("install")
+    );
+
     let needs_refresh = cli
         .subcommand_name()
-        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd))
+        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install)
         .unwrap_or(false);
 
     if needs_refresh {

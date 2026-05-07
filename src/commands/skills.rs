@@ -119,6 +119,14 @@ pub(super) fn resolve_tools(home: &Path, agent_filter: &[String]) -> Result<Vec<
     }
 }
 
+pub(super) fn skills_configured_for_slug(home: &Path, slug: &str) -> bool {
+    coding_tools(home)
+        .into_iter()
+        .find(|tool| tool.slug == slug)
+        .map(|tool| tool.global_parent.join(tool.skills_dir_name).join("use-railway"))
+        .is_some_and(|path| path.is_dir())
+}
+
 fn build_targets(tools: &[CodingTool]) -> Vec<InstallTarget> {
     tools
         .iter()
@@ -367,4 +375,19 @@ async fn remove_skills(agent_filter: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_existing_use_railway_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".agents").join("skills").join("use-railway");
+        std::fs::create_dir_all(&path).unwrap();
+
+        assert!(skills_configured_for_slug(home.path(), "universal"));
+        assert!(!skills_configured_for_slug(home.path(), "cursor"));
+    }
 }

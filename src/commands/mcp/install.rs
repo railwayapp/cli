@@ -123,6 +123,70 @@ fn config_path(slug: &str, home: &Path) -> PathBuf {
     }
 }
 
+pub(crate) fn mcp_configured_for_slug(home: &Path, slug: &str, remote: bool) -> bool {
+    let path = config_path(slug, home);
+
+    match slug {
+        "claude-code" | "cursor" => read_json_or_empty(&path)
+            .ok()
+            .and_then(|root| root.pointer("/mcpServers/railway").cloned())
+            .is_some_and(|entry| json_mcp_entry_matches(&entry, remote)),
+        "opencode" => read_json_or_empty(&path)
+            .ok()
+            .and_then(|root| root.pointer("/mcp/railway").cloned())
+            .is_some_and(|entry| opencode_mcp_entry_matches(&entry, remote)),
+        "codex" if !remote => codex_mcp_configured(&path),
+        _ => false,
+    }
+}
+
+fn json_mcp_entry_matches(entry: &JsonValue, remote: bool) -> bool {
+    if remote {
+        entry.get("url").and_then(JsonValue::as_str) == Some(REMOTE_MCP_URL)
+    } else {
+        entry.get("command").and_then(JsonValue::as_str) == Some("railway")
+            && entry
+                .get("args")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("mcp")))
+    }
+}
+
+fn opencode_mcp_entry_matches(entry: &JsonValue, remote: bool) -> bool {
+    if remote {
+        entry.get("type").and_then(JsonValue::as_str) == Some("remote")
+            && entry.get("url").and_then(JsonValue::as_str) == Some(REMOTE_MCP_URL)
+    } else {
+        entry.get("type").and_then(JsonValue::as_str) == Some("local")
+            && entry
+                .get("command")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|command| {
+                    command.first().and_then(JsonValue::as_str) == Some("railway")
+                        && command.iter().any(|arg| arg.as_str() == Some("mcp"))
+                })
+    }
+}
+
+fn codex_mcp_configured(path: &Path) -> bool {
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(doc) = existing.parse::<toml::Value>() else {
+        return false;
+    };
+
+    doc.get("mcp_servers")
+        .and_then(|servers| servers.get("railway"))
+        .is_some_and(|entry| {
+            entry.get("command").and_then(toml::Value::as_str) == Some("railway")
+                && entry
+                    .get("args")
+                    .and_then(toml::Value::as_array)
+                    .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("mcp")))
+        })
+}
+
 fn install_for(slug: &str, path: &Path, remote: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -339,4 +403,75 @@ fn write_json_pretty(path: &Path, value: &JsonValue) -> Result<()> {
     let s = serde_json::to_string_pretty(value).context("Failed to serialize JSON")?;
     crate::util::write_atomic(path, &s)
         .with_context(|| format!("Failed to write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_existing_cursor_local_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+                // Existing user config may be JSONC.
+                "mcpServers": {
+                    "railway": { "command": "railway", "args": ["mcp"] },
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(mcp_configured_for_slug(home.path(), "cursor", false));
+        assert!(!mcp_configured_for_slug(home.path(), "cursor", true));
+    }
+
+    #[test]
+    fn detects_existing_opencode_remote_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+                "mcp": {
+                    "railway": {
+                        "type": "remote",
+                        "url": "https://mcp.railway.com",
+                        "enabled": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(mcp_configured_for_slug(home.path(), "opencode", true));
+        assert!(!mcp_configured_for_slug(home.path(), "opencode", false));
+    }
+
+    #[test]
+    fn detects_existing_codex_local_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".codex").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+                [mcp_servers.railway]
+                command = "railway"
+                args = ["mcp"]
+            "#,
+        )
+        .unwrap();
+
+        assert!(mcp_configured_for_slug(home.path(), "codex", false));
+        assert!(!mcp_configured_for_slug(home.path(), "codex", true));
+    }
 }

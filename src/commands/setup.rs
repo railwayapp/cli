@@ -160,14 +160,27 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
     }
 
     // Step 1: skills install
-    skills::install_skills(&selected_slugs).await?;
+    let missing_skills: Vec<String> = selected_slugs
+        .iter()
+        .filter(|slug| !skills::skills_configured_for_slug(&home, slug))
+        .cloned()
+        .collect();
+    if missing_skills.is_empty() {
+        println!(
+            "\n{} {}",
+            "-".dimmed(),
+            "Railway skills already configured; skipping install.".dimmed()
+        );
+    } else {
+        skills::install_skills(&missing_skills).await?;
+    }
 
     // Step 2: MCP install (skips universal internally — no MCP convention).
     // `--remote` short-circuits the prompt; `-y`/non-TTY defaults to local.
     let mcp_choice = pick_mcp_choice(args.remote, non_interactive)?;
     match mcp_choice {
-        McpChoice::Local => mcp_install::install_mcp(&selected_slugs, false).await?,
-        McpChoice::Remote => mcp_install::install_mcp(&selected_slugs, true).await?,
+        McpChoice::Local => install_missing_mcp(&home, &selected_slugs, false).await?,
+        McpChoice::Remote => install_missing_mcp(&home, &selected_slugs, true).await?,
         McpChoice::Skip => {
             println!(
                 "\n{} {}",
@@ -197,6 +210,30 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn install_missing_mcp(
+    home: &std::path::Path,
+    selected_slugs: &[String],
+    remote: bool,
+) -> Result<()> {
+    let missing_mcp: Vec<String> = selected_slugs
+        .iter()
+        .filter(|slug| slug.as_str() != "universal")
+        .filter(|slug| !mcp_install::mcp_configured_for_slug(home, slug, remote))
+        .cloned()
+        .collect();
+
+    if missing_mcp.is_empty() {
+        println!(
+            "\n{} {}",
+            "-".dimmed(),
+            "Railway MCP already configured; skipping install.".dimmed()
+        );
+        return Ok(());
+    }
+
+    mcp_install::install_mcp(&missing_mcp, remote).await
 }
 
 /// Mirrors the logic at the top of `login::command` without invoking the
