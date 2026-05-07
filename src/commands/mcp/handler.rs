@@ -47,6 +47,7 @@ pub(crate) struct ResolvedServiceContext {
     pub(crate) project_id: String,
     pub(crate) environment_id: String,
     pub(crate) service_id: String,
+    pub(crate) context: ResolvedContext,
 }
 
 impl RailwayMcp {
@@ -163,7 +164,11 @@ impl RailwayMcp {
                         None,
                     )
                 })?,
-            None => ctx.linked.and_then(|l| l.service).ok_or_else(|| {
+            None => ctx
+                .linked
+                .as_ref()
+                .and_then(|l| l.service.clone())
+                .ok_or_else(|| {
                 let available = format_services(&ctx.project);
                 McpError::invalid_params(
                     format!("No service_id provided and no linked service. Available services:\n{available}"),
@@ -173,9 +178,10 @@ impl RailwayMcp {
         };
 
         Ok(ResolvedServiceContext {
-            project_id: ctx.project_id,
-            environment_id: ctx.environment_id,
+            project_id: ctx.project_id.clone(),
+            environment_id: ctx.environment_id.clone(),
             service_id,
+            context: ctx,
         })
     }
 }

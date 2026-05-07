@@ -12,6 +12,10 @@ use super::{RegionRow, ScaleTuiApp, ScaleTuiFocus, ScaleTuiMode};
 
 const LABEL_COLOR: Color = Color::DarkGray;
 const BORDER_COLOR: Color = Color::DarkGray;
+const SELECTED_ROW_STYLE: Style = Style::new()
+    .fg(Color::White)
+    .bg(Color::Indexed(238))
+    .add_modifier(Modifier::BOLD);
 
 pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
     let area = frame.area();
@@ -90,12 +94,13 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 
     let rows = visible.iter().enumerate().map(|(visible_idx, idx)| {
         let row = &app.rows[*idx];
+        let selected = app.focus == ScaleTuiFocus::Regions && app.selected == visible_idx;
         Row::new(vec![
             Cell::from(region_label(row)),
-            replica_cell(app, visible_idx, row),
+            replica_cell(app, visible_idx, row, selected),
             Cell::from(change_label(row)),
         ])
-        .style(row_style(row))
+        .style(row_style(row, selected))
     });
 
     let table = Table::new(
@@ -118,12 +123,7 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(Style::default().fg(BORDER_COLOR)),
     )
-    .row_highlight_style(
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::Indexed(238))
-            .add_modifier(Modifier::BOLD),
-    );
+    .row_highlight_style(SELECTED_ROW_STYLE);
 
     let mut state = TableState::default();
     if app.focus == ScaleTuiFocus::Regions {
@@ -267,25 +267,24 @@ fn region_label(row: &RegionRow) -> String {
     label
 }
 
-fn replica_cell(app: &ScaleTuiApp, visible_idx: usize, row: &RegionRow) -> Cell<'static> {
+fn replica_cell(
+    app: &ScaleTuiApp,
+    visible_idx: usize,
+    row: &RegionRow,
+    selected: bool,
+) -> Cell<'static> {
     let is_editing = app.mode == ScaleTuiMode::Edit && app.selected == visible_idx;
     if is_editing {
         return Cell::from(Line::from(vec![Span::styled(
             format!("[{}]", app.edit_input),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            replica_style(row, selected),
         )]));
     }
 
-    let style = if row.changed() {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    Cell::from(Line::from(Span::styled(row.desired.to_string(), style)))
+    Cell::from(Line::from(Span::styled(
+        row.desired.to_string(),
+        replica_style(row, selected),
+    )))
 }
 
 fn button(label: &'static str, focused: bool, color: Color) -> Span<'static> {
@@ -317,11 +316,29 @@ fn change_label(row: &RegionRow) -> String {
     }
 }
 
-fn row_style(row: &RegionRow) -> Style {
+fn row_style(row: &RegionRow, selected: bool) -> Style {
+    if selected {
+        return SELECTED_ROW_STYLE;
+    }
+
     if row.changed() {
         Style::default().fg(Color::Green)
     } else if !row.available {
         Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    }
+}
+
+fn replica_style(row: &RegionRow, selected: bool) -> Style {
+    if selected {
+        return SELECTED_ROW_STYLE;
+    }
+
+    if row.changed() {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     }

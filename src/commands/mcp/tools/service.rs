@@ -38,15 +38,9 @@ impl RailwayMcp {
         }
 
         let service_ctx = self
-            .resolve_service_context(
-                params.project_id.clone(),
-                params.service_id.clone(),
-                params.environment_id.clone(),
-            )
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
-        let ctx = self
-            .resolve_context(params.project_id, params.environment_id)
-            .await?;
+        let ctx = &service_ctx.context;
         let regions =
             fetch_regions_for_project(&self.client, &self.configs, Some(&service_ctx.project_id))
                 .await
@@ -136,7 +130,7 @@ impl RailwayMcp {
             .map(|service| service.node.name.as_str())
             .unwrap_or(&service_ctx.service_id);
         let mode = self
-            .apply_env_patch(&ctx, patch, Some(format!("Scale service {service_name}")))
+            .apply_env_patch(ctx, patch, Some(format!("Scale service {service_name}")))
             .await?;
         let status = match mode {
             PatchMode::Commit => "committed",

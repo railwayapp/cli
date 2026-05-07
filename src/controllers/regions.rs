@@ -31,14 +31,6 @@ impl Display for PromptRegion {
     }
 }
 
-/// Fetch available regions from the API
-pub async fn fetch_regions(
-    client: &reqwest::Client,
-    configs: &Configs,
-) -> Result<queries::regions::ResponseData> {
-    fetch_regions_for_project(client, configs, None).await
-}
-
 pub async fn fetch_regions_for_project(
     client: &reqwest::Client,
     configs: &Configs,

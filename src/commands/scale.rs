@@ -4,36 +4,25 @@ use crate::{
         environment::get_matched_environment,
         project::{ProjectEnvironmentInstances, find_service_instance, get_environment_instances},
         regions::{
-            available_deploy_regions_help, build_multi_region_patch, convert_hashmap_to_map,
-            fetch_region_locations_for_project, fetch_regions, fetch_regions_for_project,
-            merge_config, region_data_from_deployment_meta, region_flag_name, region_full_label,
-            region_is_available, resolve_deploy_region_id_for_scale, validate_total_replicas,
+            build_multi_region_patch, convert_hashmap_to_map, fetch_region_locations_for_project,
+            fetch_regions_for_project, merge_config, region_data_from_deployment_meta,
+            resolve_deploy_region_id_for_scale, validate_total_replicas,
         },
         scale_tui::{self, ScaleTuiOutput},
     },
     util::progress::create_spinner_if,
 };
 use anyhow::{Context as _, bail};
-use clap::{Arg, Command, Parser};
-use futures::executor::block_on;
+use clap::{Command, Parser};
 use is_terminal::IsTerminal;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
-use struct_field_names_as_array::FieldNamesAsArray;
+use std::{collections::HashMap, ffi::OsString};
 
 use super::*;
 
-/// Dynamic flags workaround
-/// Unfortunately, we aren't able to use the Parser derive macro when working with dynamic flags,
-/// meaning we have to implement most of the traits for the Args struct manually.
-struct DynamicArgs(HashMap<String, u64>);
-
-#[derive(Parser, FieldNamesAsArray)]
+#[derive(Parser)]
 #[clap(after_help = SCALE_AFTER_HELP)]
 pub struct Args {
-    #[clap(flatten)]
-    dynamic: DynamicArgs,
-
     /// Replica counts by region, e.g. eu-west=2 us-east=1
     #[clap(value_name = "REGION=REPLICAS")]
     assignments: Vec<String>,
@@ -58,12 +47,8 @@ const SCALE_AFTER_HELP: &str = r#"Examples:
   railway service scale --service worker eu-west=2 us-east=1
   railway scale --environment production --service worker eu-west=0
 
-Region names use the same friendly names as the Railway dashboard, formatted for the CLI.
-Replica counts are capped at 50 total replicas across regions.
-Run `railway scale --help` while logged in to list available regions.
-
-Backwards compatibility:
-  Legacy region flags like `railway scale --eu-west 2` are still accepted."#;
+Regions: us-west, us-east, eu-west, southeast-asia, or region IDs.
+Maximum: 50 total replicas across regions."#;
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
@@ -122,6 +107,7 @@ pub async fn command(args: Args) -> Result<()> {
         &client,
         &environment_id,
         &service_id,
+        &service_name,
         &region_data,
         args.json,
     )
@@ -154,7 +140,7 @@ async fn resolve_new_config(
     environment_name: &str,
     existing: &Value,
 ) -> Result<HashMap<String, u64>> {
-    if args.assignments.is_empty() && args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
+    if args.assignments.is_empty() && std::io::stdout().is_terminal() {
         let regions = fetch_regions_for_project(client, configs, Some(project_id)).await?;
         return match scale_tui::run(scale_tui::ScaleTuiParams {
             service_name: service_name.to_string(),
@@ -167,17 +153,13 @@ async fn resolve_new_config(
         };
     }
 
-    if args.assignments.is_empty() && args.dynamic.0.is_empty() {
+    if args.assignments.is_empty() {
         bail!(
             "Please specify replica counts as REGION=REPLICAS, for example `railway scale eu-west=2`"
         );
     }
 
-    let mut new_config = args.dynamic.0.clone();
-    if args.assignments.is_empty() {
-        return Ok(new_config);
-    }
-
+    let mut new_config = HashMap::new();
     let regions = fetch_regions_for_project(client, configs, Some(project_id)).await?;
 
     for assignment in &args.assignments {
@@ -209,6 +191,7 @@ async fn commit_scale_patch(
     client: &reqwest::Client,
     environment_id: &str,
     service_id: &str,
+    service_name: &str,
     region_data: &Value,
     json: bool,
 ) -> Result<(), anyhow::Error> {
@@ -221,7 +204,7 @@ async fn commit_scale_patch(
         mutations::environment_patch_commit::Variables {
             environment_id: environment_id.to_string(),
             patch,
-            commit_message: None,
+            commit_message: Some(format!("Scale service {service_name}")),
         },
     )
     .await?;
@@ -278,153 +261,181 @@ fn get_existing_config(
     ))
 }
 
-/// This function generates flags that are appended to the command at runtime.
+/// Legacy region flags are normalized before clap parses argv, so scale no
+/// longer performs any network-backed dynamic command construction here.
 pub fn get_dynamic_args(cmd: Command) -> Command {
-    if !is_top_level_scale() {
-        return cmd;
-    }
-    add_region_args(cmd)
+    cmd
 }
 
 pub fn get_dynamic_args_for_service_subcommand(cmd: Command) -> Command {
-    if !is_service_scale() {
-        return cmd;
-    }
-    add_region_args(cmd)
+    cmd
 }
 
-fn is_top_level_scale() -> bool {
-    let args: Vec<String> = std::env::args().collect();
-    args.len() >= 2 && args[1].eq_ignore_ascii_case("scale")
+pub fn normalize_legacy_scale_args(args: Vec<OsString>) -> Vec<OsString> {
+    let Some(scale_args_start) = scale_args_start(&args) else {
+        return args;
+    };
+
+    let mut normalized = args[..scale_args_start].to_vec();
+    normalize_scale_args_tail(&args[scale_args_start..], &mut normalized);
+    normalized
 }
 
-fn is_service_scale() -> bool {
-    let args: Vec<String> = std::env::args().collect();
-    args.len() >= 3
-        && args[1].eq_ignore_ascii_case("service")
-        && args[2].eq_ignore_ascii_case("scale")
-}
-
-fn add_region_args(cmd: Command) -> Command {
-    block_on(async move {
-        let Ok(configs) = Configs::new() else {
-            return cmd;
-        };
-        let Ok(client) = GQLClient::new_authorized(&configs) else {
-            return cmd;
-        };
-        let Ok(regions) = fetch_regions(&client, &configs).await else {
-            return cmd;
-        };
-
-        let available_regions = regions
-            .regions
-            .iter()
-            .filter(|r| region_is_available(r))
-            .collect::<Vec<_>>();
-        let cmd = cmd.after_help(dynamic_scale_after_help(&regions.regions));
-        let flag_counts = available_regions
-            .iter()
-            .fold(HashMap::new(), |mut counts, region| {
-                *counts.entry(region_flag_name(region)).or_insert(0usize) += 1;
-                counts
-            });
-
-        available_regions.iter().fold(cmd, |new_cmd, region| {
-            let region_id_static: &'static str = Box::leak(region.name.clone().into_boxed_str());
-            let region_flag = region_flag_name(region);
-            let use_friendly_flag =
-                flag_counts.get(&region_flag).copied().unwrap_or(0) == 1 && !region_flag.is_empty();
-            let long_flag = if use_friendly_flag {
-                region_flag
-            } else {
-                region.name.clone()
-            };
-            let region_flag_static: &'static str = Box::leak(long_flag.into_boxed_str());
-            let region_help = format!(
-                "Number of instances to run in {}",
-                region_full_label(region)
-            );
-            let arg = Arg::new(region_id_static)
-                .long(region_flag_static)
-                .help(region_help)
-                .hide(true)
-                .value_name("INSTANCES")
-                .value_parser(clap::value_parser!(u64))
-                .action(clap::ArgAction::Set);
-            let arg = if use_friendly_flag {
-                arg.alias(region_id_static)
-            } else {
-                arg
-            };
-            new_cmd.arg(arg)
-        })
-    })
-}
-
-fn available_regions_help(regions: &[queries::regions::RegionsRegions]) -> String {
-    available_deploy_regions_help(regions)
-}
-
-fn dynamic_scale_after_help(regions: &[queries::regions::RegionsRegions]) -> String {
-    format!(
-        "{SCALE_AFTER_HELP}\n\nAvailable regions:\n{}",
-        available_regions_help(regions)
-    )
-}
-
-impl clap::FromArgMatches for DynamicArgs {
-    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
-        let mut dynamic = HashMap::new();
-        // Iterate through all provided argument keys.
-        // Adjust the static key names if you add any to your Args struct.
-        for key in matches.ids() {
-            if Args::FIELD_NAMES_AS_ARRAY.contains(&key.as_str()) {
-                continue;
-            }
-            // If the flag value can be interpreted as a u64, insert it.
-            if let Some(val) = matches.get_one::<u64>(key.as_str()) {
-                dynamic.insert(key.to_string(), *val);
-            }
-        }
-        Ok(DynamicArgs(dynamic))
-    }
-
-    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
-        *self = Self::from_arg_matches(matches)?;
-        Ok(())
-    }
-}
-
-impl clap::Args for DynamicArgs {
-    fn group_id() -> Option<clap::Id> {
-        // Do not create an argument group for dynamic flags
+fn scale_args_start(args: &[OsString]) -> Option<usize> {
+    if args.get(1).is_some_and(|arg| os_eq(arg, "scale")) {
+        Some(2)
+    } else if args.get(1).is_some_and(|arg| os_eq(arg, "service"))
+        && args.get(2).is_some_and(|arg| os_eq(arg, "scale"))
+    {
+        Some(3)
+    } else {
         None
     }
-    fn augment_args(cmd: clap::Command) -> clap::Command {
-        // Leave the command unchanged; dynamic flags will be handled via FromArgMatches
-        cmd
-    }
-    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
-        cmd
+}
+
+fn normalize_scale_args_tail(args: &[OsString], normalized: &mut Vec<OsString>) {
+    let mut idx = 0;
+    while idx < args.len() {
+        let current = &args[idx];
+        let Some(current_str) = current.to_str() else {
+            normalized.push(current.clone());
+            idx += 1;
+            continue;
+        };
+
+        if current_str == "--" {
+            normalized.extend(args[idx..].iter().cloned());
+            break;
+        }
+
+        if let Some(flag) = current_str.strip_prefix("--") {
+            let (flag_name, inline_value) = flag
+                .split_once('=')
+                .map_or((flag, None), |(name, value)| (name, Some(value)));
+
+            if scale_long_flag_takes_value(flag_name) {
+                normalized.push(current.clone());
+                idx += 1;
+                if inline_value.is_none() && idx < args.len() {
+                    normalized.push(args[idx].clone());
+                    idx += 1;
+                }
+                continue;
+            }
+
+            if scale_long_flag_is_known(flag_name) {
+                normalized.push(current.clone());
+                idx += 1;
+                continue;
+            }
+
+            if let Some(value) = inline_value {
+                normalized.push(OsString::from(format!("{flag_name}={value}")));
+                idx += 1;
+                continue;
+            }
+
+            if let Some(next) = args.get(idx + 1).and_then(|value| value.to_str())
+                && !next.starts_with('-')
+            {
+                normalized.push(OsString::from(format!("{flag_name}={next}")));
+                idx += 2;
+                continue;
+            }
+        }
+
+        if matches!(current_str, "-s" | "-e") {
+            normalized.push(current.clone());
+            idx += 1;
+            if idx < args.len() {
+                normalized.push(args[idx].clone());
+                idx += 1;
+            }
+            continue;
+        }
+
+        normalized.push(current.clone());
+        idx += 1;
     }
 }
 
-impl clap::CommandFactory for DynamicArgs {
-    fn command<'b>() -> clap::Command {
-        let __clap_app = clap::Command::new("railwayapp");
-        <DynamicArgs as clap::Args>::augment_args(__clap_app)
-    }
-    fn command_for_update<'b>() -> clap::Command {
-        let __clap_app = clap::Command::new("railwayapp");
-        <DynamicArgs as clap::Args>::augment_args_for_update(__clap_app)
-    }
+fn scale_long_flag_takes_value(flag: &str) -> bool {
+    matches!(flag, "service" | "environment")
+}
+
+fn scale_long_flag_is_known(flag: &str) -> bool {
+    matches!(flag, "json" | "help" | "version") || scale_long_flag_takes_value(flag)
+}
+
+fn os_eq(value: &OsString, expected: &str) -> bool {
+    value
+        .to_str()
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn normalize(args: &[&str]) -> Vec<String> {
+        normalize_legacy_scale_args(args.iter().map(OsString::from).collect())
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn legacy_region_flags_normalize_to_assignments() {
+        assert_eq!(
+            normalize(&["railway", "scale", "--eu-west", "2"]),
+            vec!["railway", "scale", "eu-west=2"]
+        );
+        assert_eq!(
+            normalize(&["railway", "scale", "--eu-west=2"]),
+            vec!["railway", "scale", "eu-west=2"]
+        );
+    }
+
+    #[test]
+    fn legacy_region_flags_normalize_for_service_scale() {
+        assert_eq!(
+            normalize(&["railway", "service", "scale", "--us-east", "1"]),
+            vec!["railway", "service", "scale", "us-east=1"]
+        );
+    }
+
+    #[test]
+    fn known_scale_flags_are_preserved() {
+        assert_eq!(
+            normalize(&[
+                "railway",
+                "scale",
+                "--service",
+                "worker",
+                "--environment=production",
+                "--json",
+                "eu-west=2",
+            ]),
+            vec![
+                "railway",
+                "scale",
+                "--service",
+                "worker",
+                "--environment=production",
+                "--json",
+                "eu-west=2",
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_normalization_stops_after_arg_terminator() {
+        assert_eq!(
+            normalize(&["railway", "scale", "--", "--eu-west", "2"]),
+            vec!["railway", "scale", "--", "--eu-west", "2"]
+        );
+    }
 
     #[test]
     fn build_scale_patch_targets_service_multi_region_config() {
