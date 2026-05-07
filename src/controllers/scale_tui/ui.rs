@@ -9,6 +9,7 @@ use ratatui::{
 use super::{RegionRow, ScaleTuiApp, ScaleTuiFocus, ScaleTuiMode};
 
 const LABEL_COLOR: Color = Color::DarkGray;
+const BORDER_COLOR: Color = Color::DarkGray;
 
 pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
     let area = frame.area();
@@ -21,20 +22,29 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
         return;
     }
 
+    let visible_rows = app.visible_indices().len().max(1) as u16;
+    let preview_height = if show_preview(app) { 3 } else { 0 };
+    let reserved_height = 2 + 1 + preview_height + 2;
+    let table_height = visible_rows
+        .saturating_add(3)
+        .min(area.height.saturating_sub(reserved_height).max(5));
     let chunks = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Min(8),
-        Constraint::Length(2),
-        Constraint::Length(4),
+        Constraint::Length(table_height),
         Constraint::Length(1),
+        Constraint::Length(preview_height),
+        Constraint::Length(2),
+        Constraint::Min(0),
     ])
     .split(area);
 
     render_header(app, frame, chunks[0]);
     render_table(app, frame, chunks[1]);
-    render_actions(app, frame, chunks[2]);
-    render_preview(app, frame, chunks[3]);
-    render_help_bar(app, frame, chunks[4]);
+    render_help_bar(app, frame, chunks[2]);
+    if show_preview(app) {
+        render_preview(app, frame, chunks[3]);
+    }
+    render_actions(app, frame, chunks[4]);
 
     match app.mode {
         ScaleTuiMode::Confirm => render_confirm_popup(app, frame, area),
@@ -45,14 +55,20 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
 
 fn render_header(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let mut header = vec![
+        Span::styled("  Scale ", Style::default().fg(LABEL_COLOR)),
         Span::styled(
-            format!("  Scale {}", app.service_name),
+            app.service_name.clone(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  in  ", Style::default().fg(LABEL_COLOR)),
-        Span::raw(app.environment_name.clone()),
+        Span::styled(
+            app.environment_name.clone(),
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
 
     if app.mode == ScaleTuiMode::Search || !app.search.is_empty() {
@@ -92,7 +108,6 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
         let row = &app.rows[*idx];
         Row::new(vec![
             Cell::from(region_label(row)),
-            Cell::from(row.cli_name.clone()),
             replica_cell(app, visible_idx, row),
             Cell::from(change_label(row)),
         ])
@@ -102,20 +117,23 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(52),
-            Constraint::Length(18),
+            Constraint::Percentage(64),
             Constraint::Length(12),
-            Constraint::Min(18),
+            Constraint::Min(20),
         ],
     )
     .header(
-        Row::new(vec!["Region", "CLI name", "Replicas", "Change"]).style(
+        Row::new(vec!["Region", "Replicas", "Change"]).style(
             Style::default()
                 .fg(LABEL_COLOR)
                 .add_modifier(Modifier::BOLD),
         ),
     )
-    .block(Block::default().borders(Borders::TOP | Borders::BOTTOM))
+    .block(
+        Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(BORDER_COLOR)),
+    )
     .row_highlight_style(
         Style::default()
             .fg(Color::Black)
@@ -143,25 +161,15 @@ fn render_actions(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "Command preview",
-            Style::default().fg(LABEL_COLOR),
-        )),
-        Line::from(app.command_preview()),
-    ];
+    let mut lines = Vec::new();
 
     if let Some(error) = &app.error {
         lines.push(Line::from(Span::styled(
             error.clone(),
             Style::default().fg(Color::Red),
         )));
-    } else if app.changes().is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No scale changes selected.",
-            Style::default().fg(LABEL_COLOR),
-        )));
-    } else {
+    } else if !app.changes().is_empty() {
+        lines.push(Line::from(app.command_preview()));
         lines.push(Line::from(Span::styled(
             format!("{} region change(s) selected.", app.changes().len()),
             Style::default().fg(Color::Green),
@@ -306,7 +314,7 @@ fn replica_cell(app: &ScaleTuiApp, visible_idx: usize, row: &RegionRow) -> Cell<
 fn button(label: &'static str, focused: bool, color: Color) -> Span<'static> {
     let style = if focused {
         Style::default()
-            .fg(Color::Black)
+            .fg(Color::White)
             .bg(color)
             .add_modifier(Modifier::BOLD)
     } else {
@@ -314,6 +322,10 @@ fn button(label: &'static str, focused: bool, color: Color) -> Span<'static> {
     };
 
     Span::styled(format!("[ {label} ]"), style)
+}
+
+fn show_preview(app: &ScaleTuiApp) -> bool {
+    app.error.is_some() || !app.changes().is_empty()
 }
 
 fn change_label(row: &RegionRow) -> String {
