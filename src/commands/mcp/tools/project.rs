@@ -4,7 +4,7 @@ use crate::{
     client::post_graphql,
     controllers::{
         project::{get_environment_instances, service_instances_in_env},
-        regions::{fetch_regions, resolve_deploy_region_id},
+        regions::{fetch_regions_for_project, resolve_deploy_region_id},
     },
     gql::mutations,
     workspace::workspaces,
@@ -220,11 +220,12 @@ impl RailwayMcp {
 
         let region = match params.region {
             Some(region_input) => {
-                let regions = fetch_regions(&self.client, &self.configs)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
-                    })?;
+                let regions =
+                    fetch_regions_for_project(&self.client, &self.configs, Some(&ctx.project_id))
+                        .await
+                        .map_err(|e| {
+                            McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
+                        })?;
                 Some(
                     resolve_deploy_region_id(&regions, &region_input)
                         .map_err(|e| McpError::invalid_params(e.to_string(), None))?,

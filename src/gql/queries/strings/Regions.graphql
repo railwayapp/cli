@@ -1,12 +1,14 @@
-query Regions {
-    regions {
+query Regions($projectId: String) {
+    regions(projectId: $projectId) {
         name
         region
         country
         location
+        workspaceId
         deploymentConstraints {
             deprecationInfo {
                 isDeprecated
+                replacementRegion
             }
         }
     }

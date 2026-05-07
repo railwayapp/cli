@@ -5,9 +5,9 @@ use crate::{
         project::{ProjectEnvironmentInstances, find_service_instance, get_environment_instances},
         regions::{
             available_deploy_regions_help, build_multi_region_patch, convert_hashmap_to_map,
-            fetch_region_locations, fetch_regions, merge_config, prompt_for_regions,
-            region_data_from_deployment_meta, region_flag_name, region_full_label,
-            region_is_available, resolve_deploy_region_id,
+            fetch_region_locations_for_project, fetch_regions, fetch_regions_for_project,
+            merge_config, prompt_for_regions_for_project, region_data_from_deployment_meta,
+            region_flag_name, region_full_label, region_is_available, resolve_deploy_region_id,
         },
     },
     util::progress::create_spinner_if,
@@ -95,8 +95,9 @@ pub async fn command(args: Args) -> Result<()> {
         .find(|service| service.node.id == service_id)
         .map(|service| service.node.name.clone())
         .expect("service ID returned from project services");
-    let new_config =
-        convert_hashmap_to_map(resolve_new_config(&args, &configs, &client, &existing).await?);
+    let new_config = convert_hashmap_to_map(
+        resolve_new_config(&args, &configs, &client, &linked_project.project, &existing).await?,
+    );
     if new_config.is_empty() {
         if !args.json {
             println!("No changes made");
@@ -117,7 +118,9 @@ pub async fn command(args: Args) -> Result<()> {
     if args.json {
         println!("{}", serde_json::json!({"regions": region_data}));
     } else {
-        let region_locations = fetch_region_locations(&client, &configs).await;
+        let region_locations =
+            fetch_region_locations_for_project(&client, &configs, Some(&linked_project.project))
+                .await;
         print_scale_result(
             &service_name,
             &service_id,
@@ -134,10 +137,11 @@ async fn resolve_new_config(
     args: &Args,
     configs: &Configs,
     client: &reqwest::Client,
+    project_id: &str,
     existing: &Value,
 ) -> Result<HashMap<String, u64>> {
     if args.assignments.is_empty() && args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
-        return prompt_for_regions(configs, client, existing).await;
+        return prompt_for_regions_for_project(configs, client, Some(project_id), existing).await;
     }
 
     if args.assignments.is_empty() && args.dynamic.0.is_empty() {
@@ -151,7 +155,7 @@ async fn resolve_new_config(
         return Ok(new_config);
     }
 
-    let regions = fetch_regions(client, configs).await?;
+    let regions = fetch_regions_for_project(client, configs, Some(project_id)).await?;
 
     for assignment in &args.assignments {
         let (region_input, replicas_input) = assignment.split_once('=').with_context(|| {

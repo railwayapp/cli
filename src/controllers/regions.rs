@@ -34,10 +34,20 @@ pub async fn fetch_regions(
     client: &reqwest::Client,
     configs: &Configs,
 ) -> Result<queries::regions::ResponseData> {
+    fetch_regions_for_project(client, configs, None).await
+}
+
+pub async fn fetch_regions_for_project(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project_id: Option<&str>,
+) -> Result<queries::regions::ResponseData> {
     let regions = post_graphql::<queries::Regions, _>(
         client,
         configs.get_backboard(),
-        queries::regions::Variables,
+        queries::regions::Variables {
+            project_id: project_id.map(ToString::to_string),
+        },
     )
     .await?;
     Ok(regions)
@@ -47,7 +57,15 @@ pub async fn fetch_region_locations(
     client: &reqwest::Client,
     configs: &Configs,
 ) -> HashMap<String, String> {
-    match fetch_regions(client, configs).await {
+    fetch_region_locations_for_project(client, configs, None).await
+}
+
+pub async fn fetch_region_locations_for_project(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project_id: Option<&str>,
+) -> HashMap<String, String> {
+    match fetch_regions_for_project(client, configs, project_id).await {
         Ok(regions) => region_locations_from_regions(&regions.regions),
         Err(_) => HashMap::new(),
     }
@@ -262,12 +280,13 @@ fn friendly_region_fallback(region: &str) -> Option<String> {
 /// * `configs` - Railway configs for API access
 /// * `client` - HTTP client
 /// * `existing` - Current region config as JSON Value (region -> { numReplicas: n })
-pub async fn prompt_for_regions(
+pub async fn prompt_for_regions_for_project(
     configs: &Configs,
     client: &reqwest::Client,
+    project_id: Option<&str>,
     existing: &Value,
 ) -> Result<HashMap<String, u64>> {
-    let regions = fetch_regions(client, configs).await?;
+    let regions = fetch_regions_for_project(client, configs, project_id).await?;
     prompt_for_regions_with_data(regions, existing)
 }
 
@@ -519,11 +538,13 @@ mod tests {
             region: Some("us-west2".to_string()),
             country: "US".to_string(),
             location: "US West".to_string(),
+            workspace_id: None,
             deployment_constraints: is_deprecated.map(|is_deprecated| {
                 queries::regions::RegionsRegionsDeploymentConstraints {
                     deprecation_info: Some(
                         queries::regions::RegionsRegionsDeploymentConstraintsDeprecationInfo {
                             is_deprecated,
+                            replacement_region: "us-west2".to_string(),
                         },
                     ),
                 }

@@ -9,7 +9,7 @@ use crate::{
         config::environment::fetch_environment_config,
         project::{find_service_instance, get_environment_instances},
         regions::{
-            build_multi_region_patch, convert_hashmap_to_map, fetch_regions,
+            build_multi_region_patch, convert_hashmap_to_map, fetch_regions_for_project,
             format_region_replicas, merge_config, region_data_from_deployment_meta,
             region_locations_from_regions, resolve_deploy_region_id,
         },
@@ -46,9 +46,12 @@ impl RailwayMcp {
         let ctx = self
             .resolve_context(params.project_id, params.environment_id)
             .await?;
-        let regions = fetch_regions(&self.client, &self.configs)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to fetch regions: {e}"), None))?;
+        let regions =
+            fetch_regions_for_project(&self.client, &self.configs, Some(&service_ctx.project_id))
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
+                })?;
 
         let mut requested = HashMap::new();
         for (region_input, replicas) in params.replicas {
