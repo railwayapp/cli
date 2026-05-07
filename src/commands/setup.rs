@@ -35,7 +35,6 @@ pub struct AgentArgs {
     yes: bool,
 
     /// Configure the remote HTTP MCP server at mcp.railway.com instead of the local stdio server.
-    /// Codex is skipped because it only supports stdio MCP servers.
     #[clap(long)]
     remote: bool,
 }
