@@ -14,8 +14,10 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// Enable automatic updates
+    #[clap(visible_alias = "on")]
     Enable,
     /// Disable automatic updates
+    #[clap(visible_alias = "off")]
     Disable,
     /// Show current auto-update status
     Status,

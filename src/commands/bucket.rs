@@ -20,6 +20,9 @@ use std::{collections::BTreeMap, fmt::Display};
 
 /// Manage project buckets
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway bucket list --json\n  railway bucket create uploads --region sjc --json\n  railway bucket info --bucket uploads --json\n  railway bucket credentials --bucket uploads --json\n  railway bucket rename --bucket uploads --name assets --json\n  railway bucket delete --bucket assets --yes --json\n\nAliases:\n  list: ls\n  create: add, new\n  delete: remove, rm\n  info: show, get\n  credentials: creds\n  rename: mv\n\nAutomation notes:\n  `railway bucket credentials` prints access keys and secret keys. Avoid sharing command output."
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -90,7 +93,7 @@ struct CredentialsArgs {
     #[clap(long = "2fa-code", requires = "reset")]
     two_factor_code: Option<String>,
 
-    /// Output in JSON format
+    /// Output in JSON format. This includes access keys and secret keys.
     #[clap(long)]
     json: bool,
 }
@@ -109,24 +112,27 @@ struct RenameArgs {
 #[derive(Parser)]
 enum Commands {
     /// List buckets
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(ListArgs),
 
     /// Create a new bucket
-    #[clap(alias = "add", alias = "new")]
+    #[clap(visible_alias = "add", visible_alias = "new")]
     Create(CreateArgs),
 
     /// Delete a bucket
-    #[clap(alias = "remove", alias = "rm")]
+    #[clap(visible_alias = "remove", visible_alias = "rm")]
     Delete(DeleteArgs),
 
     /// Show bucket details
+    #[clap(visible_alias = "show", visible_alias = "get")]
     Info(InfoArgs),
 
     /// Show or reset S3-compatible credentials
+    #[clap(visible_alias = "creds")]
     Credentials(CredentialsArgs),
 
     /// Rename a bucket
+    #[clap(visible_alias = "mv")]
     Rename(RenameArgs),
 }
 

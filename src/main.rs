@@ -354,8 +354,13 @@ async fn main() -> Result<()> {
     }
 
     if let Err(e) = exec_result {
-        if e.root_cause().to_string() == inquire::InquireError::OperationInterrupted.to_string() {
-            return Ok(()); // Exit gracefully if interrupted
+        let root_cause = e.root_cause().to_string();
+        if root_cause == inquire::InquireError::OperationInterrupted.to_string()
+            || root_cause == inquire::InquireError::OperationCanceled.to_string()
+        {
+            eprintln!("Operation cancelled.");
+            handle_update_task(check_updates_handle).await;
+            std::process::exit(130);
         }
 
         eprintln!("{e:?}");

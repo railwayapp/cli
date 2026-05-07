@@ -23,6 +23,9 @@ mod new;
 
 /// Create, delete or link an environment
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway environment list --json\n  railway environment new staging --json\n  railway environment create staging --duplicate production --json\n  railway environment delete staging --yes --json\n  railway environment config --environment production --json\n\nAutomation notes:\n  After creating an environment, verify the linked target with `railway status --json`.\n  Destructive non-interactive runs must pass the environment and --yes."
+)]
 pub struct Args {
     /// The environment to link to
     pub environment: Option<String>,
@@ -50,6 +53,7 @@ structstruck::strike! {
         }),
 
         /// Create a new environment
+        #[clap(visible_alias = "create", visible_alias = "add")]
         New(pub struct {
             /// The name of the environment to create
             pub name: Option<String>,
@@ -67,6 +71,7 @@ structstruck::strike! {
         }),
 
         /// Delete an environment
+        #[clap(visible_alias = "rm", visible_alias = "remove")]
         Delete(pub struct {
             /// Skip confirmation dialog
             #[clap(short = 'y', long = "yes")]
@@ -85,6 +90,7 @@ structstruck::strike! {
         }),
 
         /// Edit an environment's configuration
+        #[clap(visible_alias = "update")]
         Edit(pub struct {
             /// The environment to edit (defaults to linked environment)
             #[clap(long, short)]
@@ -107,6 +113,7 @@ structstruck::strike! {
         }),
 
         /// Show environment configuration
+        #[clap(visible_alias = "show", visible_alias = "info")]
         Config(pub struct {
             /// Environment to show config for (defaults to linked)
             #[clap(long, short)]
@@ -118,6 +125,7 @@ structstruck::strike! {
         }),
 
         /// List all environments in the project
+        #[clap(visible_alias = "ls")]
         List(pub struct {
             /// Show only ephemeral (PR) environments
             #[clap(long, conflicts_with = "no_ephemeral")]

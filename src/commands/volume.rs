@@ -21,6 +21,9 @@ use std::fmt::Display;
 
 /// Manage project volumes
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide."
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -37,7 +40,7 @@ structstruck::strike! {
     #[strikethrough[derive(Parser)]]
     enum Commands {
         /// List volumes
-        #[clap(alias = "ls")]
+        #[clap(visible_alias = "ls")]
         List(struct {
             /// Output in JSON format
             #[clap(long)]
@@ -45,7 +48,7 @@ structstruck::strike! {
         }),
 
         /// Add a new volume
-        #[clap(alias = "create")]
+        #[clap(visible_alias = "create", visible_alias = "new")]
         Add(struct {
             /// The mount path of the volume
             #[clap(long, short)]
@@ -57,7 +60,7 @@ structstruck::strike! {
         }),
 
         /// Delete a volume
-        #[clap(alias = "remove", alias = "rm")]
+        #[clap(visible_alias = "remove", visible_alias = "rm")]
         Delete(struct {
             /// The ID/name of the volume you wish to delete
             #[clap(long, short)]
@@ -77,7 +80,7 @@ structstruck::strike! {
         }),
 
         /// Update a volume
-        #[clap(alias = "edit")]
+        #[clap(visible_alias = "edit", visible_alias = "rename")]
         Update(struct {
             /// The ID/name of the volume you wish to update
             #[clap(long, short)]

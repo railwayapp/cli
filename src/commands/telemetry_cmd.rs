@@ -11,8 +11,10 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// Enable telemetry data collection
+    #[clap(visible_alias = "on")]
     Enable,
     /// Disable telemetry data collection
+    #[clap(visible_alias = "off")]
     Disable,
     /// Show current telemetry status
     Status,

@@ -19,10 +19,11 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// List deployments for a service with IDs, statuses and other metadata
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(ListArgs),
 
     /// Upload and deploy project from the current directory
+    #[clap(visible_alias = "deploy")]
     Up(crate::commands::up::Args),
 
     /// Redeploy the latest deployment of a service

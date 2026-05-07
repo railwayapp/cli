@@ -20,6 +20,9 @@ use super::*;
 
 /// Add a service to your project
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway add --service api --json\n  railway add --database postgres --json\n  railway add --repo railwayapp/starters --service web --json\n  railway add --image nginx:latest --service web --json\n\nAutomation notes:\n  Non-interactive runs must pass one of --service, --database, --repo, or --image.\n  Use --json for machine-readable output and read stderr separately for progress or selection echoes."
+)]
 pub struct Args {
     /// The name of the database to add
     #[arg(short, long, value_enum)]
@@ -61,7 +64,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
     if verbose {
-        println!("project and environment exist in linked project exist")
+        eprintln!("project and environment exist in linked project exist")
     }
     let type_of_create = if !args.database.is_empty() {
         fake_select("What do you need?", "Database");
@@ -124,14 +127,14 @@ pub async fn command(args: Args) -> Result<()> {
         }
     };
     if verbose {
-        println!("{:?}", type_of_create);
+        eprintln!("{:?}", type_of_create);
     }
     match type_of_create {
         CreateKind::Database(databases) => {
             let is_single_db = databases.len() == 1;
             for db in databases {
                 if verbose {
-                    println!("iterating through databases to add: {:?}", db)
+                    eprintln!("iterating through databases to add: {:?}", db)
                 }
                 deploy::fetch_and_create(
                     &client,
@@ -147,7 +150,7 @@ pub async fn command(args: Args) -> Result<()> {
                 )
                 .await?;
                 if verbose {
-                    println!("successfully created {:?}", db)
+                    eprintln!("successfully created {:?}", db)
                 }
             }
         }
@@ -300,7 +303,7 @@ async fn create_service(
     let source = mutations::service_create::ServiceSourceInput { repo, image };
     let branch = if let Some(repo) = &source.repo {
         if verbose {
-            println!("fetching branch for github repo {repo}")
+            eprintln!("fetching branch for github repo {repo}")
         }
         let repos = post_graphql::<queries::GitHubRepos, _>(
             client,
@@ -326,7 +329,7 @@ async fn create_service(
         branch,
     };
     if verbose {
-        println!("creating service");
+        eprintln!("creating service");
     }
     let s =
         post_graphql::<mutations::ServiceCreate, _>(client, &configs.get_backboard(), vars).await?;

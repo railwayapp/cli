@@ -24,6 +24,9 @@ use super::*;
 
 /// Upload and deploy project from the current directory
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway up --service api --environment production\n  railway up ./apps/api --path-as-root --service api\n  railway up --detach --json --message \"deploy api\"\n\nAutomation notes:\n  `railway up --detach --json` starts an upload and deployment, but it does not wait for the deployment to become healthy.\n  Poll with `railway deployment list --json` and inspect logs with `railway logs --json --lines 100`."
+)]
 pub struct Args {
     path: Option<PathBuf>,
 

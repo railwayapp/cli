@@ -17,6 +17,9 @@ use super::*;
 
 /// Delete a project
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway delete --project project-id --yes --json\n  railway rm --project project-id --yes --json\n  railway project delete --project project-id --yes --json\n\nAutomation notes:\n  Project deletion is scheduled by Railway. Treat a successful response as the deletion request being accepted.\n  Non-interactive deletion requires --yes. Use --2fa-code when your account requires 2FA."
+)]
 pub struct Args {
     /// The project ID or name to delete
     #[clap(short, long)]

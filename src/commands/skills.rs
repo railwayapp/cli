@@ -28,9 +28,10 @@ enum Commands {
     /// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and all tools that support .agents/skills)
     ///
     /// Always installs to ~/.agents/skills. Additionally installs to any detected tool directories (e.g. ~/.claude/skills, ~/.cursor/skills). Use --agent to target specific tools instead of auto-detection.
-    #[clap(alias = "update")]
+    #[clap(visible_alias = "update", visible_alias = "add")]
     Install,
     /// Remove Railway skills from all tools
+    #[clap(visible_alias = "rm", visible_alias = "uninstall")]
     Remove,
 }
 
