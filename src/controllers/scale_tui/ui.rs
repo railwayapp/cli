@@ -23,7 +23,7 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
     }
 
     let visible_rows = app.visible_indices().len().max(1) as u16;
-    let preview_height = 3;
+    let preview_height = 4;
     let reserved_height = 2 + 1 + preview_height + 2;
     let table_height = visible_rows
         .saturating_add(3)
@@ -118,8 +118,8 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     )
     .row_highlight_style(
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(Color::White)
+            .bg(Color::Indexed(238))
             .add_modifier(Modifier::BOLD),
     );
 
@@ -149,6 +149,7 @@ fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::Red),
         )));
     } else if !app.changes().is_empty() {
+        lines.push(Line::from(""));
         lines.push(Line::from(app.command_preview()));
         lines.push(Line::from(Span::styled(
             format!("{} region change(s) selected.", app.changes().len()),
@@ -156,12 +157,7 @@ fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
         )));
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().padding(Padding::new(1, 1, 0, 0)))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_help_bar(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
