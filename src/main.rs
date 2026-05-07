@@ -137,6 +137,16 @@ fn spawn_update_task(
     })
 }
 
+fn project_command_suggestion(raw_args: &[String]) -> Option<&'static str> {
+    let raw_subcommand = raw_args.iter().find(|arg| !arg.starts_with('-'))?;
+
+    if raw_subcommand == "projects" {
+        Some("I think you meant `railway project`; running that command instead.")
+    } else {
+        None
+    }
+}
+
 /// Waits for the background update task to finish, but no longer than a
 /// couple of seconds so that short-lived commands are not noticeably delayed.
 /// The heavy download work runs in a detached process, so this timeout only
@@ -300,6 +310,10 @@ async fn main() -> Result<()> {
             std::process::exit(2); // The default behavior is exit 2
         }
     };
+
+    if let Some(suggestion) = project_command_suggestion(&raw_args) {
+        eprintln!("{suggestion}");
+    }
 
     // Commands that do not require authentication -- skip token refresh for these.
     const NO_AUTH_COMMANDS: &[&str] = &[
@@ -562,12 +576,24 @@ mod cli_tests {
         #[test]
         fn project_subcommands() {
             assert_parses(&["project", "list"]);
+            assert_parses(&["projects", "list"]);
+            assert_subcommand(&["projects", "list"], "project");
             assert_parses(&["project", "ls"]); // alias
             assert_parses(&["project", "list", "--json"]);
             assert_parses(&["project", "link"]);
             assert_parses(&["project", "delete"]);
             assert_parses(&["project", "rm"]); // alias
             assert_parses(&["project", "delete", "-y"]);
+        }
+
+        #[test]
+        fn projects_alias_shows_suggestion() {
+            let raw_args = vec!["projects".to_string(), "list".to_string()];
+
+            assert_eq!(
+                project_command_suggestion(&raw_args),
+                Some("I think you meant `railway project`; running that command instead.")
+            );
         }
 
         #[test]
