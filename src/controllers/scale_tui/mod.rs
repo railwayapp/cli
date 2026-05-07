@@ -3,7 +3,7 @@ mod ui;
 
 use std::{collections::HashMap, io::stdout, panic};
 
-pub use app::{RegionRow, ScaleTuiAction, ScaleTuiApp, ScaleTuiMode};
+pub use app::{RegionRow, ScaleTuiAction, ScaleTuiApp, ScaleTuiFocus, ScaleTuiMode};
 
 use anyhow::Result;
 use crossterm::{

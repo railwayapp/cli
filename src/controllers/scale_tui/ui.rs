@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use super::{RegionRow, ScaleTuiApp, ScaleTuiMode};
+use super::{RegionRow, ScaleTuiApp, ScaleTuiFocus, ScaleTuiMode};
 
 const LABEL_COLOR: Color = Color::DarkGray;
 
@@ -24,6 +24,7 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(8),
+        Constraint::Length(2),
         Constraint::Length(4),
         Constraint::Length(1),
     ])
@@ -31,8 +32,9 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
 
     render_header(app, frame, chunks[0]);
     render_table(app, frame, chunks[1]);
-    render_preview(app, frame, chunks[2]);
-    render_help_bar(app, frame, chunks[3]);
+    render_actions(app, frame, chunks[2]);
+    render_preview(app, frame, chunks[3]);
+    render_help_bar(app, frame, chunks[4]);
 
     match app.mode {
         ScaleTuiMode::Confirm => render_confirm_popup(app, frame, area),
@@ -123,8 +125,21 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     .highlight_symbol("  ");
 
     let mut state = TableState::default();
-    state.select(Some(app.selected.min(visible.len().saturating_sub(1))));
+    if app.focus == ScaleTuiFocus::Regions {
+        state.select(Some(app.selected.min(visible.len().saturating_sub(1))));
+    }
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn render_actions(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
+    let line = Line::from(vec![
+        Span::raw("  "),
+        button("Apply", app.focus == ScaleTuiFocus::Apply, Color::Green),
+        Span::raw("  "),
+        button("Cancel", app.focus == ScaleTuiFocus::Cancel, Color::Red),
+    ]);
+
+    frame.render_widget(Paragraph::new(vec![Line::from(""), line]), area);
 }
 
 fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
@@ -164,9 +179,10 @@ fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 fn render_help_bar(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let help = match app.mode {
         ScaleTuiMode::Search => "Type search  Enter done  Esc clear/back  Up/Down move",
-        ScaleTuiMode::Browse => {
-            "Up/Down move  type edit  +/- adjust  0 remove  / search  a apply  q cancel  ? help"
+        ScaleTuiMode::Browse if app.focus == ScaleTuiFocus::Regions => {
+            "Up/Down move  type edit  +/- adjust  0 remove  Tab buttons  / search  ? help"
         }
+        ScaleTuiMode::Browse => "Enter activate  Tab switch  Up regions  q cancel  ? help",
         ScaleTuiMode::Edit => "Type replicas  Enter save  Esc cancel  Backspace delete",
         ScaleTuiMode::Confirm => "Enter apply  e edit  q cancel",
         ScaleTuiMode::Help => "Esc close help",
@@ -285,6 +301,19 @@ fn replica_cell(app: &ScaleTuiApp, visible_idx: usize, row: &RegionRow) -> Cell<
         Style::default()
     };
     Cell::from(Line::from(Span::styled(row.desired.to_string(), style)))
+}
+
+fn button(label: &'static str, focused: bool, color: Color) -> Span<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    };
+
+    Span::styled(format!("[ {label} ]"), style)
 }
 
 fn change_label(row: &RegionRow) -> String {

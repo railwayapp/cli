@@ -26,6 +26,13 @@ pub enum ScaleTuiMode {
     Help,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleTuiFocus {
+    Regions,
+    Apply,
+    Cancel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionRow {
     pub name: String,
@@ -54,6 +61,7 @@ pub struct ScaleTuiApp {
     pub rows: Vec<RegionRow>,
     pub selected: usize,
     pub mode: ScaleTuiMode,
+    pub focus: ScaleTuiFocus,
     pub search: String,
     pub edit_input: String,
     pub error: Option<String>,
@@ -120,6 +128,7 @@ impl ScaleTuiApp {
             rows,
             selected: 0,
             mode: ScaleTuiMode::Browse,
+            focus: ScaleTuiFocus::Regions,
             search: String::new(),
             edit_input: String::new(),
             error: None,
@@ -220,60 +229,102 @@ impl ScaleTuiApp {
     fn handle_browse_key(&mut self, key: KeyEvent) -> ScaleTuiAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ScaleTuiAction::Cancel,
+            KeyCode::Tab => {
+                self.next_focus();
+                ScaleTuiAction::Continue
+            }
+            KeyCode::BackTab => {
+                self.previous_focus();
+                ScaleTuiAction::Continue
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.focus != ScaleTuiFocus::Regions => {
+                self.previous_focus();
+                ScaleTuiAction::Continue
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.focus != ScaleTuiFocus::Regions => {
+                self.next_focus();
+                ScaleTuiAction::Continue
+            }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.move_selection(-1);
+                if self.focus == ScaleTuiFocus::Regions {
+                    self.move_selection(-1);
+                } else {
+                    self.focus = ScaleTuiFocus::Regions;
+                }
                 ScaleTuiAction::Continue
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.move_selection(1);
+                if self.focus == ScaleTuiFocus::Regions {
+                    if self.selected + 1 >= self.visible_indices().len() {
+                        self.focus = ScaleTuiFocus::Apply;
+                    } else {
+                        self.move_selection(1);
+                    }
+                }
                 ScaleTuiAction::Continue
             }
             KeyCode::Home | KeyCode::Char('g') => {
+                self.focus = ScaleTuiFocus::Regions;
                 self.selected = 0;
                 ScaleTuiAction::Continue
             }
             KeyCode::End | KeyCode::Char('G') => {
+                self.focus = ScaleTuiFocus::Regions;
                 let len = self.visible_indices().len();
                 self.selected = len.saturating_sub(1);
                 ScaleTuiAction::Continue
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.adjust_selected(1);
+                if self.focus == ScaleTuiFocus::Regions {
+                    self.adjust_selected(1);
+                }
                 ScaleTuiAction::Continue
             }
             KeyCode::Char('-') => {
-                self.adjust_selected(-1);
+                if self.focus == ScaleTuiFocus::Regions {
+                    self.adjust_selected(-1);
+                }
                 ScaleTuiAction::Continue
             }
             KeyCode::Char('0') => {
-                if let Some(row) = self.selected_row_mut() {
+                if self.focus == ScaleTuiFocus::Regions
+                    && let Some(row) = self.selected_row_mut()
+                {
                     row.desired = 0;
                 }
                 ScaleTuiAction::Continue
             }
-            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+            KeyCode::Char(ch) if ch.is_ascii_digit() && self.focus == ScaleTuiFocus::Regions => {
                 self.edit_input = ch.to_string();
                 self.mode = ScaleTuiMode::Edit;
                 ScaleTuiAction::Continue
             }
-            KeyCode::Enter | KeyCode::Char('e') => {
-                if let Some(row) = self.selected_row() {
-                    self.edit_input = row.desired.to_string();
-                    self.mode = ScaleTuiMode::Edit;
+            KeyCode::Enter => match self.focus {
+                ScaleTuiFocus::Regions => {
+                    if let Some(row) = self.selected_row() {
+                        self.edit_input = row.desired.to_string();
+                        self.mode = ScaleTuiMode::Edit;
+                    }
+                    ScaleTuiAction::Continue
+                }
+                ScaleTuiFocus::Apply => self.activate_apply(),
+                ScaleTuiFocus::Cancel => ScaleTuiAction::Cancel,
+            },
+            KeyCode::Char('e') => {
+                if self.focus == ScaleTuiFocus::Regions {
+                    if let Some(row) = self.selected_row() {
+                        self.edit_input = row.desired.to_string();
+                        self.mode = ScaleTuiMode::Edit;
+                    }
                 }
                 ScaleTuiAction::Continue
             }
             KeyCode::Char('/') => {
+                self.focus = ScaleTuiFocus::Regions;
                 self.mode = ScaleTuiMode::Search;
                 ScaleTuiAction::Continue
             }
-            KeyCode::Char('a') => {
-                if self.changes().is_empty() {
-                    return ScaleTuiAction::Apply(HashMap::new());
-                }
-                self.mode = ScaleTuiMode::Confirm;
-                ScaleTuiAction::Continue
-            }
+            KeyCode::Char('a') => self.activate_apply(),
             KeyCode::Char('?') => {
                 self.mode = ScaleTuiMode::Help;
                 ScaleTuiAction::Continue
@@ -313,6 +364,7 @@ impl ScaleTuiApp {
         match key.code {
             KeyCode::Esc => {
                 self.mode = ScaleTuiMode::Browse;
+                self.focus = ScaleTuiFocus::Regions;
                 self.edit_input.clear();
             }
             KeyCode::Enter => match self.edit_input.parse::<u64>() {
@@ -321,6 +373,7 @@ impl ScaleTuiApp {
                         row.desired = replicas;
                     }
                     self.mode = ScaleTuiMode::Browse;
+                    self.focus = ScaleTuiFocus::Regions;
                     self.edit_input.clear();
                 }
                 Err(_) => {
@@ -369,6 +422,31 @@ impl ScaleTuiApp {
         let visible = self.visible_indices();
         let selected = *visible.get(self.selected)?;
         self.rows.get_mut(selected)
+    }
+
+    fn activate_apply(&mut self) -> ScaleTuiAction {
+        if self.changes().is_empty() {
+            return ScaleTuiAction::Apply(HashMap::new());
+        }
+
+        self.mode = ScaleTuiMode::Confirm;
+        ScaleTuiAction::Continue
+    }
+
+    fn next_focus(&mut self) {
+        self.focus = match self.focus {
+            ScaleTuiFocus::Regions => ScaleTuiFocus::Apply,
+            ScaleTuiFocus::Apply => ScaleTuiFocus::Cancel,
+            ScaleTuiFocus::Cancel => ScaleTuiFocus::Regions,
+        };
+    }
+
+    fn previous_focus(&mut self) {
+        self.focus = match self.focus {
+            ScaleTuiFocus::Regions => ScaleTuiFocus::Cancel,
+            ScaleTuiFocus::Apply => ScaleTuiFocus::Regions,
+            ScaleTuiFocus::Cancel => ScaleTuiFocus::Apply,
+        };
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -593,5 +671,56 @@ mod tests {
         assert_eq!(app.mode, ScaleTuiMode::Browse);
         assert_eq!(app.edit_input, "");
         assert_eq!(app.rows[0].desired, 1);
+    }
+
+    #[test]
+    fn tab_cycles_between_regions_and_action_buttons() {
+        let regions = queries::regions::ResponseData {
+            regions: vec![region("us-west2", "US West", "US", Some("us-west2"), false)],
+        };
+        let mut app = ScaleTuiApp::new(
+            "worker".to_string(),
+            "production".to_string(),
+            regions,
+            &json!({}),
+        );
+
+        assert_eq!(app.focus, ScaleTuiFocus::Regions);
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, ScaleTuiFocus::Apply);
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, ScaleTuiFocus::Cancel);
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, ScaleTuiFocus::Regions);
+    }
+
+    #[test]
+    fn action_buttons_activate_from_keyboard() {
+        let regions = queries::regions::ResponseData {
+            regions: vec![region("us-west2", "US West", "US", Some("us-west2"), false)],
+        };
+        let mut app = ScaleTuiApp::new(
+            "worker".to_string(),
+            "production".to_string(),
+            regions,
+            &json!({"us-west2": {"numReplicas": 1}}),
+        );
+
+        app.rows[0].desired = 2;
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, ScaleTuiFocus::Apply);
+        assert_eq!(
+            app.handle_key(KeyEvent::from(KeyCode::Enter)),
+            ScaleTuiAction::Continue
+        );
+        assert_eq!(app.mode, ScaleTuiMode::Confirm);
+
+        app.mode = ScaleTuiMode::Browse;
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, ScaleTuiFocus::Cancel);
+        assert_eq!(
+            app.handle_key(KeyEvent::from(KeyCode::Enter)),
+            ScaleTuiAction::Cancel
+        );
     }
 }
