@@ -49,6 +49,7 @@ pub async fn command(args: Args) -> Result<()> {
         if let Ok(client) = GQLClient::new_authorized(&configs) {
             match get_user(&client, &configs).await {
                 Ok(user) => {
+                    let _ = configs.save_user_id(&user.id);
                     println!("{} found", token_name.bold());
                     print_user(user);
                     return Ok(());
@@ -84,6 +85,10 @@ pub async fn command(args: Args) -> Result<()> {
     let me = post_graphql::<queries::UserMeta, _>(&client, configs.get_backboard(), vars)
         .await?
         .me;
+
+    if let Err(e) = configs.save_user_id(&me.id) {
+        eprintln!("{}: {e}", "Warning: failed to persist user id".yellow());
+    }
 
     if let Some(name) = me.name {
         println!("Logged in as {} ({})", name.bold(), me.email);

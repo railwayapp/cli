@@ -544,6 +544,11 @@ run_agent_setup() {
   local railway_bin="$1"
   local yes=""
 
+  if [ -z "${RAILWAY_INSTALL_REQUEST_ID-}" ]; then
+    RAILWAY_INSTALL_REQUEST_ID="install_$(od -vAn -N16 -tx1 < /dev/urandom | tr -d ' \n')"
+    export RAILWAY_INSTALL_REQUEST_ID
+  fi
+
   if [ -n "${FORCE-}" ] || [ ! -t 0 ]; then
     yes="-y"
   fi
