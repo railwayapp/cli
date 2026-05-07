@@ -6,8 +6,7 @@ use serde_json::Value;
 use crate::{
     commands::{
         output::service_summary::{
-            build_service_output, fetch_region_locations, format_size_pair, print_service_card,
-            service_resource_details,
+            build_service_output, format_size_pair, print_service_card, service_resource_details,
         },
         queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges},
     },
@@ -18,6 +17,7 @@ use crate::{
             ensure_project_and_environment_exist, get_environment_instances, get_project,
             service_instances_in_env, volume_instances_in_env,
         },
+        regions::fetch_region_locations,
     },
     resources::{
         ResourceKind, classify_service_instance, database_label, name_mentions, project_bucket_name,
