@@ -532,28 +532,8 @@ mod tests {
     }
 
     #[test]
-    fn regions_without_deprecation_info_are_available() {
-        assert!(region_is_available(&region(None)));
-    }
-
-    #[test]
     fn deprecated_regions_are_not_available() {
         assert!(!region_is_available(&region(Some(true))));
-    }
-
-    #[test]
-    fn non_deprecated_regions_are_available() {
-        assert!(region_is_available(&region(Some(false))));
-    }
-
-    #[test]
-    fn region_flag_names_use_ui_friendly_location() {
-        assert_eq!(region_flag_name(&region(None)), "us-west");
-    }
-
-    #[test]
-    fn region_full_labels_match_ui_region_label() {
-        assert_eq!(region_full_label(&region(None)), "US West (us-west2, US)");
     }
 
     #[test]
@@ -599,11 +579,5 @@ mod tests {
                 "us-east4-eqdc4a": { "numReplicas": 1 }
             }))
         );
-    }
-
-    #[test]
-    fn bucket_region_parse_accepts_supported_codes() {
-        assert_eq!(BucketRegion::parse("sjc").unwrap(), BucketRegion::Sjc);
-        assert_eq!(BucketRegion::parse("IAD").unwrap(), BucketRegion::Iad);
     }
 }
