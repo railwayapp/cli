@@ -2,7 +2,10 @@ use rmcp::{ErrorData as McpError, model::*};
 
 use crate::{
     client::post_graphql,
-    controllers::project::{get_environment_instances, service_instances_in_env},
+    controllers::{
+        project::{get_environment_instances, service_instances_in_env},
+        regions::{fetch_regions, resolve_deploy_region_id},
+    },
     gql::mutations,
     workspace::workspaces,
 };
@@ -215,6 +218,21 @@ impl RailwayMcp {
                     ),
                 });
 
+        let region = match params.region {
+            Some(region_input) => {
+                let regions = fetch_regions(&self.client, &self.configs)
+                    .await
+                    .map_err(|e| {
+                        McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
+                    })?;
+                Some(
+                    resolve_deploy_region_id(&regions, &region_input)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
+                )
+            }
+            None => None,
+        };
+
         let input = mutations::service_instance_update::ServiceInstanceUpdateInput {
             build_command: params.build_command,
             start_command: params.start_command,
@@ -228,7 +246,7 @@ impl RailwayMcp {
             restart_policy_type,
             restart_policy_max_retries: params.restart_policy_max_retries,
             pre_deploy_command: params.pre_deploy_command,
-            region: params.region,
+            region,
             railway_config_file: params.railway_config_file,
             watch_patterns: params.watch_patterns,
             ..Default::default()
