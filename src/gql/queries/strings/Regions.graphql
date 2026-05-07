@@ -3,7 +3,11 @@ query Regions {
         name
         region
         country
-        railwayMetal
         location
+        deploymentConstraints {
+            deprecationInfo {
+                isDeprecated
+            }
+        }
     }
 }
