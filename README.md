@@ -81,6 +81,9 @@ npm install -g @railway/cli
 # Install
 bash <(curl -fsSL cli.new)
 
+# Install and configure Railway agent support
+bash <(curl -fsSL cli.new) --agents -y
+
 # Uninstall
 bash <(curl -fsSL cli.new) -r
 ```
