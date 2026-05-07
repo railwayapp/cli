@@ -132,7 +132,6 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 
 fn render_actions(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let line = Line::from(vec![
-        Span::raw("  "),
         button("Apply", app.focus == ScaleTuiFocus::Apply, Color::Green),
         Span::raw("  "),
         button("Cancel", app.focus == ScaleTuiFocus::Cancel, Color::Red),
