@@ -241,6 +241,44 @@ impl RailwayMcp {
     }
 
     #[tool(
+        description = "List all Railway workspaces available to the current user. Returns workspace names, IDs, team IDs, and project counts. Use the workspace ID with create_project."
+    )]
+    async fn list_workspaces(&self) -> Result<CallToolResult, McpError> {
+        let workspaces = workspaces().await.map_err(|e| {
+            McpError::internal_error(format!("Failed to list workspaces: {e}"), None)
+        })?;
+
+        if workspaces.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No workspaces found.".to_string(),
+            )]));
+        }
+
+        let output = workspaces
+            .iter()
+            .map(|workspace| {
+                let kind = if workspace.team_id().is_some() {
+                    "team"
+                } else {
+                    "personal"
+                };
+                let team_id = workspace.team_id().unwrap_or("none");
+                format!(
+                    "- {} (workspace_id: {}, type: {}, team_id: {}, projects: {})",
+                    workspace.name(),
+                    workspace.id(),
+                    kind,
+                    team_id,
+                    workspace.projects().len()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    #[tool(
         description = "List all services in a Railway project. If no project_id is provided, uses the currently linked project."
     )]
     async fn list_services(

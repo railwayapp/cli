@@ -22,6 +22,12 @@ help_text="Options
    -B, --base-url
    Override the base URL used for downloading releases
 
+   --agents
+   Install or reuse the Railway CLI, then configure Railway agent support
+
+   --no-modify-path
+   Do not update shell startup files when used with --agents
+
    -r, --remove
    Uninstall railway
 
@@ -337,6 +343,9 @@ is_build_available() {
 }
 UNINSTALL=0
 HELP=0
+AGENTS=0
+NO_MODIFY_PATH=0
+BIN_DIR_SET=0
 
 DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-)
 
@@ -355,9 +364,7 @@ if [ -z "${RAILWAY_PLATFORM-}" ]; then
   PLATFORM="$(detect_platform)"
 fi
 
-if [ -z "${RAILWAY_BIN_DIR-}" ]; then
-  BIN_DIR=/usr/local/bin
-fi
+BIN_DIR="${RAILWAY_BIN_DIR:-/usr/local/bin}"
 
 if [ -z "${RAILWAY_ARCH-}" ]; then
   ARCH="$(detect_arch)"
@@ -376,6 +383,7 @@ while [ "$#" -gt 0 ]; do
     ;;
   -b | --bin-dir)
     BIN_DIR="$2"
+    BIN_DIR_SET=1
     shift 2
     ;;
   -a | --arch)
@@ -399,6 +407,14 @@ while [ "$#" -gt 0 ]; do
     UNINSTALL=1
     shift 1
     ;;
+  --agents)
+    AGENTS=1
+    shift 1
+    ;;
+  --no-modify-path)
+    NO_MODIFY_PATH=1
+    shift 1
+    ;;
   -h | --help)
     HELP=1
     shift 1
@@ -409,6 +425,7 @@ while [ "$#" -gt 0 ]; do
     ;;
   -b=* | --bin-dir=*)
     BIN_DIR="${1#*=}"
+    BIN_DIR_SET=1
     shift 1
     ;;
   -a=* | --arch=*)
@@ -442,6 +459,98 @@ else
   VERBOSE=
 fi
 
+update_shell_rc_for_agents() {
+  local marker='# Added by Railway agent installer'
+  local bash_escaped_bin_dir
+  printf -v bash_escaped_bin_dir '%q' "$BIN_DIR"
+  local bash_line="export PATH=\"\$PATH\":$bash_escaped_bin_dir"
+  local fish_line="set -gx PATH \$PATH \"$BIN_DIR\""
+  local found=0
+
+  _append() {
+    local rc="$1" line="$2"
+    if ! grep -qF "$marker" "$rc" 2>/dev/null; then
+      printf '\n%s\n%s\n' "$marker" "$line" >> "$rc"
+      info "Added PATH update to $rc"
+    fi
+  }
+
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [ -f "$rc" ]; then
+      _append "$rc" "$bash_line"
+      found=1
+    fi
+  done
+  if [ -f "$HOME/.config/fish/config.fish" ]; then
+    _append "$HOME/.config/fish/config.fish" "$fish_line"
+    found=1
+  fi
+  if [ "$found" = "0" ]; then
+    _append "$HOME/.profile" "$bash_line"
+  fi
+}
+
+find_railway_bins() {
+  local seen=":"
+  local dir bin
+  IFS=':' read -r -a path_entries <<< "$PATH"
+  for dir in "${path_entries[@]}"; do
+    [ -n "$dir" ] || continue
+    bin="$dir/railway"
+    if [ -x "$bin" ] && [[ "$seen" != *":$bin:"* ]]; then
+      printf '%s\n' "$bin"
+      seen="$seen$bin:"
+    fi
+  done
+}
+
+print_cli_conflicts() {
+  local bins=()
+  local bin version
+  while IFS= read -r bin; do
+    bins+=("$bin")
+  done < <(find_railway_bins)
+
+  if [ "${#bins[@]}" -eq 0 ]; then
+    return
+  fi
+
+  info "Railway CLI on PATH:"
+  for bin in "${bins[@]}"; do
+    version="$("$bin" --version 2>/dev/null || echo unknown)"
+    info "  $bin ($version)"
+  done
+  info "Shells use the first entry above."
+
+  if [ "${#bins[@]}" -gt 1 ]; then
+    warn "Multiple Railway CLI installs found. No PATH entries were reordered or removed."
+  fi
+}
+
+run_agent_setup() {
+  local railway_bin="$1"
+  local yes=""
+
+  if [ -n "${FORCE-}" ] || [ ! -t 0 ]; then
+    yes="-y"
+  fi
+
+  if [ -t 0 ] && [ -z "${FORCE-}" ]; then
+    if "$railway_bin" whoami >/dev/null 2>&1; then
+      info "Already logged in to Railway."
+    else
+      info "Logging in to Railway (opens a browser)..."
+      "$railway_bin" login
+    fi
+  fi
+
+  "$railway_bin" setup agent $yes
+
+  if ! "$railway_bin" whoami >/dev/null 2>&1; then
+    warn "Next: run '$railway_bin login' to finish setup (opens a browser)."
+  fi
+}
+
 if [ "$UNINSTALL" = 1 ]; then
   confirm "Are you sure you want to uninstall railway?"
 
@@ -472,6 +581,20 @@ if [ "$HELP" = 1 ]; then
     echo "${help_text}"
     exit 0
 fi
+
+if [ "$AGENTS" = 1 ] && has railway; then
+  RAILWAY_BIN="$(command -v railway)"
+  info "Railway CLI already installed: $RAILWAY_BIN ($("$RAILWAY_BIN" --version 2>/dev/null || echo unknown))"
+  info "No PATH changes were made."
+  print_cli_conflicts
+  run_agent_setup "$RAILWAY_BIN"
+  exit 0
+fi
+
+if [ "$AGENTS" = 1 ] && [ "$BIN_DIR_SET" = 0 ] && [ -z "${RAILWAY_BIN_DIR-}" ]; then
+  BIN_DIR="${RAILWAY_AGENT_BIN_DIR:-$HOME/.railway/bin}"
+fi
+
 TARGET="$(detect_target "${ARCH}" "${PLATFORM}")"
 
 is_build_available "${ARCH}" "${PLATFORM}" "${TARGET}"
@@ -499,9 +622,36 @@ fi
 URL="${BASE_URL}/download/v${RAILWAY_VERSION}/railway-v${RAILWAY_VERSION}-${TARGET}.${EXT}"
 debug "Tarball URL: ${UNDERLINE}${BLUE}${URL}${NO_COLOR}"
 confirm "Install railway ${GREEN}${RAILWAY_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
+if [ "$AGENTS" = 1 ]; then
+  mkdir -p "${BIN_DIR}"
+fi
 check_bin_dir "${BIN_DIR}"
 
 install "${EXT}"
+
+if [ "$AGENTS" = 1 ]; then
+  RAILWAY_BIN="$BIN_DIR/railway"
+  if [ ! -x "$RAILWAY_BIN" ]; then
+    error "Railway CLI install did not produce $RAILWAY_BIN"
+    exit 1
+  fi
+
+  export PATH="$PATH:$BIN_DIR"
+
+  if [ "$NO_MODIFY_PATH" = 0 ]; then
+    update_shell_rc_for_agents
+  else
+    warn "PATH update skipped by --no-modify-path. Agent MCP config requires railway on PATH."
+  fi
+
+  print_cli_conflicts
+  run_agent_setup "$RAILWAY_BIN"
+
+  if [ "$NO_MODIFY_PATH" = 0 ]; then
+    warn "IMPORTANT: Railway was installed to $BIN_DIR and your shell PATH was updated."
+    warn "Restart your terminal and AI editor so agent MCP config can find 'railway mcp'."
+  fi
+fi
 
 printf "$MAGENTA"
   cat <<'EOF'
