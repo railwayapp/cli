@@ -98,6 +98,7 @@ pub async fn new_environment(args: Args) -> Result<()> {
         env_id,
         Some(env_name),
     )?;
+    configs.write()?;
 
     Ok(())
 }

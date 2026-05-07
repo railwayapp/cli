@@ -11,7 +11,7 @@ macro_rules! commands {
                     .propagate_version(true)
                     .about(concat!(
                         clap::crate_description!(),
-                        "\n\nTip: Using an AI coding agent? Run `railway skills install` to enhance it with Railway expertise — deploying, debugging, managing services."
+                        "\n\nTip: Using an AI coding agent? Run `railway setup agent -y` to install Railway skills and MCP configuration."
                     ))
                     .long_about(None)
                     .version(clap::crate_version!());
@@ -44,6 +44,17 @@ macro_rules! commands {
                         cmd = cmd.subcommand(sub);
                     }
                 )*
+                cmd = cmd
+                    .mut_subcommand("list", |cmd| cmd.visible_alias("ls"))
+                    .mut_subcommand("delete", |cmd| {
+                        cmd.visible_alias("rm").visible_alias("remove")
+                    })
+                    .mut_subcommand("project", |cmd| cmd.visible_alias("projects"))
+                    .mut_subcommand("bucket", |cmd| cmd.visible_alias("buckets"))
+                    .mut_subcommand("volume", |cmd| cmd.visible_alias("volumes"))
+                    .mut_subcommand("deployment", |cmd| cmd.visible_alias("deployments"))
+                    .mut_subcommand("templates", |cmd| cmd.visible_alias("template"))
+                    .mut_subcommand("check_updates", |cmd| cmd.visible_alias("check-updates"));
                 cmd
             }
 

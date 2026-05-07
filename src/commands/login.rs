@@ -8,7 +8,7 @@ use crate::{
     consts::{RAILWAY_API_TOKEN_ENV, RAILWAY_TOKEN_ENV},
     controllers::user::get_user,
     errors::RailwayError,
-    interact_or, oauth,
+    oauth,
     util::{progress::create_spinner, prompt::prompt_confirm_with_default_with_cancel},
 };
 
@@ -23,7 +23,16 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    interact_or!("Cannot login in non-interactive mode");
+    if !crate::macros::is_stdout_terminal() {
+        if args.browserless {
+            bail!(
+                "Browserless login requires an interactive terminal. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
+            );
+        }
+        bail!(
+            "Cannot login in non-interactive mode. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
+        );
+    }
 
     let mut configs = Configs::new()?;
 

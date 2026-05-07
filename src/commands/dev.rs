@@ -32,6 +32,9 @@ use super::*;
 
 /// Run Railway services locally
 #[derive(Debug, Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway dev up --dry-run --no-tui\n  railway dev start --no-https\n  railway dev configure\n  railway dev stop\n\nAliases:\n  up: start\n  down: stop\n  configure: config\n  clean: reset"
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Option<DevelopCommand>,
@@ -44,12 +47,16 @@ pub struct Args {
 #[derive(Debug, Subcommand)]
 enum DevelopCommand {
     /// Start services (default when no subcommand provided)
+    #[clap(visible_alias = "start")]
     Up(UpArgs),
     /// Stop services
+    #[clap(visible_alias = "stop")]
     Down(DownArgs),
     /// Stop services and remove volumes/data
+    #[clap(visible_alias = "reset")]
     Clean(CleanArgs),
     /// Configure local code services
+    #[clap(visible_alias = "config")]
     Configure(ConfigureArgs),
 }
 

@@ -1,135 +1,77 @@
 # Railway CLI
 
-[![Crates.io](https://img.shields.io/crates/v/railwayapp)](https://crates.io/crates/railwayapp)
-[![CI](https://github.com/railwayapp/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/railwayapp/cliv3/actions/workflows/ci.yml)
-[![cargo audit](https://github.com/railwayapp/cli/actions/workflows/cargo-audit.yml/badge.svg)](https://github.com/railwayapp/cli/actions/workflows/cargo-audit.yml)
-
-## Overview
-
-This is the command line interface for [Railway](https://railway.com). Use it to connect your code to Railway's infrastructure without needing to worry about environment variables or configuration.
-
-The Railway command line interface (CLI) connects your code to your Railway project from the command line.
-
-The Railway CLI allows you to:
-
-- Create new Railway projects from the terminal
-- Link to an existing Railway project
-- Pull down environment variables for your project locally to run
-- Create services and databases right from the comfort of your fingertips
-
-And more.
-
-## Agent Skills
-
-Install [Railway agent skills](https://agentskills.io) for AI coding tools (Claude Code, Cursor, Codex, OpenCode, and more):
-
-```bash
-railway skills
-```
-
-Use `--agent` to target a specific tool:
-
-```bash
-railway skills --agent claude-code
-```
-
-You can also install via [skills.sh](https://skills.sh/railwayapp/railway-skills/use-railway):
-
-```bash
-npx skills add https://github.com/railwayapp/railway-skills --skill use-railway
-```
-
-## Documentation
-
-[View the CLI guide](https://docs.railway.com/guides/cli)
-
-[View the CLI API reference](https://docs.railway.com/reference/cli-api)
-
-## Quick start
-
-Follow the [CLI guide](https://docs.railway.com/guides/cli) to install the CLI and run your first command.
-
-## Authentication
-
-For non-interactive authentication details, see the [CLI guide](https://docs.railway.com/guides/cli#tokens).
+The Railway CLI lets you interact with your Railway projects from the command line. Read the [CLI documentation](https://docs.railway.com/cli).
 
 ## Installation
 
-### Package managers
-
-#### Cargo
+Install the CLI with the Bash script on macOS, Linux, or Windows through WSL:
 
 ```bash
-cargo install railwayapp --locked
-```
-
-#### Homebrew
-
-```bash
-brew install railway
-```
-
-#### NPM
-
-```bash
-npm install -g @railway/cli
-```
-
-#### Bash
-
-```bash
-# Install
 bash <(curl -fsSL cli.new)
+```
 
-# Install and configure Railway agent support
+Install the CLI and configure Railway agent support:
+
+```bash
 bash <(curl -fsSL cli.new) --agents -y
+```
 
-# Uninstall
+Uninstall the CLI:
+
+```bash
 bash <(curl -fsSL cli.new) -r
 ```
 
-#### Scoop
+Other installation methods are available in the CLI documentation: [Homebrew](https://docs.railway.com/cli#homebrew-macos), [npm](https://docs.railway.com/cli#npm-macos-linux-windows), [Scoop](https://docs.railway.com/cli#scoop-windows), [pre-built binaries](https://docs.railway.com/cli#pre-built-binaries), and [source builds](https://docs.railway.com/cli#from-source).
 
-```ps1
-scoop install railway
-```
+## Authentication
 
-#### Arch Linux AUR
-
-Install with Paru
+Before using the CLI, authenticate with your Railway account:
 
 ```bash
-paru -S railwayapp-cli
+railway login
 ```
 
-Install with Yay
+For environments without a browser, such as SSH sessions, use browserless login:
 
 ```bash
-yay -S railwayapp-cli
+railway login --browserless
 ```
 
-### Docker
+### Tokens
 
-#### Install from the command line
+For CI/CD pipelines, set environment variables instead of using interactive login:
+
+- Project token: Set `RAILWAY_TOKEN` for project-level actions.
+- Account or workspace token: Set `RAILWAY_API_TOKEN` for account-level or workspace-level actions.
 
 ```bash
-docker pull ghcr.io/railwayapp/cli:latest
+RAILWAY_TOKEN=xxx railway up
 ```
 
-#### Use in GitHub Actions
+See [Tokens](https://docs.railway.com/integrations/api#creating-a-token) for more information.
 
-For GitHub Actions setup, see the blog post at [blog.railway.com/p/github-actions](https://blog.railway.com/p/github-actions).
+## Agent Setup
 
-#### Use in GitLab CI/CD
+Configure Railway agent support for AI coding tools:
 
-For GitLab CI/CD setup, see the blog post at [blog.railway.com/p/gitlab-ci-cd](https://blog.railway.com/p/gitlab-ci-cd).
+```bash
+railway setup agent -y
+```
 
-### Contributing
+This installs Railway skills and configures the Railway MCP server for detected tools such as Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, and Factory Droid.
+
+Use the focused commands when you only need one part of the setup:
+
+```bash
+railway mcp install --agent cursor
+railway skills --agent claude-code
+```
+
+## Contributing
 
 See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repository locally.
 
 ## Feedback
 
-We would love to hear your feedback or suggestions. The best way to reach us is on [Central Station](https://station.railway.com/feedback).
-
-We also welcome pull requests into this repository. See [CONTRIBUTING.md](https://github.com/railwayapp/cli/blob/master/CONTRIBUTING.md) for information on setting up this repository locally.
+Share feedback and suggestions on [Central Station](https://station.railway.com/feedback).

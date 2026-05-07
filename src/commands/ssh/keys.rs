@@ -74,10 +74,11 @@ pub struct Args {
 #[derive(Parser, Clone)]
 enum Commands {
     /// List all registered SSH keys
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List,
 
     /// Add/register a local SSH key with Railway
+    #[clap(visible_alias = "create", visible_alias = "register")]
     Add {
         /// Path to the public key file (defaults to auto-detect)
         #[clap(long, short)]
@@ -89,7 +90,7 @@ enum Commands {
     },
 
     /// Remove a registered SSH key
-    #[clap(alias = "rm", alias = "delete")]
+    #[clap(visible_alias = "rm", visible_alias = "delete")]
     Remove {
         /// Key ID or fingerprint to remove
         key: Option<String>,
@@ -100,7 +101,7 @@ enum Commands {
     },
 
     /// Import SSH keys from your GitHub account
-    #[clap(alias = "import")]
+    #[clap(visible_alias = "import")]
     Github,
 }
 

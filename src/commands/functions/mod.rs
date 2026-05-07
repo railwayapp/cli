@@ -37,7 +37,7 @@ structstruck::strike! {
         List,
 
         /// Add a new function
-        #[clap(visible_alias = "create")]
+        #[clap(visible_alias = "create", visible_alias = "add")]
         New(struct {
             /// The path to the function locally
             #[clap(long, short)]
@@ -81,7 +81,7 @@ structstruck::strike! {
         }),
 
         /// Push a new change to the function
-        #[clap(visible_alias = "up")]
+        #[clap(visible_alias = "up", visible_alias = "deploy")]
         Push(struct {
             /// The path to the function
             #[clap(long, short)]

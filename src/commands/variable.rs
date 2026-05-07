@@ -12,6 +12,9 @@ use std::io::{IsTerminal, Read};
 
 /// Manage environment variables for a service
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway variable list --service api --json\n  railway variable list --service api --kv\n  railway variable set API_URL=https://example.com --skip-deploys --json\n  echo \"secret\" | railway variable set API_KEY --stdin --skip-deploys --json\n  railway variable delete API_KEY --service api --json\n\nAutomation notes:\n  JSON and KV output include raw variable values. Avoid sharing command output from secret-bearing variable commands.\n  For idempotent deletes, list variables first, check whether the key exists, then delete it."
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Option<Commands>,
@@ -25,7 +28,7 @@ pub struct Args {
     #[clap(short, long)]
     environment: Option<String>,
 
-    /// Show variables in KV format
+    /// Show variables in KV format. This prints raw values.
     #[clap(short, long)]
     kv: bool,
 
@@ -37,7 +40,7 @@ pub struct Args {
     #[clap(long, value_name = "KEY")]
     set_from_stdin: Option<String>,
 
-    /// Output in JSON format
+    /// Output in JSON format. Variable list JSON includes raw values.
     #[clap(long)]
     json: bool,
 
@@ -49,14 +52,14 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// List variables for a service
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(ListArgs),
 
     /// Set a variable
     Set(SetArgs),
 
     /// Delete a variable
-    #[clap(alias = "rm", alias = "remove")]
+    #[clap(visible_alias = "rm", visible_alias = "remove")]
     Delete(DeleteArgs),
 }
 
@@ -70,11 +73,11 @@ struct ListArgs {
     #[clap(short, long)]
     environment: Option<String>,
 
-    /// Show variables in KV format
+    /// Show variables in KV format. This prints raw values.
     #[clap(short, long)]
     kv: bool,
 
-    /// Output in JSON format
+    /// Output in JSON format. This includes raw values.
     #[clap(long)]
     json: bool,
 }
@@ -232,6 +235,18 @@ async fn set_variable(args: SetArgs) -> Result<()> {
 
 async fn delete_variable(args: DeleteArgs) -> Result<()> {
     let ctx = resolve_service_context(args.service, args.environment).await?;
+
+    let variables = get_service_variables(
+        &ctx.client,
+        &ctx.configs,
+        ctx.project_id.clone(),
+        ctx.environment_id.clone(),
+        ctx.service_id.clone(),
+    )
+    .await?;
+    if !variables.contains_key(&args.key) {
+        bail!("Variable '{}' not found", args.key);
+    }
 
     let spinner = create_spinner_if(!args.json, format!("Deleting {}...", args.key.bold()));
 

@@ -159,7 +159,7 @@ pub fn prompt_select_with_cancel<T: Display>(message: &str, options: Vec<T>) -> 
 }
 
 pub fn fake_select(message: &str, selected: &str) {
-    println!("{} {} {}", ">".green(), message, selected.cyan().bold());
+    eprintln!("{} {} {}", ">".green(), message, selected.cyan().bold());
 }
 
 pub fn prompt_variables(service_name: Option<&str>) -> Result<Vec<Variable>> {
@@ -179,7 +179,7 @@ pub fn prompt_variables(service_name: Option<&str>) -> Result<Vec<Variable>> {
             }
             match variable.parse::<Variable>() {
                 Ok(v) => variables.push(v),
-                Err(err) => println!("{} {:?}", "Warn".yellow(), err),
+                Err(err) => eprintln!("{} {:?}", "Warn".yellow(), err),
             }
         } else {
             break Ok(variables);

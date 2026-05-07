@@ -46,6 +46,9 @@ enum TerminalTheme {
 
 /// Discover Railway templates
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -54,6 +57,7 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// Search published templates
+    #[clap(visible_alias = "find", visible_alias = "list", visible_alias = "ls")]
     Search(SearchArgs),
 }
 

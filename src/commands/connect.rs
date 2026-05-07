@@ -19,6 +19,9 @@ use super::*;
 
 /// Connect to a database's shell (psql for Postgres, mongosh for MongoDB, etc.)
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway connect postgres\n  railway connect redis --environment production\n\nAutomation notes:\n  Non-interactive runs must pass the database service name.\n  The local database client must be installed before connecting."
+)]
 pub struct Args {
     /// The name of the database to connect to
     service_name: Option<String>,

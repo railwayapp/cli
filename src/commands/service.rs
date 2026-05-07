@@ -26,6 +26,9 @@ use super::*;
 
 /// Manage services
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway service list --json\n  railway service delete --service api --environment production --yes --json\n  railway service rm --service api --yes --json\n  railway service link api\n\nAutomation notes:\n  Destructive non-interactive runs must pass exact selectors and --yes.\n  Prefer service IDs from `railway service list --json` when names may collide."
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Option<Commands>,
@@ -37,11 +40,11 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// List services in the current environment
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(ListArgs),
 
     /// Delete a service from an environment
-    #[clap(alias = "remove", alias = "rm")]
+    #[clap(visible_alias = "remove", visible_alias = "rm")]
     Delete(DeleteArgs),
 
     /// Link a service to the current project
