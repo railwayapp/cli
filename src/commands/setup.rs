@@ -10,6 +10,7 @@ use crate::{
     consts::{RAILWAY_API_TOKEN_ENV, RAILWAY_TOKEN_ENV},
     controllers::user::get_user,
     macros::is_stdout_terminal,
+    telemetry::{self, SetupAgentPhase, SetupAgentTrackEvent},
 };
 
 const DOCS_URL: &str = "https://docs.railway.com/ai";
@@ -102,6 +103,44 @@ fn pick_mcp_choice(remote_flag: bool, non_interactive: bool) -> Result<McpChoice
 }
 
 async fn agent_setup(args: AgentArgs) -> Result<()> {
+    telemetry::send_setup_agent(SetupAgentTrackEvent {
+        phase: SetupAgentPhase::Start,
+        success: None,
+        error_message: None,
+        configured_clients: None,
+    })
+    .await;
+
+    match agent_setup_inner(args).await {
+        Ok(configured_clients) => {
+            telemetry::send_setup_agent(SetupAgentTrackEvent {
+                phase: SetupAgentPhase::Finish,
+                success: Some(true),
+                error_message: None,
+                configured_clients: Some(configured_clients),
+            })
+            .await;
+            Ok(())
+        }
+        Err(err) => {
+            let message = err.to_string();
+            telemetry::send_setup_agent(SetupAgentTrackEvent {
+                phase: SetupAgentPhase::Finish,
+                success: Some(false),
+                error_message: Some(if message.len() > 256 {
+                    message[..256].to_string()
+                } else {
+                    message
+                }),
+                configured_clients: None,
+            })
+            .await;
+            Err(err)
+        }
+    }
+}
+
+async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     // Treat the run as non-interactive if the user passed -y, OR if stdout
     // isn't a TTY (piped, CI, agent-driven). Matches the convention used by
@@ -145,7 +184,7 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
 
         if picked.is_empty() {
             println!("{}", "No editors selected. Nothing to do.".yellow());
-            return Ok(());
+            return Ok(Vec::new());
         }
         picked.iter().map(|c| c.slug.to_string()).collect()
     };
@@ -155,8 +194,10 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
             "{}",
             "No editors detected. Re-run interactively to pick, or rerun in a TTY.".yellow()
         );
-        return Ok(());
+        return Ok(Vec::new());
     }
+
+    let configured_clients = selected_slugs.clone();
 
     // Step 1: skills install
     let missing_skills: Vec<String> = selected_slugs
@@ -208,7 +249,7 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
         eprintln!("{}: {e}", "Warning: failed to record agent setup".yellow());
     }
 
-    Ok(())
+    Ok(configured_clients)
 }
 
 async fn install_missing_mcp(

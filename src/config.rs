@@ -44,6 +44,7 @@ impl LinkedProject {
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayUser {
+    pub id: Option<String>,
     pub token: Option<String>,
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
@@ -213,6 +214,12 @@ impl Configs {
         self.root_config.user.refresh_token = refresh_token.map(|s| s.to_string());
         self.root_config.user.token_expires_at = Some(expires_at);
         self.root_config.user.token = None; // Clear legacy token
+        self.write()
+    }
+
+    pub fn save_user_id(&mut self, id: &str) -> Result<()> {
+        anyhow::ensure!(!id.is_empty(), "user id cannot be empty");
+        self.root_config.user.id = Some(id.to_string());
         self.write()
     }
 
