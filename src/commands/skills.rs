@@ -123,7 +123,11 @@ pub(super) fn skills_configured_for_slug(home: &Path, slug: &str) -> bool {
     coding_tools(home)
         .into_iter()
         .find(|tool| tool.slug == slug)
-        .map(|tool| tool.global_parent.join(tool.skills_dir_name).join("use-railway"))
+        .map(|tool| {
+            tool.global_parent
+                .join(tool.skills_dir_name)
+                .join("use-railway")
+        })
         .is_some_and(|path| path.is_dir())
 }
 
@@ -384,7 +388,11 @@ mod tests {
     #[test]
     fn detects_existing_use_railway_skill() {
         let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(".agents").join("skills").join("use-railway");
+        let path = home
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("use-railway");
         std::fs::create_dir_all(&path).unwrap();
 
         assert!(skills_configured_for_slug(home.path(), "universal"));
