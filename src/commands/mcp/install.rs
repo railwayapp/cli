@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 const REMOTE_MCP_URL: &str = "https://mcp.railway.com";
 
-/// Install the Railway MCP server config into AI coding tools (Claude Code, Cursor, OpenAI Codex, OpenCode).
+/// Install the Railway MCP server config into AI coding tools (Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Factory Droid).
 ///
 /// Merges a `railway` server entry into each tool's MCP config file. Without `--agent`, only configures detected tools (those with their config dir present).
 #[derive(Parser)]
@@ -94,7 +94,10 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result
 }
 
 fn supports_mcp(slug: &str) -> bool {
-    matches!(slug, "claude-code" | "cursor" | "opencode" | "codex")
+    matches!(
+        slug,
+        "claude-code" | "cursor" | "opencode" | "codex" | "copilot" | "factory-droid"
+    )
 }
 
 fn config_path(slug: &str, home: &Path) -> PathBuf {
@@ -103,6 +106,8 @@ fn config_path(slug: &str, home: &Path) -> PathBuf {
         "cursor" => home.join(".cursor").join("mcp.json"),
         "opencode" => home.join(".config").join("opencode").join("opencode.json"),
         "codex" => home.join(".codex").join("config.toml"),
+        "copilot" => home.join(".copilot").join("mcp-config.json"),
+        "factory-droid" => home.join(".factory").join("mcp.json"),
         // supports_mcp gates this; unreachable in practice.
         _ => home.join(".unsupported"),
     }
@@ -112,7 +117,7 @@ pub(crate) fn mcp_configured_for_slug(home: &Path, slug: &str, remote: bool) -> 
     let path = config_path(slug, home);
 
     match slug {
-        "claude-code" | "cursor" => read_json_or_empty(&path)
+        "claude-code" | "cursor" | "copilot" | "factory-droid" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcpServers/railway").cloned())
             .is_some_and(|entry| json_mcp_entry_matches(&entry, remote)),
@@ -201,6 +206,32 @@ fn install_for(slug: &str, path: &Path, remote: bool) -> Result<()> {
         }
         "opencode" => write_opencode_mcp(path, remote),
         "codex" => write_codex_toml(path, remote),
+        "copilot" => {
+            let entry = if remote {
+                json!({ "type": "http", "url": REMOTE_MCP_URL, "tools": ["*"] })
+            } else {
+                json!({
+                    "type": "local",
+                    "command": "railway",
+                    "args": ["mcp"],
+                    "tools": ["*"]
+                })
+            };
+            write_json_mcp_servers(path, entry)
+        }
+        "factory-droid" => {
+            let entry = if remote {
+                json!({ "type": "http", "url": REMOTE_MCP_URL, "disabled": false })
+            } else {
+                json!({
+                    "type": "stdio",
+                    "command": "railway",
+                    "args": ["mcp"],
+                    "disabled": false
+                })
+            };
+            write_json_mcp_servers(path, entry)
+        }
         _ => bail!("Unsupported MCP target: {}", slug),
     }
 }
@@ -509,5 +540,45 @@ mod tests {
         );
         assert!(railway.get("command").is_none());
         assert!(railway.get("args").is_none());
+    }
+
+    #[test]
+    fn writes_copilot_local_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".copilot").join("mcp-config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        install_for("copilot", &path, false).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let root: JsonValue = serde_json::from_str(&written).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+
+        assert_eq!(railway.get("type").and_then(JsonValue::as_str), Some("local"));
+        assert_eq!(
+            railway.get("command").and_then(JsonValue::as_str),
+            Some("railway")
+        );
+        assert!(mcp_configured_for_slug(home.path(), "copilot", false));
+    }
+
+    #[test]
+    fn writes_factory_droid_remote_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".factory").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        install_for("factory-droid", &path, true).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let root: JsonValue = serde_json::from_str(&written).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+
+        assert_eq!(railway.get("type").and_then(JsonValue::as_str), Some("http"));
+        assert_eq!(
+            railway.get("url").and_then(JsonValue::as_str),
+            Some("https://mcp.railway.com")
+        );
+        assert!(mcp_configured_for_slug(home.path(), "factory-droid", true));
     }
 }
