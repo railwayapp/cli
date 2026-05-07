@@ -6,9 +6,10 @@ use crate::{
         regions::{
             available_deploy_regions_help, build_multi_region_patch, convert_hashmap_to_map,
             fetch_region_locations_for_project, fetch_regions, fetch_regions_for_project,
-            merge_config, prompt_for_regions_for_project, region_data_from_deployment_meta,
-            region_flag_name, region_full_label, region_is_available, resolve_deploy_region_id,
+            merge_config, region_data_from_deployment_meta, region_flag_name, region_full_label,
+            region_is_available, resolve_deploy_region_id,
         },
+        scale_tui::{self, ScaleTuiOutput},
     },
     util::progress::create_spinner_if,
 };
@@ -96,7 +97,16 @@ pub async fn command(args: Args) -> Result<()> {
         .map(|service| service.node.name.clone())
         .expect("service ID returned from project services");
     let new_config = convert_hashmap_to_map(
-        resolve_new_config(&args, &configs, &client, &linked_project.project, &existing).await?,
+        resolve_new_config(
+            &args,
+            &configs,
+            &client,
+            &linked_project.project,
+            &service_name,
+            &environment_name,
+            &existing,
+        )
+        .await?,
     );
     if new_config.is_empty() {
         if !args.json {
@@ -138,10 +148,21 @@ async fn resolve_new_config(
     configs: &Configs,
     client: &reqwest::Client,
     project_id: &str,
+    service_name: &str,
+    environment_name: &str,
     existing: &Value,
 ) -> Result<HashMap<String, u64>> {
     if args.assignments.is_empty() && args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
-        return prompt_for_regions_for_project(configs, client, Some(project_id), existing).await;
+        let regions = fetch_regions_for_project(client, configs, Some(project_id)).await?;
+        return match scale_tui::run(scale_tui::ScaleTuiParams {
+            service_name: service_name.to_string(),
+            environment_name: environment_name.to_string(),
+            regions,
+            existing: existing.clone(),
+        })? {
+            ScaleTuiOutput::Apply(changes) => Ok(changes),
+            ScaleTuiOutput::Cancelled => Ok(HashMap::new()),
+        };
     }
 
     if args.assignments.is_empty() && args.dynamic.0.is_empty() {

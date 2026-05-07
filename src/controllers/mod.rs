@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod metrics_tui;
 pub mod project;
 pub mod regions;
+pub mod scale_tui;
 pub mod service;
 pub mod ssh_keys;
 pub mod upload;

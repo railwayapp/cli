@@ -273,24 +273,6 @@ fn friendly_region_fallback(region: &str) -> Option<String> {
 }
 
 /// Interactive prompt for selecting regions and replica counts.
-/// Fetches regions from the API first, then prompts.
-/// Returns a HashMap of region name -> replica count.
-///
-/// # Arguments
-/// * `configs` - Railway configs for API access
-/// * `client` - HTTP client
-/// * `existing` - Current region config as JSON Value (region -> { numReplicas: n })
-pub async fn prompt_for_regions_for_project(
-    configs: &Configs,
-    client: &reqwest::Client,
-    project_id: Option<&str>,
-    existing: &Value,
-) -> Result<HashMap<String, u64>> {
-    let regions = fetch_regions_for_project(client, configs, project_id).await?;
-    prompt_for_regions_with_data(regions, existing)
-}
-
-/// Interactive prompt for selecting regions and replica counts.
 /// Uses pre-fetched region data.
 /// Returns a HashMap of region name -> replica count.
 ///
