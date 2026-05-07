@@ -461,9 +461,9 @@ fi
 
 update_shell_rc_for_agents() {
   local marker='# Added by Railway agent installer'
-  local bash_escaped_bin_dir
-  printf -v bash_escaped_bin_dir '%q' "$BIN_DIR"
-  local bash_line="export PATH=\"\$PATH\":$bash_escaped_bin_dir"
+  local quoted_bin_dir
+  quoted_bin_dir="$(printf "%s" "$BIN_DIR" | sed "s/'/'\\\\''/g")"
+  local bash_line="export PATH=\"\$PATH\":'$quoted_bin_dir'"
   local fish_line="set -gx PATH \$PATH \"$BIN_DIR\""
   local found=0
 
@@ -493,36 +493,49 @@ update_shell_rc_for_agents() {
 find_railway_bins() {
   local seen=":"
   local dir bin
-  IFS=':' read -r -a path_entries <<< "$PATH"
-  for dir in "${path_entries[@]}"; do
+  local old_ifs="$IFS"
+
+  IFS=':'
+  set -- $PATH
+  IFS="$old_ifs"
+
+  for dir do
     [ -n "$dir" ] || continue
     bin="$dir/railway"
-    if [ -x "$bin" ] && [[ "$seen" != *":$bin:"* ]]; then
-      printf '%s\n' "$bin"
-      seen="$seen$bin:"
-    fi
+    [ -x "$bin" ] || continue
+    case "$seen" in
+      *":$bin:"*) ;;
+      *)
+        printf '%s\n' "$bin"
+        seen="$seen$bin:"
+        ;;
+    esac
   done
 }
 
 print_cli_conflicts() {
-  local bins=()
+  local bins_file
   local bin version
-  while IFS= read -r bin; do
-    bins+=("$bin")
-  done < <(find_railway_bins)
+  local count=0
 
-  if [ "${#bins[@]}" -eq 0 ]; then
+  bins_file="$(get_tmpfile bins)"
+  find_railway_bins > "$bins_file"
+
+  if [ ! -s "$bins_file" ]; then
+    rm -f "$bins_file"
     return
   fi
 
   info "Railway CLI on PATH:"
-  for bin in "${bins[@]}"; do
+  while IFS= read -r bin; do
+    count=$((count + 1))
     version="$("$bin" --version 2>/dev/null || echo unknown)"
     info "  $bin ($version)"
-  done
+  done < "$bins_file"
+  rm -f "$bins_file"
   info "Shells use the first entry above."
 
-  if [ "${#bins[@]}" -gt 1 ]; then
+  if [ "$count" -gt 1 ]; then
     warn "Multiple Railway CLI installs found. No PATH entries were reordered or removed."
   fi
 }
