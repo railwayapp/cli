@@ -139,9 +139,24 @@ fn session_id() -> String {
 }
 
 fn known_agent_from_env() -> Option<&'static str> {
+    if std::env::var("AGENT")
+        .map(|value| value.eq_ignore_ascii_case("amp"))
+        .unwrap_or(false)
+    {
+        return Some("amp");
+    }
+
     const ENVS: &[(&str, &str)] = &[
+        ("AIDER", "aider"),
+        ("COPILOT_AGENT_SESSION_ID", "copilot_cli"),
+        ("COPILOT_CLI", "copilot_cli"),
+        ("FACTORY_DROID", "factory_droid"),
+        ("GEMINI_CLI", "gemini"),
+        ("REPLIT_AGENT", "replit"),
         ("OPENCODE", "opencode"),
         ("OPENCODE_SESSION_ID", "opencode"),
+        ("AMP_CURRENT_THREAD_ID", "amp"),
+        ("PI_CODING_AGENT", "pi"),
         ("CLAUDECODE", "claude_code"),
         ("CLAUDE_CODE", "claude_code"),
         ("CLAUDECODE_SESSION_ID", "claude_code"),
@@ -159,10 +174,24 @@ fn caller_from_process_name(name: &str) -> Option<&'static str> {
     let name = name.to_ascii_lowercase();
     if name.contains("opencode") {
         Some("opencode")
+    } else if name.contains("aider") {
+        Some("aider")
+    } else if name.contains("replit") {
+        Some("replit")
+    } else if name.contains("copilot") {
+        Some("copilot_cli")
+    } else if name.contains("gemini") {
+        Some("gemini")
+    } else if name.contains("factory-droid") || name.contains("factory_droid") {
+        Some("factory_droid")
+    } else if name == "amp" || name.ends_with("/amp") {
+        Some("amp")
     } else if name.contains("claude") {
         Some("claude_code")
     } else if name.contains("cursor") {
         Some("cursor")
+    } else if name == "pi" || name.ends_with("/pi") {
+        Some("pi")
     } else if name.contains("codex") {
         Some("codex")
     } else if name.contains("windsurf") {
@@ -277,13 +306,15 @@ impl TelemetryContext {
         let session_id = session_id();
         let caller = detect_caller();
         let linked_project = configs.get_local_linked_project().ok();
-        let agent_session_id = safe_env(RAILWAY_AGENT_SESSION_ENV).or_else(|| {
-            if is_agent_caller(&caller) {
-                Some(session_id.clone())
-            } else {
-                None
-            }
-        });
+        let agent_session_id = safe_env(RAILWAY_AGENT_SESSION_ENV)
+            .or_else(|| safe_env("COPILOT_AGENT_SESSION_ID"))
+            .or_else(|| {
+                if is_agent_caller(&caller) {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            });
 
         Self {
             session_id,
@@ -485,4 +516,75 @@ pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
     });
 
     let _ = post_telemetry_body(&client, configs.get_backboard(), body).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caller_from_process_name;
+
+    #[test]
+    fn detects_pi_process_name() {
+        assert_eq!(caller_from_process_name("pi"), Some("pi"));
+        assert_eq!(caller_from_process_name("/usr/local/bin/pi"), Some("pi"));
+    }
+
+    #[test]
+    fn detects_amp_process_name() {
+        assert_eq!(caller_from_process_name("amp"), Some("amp"));
+        assert_eq!(caller_from_process_name("/usr/local/bin/amp"), Some("amp"));
+    }
+
+    #[test]
+    fn detects_aider_process_name() {
+        assert_eq!(caller_from_process_name("aider"), Some("aider"));
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/aider"),
+            Some("aider")
+        );
+    }
+
+    #[test]
+    fn detects_replit_process_name() {
+        assert_eq!(caller_from_process_name("replit-agent"), Some("replit"));
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/replit"),
+            Some("replit")
+        );
+    }
+
+    #[test]
+    fn detects_copilot_process_name() {
+        assert_eq!(caller_from_process_name("copilot"), Some("copilot_cli"));
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/copilot"),
+            Some("copilot_cli")
+        );
+    }
+
+    #[test]
+    fn detects_gemini_process_name() {
+        assert_eq!(caller_from_process_name("gemini"), Some("gemini"));
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/gemini"),
+            Some("gemini")
+        );
+    }
+
+    #[test]
+    fn detects_factory_droid_process_name() {
+        assert_eq!(
+            caller_from_process_name("factory-droid"),
+            Some("factory_droid")
+        );
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/factory_droid"),
+            Some("factory_droid")
+        );
+    }
+
+    #[test]
+    fn does_not_detect_short_agent_names_as_substrings() {
+        assert_eq!(caller_from_process_name("pilot"), None);
+        assert_eq!(caller_from_process_name("example"), None);
+    }
 }

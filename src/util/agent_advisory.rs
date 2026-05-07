@@ -82,16 +82,35 @@ fn is_agent_environment() -> bool {
 
     const AGENT_ENV_VARS: &[&str] = &[
         "AIDER",
+        "AMP_CURRENT_THREAD_ID",
+        "COPILOT_AGENT_SESSION_ID",
+        "COPILOT_CLI",
         "CLAUDECODE",
         "CLAUDE_CODE",
         "CURSOR_AGENT",
         "FACTORY_DROID",
+        "GEMINI_CLI",
         "OPENCODE",
         "OPENAI_AGENT",
+        "PI_CODING_AGENT",
         "REPLIT_AGENT",
     ];
 
-    const AGENT_ENV_PREFIXES: &[&str] = &["CLAUDE_CODE_", "CODEX_", "OPENCODE_"];
+    const AGENT_ENV_PREFIXES: &[&str] = &[
+        "AMP_",
+        "CLAUDE_CODE_",
+        "CODEX_",
+        "COPILOT_",
+        "GEMINI_",
+        "OPENCODE_",
+    ];
+
+    if std::env::var("AGENT")
+        .map(|value| value.eq_ignore_ascii_case("amp"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
 
     AGENT_ENV_VARS
         .iter()
