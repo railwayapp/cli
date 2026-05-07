@@ -20,7 +20,6 @@ pub enum ScaleTuiAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScaleTuiMode {
     Browse,
-    Search,
     Edit,
     Confirm,
     Help,
@@ -62,7 +61,6 @@ pub struct ScaleTuiApp {
     pub selected: usize,
     pub mode: ScaleTuiMode,
     pub focus: ScaleTuiFocus,
-    pub search: String,
     pub edit_input: String,
     pub error: Option<String>,
 }
@@ -129,29 +127,13 @@ impl ScaleTuiApp {
             selected: 0,
             mode: ScaleTuiMode::Browse,
             focus: ScaleTuiFocus::Regions,
-            search: String::new(),
             edit_input: String::new(),
             error: None,
         }
     }
 
     pub fn visible_indices(&self) -> Vec<usize> {
-        let query = self.search.trim().to_ascii_lowercase();
-        self.rows
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, row)| {
-                if query.is_empty()
-                    || row.label.to_ascii_lowercase().contains(&query)
-                    || row.cli_name.to_ascii_lowercase().contains(&query)
-                    || row.name.to_ascii_lowercase().contains(&query)
-                {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        (0..self.rows.len()).collect()
     }
 
     pub fn selected_row(&self) -> Option<&RegionRow> {
@@ -219,7 +201,6 @@ impl ScaleTuiApp {
 
         match self.mode {
             ScaleTuiMode::Browse => self.handle_browse_key(key),
-            ScaleTuiMode::Search => self.handle_search_key(key),
             ScaleTuiMode::Edit => self.handle_edit_key(key),
             ScaleTuiMode::Confirm => self.handle_confirm_key(key),
             ScaleTuiMode::Help => self.handle_help_key(key),
@@ -319,11 +300,6 @@ impl ScaleTuiApp {
                 }
                 ScaleTuiAction::Continue
             }
-            KeyCode::Char('/') => {
-                self.focus = ScaleTuiFocus::Regions;
-                self.mode = ScaleTuiMode::Search;
-                ScaleTuiAction::Continue
-            }
             KeyCode::Char('a') => self.activate_apply(),
             KeyCode::Char('?') => {
                 self.mode = ScaleTuiMode::Help;
@@ -331,33 +307,6 @@ impl ScaleTuiApp {
             }
             _ => ScaleTuiAction::Continue,
         }
-    }
-
-    fn handle_search_key(&mut self, key: KeyEvent) -> ScaleTuiAction {
-        match key.code {
-            KeyCode::Esc => {
-                if self.search.is_empty() {
-                    self.mode = ScaleTuiMode::Browse;
-                } else {
-                    self.search.clear();
-                    self.selected = 0;
-                }
-            }
-            KeyCode::Enter => self.mode = ScaleTuiMode::Browse,
-            KeyCode::Backspace => {
-                self.search.pop();
-                self.clamp_selection();
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.search.push(ch);
-                self.selected = 0;
-                self.clamp_selection();
-            }
-            _ => {}
-        }
-        ScaleTuiAction::Continue
     }
 
     fn handle_edit_key(&mut self, key: KeyEvent) -> ScaleTuiAction {
@@ -468,11 +417,6 @@ impl ScaleTuiApp {
                 row.desired = row.desired.saturating_add(delta as u64);
             }
         }
-    }
-
-    fn clamp_selection(&mut self) {
-        let len = self.visible_indices().len();
-        self.selected = self.selected.min(len.saturating_sub(1));
     }
 }
 

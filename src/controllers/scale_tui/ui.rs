@@ -23,7 +23,7 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
     }
 
     let visible_rows = app.visible_indices().len().max(1) as u16;
-    let preview_height = if show_preview(app) { 3 } else { 0 };
+    let preview_height = 3;
     let reserved_height = 2 + 1 + preview_height + 2;
     let table_height = visible_rows
         .saturating_add(3)
@@ -41,20 +41,18 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
     render_header(app, frame, chunks[0]);
     render_table(app, frame, chunks[1]);
     render_help_bar(app, frame, chunks[2]);
-    if show_preview(app) {
-        render_preview(app, frame, chunks[3]);
-    }
+    render_preview(app, frame, chunks[3]);
     render_actions(app, frame, chunks[4]);
 
     match app.mode {
         ScaleTuiMode::Confirm => render_confirm_popup(app, frame, area),
         ScaleTuiMode::Help => render_help_popup(frame, area),
-        ScaleTuiMode::Browse | ScaleTuiMode::Search | ScaleTuiMode::Edit => {}
+        ScaleTuiMode::Browse | ScaleTuiMode::Edit => {}
     }
 }
 
 fn render_header(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
-    let mut header = vec![
+    let header = vec![
         Span::styled("  Scale ", Style::default().fg(LABEL_COLOR)),
         Span::styled(
             app.service_name.clone(),
@@ -71,18 +69,6 @@ fn render_header(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
         ),
     ];
 
-    if app.mode == ScaleTuiMode::Search || !app.search.is_empty() {
-        header.push(Span::styled("  search  ", Style::default().fg(LABEL_COLOR)));
-        header.push(Span::styled(
-            if app.search.is_empty() {
-                "/".to_string()
-            } else {
-                format!("/{}", app.search)
-            },
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-
     frame.render_widget(
         Paragraph::new(vec![Line::from(header), Line::from("")]),
         area,
@@ -92,11 +78,7 @@ fn render_header(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let visible = app.visible_indices();
     if visible.is_empty() {
-        let message = if app.search.is_empty() {
-            "No regions available."
-        } else {
-            "No regions match the current search."
-        };
+        let message = "No regions available.";
         frame.render_widget(
             Paragraph::new(format!("  {message}")).style(Style::default().fg(LABEL_COLOR)),
             area,
@@ -139,8 +121,7 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
             .fg(Color::Black)
             .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("  ");
+    );
 
     let mut state = TableState::default();
     if app.focus == ScaleTuiFocus::Regions {
@@ -186,11 +167,10 @@ fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 
 fn render_help_bar(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let help = match app.mode {
-        ScaleTuiMode::Search => "Type search  Enter done  Esc clear/back  Up/Down move",
         ScaleTuiMode::Browse if app.focus == ScaleTuiFocus::Regions => {
-            "Up/Down move  type edit  +/- adjust  0 remove  Tab buttons  / search  ? help"
+            "Up/Down move  type edit  +/- adjust  0 remove  Enter edit  ? help"
         }
-        ScaleTuiMode::Browse => "Enter activate  Tab switch  Up regions  q cancel  ? help",
+        ScaleTuiMode::Browse => "Enter activate  Up regions  q cancel  ? help",
         ScaleTuiMode::Edit => "Type replicas  Enter save  Esc cancel  Backspace delete",
         ScaleTuiMode::Confirm => "Enter apply  e edit  q cancel",
         ScaleTuiMode::Help => "Esc close help",
@@ -265,7 +245,6 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from("Type a number to edit the selected replica cell inline."),
         Line::from("Enter saves an inline edit."),
         Line::from("0 sets the selected region to zero replicas."),
-        Line::from("/ searches by dashboard label, CLI name, or region id."),
         Line::from("a previews and applies the selected changes."),
         Line::from("q or Esc cancels without applying."),
         Line::from(""),
@@ -322,10 +301,6 @@ fn button(label: &'static str, focused: bool, color: Color) -> Span<'static> {
     };
 
     Span::styled(format!("[ {label} ]"), style)
-}
-
-fn show_preview(app: &ScaleTuiApp) -> bool {
-    app.error.is_some() || !app.changes().is_empty()
 }
 
 fn change_label(row: &RegionRow) -> String {
