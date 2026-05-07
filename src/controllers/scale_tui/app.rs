@@ -251,6 +251,11 @@ impl ScaleTuiApp {
                 }
                 ScaleTuiAction::Continue
             }
+            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                self.edit_input = ch.to_string();
+                self.mode = ScaleTuiMode::Edit;
+                ScaleTuiAction::Continue
+            }
             KeyCode::Enter | KeyCode::Char('e') => {
                 if let Some(row) = self.selected_row() {
                     self.edit_input = row.desired.to_string();
@@ -308,6 +313,7 @@ impl ScaleTuiApp {
         match key.code {
             KeyCode::Esc => {
                 self.mode = ScaleTuiMode::Browse;
+                self.edit_input.clear();
             }
             KeyCode::Enter => match self.edit_input.parse::<u64>() {
                 Ok(replicas) => {
@@ -323,6 +329,9 @@ impl ScaleTuiApp {
             },
             KeyCode::Backspace => {
                 self.edit_input.pop();
+            }
+            KeyCode::Delete => {
+                self.edit_input.clear();
             }
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
                 self.edit_input.push(ch);
@@ -536,5 +545,53 @@ mod tests {
             app.command_preview(),
             "railway scale --environment production --service 'web worker' region-a=2"
         );
+    }
+
+    #[test]
+    fn typing_digit_starts_inline_edit_without_changing_until_enter() {
+        let regions = queries::regions::ResponseData {
+            regions: vec![region("us-west2", "US West", "US", Some("us-west2"), false)],
+        };
+        let mut app = ScaleTuiApp::new(
+            "worker".to_string(),
+            "production".to_string(),
+            regions,
+            &json!({"us-west2": {"numReplicas": 1}}),
+        );
+
+        assert_eq!(
+            app.handle_key(KeyEvent::from(KeyCode::Char('4'))),
+            ScaleTuiAction::Continue
+        );
+        assert_eq!(app.mode, ScaleTuiMode::Edit);
+        assert_eq!(app.edit_input, "4");
+        assert_eq!(app.rows[0].desired, 1);
+
+        assert_eq!(
+            app.handle_key(KeyEvent::from(KeyCode::Enter)),
+            ScaleTuiAction::Continue
+        );
+        assert_eq!(app.mode, ScaleTuiMode::Browse);
+        assert_eq!(app.rows[0].desired, 4);
+    }
+
+    #[test]
+    fn escape_cancels_inline_edit() {
+        let regions = queries::regions::ResponseData {
+            regions: vec![region("us-west2", "US West", "US", Some("us-west2"), false)],
+        };
+        let mut app = ScaleTuiApp::new(
+            "worker".to_string(),
+            "production".to_string(),
+            regions,
+            &json!({"us-west2": {"numReplicas": 1}}),
+        );
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('4')));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        assert_eq!(app.mode, ScaleTuiMode::Browse);
+        assert_eq!(app.edit_input, "");
+        assert_eq!(app.rows[0].desired, 1);
     }
 }

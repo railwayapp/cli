@@ -35,10 +35,9 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
     render_help_bar(app, frame, chunks[3]);
 
     match app.mode {
-        ScaleTuiMode::Edit => render_edit_popup(app, frame, area),
         ScaleTuiMode::Confirm => render_confirm_popup(app, frame, area),
         ScaleTuiMode::Help => render_help_popup(frame, area),
-        ScaleTuiMode::Browse | ScaleTuiMode::Search => {}
+        ScaleTuiMode::Browse | ScaleTuiMode::Search | ScaleTuiMode::Edit => {}
     }
 }
 
@@ -87,13 +86,12 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let rows = visible.iter().map(|idx| {
+    let rows = visible.iter().enumerate().map(|(visible_idx, idx)| {
         let row = &app.rows[*idx];
         Row::new(vec![
             Cell::from(region_label(row)),
             Cell::from(row.cli_name.clone()),
-            Cell::from(row.current.to_string()),
-            Cell::from(row.desired.to_string()),
+            replica_cell(app, visible_idx, row),
             Cell::from(change_label(row)),
         ])
         .style(row_style(row))
@@ -102,15 +100,14 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(45),
+            Constraint::Percentage(52),
             Constraint::Length(18),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Min(8),
+            Constraint::Length(12),
+            Constraint::Min(18),
         ],
     )
     .header(
-        Row::new(vec!["Region", "CLI name", "Current", "Desired", "Change"]).style(
+        Row::new(vec!["Region", "CLI name", "Replicas", "Change"]).style(
             Style::default()
                 .fg(LABEL_COLOR)
                 .add_modifier(Modifier::BOLD),
@@ -168,9 +165,9 @@ fn render_help_bar(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     let help = match app.mode {
         ScaleTuiMode::Search => "Type search  Enter done  Esc clear/back  Up/Down move",
         ScaleTuiMode::Browse => {
-            "Up/Down move  +/- adjust  Enter edit  0 remove  / search  a apply  q cancel  ? help"
+            "Up/Down move  type edit  +/- adjust  0 remove  / search  a apply  q cancel  ? help"
         }
-        ScaleTuiMode::Edit => "Enter save  Esc cancel",
+        ScaleTuiMode::Edit => "Type replicas  Enter save  Esc cancel  Backspace delete",
         ScaleTuiMode::Confirm => "Enter apply  e edit  q cancel",
         ScaleTuiMode::Help => "Esc close help",
     };
@@ -181,31 +178,6 @@ fn render_help_bar(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
         ))),
         area,
     );
-}
-
-fn render_edit_popup(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(48, 7, area);
-    frame.render_widget(Clear, popup);
-
-    let row_name = app
-        .selected_row()
-        .map(|row| row.label.clone())
-        .unwrap_or_else(|| "region".to_string());
-    let block = Block::default()
-        .title(" Edit replicas ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .padding(Padding::new(1, 1, 1, 1));
-    let text = vec![
-        Line::from(row_name),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Replicas: ", Style::default().fg(LABEL_COLOR)),
-            Span::styled(app.edit_input.clone(), Style::default().fg(Color::Yellow)),
-        ]),
-    ];
-
-    frame.render_widget(Paragraph::new(text).block(block), popup);
 }
 
 fn render_confirm_popup(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
@@ -266,7 +238,8 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from("+ / - adjusts the selected region by one replica."),
-        Line::from("Enter opens an exact replica-count editor."),
+        Line::from("Type a number to edit the selected replica cell inline."),
+        Line::from("Enter saves an inline edit."),
         Line::from("0 sets the selected region to zero replicas."),
         Line::from("/ searches by dashboard label, CLI name, or region id."),
         Line::from("a previews and applies the selected changes."),
@@ -293,10 +266,39 @@ fn region_label(row: &RegionRow) -> String {
     label
 }
 
+fn replica_cell(app: &ScaleTuiApp, visible_idx: usize, row: &RegionRow) -> Cell<'static> {
+    let is_editing = app.mode == ScaleTuiMode::Edit && app.selected == visible_idx;
+    if is_editing {
+        return Cell::from(Line::from(vec![Span::styled(
+            format!("[{}]", app.edit_input),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
+    }
+
+    let style = if row.changed() {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Cell::from(Line::from(Span::styled(row.desired.to_string(), style)))
+}
+
 fn change_label(row: &RegionRow) -> String {
+    if !row.changed() {
+        return String::new();
+    }
+
+    if row.desired == 0 && row.current > 0 {
+        return format!("was {}, remove", row.current);
+    }
+
     match row.change() {
-        change if change > 0 => format!("+{change}"),
-        change if change < 0 => change.to_string(),
+        change if change > 0 => format!("was {}, +{}", row.current, change),
+        change if change < 0 => format!("was {}, {}", row.current, change),
         _ => String::new(),
     }
 }
