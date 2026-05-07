@@ -554,7 +554,10 @@ mod tests {
         let root: JsonValue = serde_json::from_str(&written).unwrap();
         let railway = root.pointer("/mcpServers/railway").unwrap();
 
-        assert_eq!(railway.get("type").and_then(JsonValue::as_str), Some("local"));
+        assert_eq!(
+            railway.get("type").and_then(JsonValue::as_str),
+            Some("local")
+        );
         assert_eq!(
             railway.get("command").and_then(JsonValue::as_str),
             Some("railway")
@@ -574,7 +577,10 @@ mod tests {
         let root: JsonValue = serde_json::from_str(&written).unwrap();
         let railway = root.pointer("/mcpServers/railway").unwrap();
 
-        assert_eq!(railway.get("type").and_then(JsonValue::as_str), Some("http"));
+        assert_eq!(
+            railway.get("type").and_then(JsonValue::as_str),
+            Some("http")
+        );
         assert_eq!(
             railway.get("url").and_then(JsonValue::as_str),
             Some("https://mcp.railway.com")
