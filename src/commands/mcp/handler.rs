@@ -945,7 +945,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Scale one service across Railway deploy regions using friendly region names or region IDs. Provide replicas as a map, e.g. {\"eu-west\": 2, \"us-east\": 1}."
+        description = "Scale one service across Railway deploy regions using friendly region names or region IDs. Provide replicas as a map, e.g. {\"eu-west\": 2, \"us-east\": 1}. Maximum 50 total replicas across regions."
     )]
     async fn scale_service(
         &self,

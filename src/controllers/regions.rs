@@ -20,6 +20,8 @@ use crate::{
     },
 };
 
+pub const MAX_TOTAL_REPLICAS: u64 = 50;
+
 /// Wrapper for region display in prompts
 pub struct PromptRegion(pub queries::regions::RegionsRegions, pub String);
 
@@ -172,6 +174,26 @@ pub fn resolve_deploy_region_id(
     }
 }
 
+pub fn resolve_deploy_region_id_for_scale(
+    regions: &queries::regions::ResponseData,
+    input: &str,
+    replicas: u64,
+    existing: &Value,
+) -> Result<String> {
+    match resolve_deploy_region_id(regions, input) {
+        Ok(region_id) => Ok(region_id),
+        Err(error) => {
+            if let Some((region_id, current_replicas)) = existing_region_replicas(existing, input)
+                && replicas <= current_replicas
+            {
+                return Ok(region_id);
+            }
+
+            Err(error)
+        }
+    }
+}
+
 pub fn available_deploy_regions_help(regions: &[queries::regions::RegionsRegions]) -> String {
     regions
         .iter()
@@ -185,6 +207,44 @@ pub fn available_deploy_regions_help(regions: &[queries::regions::RegionsRegions
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+pub fn configured_replicas(region_config: &Value) -> u64 {
+    region_config
+        .get("numReplicas")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+pub fn total_replicas(region_data: &Value) -> u64 {
+    region_data
+        .as_object()
+        .map(|config| {
+            config.values().fold(0u64, |total, value| {
+                total.saturating_add(configured_replicas(value))
+            })
+        })
+        .unwrap_or(0)
+}
+
+pub fn validate_total_replicas(region_data: &Value) -> Result<()> {
+    let total = total_replicas(region_data);
+    if total > MAX_TOTAL_REPLICAS {
+        bail!(
+            "Cannot scale to {total} replicas. The maximum is {MAX_TOTAL_REPLICAS} total replicas across regions. Reduce the requested total by at least {} replicas.",
+            total.saturating_sub(MAX_TOTAL_REPLICAS)
+        );
+    }
+
+    Ok(())
+}
+
+fn existing_region_replicas(existing: &Value, input: &str) -> Option<(String, u64)> {
+    existing
+        .as_object()?
+        .iter()
+        .find(|(region, _)| region.eq_ignore_ascii_case(input))
+        .map(|(region, value)| (region.clone(), configured_replicas(value)))
 }
 
 pub fn region_display_name(region: &str, region_locations: &HashMap<String, String>) -> String {
@@ -540,6 +600,22 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_existing_regions_can_be_scaled_down_by_id() {
+        let regions = queries::regions::ResponseData {
+            regions: vec![region(Some(true))],
+        };
+        let existing = json!({
+            "us-west2": { "numReplicas": 3 }
+        });
+
+        assert_eq!(
+            resolve_deploy_region_id_for_scale(&regions, "us-west2", 0, &existing).unwrap(),
+            "us-west2"
+        );
+        assert!(resolve_deploy_region_id_for_scale(&regions, "us-west2", 4, &existing).is_err());
+    }
+
+    #[test]
     fn region_matching_accepts_friendly_slug_and_region_id() {
         let region = region(None);
         assert!(region_matches_input(&region, "us-west"));
@@ -582,5 +658,22 @@ mod tests {
                 "us-east4-eqdc4a": { "numReplicas": 1 }
             }))
         );
+    }
+
+    #[test]
+    fn total_replicas_are_capped_at_fifty() {
+        let valid = json!({
+            "us-west2": { "numReplicas": 25 },
+            "europe-west4-drams3a": { "numReplicas": 25 },
+            "us-east4-eqdc4a": null
+        });
+        let invalid = json!({
+            "us-west2": { "numReplicas": 25 },
+            "europe-west4-drams3a": { "numReplicas": 26 }
+        });
+
+        assert_eq!(total_replicas(&valid), MAX_TOTAL_REPLICAS);
+        assert!(validate_total_replicas(&valid).is_ok());
+        assert!(validate_total_replicas(&invalid).is_err());
     }
 }

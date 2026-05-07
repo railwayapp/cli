@@ -301,7 +301,7 @@ pub struct ScaleServiceParams {
     /// The environment ID or name. If omitted, uses the currently linked environment.
     #[serde(default)]
     pub environment_id: Option<String>,
-    /// Map of friendly region names or region IDs to replica counts, e.g. {"eu-west": 2, "us-east": 1}.
+    /// Map of friendly region names or region IDs to replica counts, e.g. {"eu-west": 2, "us-east": 1}. Maximum 50 total replicas across regions.
     pub replicas: BTreeMap<String, i64>,
 }
 

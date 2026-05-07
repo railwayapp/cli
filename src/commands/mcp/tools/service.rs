@@ -11,7 +11,8 @@ use crate::{
         regions::{
             build_multi_region_patch, convert_hashmap_to_map, fetch_regions_for_project,
             format_region_replicas, merge_config, region_data_from_deployment_meta,
-            region_locations_from_regions, resolve_deploy_region_id,
+            region_locations_from_regions, resolve_deploy_region_id_for_scale,
+            validate_total_replicas,
         },
     },
     gql::{mutations, queries},
@@ -52,26 +53,6 @@ impl RailwayMcp {
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
                 })?;
-
-        let mut requested = HashMap::new();
-        for (region_input, replicas) in params.replicas {
-            if replicas < 0 {
-                return Err(McpError::invalid_params(
-                    format!("Replica count for region \"{region_input}\" must be zero or greater."),
-                    None,
-                ));
-            }
-
-            let region_id = resolve_deploy_region_id(&regions, &region_input)
-                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-            if requested.insert(region_id, replicas as u64).is_some() {
-                return Err(McpError::invalid_params(
-                    format!("Region \"{region_input}\" was specified more than once."),
-                    None,
-                ));
-            }
-        }
-
         let config_resp = fetch_environment_config(
             &self.client,
             &self.configs,
@@ -113,7 +94,34 @@ impl RailwayMcp {
             .map(|config| serde_json::to_value(config).unwrap_or(Value::Object(Map::new())))
             .unwrap_or_else(|| Value::Object(Map::new()));
         let existing = existing_from_deployment.unwrap_or(existing_from_config);
+
+        let mut requested = HashMap::new();
+        for (region_input, replicas) in params.replicas {
+            if replicas < 0 {
+                return Err(McpError::invalid_params(
+                    format!("Replica count for region \"{region_input}\" must be zero or greater."),
+                    None,
+                ));
+            }
+
+            let region_id = resolve_deploy_region_id_for_scale(
+                &regions,
+                &region_input,
+                replicas as u64,
+                &existing,
+            )
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            if requested.insert(region_id, replicas as u64).is_some() {
+                return Err(McpError::invalid_params(
+                    format!("Region \"{region_input}\" was specified more than once."),
+                    None,
+                ));
+            }
+        }
+
         let region_data = merge_config(existing, convert_hashmap_to_map(requested));
+        validate_total_replicas(&region_data)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let patch =
             build_multi_region_patch(&service_ctx.service_id, &region_data).map_err(|e| {
                 McpError::internal_error(format!("Failed to build scale patch: {e}"), None)

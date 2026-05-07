@@ -7,7 +7,7 @@ use crate::{
             available_deploy_regions_help, build_multi_region_patch, convert_hashmap_to_map,
             fetch_region_locations_for_project, fetch_regions, fetch_regions_for_project,
             merge_config, region_data_from_deployment_meta, region_flag_name, region_full_label,
-            region_is_available, resolve_deploy_region_id,
+            region_is_available, resolve_deploy_region_id_for_scale, validate_total_replicas,
         },
         scale_tui::{self, ScaleTuiOutput},
     },
@@ -59,6 +59,7 @@ const SCALE_AFTER_HELP: &str = r#"Examples:
   railway scale --environment production --service worker eu-west=0
 
 Region names use the same friendly names as the Railway dashboard, formatted for the CLI.
+Replica counts are capped at 50 total replicas across regions.
 Run `railway scale --help` while logged in to list available regions.
 
 Backwards compatibility:
@@ -115,6 +116,7 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
     let region_data = merge_config(existing, new_config);
+    validate_total_replicas(&region_data)?;
     commit_scale_patch(
         &configs,
         &client,
@@ -191,7 +193,8 @@ async fn resolve_new_config(
         let replicas = replicas_input.parse::<u64>().with_context(|| {
             format!("Invalid replica count `{replicas_input}` in `{assignment}`")
         })?;
-        let region_id = resolve_deploy_region_id(&regions, region_input)?;
+        let region_id =
+            resolve_deploy_region_id_for_scale(&regions, region_input, replicas, existing)?;
 
         if new_config.insert(region_id.clone(), replicas).is_some() {
             bail!("Region `{}` was specified more than once", region_input);
@@ -320,25 +323,41 @@ fn add_region_args(cmd: Command) -> Command {
             .filter(|r| region_is_available(r))
             .collect::<Vec<_>>();
         let cmd = cmd.after_help(dynamic_scale_after_help(&regions.regions));
+        let flag_counts = available_regions
+            .iter()
+            .fold(HashMap::new(), |mut counts, region| {
+                *counts.entry(region_flag_name(region)).or_insert(0usize) += 1;
+                counts
+            });
 
         available_regions.iter().fold(cmd, |new_cmd, region| {
             let region_id_static: &'static str = Box::leak(region.name.clone().into_boxed_str());
-            let region_flag_static: &'static str =
-                Box::leak(region_flag_name(region).into_boxed_str());
+            let region_flag = region_flag_name(region);
+            let use_friendly_flag =
+                flag_counts.get(&region_flag).copied().unwrap_or(0) == 1 && !region_flag.is_empty();
+            let long_flag = if use_friendly_flag {
+                region_flag
+            } else {
+                region.name.clone()
+            };
+            let region_flag_static: &'static str = Box::leak(long_flag.into_boxed_str());
             let region_help = format!(
                 "Number of instances to run in {}",
                 region_full_label(region)
             );
-            new_cmd.arg(
-                Arg::new(region_id_static)
-                    .long(region_flag_static)
-                    .alias(region_id_static)
-                    .help(region_help)
-                    .hide(true)
-                    .value_name("INSTANCES")
-                    .value_parser(clap::value_parser!(u64))
-                    .action(clap::ArgAction::Set),
-            )
+            let arg = Arg::new(region_id_static)
+                .long(region_flag_static)
+                .help(region_help)
+                .hide(true)
+                .value_name("INSTANCES")
+                .value_parser(clap::value_parser!(u64))
+                .action(clap::ArgAction::Set);
+            let arg = if use_friendly_flag {
+                arg.alias(region_id_static)
+            } else {
+                arg
+            };
+            new_cmd.arg(arg)
         })
     })
 }

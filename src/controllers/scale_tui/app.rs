@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use crate::{
     controllers::regions::{
-        region_display_name, region_flag_name, region_full_label, region_is_available,
+        MAX_TOTAL_REPLICAS, region_display_name, region_flag_name, region_full_label,
+        region_is_available,
     },
     gql::queries,
 };
@@ -155,6 +156,12 @@ impl ScaleTuiApp {
         self.rows.iter().filter(|row| row.changed()).collect()
     }
 
+    pub fn total_desired_replicas(&self) -> u64 {
+        self.rows
+            .iter()
+            .fold(0u64, |total, row| total.saturating_add(row.desired))
+    }
+
     pub fn command_preview(&self) -> String {
         let mut changes = self.changed_rows();
         changes.sort_by(|a, b| a.cli_name.cmp(&b.cli_name));
@@ -268,10 +275,8 @@ impl ScaleTuiApp {
                 ScaleTuiAction::Continue
             }
             KeyCode::Char('0') => {
-                if self.focus == ScaleTuiFocus::Regions
-                    && let Some(row) = self.selected_row_mut()
-                {
-                    row.desired = 0;
+                if self.focus == ScaleTuiFocus::Regions {
+                    self.set_selected_desired(0);
                 }
                 ScaleTuiAction::Continue
             }
@@ -318,9 +323,7 @@ impl ScaleTuiApp {
             }
             KeyCode::Enter => match self.edit_input.parse::<u64>() {
                 Ok(replicas) => {
-                    if let Some(row) = self.selected_row_mut() {
-                        row.desired = replicas;
-                    }
+                    self.set_selected_desired(replicas);
                     self.mode = ScaleTuiMode::Browse;
                     self.focus = ScaleTuiFocus::Regions;
                     self.edit_input.clear();
@@ -378,6 +381,12 @@ impl ScaleTuiApp {
             return ScaleTuiAction::Apply(HashMap::new());
         }
 
+        let total = self.total_desired_replicas();
+        if total > MAX_TOTAL_REPLICAS {
+            self.error = Some(max_total_error(total));
+            return ScaleTuiAction::Continue;
+        }
+
         self.mode = ScaleTuiMode::Confirm;
         ScaleTuiAction::Continue
     }
@@ -410,14 +419,51 @@ impl ScaleTuiApp {
     }
 
     fn adjust_selected(&mut self, delta: i64) {
-        if let Some(row) = self.selected_row_mut() {
-            if delta.is_negative() {
-                row.desired = row.desired.saturating_sub(delta.unsigned_abs());
+        if let Some(row) = self.selected_row() {
+            let next = if delta.is_negative() {
+                row.desired.saturating_sub(delta.unsigned_abs())
             } else {
-                row.desired = row.desired.saturating_add(delta as u64);
-            }
+                row.desired.saturating_add(delta as u64)
+            };
+            self.set_selected_desired(next);
         }
     }
+
+    fn set_selected_desired(&mut self, replicas: u64) {
+        let max = self.max_for_selected_row();
+        let desired = replicas.min(max);
+        if replicas > max {
+            self.error = Some(format!(
+                "Max for this region is {max} replicas ({MAX_TOTAL_REPLICAS} total across regions)."
+            ));
+        }
+
+        if let Some(row) = self.selected_row_mut() {
+            row.desired = desired;
+        }
+    }
+
+    fn max_for_selected_row(&self) -> u64 {
+        let visible = self.visible_indices();
+        let Some(selected_idx) = visible.get(self.selected) else {
+            return 0;
+        };
+
+        let other_replicas = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| idx != selected_idx)
+            .fold(0u64, |total, (_, row)| total.saturating_add(row.desired));
+
+        MAX_TOTAL_REPLICAS.saturating_sub(other_replicas)
+    }
+}
+
+fn max_total_error(total: u64) -> String {
+    format!(
+        "Cannot scale to {total} replicas. Max is {MAX_TOTAL_REPLICAS} total replicas across regions."
+    )
 }
 
 fn current_replicas(existing: &Value) -> HashMap<String, u64> {
@@ -595,6 +641,78 @@ mod tests {
         );
         assert_eq!(app.mode, ScaleTuiMode::Browse);
         assert_eq!(app.rows[0].desired, 4);
+    }
+
+    #[test]
+    fn typed_replica_count_is_capped_by_remaining_total() {
+        let regions = queries::regions::ResponseData {
+            regions: vec![
+                region("us-west2", "US West", "US", Some("us-west2"), false),
+                region(
+                    "europe-west4-drams3a",
+                    "EU West",
+                    "NL",
+                    Some("europe-west4"),
+                    false,
+                ),
+            ],
+        };
+        let mut app = ScaleTuiApp::new(
+            "worker".to_string(),
+            "production".to_string(),
+            regions,
+            &json!({
+                "us-west2": { "numReplicas": 1 },
+                "europe-west4-drams3a": { "numReplicas": 1 }
+            }),
+        );
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('6')));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('0')));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.rows[app.selected].desired, 49);
+        assert_eq!(app.total_desired_replicas(), MAX_TOTAL_REPLICAS);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("Max for this region"))
+        );
+    }
+
+    #[test]
+    fn increment_does_not_exceed_total_replica_limit() {
+        let regions = queries::regions::ResponseData {
+            regions: vec![
+                region("us-west2", "US West", "US", Some("us-west2"), false),
+                region(
+                    "europe-west4-drams3a",
+                    "EU West",
+                    "NL",
+                    Some("europe-west4"),
+                    false,
+                ),
+            ],
+        };
+        let mut app = ScaleTuiApp::new(
+            "worker".to_string(),
+            "production".to_string(),
+            regions,
+            &json!({
+                "us-west2": { "numReplicas": 49 },
+                "europe-west4-drams3a": { "numReplicas": 1 }
+            }),
+        );
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('+')));
+
+        assert_eq!(app.total_desired_replicas(), MAX_TOTAL_REPLICAS);
+        assert_eq!(app.rows[app.selected].desired, 49);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("Max for this region"))
+        );
     }
 
     #[test]

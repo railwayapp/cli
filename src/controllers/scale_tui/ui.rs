@@ -6,6 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap},
 };
 
+use crate::controllers::regions::MAX_TOTAL_REPLICAS;
+
 use super::{RegionRow, ScaleTuiApp, ScaleTuiFocus, ScaleTuiMode};
 
 const LABEL_COLOR: Color = Color::DarkGray;
@@ -238,6 +240,7 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("+ / - adjusts the selected region by one replica."),
         Line::from("Type a number to edit the selected replica cell inline."),
+        Line::from(format!("Replica total is capped at {MAX_TOTAL_REPLICAS}.")),
         Line::from("Enter saves an inline edit."),
         Line::from("0 sets the selected region to zero replicas."),
         Line::from("a previews and applies the selected changes."),
