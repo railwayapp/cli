@@ -19,7 +19,7 @@ use super::*;
 pub struct Args {
     /// Browserless login
     #[clap(short, long)]
-    browserless: bool,
+    pub browserless: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {

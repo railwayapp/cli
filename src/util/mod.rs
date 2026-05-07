@@ -1,3 +1,4 @@
+pub mod agent_advisory;
 pub mod check_update;
 pub mod compare_semver;
 pub mod install_method;

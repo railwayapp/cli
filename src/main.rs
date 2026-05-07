@@ -55,6 +55,7 @@ commands!(
     project,
     run(local),
     service,
+    setup,
     shell,
     skills,
     ssh,
@@ -198,7 +199,8 @@ async fn main() -> Result<()> {
     // Check raw args too so that help/error paths (where clap returns Err)
     // are also detected — e.g. `railway upgrade --help` should not apply
     // a staged update as a side effect.
-    let raw_subcommand = std::env::args().nth(1).filter(|a| !a.starts_with('-'));
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_subcommand = raw_args.iter().find(|a| !a.starts_with('-')).cloned();
 
     let is_update_management_cmd = matches!(
         raw_subcommand.as_deref(),
@@ -305,6 +307,8 @@ async fn main() -> Result<()> {
         "logout",
         "completion",
         "docs",
+        "setup",
+        "skills",
         "upgrade",
         "autoupdate",
         "telemetry_cmd",
@@ -312,9 +316,14 @@ async fn main() -> Result<()> {
         "check_updates",
     ];
 
+    let is_mcp_install = matches!(
+        cli.subcommand(),
+        Some(("mcp", mcp_matches)) if mcp_matches.subcommand_name() == Some("install")
+    );
+
     let needs_refresh = cli
         .subcommand_name()
-        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd))
+        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install)
         .unwrap_or(false);
 
     if needs_refresh {
@@ -325,6 +334,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    let subcommand_name = cli.subcommand_name().map(str::to_string);
     let exec_result = exec_cli(cli).await;
 
     // Send telemetry for silent auto-update apply (after auth is available).
@@ -353,6 +363,8 @@ async fn main() -> Result<()> {
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);
     }
+
+    util::agent_advisory::maybe_show(&raw_args, subcommand_name.as_deref()).await;
 
     handle_update_task(check_updates_handle).await;
 
@@ -570,6 +582,33 @@ mod cli_tests {
             assert_parses(&["variable", "set", "KEY", "--stdin"]);
             assert_parses(&["variable", "set", "MY_VAR", "--stdin", "-s", "myservice"]);
             assert_parses(&["variable", "set", "SECRET", "--stdin", "--skip-deploys"]);
+        }
+
+        #[test]
+        fn setup_agent_subcommand() {
+            assert_subcommand(&["setup", "agent"], "setup");
+            assert_parses(&["setup", "agent"]);
+            assert_parses(&["setup", "agent", "--yes"]);
+            assert_parses(&["setup", "agent", "-y"]);
+            assert_parses(&["setup", "agent", "--remote"]);
+            assert_parses(&["setup", "agent", "--remote", "-y"]);
+        }
+
+        #[test]
+        fn mcp_install_subcommand() {
+            assert_parses(&["mcp"]); // no subcommand: still launches server
+            assert_parses(&["mcp", "install"]);
+            assert_parses(&["mcp", "install", "--agent", "cursor"]);
+            assert_parses(&[
+                "mcp",
+                "install",
+                "--agent",
+                "cursor",
+                "--agent",
+                "claude-code",
+            ]);
+            assert_parses(&["mcp", "install", "--remote"]);
+            assert_parses(&["mcp", "install", "--remote", "--agent", "cursor"]);
         }
     }
 }

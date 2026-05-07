@@ -35,10 +35,10 @@ enum Commands {
 }
 
 #[derive(Clone)]
-struct CodingTool {
-    slug: &'static str,
-    name: &'static str,
-    global_parent: PathBuf,
+pub(super) struct CodingTool {
+    pub slug: &'static str,
+    pub name: &'static str,
+    pub global_parent: PathBuf,
     skills_dir_name: &'static str,
 }
 
@@ -56,7 +56,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 }
 
-fn coding_tools(home: &Path) -> Vec<CodingTool> {
+pub(super) fn coding_tools(home: &Path) -> Vec<CodingTool> {
     vec![
         CodingTool {
             slug: "universal",
@@ -91,7 +91,7 @@ fn coding_tools(home: &Path) -> Vec<CodingTool> {
     ]
 }
 
-fn resolve_tools(home: &Path, agent_filter: &[String]) -> Result<Vec<CodingTool>> {
+pub(super) fn resolve_tools(home: &Path, agent_filter: &[String]) -> Result<Vec<CodingTool>> {
     let all_tools = coding_tools(home);
 
     if agent_filter.is_empty() {
@@ -117,6 +117,18 @@ fn resolve_tools(home: &Path, agent_filter: &[String]) -> Result<Vec<CodingTool>
         }
         Ok(selected)
     }
+}
+
+pub(super) fn skills_configured_for_slug(home: &Path, slug: &str) -> bool {
+    coding_tools(home)
+        .into_iter()
+        .find(|tool| tool.slug == slug)
+        .map(|tool| {
+            tool.global_parent
+                .join(tool.skills_dir_name)
+                .join("use-railway")
+        })
+        .is_some_and(|path| path.is_dir())
 }
 
 fn build_targets(tools: &[CodingTool]) -> Vec<InstallTarget> {
@@ -240,7 +252,7 @@ fn write_skills_to_target(target: &InstallTarget, skills: &SkillFiles) -> Result
     Ok(())
 }
 
-async fn install_skills(agent_filter: &[String]) -> Result<()> {
+pub(super) async fn install_skills(agent_filter: &[String]) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let tools = resolve_tools(&home, agent_filter)?;
     let targets = build_targets(&tools);
@@ -367,4 +379,23 @@ async fn remove_skills(agent_filter: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_existing_use_railway_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("use-railway");
+        std::fs::create_dir_all(&path).unwrap();
+
+        assert!(skills_configured_for_slug(home.path(), "universal"));
+        assert!(!skills_configured_for_slug(home.path(), "cursor"));
+    }
 }

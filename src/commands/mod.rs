@@ -38,6 +38,7 @@ pub mod restart;
 pub mod run;
 pub mod scale;
 pub mod service;
+pub mod setup;
 pub mod shell;
 pub mod skills;
 pub mod ssh;
