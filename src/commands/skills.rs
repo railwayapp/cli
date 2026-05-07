@@ -10,7 +10,7 @@ const TARBALL_URL: &str =
     "https://github.com/railwayapp/railway-skills/archive/refs/heads/main.tar.gz";
 const SKILLS_PATH_PREFIX: &str = "plugins/railway/skills/";
 
-/// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, and all tools that support .agents/skills)
+/// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and all tools that support .agents/skills)
 ///
 /// Always installs to ~/.agents/skills. Additionally installs to any detected tool directories (e.g. ~/.claude/skills, ~/.cursor/skills). Use --agent to target specific tools instead of auto-detection.
 #[derive(Parser)]
@@ -25,7 +25,7 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, and all tools that support .agents/skills)
+    /// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and all tools that support .agents/skills)
     ///
     /// Always installs to ~/.agents/skills. Additionally installs to any detected tool directories (e.g. ~/.claude/skills, ~/.cursor/skills). Use --agent to target specific tools instead of auto-detection.
     #[clap(alias = "update")]
@@ -80,6 +80,18 @@ pub(super) fn coding_tools(home: &Path) -> Vec<CodingTool> {
             slug: "opencode",
             name: "OpenCode",
             global_parent: home.join(".config").join("opencode"),
+            skills_dir_name: "skills",
+        },
+        CodingTool {
+            slug: "copilot",
+            name: "GitHub Copilot",
+            global_parent: home.join(".copilot"),
+            skills_dir_name: "skills",
+        },
+        CodingTool {
+            slug: "factory-droid",
+            name: "Factory Droid",
+            global_parent: home.join(".factory"),
             skills_dir_name: "skills",
         },
         CodingTool {
@@ -397,5 +409,27 @@ mod tests {
 
         assert!(skills_configured_for_slug(home.path(), "universal"));
         assert!(!skills_configured_for_slug(home.path(), "cursor"));
+    }
+
+    #[test]
+    fn detects_copilot_and_factory_droid_skills() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            home.path()
+                .join(".copilot")
+                .join("skills")
+                .join("use-railway"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(
+            home.path()
+                .join(".factory")
+                .join("skills")
+                .join("use-railway"),
+        )
+        .unwrap();
+
+        assert!(skills_configured_for_slug(home.path(), "copilot"));
+        assert!(skills_configured_for_slug(home.path(), "factory-droid"));
     }
 }

@@ -609,6 +609,7 @@ mod cli_tests {
             ]);
             assert_parses(&["mcp", "install", "--remote"]);
             assert_parses(&["mcp", "install", "--remote", "--agent", "cursor"]);
+            assert_parses(&["mcp", "install", "--remote", "--agent", "codex"]);
         }
     }
 }
