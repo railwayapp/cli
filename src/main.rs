@@ -415,6 +415,9 @@ mod cli_tests {
             assert_subcommand(&["delete"], "delete");
             assert_subcommand(&["restart"], "restart");
             assert_subcommand(&["scale"], "scale");
+            assert_parses(&["scale", "eu-west=2"]);
+            assert_parses(&["scale", "--service", "worker", "eu-west=2", "us-east=1"]);
+            assert_parses(&["scale", "eu-west=2", "--json"]);
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
@@ -557,6 +560,15 @@ mod cli_tests {
             assert_parses(&["service", "redeploy", "-s", "myservice"]);
             assert_parses(&["service", "restart"]);
             assert_parses(&["service", "scale"]);
+            assert_parses(&["service", "scale", "eu-west=2"]);
+            assert_parses(&[
+                "service",
+                "scale",
+                "--service",
+                "worker",
+                "eu-west=2",
+                "us-east=1",
+            ]);
         }
 
         #[test]

@@ -4,15 +4,14 @@ use serde::Serialize;
 
 use crate::{
     client::post_graphql,
-    commands::output::service_summary::{
-        ServiceOutput, build_service_output, fetch_region_locations, print_service_card,
-    },
+    commands::output::service_summary::{ServiceOutput, build_service_output, print_service_card},
     controllers::{
         environment::get_matched_environment,
         project::{
             ensure_project_and_environment_exist, get_environment_instances, get_project,
             get_service_ids_in_env, service_instances_in_env,
         },
+        regions::fetch_region_locations,
     },
     errors::RailwayError,
     util::{
@@ -23,6 +22,13 @@ use crate::{
 };
 
 use super::*;
+
+pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
+    cmd.mut_subcommand(
+        "scale",
+        crate::commands::scale::get_dynamic_args_for_service_subcommand,
+    )
+}
 
 /// Manage services
 #[derive(Parser)]

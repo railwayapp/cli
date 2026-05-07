@@ -1,17 +1,22 @@
 use crate::{
+    commands::output::service_summary::print_scale_result,
     controllers::{
         environment::get_matched_environment,
         project::{ProjectEnvironmentInstances, find_service_instance, get_environment_instances},
-        regions::{convert_hashmap_to_map, merge_config, prompt_for_regions},
+        regions::{
+            available_deploy_regions_help, build_multi_region_patch, convert_hashmap_to_map,
+            fetch_region_locations, fetch_regions, merge_config, prompt_for_regions,
+            region_data_from_deployment_meta, region_flag_name, region_full_label,
+            region_is_available, resolve_deploy_region_id,
+        },
     },
     util::progress::create_spinner_if,
 };
-use anyhow::bail;
+use anyhow::{Context as _, bail};
 use clap::{Arg, Command, Parser};
 use futures::executor::block_on;
 use is_terminal::IsTerminal;
-use json_dotpath::DotPaths as _;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use struct_field_names_as_array::FieldNamesAsArray;
 
@@ -23,9 +28,14 @@ use super::*;
 struct DynamicArgs(HashMap<String, u64>);
 
 #[derive(Parser, FieldNamesAsArray)]
+#[clap(after_help = SCALE_AFTER_HELP)]
 pub struct Args {
     #[clap(flatten)]
     dynamic: DynamicArgs,
+
+    /// Replica counts by region, e.g. eu-west=2 us-east=1
+    #[clap(value_name = "REGION=REPLICAS")]
+    assignments: Vec<String>,
 
     /// The service to scale (defaults to linked service)
     #[clap(long, short)]
@@ -39,6 +49,19 @@ pub struct Args {
     #[clap(long)]
     json: bool,
 }
+
+const SCALE_AFTER_HELP: &str = r#"Examples:
+
+  railway scale eu-west=2
+  railway scale --service worker eu-west=2 us-east=1
+  railway service scale --service worker eu-west=2 us-east=1
+  railway scale --environment production --service worker eu-west=0
+
+Region names use the same friendly names as the Railway dashboard, formatted for the CLI.
+Run `railway scale --help` while logged in to list available regions.
+
+Backwards compatibility:
+  Legacy region flags like `railway scale --eu-west 2` are still accepted."#;
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
@@ -57,21 +80,23 @@ pub async fn command(args: Args) -> Result<()> {
         Some(env) => env,
         None => linked_project.environment_id()?.to_string(),
     };
-    let environment_id = get_matched_environment(&project, environment)?.id;
+    let environment = get_matched_environment(&project, environment)?;
+    let environment_id = environment.id;
+    let environment_name = environment.name;
     let environment_instances =
         get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
             .await?;
     let (existing, service_id) =
         get_existing_config(&args, &linked_project, &project, &environment_instances)?;
-    let new_config = convert_hashmap_to_map(
-        if args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
-            prompt_for_regions(&configs, &client, &existing).await?
-        } else if args.dynamic.0.is_empty() {
-            bail!("Please specify regions via the flags when not running in a terminal")
-        } else {
-            args.dynamic.0
-        },
-    );
+    let service_name = project
+        .services
+        .edges
+        .iter()
+        .find(|service| service.node.id == service_id)
+        .map(|service| service.node.name.clone())
+        .expect("service ID returned from project services");
+    let new_config =
+        convert_hashmap_to_map(resolve_new_config(&args, &configs, &client, &existing).await?);
     if new_config.is_empty() {
         if !args.json {
             println!("No changes made");
@@ -79,57 +104,101 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
     let region_data = merge_config(existing, new_config);
-    update_regions_and_redeploy(
-        configs,
-        client,
+    commit_scale_patch(
+        &configs,
+        &client,
         &environment_id,
         &service_id,
-        region_data.clone(),
+        &region_data,
         args.json,
     )
     .await?;
 
     if args.json {
         println!("{}", serde_json::json!({"regions": region_data}));
+    } else {
+        let region_locations = fetch_region_locations(&client, &configs).await;
+        print_scale_result(
+            &service_name,
+            &service_id,
+            &environment_name,
+            &region_data,
+            &region_locations,
+        );
     }
 
     Ok(())
 }
 
-async fn update_regions_and_redeploy(
-    configs: Configs,
-    client: reqwest::Client,
+async fn resolve_new_config(
+    args: &Args,
+    configs: &Configs,
+    client: &reqwest::Client,
+    existing: &Value,
+) -> Result<HashMap<String, u64>> {
+    if args.assignments.is_empty() && args.dynamic.0.is_empty() && std::io::stdout().is_terminal() {
+        return prompt_for_regions(configs, client, existing).await;
+    }
+
+    if args.assignments.is_empty() && args.dynamic.0.is_empty() {
+        bail!(
+            "Please specify replica counts as REGION=REPLICAS, for example `railway scale eu-west=2`"
+        );
+    }
+
+    let mut new_config = args.dynamic.0.clone();
+    if args.assignments.is_empty() {
+        return Ok(new_config);
+    }
+
+    let regions = fetch_regions(client, configs).await?;
+
+    for assignment in &args.assignments {
+        let (region_input, replicas_input) = assignment.split_once('=').with_context(|| {
+            format!(
+                "Invalid scale target `{assignment}`. Use REGION=REPLICAS, for example `eu-west=2`"
+            )
+        })?;
+        if region_input.trim().is_empty() {
+            bail!("Invalid scale target `{assignment}`. Region cannot be empty");
+        }
+
+        let replicas = replicas_input.parse::<u64>().with_context(|| {
+            format!("Invalid replica count `{replicas_input}` in `{assignment}`")
+        })?;
+        let region_id = resolve_deploy_region_id(&regions, region_input)?;
+
+        if new_config.insert(region_id.clone(), replicas).is_some() {
+            bail!("Region `{}` was specified more than once", region_input);
+        }
+    }
+
+    Ok(new_config)
+}
+
+async fn commit_scale_patch(
+    configs: &Configs,
+    client: &reqwest::Client,
     environment_id: &str,
     service_id: &str,
-    region_data: Value,
+    region_data: &Value,
     json: bool,
 ) -> Result<(), anyhow::Error> {
-    let spinner = create_spinner_if(!json, "Updating regions...".into());
-    post_graphql::<mutations::UpdateRegions, _>(
-        &client,
+    let spinner = create_spinner_if(!json, "Committing scale changes...".into());
+    let patch = build_multi_region_patch(service_id, region_data)?;
+
+    post_graphql::<mutations::EnvironmentPatchCommit, _>(
+        client,
         configs.get_backboard(),
-        mutations::update_regions::Variables {
+        mutations::environment_patch_commit::Variables {
             environment_id: environment_id.to_string(),
-            service_id: service_id.to_string(),
-            multi_region_config: region_data,
+            patch,
+            commit_message: None,
         },
     )
     .await?;
     if let Some(s) = &spinner {
-        s.finish_with_message("Regions updated");
-    }
-    let spinner2 = create_spinner_if(!json, "Redeploying...".into());
-    post_graphql::<mutations::ServiceInstanceDeploy, _>(
-        &client,
-        configs.get_backboard(),
-        mutations::service_instance_deploy::Variables {
-            environment_id: environment_id.to_string(),
-            service_id: service_id.to_string(),
-        },
-    )
-    .await?;
-    if let Some(s) = spinner2 {
-        s.finish_with_message("Redeployed");
+        s.finish_with_message("Scale change committed");
     }
     Ok(())
 }
@@ -164,22 +233,7 @@ fn get_existing_config(
     let service_meta = if let Some(instance) = instance {
         if let Some(latest) = &instance.latest_deployment {
             if let Some(meta) = &latest.meta {
-                let deploy = meta
-                    .dot_get::<Value>("serviceManifest.deploy")?
-                    .expect("Very old deployment, please redeploy");
-                if let Some(c) = deploy.dot_get::<Value>("multiRegionConfig")? {
-                    Some(c)
-                } else if let Some(region) = deploy.dot_get::<Value>("region")? {
-                    // old deployments only have numReplicas and a region field...
-                    let mut map = Map::new();
-                    let replicas = deploy.dot_get::<Value>("numReplicas")?.unwrap_or(json!(1));
-                    map.insert(region.to_string(), json!({ "numReplicas": replicas }));
-                    Some(json!({
-                        "multiRegionConfig": map
-                    }))
-                } else {
-                    None
-                }
+                region_data_from_deployment_meta(meta)?
             } else {
                 None
             }
@@ -198,51 +252,81 @@ fn get_existing_config(
 
 /// This function generates flags that are appended to the command at runtime.
 pub fn get_dynamic_args(cmd: Command) -> Command {
-    // Check if scale is the actual subcommand (not just anywhere in args)
-    // Handles: `railway scale` and `railway service scale`
-    let args: Vec<String> = std::env::args().collect();
-    let is_scale = args.len() >= 2
-        && (args[1].eq_ignore_ascii_case("scale")
-            || (args.len() >= 3
-                && args[1].eq_ignore_ascii_case("service")
-                && args[2].eq_ignore_ascii_case("scale")));
-    if !is_scale {
+    if !is_top_level_scale() {
         return cmd;
     }
-    block_on(async move {
-        let configs = Configs::new().unwrap();
-        let client = GQLClient::new_authorized(&configs).unwrap();
-        let regions = post_graphql::<queries::Regions, _>(
-            &client,
-            configs.get_backboard(),
-            queries::regions::Variables,
-        )
-        .await
-        .expect("couldn't get regions");
+    add_region_args(cmd)
+}
 
-        // Collect region names as owned Strings.
-        let region_strings = regions
+pub fn get_dynamic_args_for_service_subcommand(cmd: Command) -> Command {
+    if !is_service_scale() {
+        return cmd;
+    }
+    add_region_args(cmd)
+}
+
+fn is_top_level_scale() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    args.len() >= 2 && args[1].eq_ignore_ascii_case("scale")
+}
+
+fn is_service_scale() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    args.len() >= 3
+        && args[1].eq_ignore_ascii_case("service")
+        && args[2].eq_ignore_ascii_case("scale")
+}
+
+fn add_region_args(cmd: Command) -> Command {
+    block_on(async move {
+        let Ok(configs) = Configs::new() else {
+            return cmd;
+        };
+        let Ok(client) = GQLClient::new_authorized(&configs) else {
+            return cmd;
+        };
+        let Ok(regions) = fetch_regions(&client, &configs).await else {
+            return cmd;
+        };
+
+        let available_regions = regions
             .regions
             .iter()
-            .filter(|r| r.railway_metal.unwrap_or_default())
-            .map(|r| r.name.to_string())
-            .collect::<Vec<String>>();
+            .filter(|r| region_is_available(r))
+            .collect::<Vec<_>>();
+        let cmd = cmd.after_help(dynamic_scale_after_help(&regions.regions));
 
-        // Mutate the command to add each region as a flag.
-        let mut new_cmd = cmd;
-        for region in region_strings {
-            let region_static: &'static str = Box::leak(region.into_boxed_str());
-            new_cmd = new_cmd.arg(
-                Arg::new(region_static) // unique identifier
-                    .long(region_static) // --my-region
-                    .help(format!("Number of instances to run on {region_static}"))
+        available_regions.iter().fold(cmd, |new_cmd, region| {
+            let region_id_static: &'static str = Box::leak(region.name.clone().into_boxed_str());
+            let region_flag_static: &'static str =
+                Box::leak(region_flag_name(region).into_boxed_str());
+            let region_help = format!(
+                "Number of instances to run in {}",
+                region_full_label(region)
+            );
+            new_cmd.arg(
+                Arg::new(region_id_static)
+                    .long(region_flag_static)
+                    .alias(region_id_static)
+                    .help(region_help)
+                    .hide(true)
                     .value_name("INSTANCES")
                     .value_parser(clap::value_parser!(u64))
                     .action(clap::ArgAction::Set),
-            );
-        }
-        new_cmd
+            )
+        })
     })
+}
+
+fn available_regions_help(regions: &[queries::regions::RegionsRegions]) -> String {
+    available_deploy_regions_help(regions)
+}
+
+fn dynamic_scale_after_help(regions: &[queries::regions::RegionsRegions]) -> String {
+    format!(
+        "{SCALE_AFTER_HELP}\n\nAvailable regions:\n{}",
+        available_regions_help(regions)
+    )
 }
 
 impl clap::FromArgMatches for DynamicArgs {
@@ -290,5 +374,57 @@ impl clap::CommandFactory for DynamicArgs {
     fn command_for_update<'b>() -> clap::Command {
         let __clap_app = clap::Command::new("railwayapp");
         <DynamicArgs as clap::Args>::augment_args_for_update(__clap_app)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_scale_patch_targets_service_multi_region_config() {
+        let patch = build_multi_region_patch(
+            "svc_123",
+            &json!({
+                "europe-west4-drams3a": { "numReplicas": 2 },
+                "us-east4-eqdc4a": null
+            }),
+        )
+        .unwrap();
+
+        let service = patch.services.get("svc_123").unwrap();
+        let multi_region_config = service
+            .deploy
+            .as_ref()
+            .unwrap()
+            .multi_region_config
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(
+            multi_region_config["europe-west4-drams3a"]
+                .as_ref()
+                .unwrap()
+                .num_replicas,
+            Some(2)
+        );
+        assert!(multi_region_config["us-east4-eqdc4a"].is_none());
+
+        assert_eq!(
+            serde_json::to_value(patch).unwrap(),
+            json!({
+                "services": {
+                    "svc_123": {
+                        "deploy": {
+                            "multiRegionConfig": {
+                                "europe-west4-drams3a": { "numReplicas": 2 },
+                                "us-east4-eqdc4a": null
+                            }
+                        }
+                    }
+                }
+            })
+        );
     }
 }
