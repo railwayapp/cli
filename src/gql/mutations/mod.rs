@@ -15,6 +15,7 @@ type EnvironmentConfig = controllers::config::EnvironmentConfig;
     query_path = "src/gql/mutations/strings/CliEventTrack.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
+#[allow(dead_code)]
 pub struct CliEventTrack;
 
 #[derive(GraphQLQuery)]
