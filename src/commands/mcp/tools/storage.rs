@@ -4,7 +4,10 @@ use rmcp::{ErrorData as McpError, model::*};
 
 use crate::{
     client::post_graphql,
-    controllers::config::{BucketInstance, EnvironmentConfig},
+    controllers::{
+        config::{BucketInstance, EnvironmentConfig},
+        regions::BucketRegion,
+    },
     gql::mutations,
 };
 
@@ -14,7 +17,7 @@ use super::super::params::{
     UpdateVolumeParams,
 };
 
-enum PatchMode {
+pub(crate) enum PatchMode {
     Commit,
     Stage,
 }
@@ -22,7 +25,7 @@ enum PatchMode {
 impl RailwayMcp {
     /// Apply an environment config patch, staging instead of committing when
     /// the environment has unmerged changes (matches CLI behavior).
-    async fn apply_env_patch(
+    pub(crate) async fn apply_env_patch(
         &self,
         ctx: &ResolvedContext,
         patch: EnvironmentConfig,
@@ -76,18 +79,11 @@ impl RailwayMcp {
             .resolve_context(params.project_id, params.environment_id)
             .await?;
 
-        let region = params.region.unwrap_or_else(|| "sjc".to_string());
-        match region.as_str() {
-            "sjc" | "iad" | "ams" | "sin" => {}
-            _ => {
-                return Err(McpError::invalid_params(
-                    format!(
-                        "Invalid bucket region \"{region}\". Valid regions: sjc, iad, ams, sin."
-                    ),
-                    None,
-                ));
-            }
-        }
+        let region = match params.region.as_deref() {
+            Some(region) => BucketRegion::parse(region)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
+            None => BucketRegion::Sjc,
+        };
 
         let create_vars = mutations::bucket_create::Variables {
             input: mutations::bucket_create::BucketCreateInput {
@@ -111,7 +107,7 @@ impl RailwayMcp {
         buckets.insert(
             bucket.id.clone(),
             BucketInstance {
-                region: Some(region.clone()),
+                region: Some(region.code().to_string()),
                 is_created: Some(true),
                 is_deleted: None,
             },

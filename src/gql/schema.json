@@ -35657,18 +35657,6 @@
             {
               "args": [],
               "deprecationReason": null,
-              "description": "Region is on Railway Metal",
-              "isDeprecated": false,
-              "name": "railwayMetal",
-              "type": {
-                "kind": "SCALAR",
-                "name": "Boolean",
-                "ofType": null
-              }
-            },
-            {
-              "args": [],
-              "deprecationReason": null,
               "description": null,
               "isDeprecated": false,
               "name": "region",

@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::ffi::OsString;
 
 use anyhow::Result;
 use clap::error::ErrorKind;
@@ -197,7 +198,9 @@ async fn main() -> Result<()> {
         return background_stage_update(&version).await;
     }
 
-    let args = build_args().try_get_matches();
+    let raw_os_args: Vec<OsString> = std::env::args_os().collect();
+    let normalized_os_args = scale::normalize_legacy_scale_args(raw_os_args.clone());
+    let args = build_args().try_get_matches_from(normalized_os_args);
     let is_tty = std::io::stdout().is_terminal();
     // Help, version, and parse-error paths are read-only: no staged-binary
     // apply, no background update spawn, no extra latency.
@@ -209,7 +212,11 @@ async fn main() -> Result<()> {
     // Check raw args too so that help/error paths (where clap returns Err)
     // are also detected — e.g. `railway upgrade --help` should not apply
     // a staged update as a side effect.
-    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = raw_os_args
+        .iter()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     let raw_subcommand = raw_args.iter().find(|a| !a.starts_with('-')).cloned();
 
     let is_update_management_cmd = matches!(
@@ -397,7 +404,8 @@ mod cli_tests {
     fn parse(args: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
         let mut full_args = vec!["railway"];
         full_args.extend(args);
-        build_args().try_get_matches_from(full_args)
+        let full_args = full_args.into_iter().map(OsString::from).collect();
+        build_args().try_get_matches_from(scale::normalize_legacy_scale_args(full_args))
     }
 
     fn assert_parses(args: &[&str]) {
@@ -429,6 +437,10 @@ mod cli_tests {
             assert_subcommand(&["delete"], "delete");
             assert_subcommand(&["restart"], "restart");
             assert_subcommand(&["scale"], "scale");
+            assert_parses(&["scale", "eu-west=2"]);
+            assert_parses(&["scale", "--eu-west", "2"]);
+            assert_parses(&["scale", "--service", "worker", "eu-west=2", "us-east=1"]);
+            assert_parses(&["scale", "eu-west=2", "--json"]);
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
@@ -571,6 +583,16 @@ mod cli_tests {
             assert_parses(&["service", "redeploy", "-s", "myservice"]);
             assert_parses(&["service", "restart"]);
             assert_parses(&["service", "scale"]);
+            assert_parses(&["service", "scale", "eu-west=2"]);
+            assert_parses(&["service", "scale", "--eu-west", "2"]);
+            assert_parses(&[
+                "service",
+                "scale",
+                "--service",
+                "worker",
+                "eu-west=2",
+                "us-east=1",
+            ]);
         }
 
         #[test]

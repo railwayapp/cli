@@ -4,6 +4,7 @@ use crate::{
         config::{BucketInstance, EnvironmentConfig, environment::fetch_environment_config},
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
+        regions::BucketRegion,
     },
     errors::RailwayError,
     resources::project_bucket_name,
@@ -224,62 +225,6 @@ enum BucketPatchMode {
     Stage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BucketRegion {
-    Sjc,
-    Iad,
-    Ams,
-    Sin,
-}
-
-impl BucketRegion {
-    fn code(self) -> &'static str {
-        match self {
-            Self::Sjc => "sjc",
-            Self::Iad => "iad",
-            Self::Ams => "ams",
-            Self::Sin => "sin",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Sjc => "US West, California",
-            Self::Iad => "US East, Virginia",
-            Self::Ams => "EU West, Amsterdam",
-            Self::Sin => "Asia Pacific, Singapore",
-        }
-    }
-
-    fn country(self) -> &'static str {
-        match self {
-            Self::Sjc | Self::Iad => "US",
-            Self::Ams => "NL",
-            Self::Sin => "SG",
-        }
-    }
-
-    fn parse(input: &str) -> Result<Self> {
-        match input.trim().to_ascii_lowercase().as_str() {
-            "sjc" => Ok(Self::Sjc),
-            "iad" => Ok(Self::Iad),
-            "ams" => Ok(Self::Ams),
-            "sin" => Ok(Self::Sin),
-            _ => bail!("Invalid bucket region \"{input}\". Valid regions: sjc, iad, ams, sin."),
-        }
-    }
-
-    fn all() -> Vec<Self> {
-        vec![Self::Sjc, Self::Iad, Self::Ams, Self::Sin]
-    }
-}
-
-impl Display for BucketRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.code(), self.label())
-    }
-}
-
 fn list(context: &CommandContext, args: ListArgs) -> Result<()> {
     let buckets = resolve_environment_buckets(&context.project, &context.environment_config);
 
@@ -373,12 +318,12 @@ async fn create(context: &CommandContext, args: CreateArgs) -> Result<()> {
             BucketPatchMode::Commit => format!(
                 "Created bucket {} ({})",
                 bucket.name.blue(),
-                region.code().cyan()
+                region.to_string().cyan()
             ),
             BucketPatchMode::Stage => format!(
                 "Created bucket {} ({}) and staged it for {} {}",
                 bucket.name.blue(),
-                region.code().cyan(),
+                region.to_string().cyan(),
                 context.environment.name.magenta().bold(),
                 "(use 'railway environment edit' to commit)".dimmed()
             ),
@@ -519,7 +464,10 @@ async fn info(context: &CommandContext, bucket: Option<String>, args: InfoArgs) 
         println!("Name:          {}", info.name);
         println!("Bucket ID:     {}", info.id);
         println!("Environment:   {}", info.environment_name);
-        println!("Region:        {}", info.region);
+        println!(
+            "Region:        {}",
+            BucketRegion::display_for_code(&info.region)
+        );
         println!("Storage:       {}", format_bytes(info.size_bytes));
         println!("Objects:       {}", format_count(info.object_count));
     }

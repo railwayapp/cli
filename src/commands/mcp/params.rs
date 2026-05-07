@@ -249,7 +249,7 @@ pub struct UpdateServiceParams {
     /// Start command override.
     #[serde(default)]
     pub start_command: Option<String>,
-    /// Number of replicas.
+    /// Legacy single-region replica count. Prefer scale_service for replica changes.
     #[serde(default)]
     pub num_replicas: Option<i64>,
     /// Health check path (e.g. "/health").
@@ -279,7 +279,7 @@ pub struct UpdateServiceParams {
     /// Commands to run before deploying (e.g. database migrations).
     #[serde(default)]
     pub pre_deploy_command: Option<Vec<String>>,
-    /// Region to deploy in (e.g. "us-west1").
+    /// Legacy deploy region ID. Prefer scale_service for region replica changes.
     #[serde(default)]
     pub region: Option<String>,
     /// Path to the Railway config file.
@@ -288,6 +288,21 @@ pub struct UpdateServiceParams {
     /// File watch patterns that trigger deploys.
     #[serde(default)]
     pub watch_patterns: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ScaleServiceParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Map of friendly region names or region IDs to replica counts, e.g. {"eu-west": 2, "us-east": 1}. Maximum 50 total replicas across regions.
+    pub replicas: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

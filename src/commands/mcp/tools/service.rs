@@ -1,19 +1,152 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rmcp::{ErrorData as McpError, model::*};
+use serde_json::{Map, Value};
 
 use crate::{
     client::{GQLClient, post_graphql},
-    controllers::config::environment::fetch_environment_config,
+    controllers::{
+        config::environment::fetch_environment_config,
+        project::{find_service_instance, get_environment_instances},
+        regions::{
+            build_multi_region_patch, convert_hashmap_to_map, fetch_regions_for_project,
+            format_region_replicas, merge_config, region_data_from_deployment_meta,
+            region_locations_from_regions, resolve_deploy_region_id_for_scale,
+            validate_total_replicas,
+        },
+    },
     gql::{mutations, queries},
 };
 
 use super::super::handler::RailwayMcp;
 use super::super::params::{
-    AddReferenceVariableParams, DeployTemplateParams, GetServiceConfigParams, SearchTemplatesParams,
+    AddReferenceVariableParams, DeployTemplateParams, GetServiceConfigParams, ScaleServiceParams,
+    SearchTemplatesParams,
 };
+use super::storage::PatchMode;
 
 impl RailwayMcp {
+    pub(crate) async fn do_scale_service(
+        &self,
+        params: ScaleServiceParams,
+    ) -> Result<CallToolResult, McpError> {
+        if params.replicas.is_empty() {
+            return Err(McpError::invalid_params(
+                "replicas must include at least one region assignment, e.g. {\"eu-west\": 2}.",
+                None,
+            ));
+        }
+
+        let service_ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+        let ctx = &service_ctx.context;
+        let regions =
+            fetch_regions_for_project(&self.client, &self.configs, Some(&service_ctx.project_id))
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
+                })?;
+        let config_resp = fetch_environment_config(
+            &self.client,
+            &self.configs,
+            &service_ctx.environment_id,
+            false,
+        )
+        .await
+        .map_err(|e| {
+            McpError::internal_error(format!("Failed to fetch environment config: {e}"), None)
+        })?;
+        let environment_instances = get_environment_instances(
+            &self.client,
+            &self.configs,
+            &service_ctx.project_id,
+            &service_ctx.environment_id,
+        )
+        .await
+        .map_err(|e| {
+            McpError::internal_error(format!("Failed to fetch environment instances: {e}"), None)
+        })?;
+        let existing_from_deployment =
+            find_service_instance(&environment_instances, &service_ctx.service_id)
+                .ok_or_else(|| {
+                    McpError::invalid_params(
+                        "Service not found in the selected environment.".to_string(),
+                        None,
+                    )
+                })?
+                .latest_deployment
+                .as_ref()
+                .and_then(|deployment| deployment.meta.as_ref())
+                .and_then(|meta| region_data_from_deployment_meta(meta).ok().flatten());
+        let existing_from_config = config_resp
+            .config
+            .services
+            .get(&service_ctx.service_id)
+            .and_then(|service| service.deploy.as_ref())
+            .and_then(|deploy| deploy.multi_region_config.as_ref())
+            .map(|config| serde_json::to_value(config).unwrap_or(Value::Object(Map::new())))
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        let existing = existing_from_deployment.unwrap_or(existing_from_config);
+
+        let mut requested = HashMap::new();
+        for (region_input, replicas) in params.replicas {
+            if replicas < 0 {
+                return Err(McpError::invalid_params(
+                    format!("Replica count for region \"{region_input}\" must be zero or greater."),
+                    None,
+                ));
+            }
+
+            let region_id = resolve_deploy_region_id_for_scale(
+                &regions,
+                &region_input,
+                replicas as u64,
+                &existing,
+            )
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            if requested.insert(region_id, replicas as u64).is_some() {
+                return Err(McpError::invalid_params(
+                    format!("Region \"{region_input}\" was specified more than once."),
+                    None,
+                ));
+            }
+        }
+
+        let region_data = merge_config(existing, convert_hashmap_to_map(requested));
+        validate_total_replicas(&region_data)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let patch =
+            build_multi_region_patch(&service_ctx.service_id, &region_data).map_err(|e| {
+                McpError::internal_error(format!("Failed to build scale patch: {e}"), None)
+            })?;
+
+        let service_name = ctx
+            .project
+            .services
+            .edges
+            .iter()
+            .find(|service| service.node.id == service_ctx.service_id)
+            .map(|service| service.node.name.as_str())
+            .unwrap_or(&service_ctx.service_id);
+        let mode = self
+            .apply_env_patch(ctx, patch, Some(format!("Scale service {service_name}")))
+            .await?;
+        let status = match mode {
+            PatchMode::Commit => "committed",
+            PatchMode::Stage => {
+                "staged (environment has pending changes; use `railway environment edit` to commit)"
+            }
+        };
+        let region_locations = region_locations_from_regions(&regions.regions);
+        let region_summary = format_region_replicas(&region_data, &region_locations);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Service scaled: {service_name} (id: {})\nEnvironment: {}\nRegions: {region_summary}\nChange: {status}",
+            service_ctx.service_id, config_resp.name
+        ))]))
+    }
+
     pub(crate) async fn do_get_service_config(
         &self,
         params: GetServiceConfigParams,

@@ -2,19 +2,18 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use colored::Colorize;
-use json_dotpath::DotPaths as _;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    client::post_graphql,
-    config::Configs,
-    controllers::project::{
-        ProjectEnvironmentInstances, ProjectServiceInstanceNode, find_service_instance,
-        volume_instances_in_env,
+    controllers::{
+        project::{
+            ProjectEnvironmentInstances, ProjectServiceInstanceNode, find_service_instance,
+            volume_instances_in_env,
+        },
+        regions::{region_data_from_deployment_meta, region_display_name},
     },
     gql::queries::{
-        self,
         environment_instances::{DeploymentInstanceStatus, DeploymentStatus, VolumeState},
         project::ProjectProjectServicesEdgesNode,
     },
@@ -202,33 +201,6 @@ pub(in crate::commands) fn build_service_output(
     }
 }
 
-pub(in crate::commands) async fn fetch_region_locations(
-    client: &reqwest::Client,
-    configs: &Configs,
-) -> HashMap<String, String> {
-    match post_graphql::<queries::Regions, _>(
-        client,
-        configs.get_backboard(),
-        queries::regions::Variables,
-    )
-    .await
-    {
-        Ok(resp) => resp
-            .regions
-            .into_iter()
-            .filter(|r| !r.location.is_empty())
-            .flat_map(|r| {
-                let mut entries = vec![(r.name, r.location.clone())];
-                if let Some(region) = r.region {
-                    entries.push((region, r.location));
-                }
-                entries
-            })
-            .collect(),
-        Err(_) => HashMap::new(),
-    }
-}
-
 const FIELD_LABEL_WIDTH: usize = 14;
 
 pub(in crate::commands) fn print_service_card(row: &ServiceOutput, show_linked_marker: bool) {
@@ -268,6 +240,36 @@ pub(in crate::commands) fn print_service_card(row: &ServiceOutput, show_linked_m
         print_field("deployment ID:", &dep_id.clone().dimmed());
     }
     print_field("service ID:", &row.id.clone().dimmed());
+    println!();
+}
+
+pub(in crate::commands) fn print_scale_result(
+    service_name: &str,
+    service_id: &str,
+    environment_name: &str,
+    region_data: &Value,
+    region_locations: &HashMap<String, String>,
+) {
+    let regions = regions_from_config(region_data, region_locations);
+    let total_replicas: i64 = regions.iter().map(|r| r.configured).sum();
+
+    println!();
+    println!("{} {}", "Scaled".bold(), service_name.green().bold());
+    print_field("environment:", &environment_name.blue().bold());
+    match regions.len() {
+        0 => {}
+        1 => print_field("region:", &format_regions_line(&regions)),
+        _ => print_field("regions:", &format_regions_line(&regions)),
+    }
+    print_field(
+        "replicas:",
+        &format!(
+            "{} configured",
+            pluralize_count(total_replicas, "replica", "replicas")
+        ),
+    );
+    print_field("deployment:", &"Redeploy started".blue());
+    print_field("service ID:", &service_id.dimmed());
     println!();
 }
 
@@ -363,45 +365,35 @@ fn count_replicas(
 }
 
 fn regions_from_meta(meta: &Value) -> Vec<RegionConfig> {
-    let Some(deploy) = meta
-        .dot_get::<Value>("serviceManifest.deploy")
+    region_data_from_deployment_meta(meta)
         .ok()
         .flatten()
-    else {
-        return Vec::new();
-    };
+        .map(|region_data| regions_from_config(&region_data, &HashMap::new()))
+        .unwrap_or_default()
+}
 
-    if let Some(config) = deploy
-        .dot_get::<Value>("multiRegionConfig")
-        .ok()
-        .flatten()
-        .and_then(|v| v.as_object().cloned())
-    {
-        let mut regions: Vec<RegionConfig> = config
-            .into_iter()
-            .map(|(name, v)| RegionConfig {
-                name,
-                location: None,
-                configured: v.get("numReplicas").and_then(Value::as_i64).unwrap_or(0),
-            })
-            .collect();
-        regions.sort_by(|a, b| a.name.cmp(&b.name));
-        return regions;
-    }
-
-    if let Some(region) = deploy.get("region").and_then(Value::as_str) {
-        let configured = deploy
-            .get("numReplicas")
-            .and_then(Value::as_i64)
-            .unwrap_or(1);
-        return vec![RegionConfig {
-            name: region.to_string(),
-            location: None,
-            configured,
-        }];
-    }
-
-    Vec::new()
+fn regions_from_config(
+    region_data: &Value,
+    region_locations: &HashMap<String, String>,
+) -> Vec<RegionConfig> {
+    let mut regions = region_data
+        .as_object()
+        .map(|config| {
+            config
+                .iter()
+                .map(|(name, value)| RegionConfig {
+                    name: name.clone(),
+                    location: region_locations.get(name).cloned(),
+                    configured: value
+                        .get("numReplicas")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    regions.sort_by(|a, b| a.name.cmp(&b.name));
+    regions
 }
 
 fn format_replicas_line(r: &ReplicasOutput) -> String {
@@ -415,7 +407,7 @@ fn format_replicas_line(r: &ReplicasOutput) -> String {
 
 fn format_regions_line(regions: &[RegionConfig]) -> String {
     if regions.len() == 1 {
-        return region_display_name(&regions[0]);
+        return region_config_display_name(&regions[0]);
     }
     let sep = " · ".dimmed();
     regions
@@ -423,7 +415,7 @@ fn format_regions_line(regions: &[RegionConfig]) -> String {
         .map(|r| {
             format!(
                 "{} ({})",
-                region_display_name(r),
+                region_config_display_name(r),
                 r.configured.to_string().dimmed()
             )
         })
@@ -431,45 +423,19 @@ fn format_regions_line(regions: &[RegionConfig]) -> String {
         .join(&sep.to_string())
 }
 
-fn region_display_name(r: &RegionConfig) -> String {
-    r.location
-        .clone()
-        .or_else(|| friendly_region_fallback(&r.name))
-        .unwrap_or_else(|| r.name.clone())
+fn region_config_display_name(r: &RegionConfig) -> String {
+    match &r.location {
+        Some(location) => location.clone(),
+        None => region_display_name(&r.name, &HashMap::new()),
+    }
 }
 
-fn friendly_region_fallback(region: &str) -> Option<String> {
-    let normalized = region.to_ascii_lowercase();
-    let label = if normalized.starts_with("europe-west") {
-        "EU West"
-    } else if normalized.starts_with("europe-north") {
-        "EU North"
-    } else if normalized.starts_with("europe-south") {
-        "EU South"
-    } else if normalized.starts_with("europe-central") {
-        "EU Central"
-    } else if normalized.starts_with("us-west") || normalized.starts_with("northamerica-west") {
-        "US West"
-    } else if normalized.starts_with("us-east") || normalized.starts_with("northamerica-east") {
-        "US East"
-    } else if normalized.starts_with("us-central") || normalized.starts_with("northamerica-central")
-    {
-        "US Central"
-    } else if normalized.starts_with("asia-east") {
-        "Asia East"
-    } else if normalized.starts_with("asia-southeast") {
-        "Asia Southeast"
-    } else if normalized.starts_with("asia-south") {
-        "Asia South"
-    } else if normalized.starts_with("australia") {
-        "Australia"
-    } else if normalized.starts_with("southamerica") {
-        "South America"
+fn pluralize_count(count: i64, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("{count} {singular}")
     } else {
-        return None;
-    };
-
-    Some(label.to_string())
+        format!("{count} {plural}")
+    }
 }
 
 fn volumes_for_service(

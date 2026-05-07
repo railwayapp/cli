@@ -47,6 +47,7 @@ pub(crate) struct ResolvedServiceContext {
     pub(crate) project_id: String,
     pub(crate) environment_id: String,
     pub(crate) service_id: String,
+    pub(crate) context: ResolvedContext,
 }
 
 impl RailwayMcp {
@@ -163,7 +164,11 @@ impl RailwayMcp {
                         None,
                     )
                 })?,
-            None => ctx.linked.and_then(|l| l.service).ok_or_else(|| {
+            None => ctx
+                .linked
+                .as_ref()
+                .and_then(|l| l.service.clone())
+                .ok_or_else(|| {
                 let available = format_services(&ctx.project);
                 McpError::invalid_params(
                     format!("No service_id provided and no linked service. Available services:\n{available}"),
@@ -173,9 +178,10 @@ impl RailwayMcp {
         };
 
         Ok(ResolvedServiceContext {
-            project_id: ctx.project_id,
-            environment_id: ctx.environment_id,
+            project_id: ctx.project_id.clone(),
+            environment_id: ctx.environment_id.clone(),
             service_id,
+            context: ctx,
         })
     }
 }
@@ -935,13 +941,23 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Update service instance settings such as build command, start command, replicas, health check, sleep mode, root directory, cron schedule, Dockerfile path, restart policy, pre-deploy command, region, Railway config file, and watch patterns."
+        description = "Update service instance settings such as build command, start command, health check, sleep mode, root directory, cron schedule, Dockerfile path, restart policy, pre-deploy command, Railway config file, and watch patterns. Use scale_service for replicas and regions."
     )]
     async fn update_service(
         &self,
         Parameters(params): Parameters<UpdateServiceParams>,
     ) -> Result<CallToolResult, McpError> {
         self.do_update_service(params).await
+    }
+
+    #[tool(
+        description = "Scale one service across Railway deploy regions using friendly region names or region IDs. Provide replicas as a map, e.g. {\"eu-west\": 2, \"us-east\": 1}. Maximum 50 total replicas across regions."
+    )]
+    async fn scale_service(
+        &self,
+        Parameters(params): Parameters<ScaleServiceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_scale_service(params).await
     }
 
     #[tool(
