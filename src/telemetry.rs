@@ -476,6 +476,28 @@ pub async fn send(event: CliTrackEvent) {
     }
 }
 
+pub fn send_mcp_tool(
+    tool_name: String,
+    duration_ms: u64,
+    success: bool,
+    error_message: Option<String>,
+) {
+    tokio::spawn(async move {
+        send(CliTrackEvent {
+            command: "mcp".to_string(),
+            sub_command: Some(tool_name),
+            duration_ms,
+            success,
+            error_message,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            is_ci: Configs::env_is_ci(),
+        })
+        .await;
+    });
+}
+
 pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
     if is_telemetry_disabled() {
         return;

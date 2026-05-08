@@ -4,10 +4,11 @@ use std::sync::Arc;
 use super::params::*;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
+    ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router,
+    service::RequestContext,
+    tool, tool_router,
 };
 
 use crate::{
@@ -22,6 +23,7 @@ use crate::{
         variables::get_service_variables,
     },
     gql::{mutations, queries},
+    telemetry,
     util::{
         logs::{HttpLogLike, LogLike},
         time::parse_time,
@@ -1207,8 +1209,51 @@ impl RailwayMcp {
     }
 }
 
-#[tool_handler]
 impl ServerHandler for RailwayMcp {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let tool_name = request.name.to_string();
+        let start = std::time::Instant::now();
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        telemetry::send_mcp_tool(
+            tool_name,
+            duration_ms,
+            result.is_ok(),
+            result.as_ref().err().map(|e| {
+                let msg = format!("{e}");
+                if msg.len() > 256 {
+                    msg[..256].to_string()
+                } else {
+                    msg
+                }
+            }),
+        );
+
+        result
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: self.tool_router.list_all(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::default(),
