@@ -1037,10 +1037,10 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
     }
 }
 
-/// Spawn-and-forget MCP tool telemetry. The caller is derived from the
-/// JSON-RPC `clientInfo` when provided (authoritative per the MCP spec)
-/// and falls back to env/process-tree detection otherwise.
-pub fn send_mcp_tool_with_client(
+/// Send MCP tool telemetry. The caller is derived from the JSON-RPC
+/// `clientInfo` when provided (authoritative per the MCP spec) and falls back
+/// to env/process-tree detection otherwise.
+pub async fn send_mcp_tool_with_client(
     tool_name: String,
     duration_ms: u64,
     success: bool,
@@ -1050,23 +1050,21 @@ pub fn send_mcp_tool_with_client(
     let caller_override = mcp_client
         .as_ref()
         .map(|c| caller_from_mcp_client_name(&c.name).to_string());
-    tokio::spawn(async move {
-        send_with_caller_override(
-            CliTrackEvent {
-                command: "mcp".to_string(),
-                sub_command: Some(tool_name),
-                duration_ms,
-                success,
-                error_message,
-                os: std::env::consts::OS,
-                arch: std::env::consts::ARCH,
-                cli_version: env!("CARGO_PKG_VERSION"),
-                is_ci: Configs::env_is_ci(),
-            },
-            caller_override,
-        )
-        .await;
-    });
+    send_with_caller_override(
+        CliTrackEvent {
+            command: "mcp".to_string(),
+            sub_command: Some(tool_name),
+            duration_ms,
+            success,
+            error_message,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            is_ci: Configs::env_is_ci(),
+        },
+        caller_override,
+    )
+    .await;
 }
 
 pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
