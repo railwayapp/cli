@@ -174,6 +174,16 @@ const STRONG_AGENT_ENV: &[(&str, &str)] = &[
     ("REPLIT_AGENT", "replit_agent"),
     ("PI_CODING_AGENT", "pi"),
     ("__COG_BASHRC_SOURCED", "devin"),
+    // Cline sets CLINE_ACTIVE=true on every terminal it creates via
+    // vscode.window.createTerminal. Verified in cline/cline source at
+    // src/hosts/vscode/terminal/VscodeTerminalRegistry.ts and
+    // src/hosts/vscode/hostbridge/workspace/executeCommandInTerminal.ts;
+    // shipped in v3.24.0.
+    ("CLINE_ACTIVE", "cline"),
+    // Roo Code sets ROO_ACTIVE=true on every terminal it creates via
+    // Terminal.getEnv() in src/integrations/terminal/Terminal.ts
+    // (RooCodeInc/Roo-Code PR #11862, merged 2026-03-05).
+    ("ROO_ACTIVE", "roo_code"),
 ];
 
 fn agent_from_strong_env() -> Option<&'static str> {
