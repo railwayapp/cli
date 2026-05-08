@@ -857,6 +857,7 @@ impl TelemetryContext {
         let session_id = session_id();
         let caller = caller_override
             .and_then(|c| safe_telemetry_value(&c))
+            .or_else(|| MCP_CLIENT_CALLER.get().cloned())
             .unwrap_or_else(detect_caller);
         let linked_project = configs.get_local_linked_project().ok();
         let agent_session_id = safe_env(RAILWAY_AGENT_SESSION_ENV)
@@ -1037,36 +1038,47 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
     }
 }
 
-/// Spawn-and-forget MCP tool telemetry. The caller is derived from the
-/// JSON-RPC `clientInfo` when provided (authoritative per the MCP spec)
-/// and falls back to env/process-tree detection otherwise.
-pub fn send_mcp_tool_with_client(
+/// Process-scoped MCP client caller, captured the first time a tool call
+/// arrives with `clientInfo`. Lets the server-lifecycle telemetry::send
+/// emitted by the dispatch macro at process exit attribute itself to the
+/// MCP client even though no `clientInfo` is in scope at that point.
+static MCP_CLIENT_CALLER: OnceLock<String> = OnceLock::new();
+
+fn record_mcp_client_caller(client: &McpClientInfo) {
+    let _ = MCP_CLIENT_CALLER.set(caller_from_mcp_client_name(&client.name).to_string());
+}
+
+/// Send MCP tool telemetry. The caller is derived from the JSON-RPC
+/// `clientInfo` when provided (authoritative per the MCP spec) and falls back
+/// to env/process-tree detection otherwise.
+pub async fn send_mcp_tool_with_client(
     tool_name: String,
     duration_ms: u64,
     success: bool,
     error_message: Option<String>,
     mcp_client: Option<McpClientInfo>,
 ) {
+    if let Some(c) = mcp_client.as_ref() {
+        record_mcp_client_caller(c);
+    }
     let caller_override = mcp_client
         .as_ref()
         .map(|c| caller_from_mcp_client_name(&c.name).to_string());
-    tokio::spawn(async move {
-        send_with_caller_override(
-            CliTrackEvent {
-                command: "mcp".to_string(),
-                sub_command: Some(tool_name),
-                duration_ms,
-                success,
-                error_message,
-                os: std::env::consts::OS,
-                arch: std::env::consts::ARCH,
-                cli_version: env!("CARGO_PKG_VERSION"),
-                is_ci: Configs::env_is_ci(),
-            },
-            caller_override,
-        )
-        .await;
-    });
+    send_with_caller_override(
+        CliTrackEvent {
+            command: "mcp".to_string(),
+            sub_command: Some(tool_name),
+            duration_ms,
+            success,
+            error_message,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            is_ci: Configs::env_is_ci(),
+        },
+        caller_override,
+    )
+    .await;
 }
 
 pub async fn send_setup_agent(event: SetupAgentTrackEvent) {

@@ -1243,7 +1243,8 @@ impl ServerHandler for RailwayMcp {
                 }
             }),
             mcp_client,
-        );
+        )
+        .await;
 
         result
     }
