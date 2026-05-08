@@ -486,9 +486,11 @@ pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
         Err(_) => return,
     };
 
-    let client = match GQLClient::new_authorized(&configs) {
-        Ok(c) => c,
-        Err(_) => return,
+    let client = GQLClient::new_authorized(&configs)
+        .or_else(|_| GQLClient::new_public())
+        .ok();
+    let Some(client) = client else {
+        return;
     };
 
     let context = TelemetryContext::current(&configs);
