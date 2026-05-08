@@ -490,6 +490,40 @@ update_shell_rc_for_agents() {
   fi
 }
 
+extract_railway_version() {
+  # Pull X.Y.Z (with optional pre-release suffix and leading v) out of
+  # `--version` output. Echoes empty string on failure so callers can
+  # treat missing versions as "skip upgrade check".
+  printf '%s' "$1" | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?' | head -1 | sed 's/^v//'
+}
+
+version_lt() {
+  # Returns 0 (true) when $1 is older than $2 by major.minor.patch.
+  # Pre-release suffixes are stripped before comparison so "4.55.0"
+  # beats "4.55.0-rc.1". Returns 1 (false) for equal, newer, or
+  # unparseable inputs — i.e. errs on the side of NOT triggering an
+  # upgrade when we can't tell.
+  local a b a1 a2 a3 b1 b2 b3
+  if [ -z "${1-}" ] || [ -z "${2-}" ]; then return 1; fi
+  a="${1%%-*}"
+  b="${2%%-*}"
+  a1="$(printf '%s' "$a" | cut -d. -f1)"
+  a2="$(printf '%s' "$a" | cut -d. -f2)"
+  a3="$(printf '%s' "$a" | cut -d. -f3)"
+  b1="$(printf '%s' "$b" | cut -d. -f1)"
+  b2="$(printf '%s' "$b" | cut -d. -f2)"
+  b3="$(printf '%s' "$b" | cut -d. -f3)"
+  a1=${a1:-0}; a2=${a2:-0}; a3=${a3:-0}
+  b1=${b1:-0}; b2=${b2:-0}; b3=${b3:-0}
+  case "$a1$a2$a3$b1$b2$b3" in *[!0-9]*) return 1 ;; esac
+  if [ "$a1" -lt "$b1" ]; then return 0; fi
+  if [ "$a1" -gt "$b1" ]; then return 1; fi
+  if [ "$a2" -lt "$b2" ]; then return 0; fi
+  if [ "$a2" -gt "$b2" ]; then return 1; fi
+  if [ "$a3" -lt "$b3" ]; then return 0; fi
+  return 1
+}
+
 find_railway_bins() {
   local seen=":"
   local dir bin
@@ -600,13 +634,85 @@ if [ "$HELP" = 1 ]; then
     exit 0
 fi
 
+RAILWAY_UPGRADE_AGENT=0
+
 if [ "$AGENTS" = 1 ] && has railway; then
   RAILWAY_BIN="$(command -v railway)"
-  info "Railway CLI already installed: $RAILWAY_BIN ($("$RAILWAY_BIN" --version 2>/dev/null || echo unknown))"
-  info "No PATH changes were made."
+  RAW_VERSION="$("$RAILWAY_BIN" --version 2>/dev/null || true)"
+  CURRENT_VERSION="$(extract_railway_version "$RAW_VERSION")"
+
+  info "Railway CLI already installed: $RAILWAY_BIN (${CURRENT_VERSION:-unknown})"
   print_cli_conflicts
-  run_agent_setup "$RAILWAY_BIN"
-  exit 0
+
+  NEEDS_UPGRADE=0
+  if [ -n "$CURRENT_VERSION" ] && version_lt "$CURRENT_VERSION" "$RAILWAY_VERSION"; then
+    NEEDS_UPGRADE=1
+  fi
+
+  if [ "$NEEDS_UPGRADE" = 0 ]; then
+    info "No PATH changes were made."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
+  # Refuse to clobber package-manager-owned binaries; route the user
+  # through the right channel and continue with the existing CLI so the
+  # agent setup still runs. Catches both M-series (/opt/homebrew/*) and
+  # Intel (/usr/local/Cellar/*) direct paths plus the /usr/local/bin
+  # symlink Intel Homebrew creates.
+  BREW_INSTALL=0
+  case "$RAILWAY_BIN" in
+    /opt/homebrew/*|/usr/local/Cellar/*) BREW_INSTALL=1 ;;
+    /usr/local/bin/railway)
+      if [ -L "$RAILWAY_BIN" ]; then
+        case "$(readlink "$RAILWAY_BIN" 2>/dev/null || true)" in
+          *Cellar*|*homebrew*) BREW_INSTALL=1 ;;
+        esac
+      fi
+      ;;
+  esac
+
+  if [ "$BREW_INSTALL" = 1 ]; then
+    warn "Railway CLI was installed via Homebrew."
+    warn "Run 'brew upgrade railway' to update from $CURRENT_VERSION to $RAILWAY_VERSION, then re-run cli.new --agents."
+    info "Continuing with $CURRENT_VERSION."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
+  EXISTING_BIN_DIR="$(dirname "$RAILWAY_BIN")"
+  info "Newer version available: $RAILWAY_VERSION (you have $CURRENT_VERSION)"
+
+  UPGRADE_CONFIRMED=0
+  if [ -n "${FORCE-}" ] || [ ! -t 0 ]; then
+    UPGRADE_CONFIRMED=1
+  else
+    printf "%s " "${MAGENTA}?${NO_COLOR} Upgrade Railway CLI in ${BOLD}$EXISTING_BIN_DIR${NO_COLOR}? ${BOLD}[Y/n]${NO_COLOR}"
+    set +e
+    read -r yn </dev/tty
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      error "Error reading from prompt (please re-run with the '--yes' option)"
+      exit 1
+    fi
+    case "${yn:-y}" in
+      y|Y|yes|YES|Yes) UPGRADE_CONFIRMED=1 ;;
+      *) UPGRADE_CONFIRMED=0 ;;
+    esac
+  fi
+
+  if [ "$UPGRADE_CONFIRMED" != "1" ]; then
+    info "Skipping upgrade. Continuing with $CURRENT_VERSION."
+    info "No PATH changes were made."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
+  info "Upgrading Railway CLI in place: $EXISTING_BIN_DIR"
+  BIN_DIR="$EXISTING_BIN_DIR"
+  BIN_DIR_SET=1
+  RAILWAY_UPGRADE_AGENT=1
 fi
 
 if [ "$AGENTS" = 1 ] && [ "$BIN_DIR_SET" = 0 ] && [ -z "${RAILWAY_BIN_DIR-}" ]; then
@@ -639,7 +745,9 @@ fi
 
 URL="${BASE_URL}/download/v${RAILWAY_VERSION}/railway-v${RAILWAY_VERSION}-${TARGET}.${EXT}"
 debug "Tarball URL: ${UNDERLINE}${BLUE}${URL}${NO_COLOR}"
-confirm "Install railway ${GREEN}${RAILWAY_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
+if [ "$RAILWAY_UPGRADE_AGENT" != "1" ]; then
+  confirm "Install railway ${GREEN}${RAILWAY_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
+fi
 if [ "$AGENTS" = 1 ]; then
   mkdir -p "${BIN_DIR}"
 fi
@@ -656,7 +764,9 @@ if [ "$AGENTS" = 1 ]; then
 
   export PATH="$PATH:$BIN_DIR"
 
-  if [ "$NO_MODIFY_PATH" = 0 ]; then
+  if [ "$RAILWAY_UPGRADE_AGENT" = "1" ]; then
+    info "Upgraded Railway CLI to ${GREEN}${RAILWAY_VERSION}${NO_COLOR}."
+  elif [ "$NO_MODIFY_PATH" = 0 ]; then
     update_shell_rc_for_agents
   else
     warn "PATH update skipped by --no-modify-path. Agent MCP config requires railway on PATH."
@@ -665,7 +775,7 @@ if [ "$AGENTS" = 1 ]; then
   print_cli_conflicts
   run_agent_setup "$RAILWAY_BIN"
 
-  if [ "$NO_MODIFY_PATH" = 0 ]; then
+  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$NO_MODIFY_PATH" = 0 ]; then
     warn "IMPORTANT: Railway was installed to $BIN_DIR and your shell PATH was updated."
     warn "Restart your terminal and AI editor so agent MCP config can find 'railway mcp'."
   fi
