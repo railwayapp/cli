@@ -1217,11 +1217,17 @@ impl ServerHandler for RailwayMcp {
     ) -> Result<CallToolResult, McpError> {
         let tool_name = request.name.to_string();
         let start = std::time::Instant::now();
+        // Snapshot the JSON-RPC initialize clientInfo before consuming the
+        // context — this is the authoritative agent identity for the entire
+        // MCP path and overrides env/process-tree heuristics downstream.
+        let mcp_client = context.peer.peer_info().map(|info| telemetry::McpClientInfo {
+            name: info.client_info.name.clone(),
+        });
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let result = self.tool_router.call(tcc).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        telemetry::send_mcp_tool(
+        telemetry::send_mcp_tool_with_client(
             tool_name,
             duration_ms,
             result.is_ok(),
@@ -1233,6 +1239,7 @@ impl ServerHandler for RailwayMcp {
                     msg
                 }
             }),
+            mcp_client,
         );
 
         result
