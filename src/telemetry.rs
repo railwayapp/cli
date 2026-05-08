@@ -540,9 +540,15 @@ fn ai_ide_host_from_env() -> Option<&'static str> {
         if b.contains("anthropic.claude") {
             return Some("claude_desktop");
         }
-        if b.contains("jetbrains") || b.contains("intellij") || b.contains("pycharm")
-            || b.contains("webstorm") || b.contains("goland") || b.contains("clion")
-            || b.contains("rustrover") || b.contains("datagrip") || b.contains("phpstorm")
+        if b.contains("jetbrains")
+            || b.contains("intellij")
+            || b.contains("pycharm")
+            || b.contains("webstorm")
+            || b.contains("goland")
+            || b.contains("clion")
+            || b.contains("rustrover")
+            || b.contains("datagrip")
+            || b.contains("phpstorm")
             || b.contains("rider")
         {
             return Some("jetbrains");
@@ -1180,10 +1186,7 @@ mod tests {
     #[test]
     fn detects_codex_via_full_argv() {
         // macOS `comm` would be just `codex`; full argv carries more context.
-        assert_eq!(
-            caller_from_process_name("codex --remote"),
-            Some("codex")
-        );
+        assert_eq!(caller_from_process_name("codex --remote"), Some("codex"));
         assert_eq!(
             caller_from_process_name("/usr/local/bin/codex"),
             Some("codex")
@@ -1224,7 +1227,10 @@ mod tests {
         assert_eq!(caller_from_mcp_client_name("Roo Code"), "roo_code");
         assert_eq!(caller_from_mcp_client_name("kilo"), "kilo_code");
         assert_eq!(caller_from_mcp_client_name("opencode"), "opencode");
-        assert_eq!(caller_from_mcp_client_name("continue-client"), "continue_dev");
+        assert_eq!(
+            caller_from_mcp_client_name("continue-client"),
+            "continue_dev"
+        );
         assert_eq!(
             caller_from_mcp_client_name("Visual Studio Code"),
             "vscode_copilot"
@@ -1237,16 +1243,28 @@ mod tests {
         assert_eq!(caller_from_mcp_client_name("Windsurf"), "windsurf");
         assert_eq!(caller_from_mcp_client_name("goose"), "goose");
         assert_eq!(caller_from_mcp_client_name("firebender"), "firebender");
-        assert_eq!(caller_from_mcp_client_name("totally-unknown-client"), "mcp_unknown");
+        assert_eq!(
+            caller_from_mcp_client_name("totally-unknown-client"),
+            "mcp_unknown"
+        );
     }
 
     #[test]
     fn parent_kind_buckets_known_interpreters() {
-        assert_eq!(parent_kind_from_command("python3 deploy.py"), Some("python"));
-        assert_eq!(parent_kind_from_command("/usr/bin/uv run script"), Some("python"));
+        assert_eq!(
+            parent_kind_from_command("python3 deploy.py"),
+            Some("python")
+        );
+        assert_eq!(
+            parent_kind_from_command("/usr/bin/uv run script"),
+            Some("python")
+        );
         assert_eq!(parent_kind_from_command("node deploy.js"), Some("node"));
         assert_eq!(parent_kind_from_command("npx some-tool"), Some("node"));
-        assert_eq!(parent_kind_from_command("bash -c 'do stuff'"), Some("shell"));
+        assert_eq!(
+            parent_kind_from_command("bash -c 'do stuff'"),
+            Some("shell")
+        );
         assert_eq!(parent_kind_from_command("zsh"), Some("shell"));
         assert_eq!(parent_kind_from_command("ruby script.rb"), Some("ruby"));
         assert_eq!(parent_kind_from_command("pwsh"), Some("powershell"));
