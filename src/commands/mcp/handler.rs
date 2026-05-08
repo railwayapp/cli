@@ -1220,9 +1220,12 @@ impl ServerHandler for RailwayMcp {
         // Snapshot the JSON-RPC initialize clientInfo before consuming the
         // context — this is the authoritative agent identity for the entire
         // MCP path and overrides env/process-tree heuristics downstream.
-        let mcp_client = context.peer.peer_info().map(|info| telemetry::McpClientInfo {
-            name: info.client_info.name.clone(),
-        });
+        let mcp_client = context
+            .peer
+            .peer_info()
+            .map(|info| telemetry::McpClientInfo {
+                name: info.client_info.name.clone(),
+            });
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let result = self.tool_router.call(tcc).await;
         let duration_ms = start.elapsed().as_millis() as u64;

@@ -245,7 +245,12 @@ struct ProcessNode {
 /// Walk the parent chain starting from `pid`, calling `f` on each node.
 /// Stops when the callback returns `Some(_)`, when no parent is found, or
 /// after `max_hops` iterations.
-fn walk_ancestors<T, F>(snapshot: &HashMap<u32, ProcessNode>, pid: u32, max_hops: u32, mut f: F) -> Option<T>
+fn walk_ancestors<T, F>(
+    snapshot: &HashMap<u32, ProcessNode>,
+    pid: u32,
+    max_hops: u32,
+    mut f: F,
+) -> Option<T>
 where
     F: FnMut(&ProcessNode) -> Option<T>,
 {
