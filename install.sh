@@ -15,6 +15,7 @@ help_text="Options
 
    -b, --bin-dir
    Override the bin installation directory
+   Precedence: --bin-dir > RAILWAY_BIN_DIR > \$RAILWAY_HOME/bin > ~/.railway/bin
 
    -a, --arch
    Override the architecture identified by the installer
@@ -24,9 +25,6 @@ help_text="Options
 
    --agents
    Install or reuse the Railway CLI, then configure Railway agent support
-
-   --no-modify-path
-   Do not update shell startup files when used with --agents
 
    -r, --remove
    Uninstall railway
@@ -110,6 +108,73 @@ test_writeable() {
   else
     return 1
   fi
+}
+
+default_railway_home() {
+  if [ -n "${RAILWAY_HOME-}" ]; then
+    printf '%s' "${RAILWAY_HOME}"
+    return 0
+  fi
+
+  if [ -n "${HOME-}" ]; then
+    printf '%s' "${HOME}/.railway"
+    return 0
+  fi
+
+  return 1
+}
+
+tildify() {
+  if [ -n "${HOME-}" ]; then
+    case "$1" in
+      "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;;
+      "$HOME") printf '~' ;;
+      *) printf '%s' "$1" ;;
+    esac
+  else
+    printf '%s' "$1"
+  fi
+}
+
+shell_quote() {
+  local value="$1"
+  value=${value//\'/\'\\\'\'}
+  printf "'%s'" "$value"
+}
+
+fish_quote() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\'/\\\'}
+  printf "'%s'" "$value"
+}
+
+source_path() {
+  local path="$1"
+
+  if [ -n "${HOME-}" ]; then
+    case "$path" in
+      "$HOME"/*) printf '"$HOME/%s"' "${path#"$HOME"/}"; return ;;
+    esac
+  fi
+
+  shell_quote "$path"
+}
+
+fish_source_path() {
+  local path="$1"
+
+  if [ -n "${HOME-}" ]; then
+    case "$path" in
+      "$HOME"/*) printf '"$HOME/%s"' "${path#"$HOME"/}"; return ;;
+    esac
+  fi
+
+  fish_quote "$path"
+}
+
+bin_dir_uses_railway_home() {
+  [ -n "${RAILWAY_HOME_DIR-}" ] && [ "${BIN_DIR%/}" = "${RAILWAY_HOME_DIR%/}/bin" ]
 }
 
 download() {
@@ -291,26 +356,10 @@ confirm() {
 check_bin_dir() {
   local bin_dir="$1"
 
-  if [ ! -d "$BIN_DIR" ]; then
-    error "Installation location $BIN_DIR does not appear to be a directory"
+  if [ ! -d "$bin_dir" ]; then
+    error "Installation location $bin_dir does not appear to be a directory"
     info "Make sure the location exists and is a directory, then try again."
     exit 1
-  fi
-
-  # https://stackoverflow.com/a/11655875
-  local good
-  good=$(
-    IFS=:
-    for path in $PATH; do
-      if [ "${path}" = "${bin_dir}" ]; then
-        printf 1
-        break
-      fi
-    done
-  )
-
-  if [ "${good}" != "1" ]; then
-    warn "Bin directory ${bin_dir} is not in your \$PATH"
   fi
 }
 
@@ -344,8 +393,14 @@ is_build_available() {
 UNINSTALL=0
 HELP=0
 AGENTS=0
-NO_MODIFY_PATH=0
-BIN_DIR_SET=0
+RAILWAY_HOME_DIR=""
+RAILWAY_ENV_FILE=""
+RAILWAY_FISH_ENV_FILE=""
+PATH_ACTIVATION_PRINTED=0
+RAILWAY_PATH_MARKER_BEGIN="# >>> railway initialize >>>"
+RAILWAY_PATH_MARKER_END="# <<< railway initialize <<<"
+SHELL_STARTUP_FILE=""
+SHELL_STARTUP_ACTION=""
 
 DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-)
 
@@ -364,7 +419,19 @@ if [ -z "${RAILWAY_PLATFORM-}" ]; then
   PLATFORM="$(detect_platform)"
 fi
 
-BIN_DIR="${RAILWAY_BIN_DIR:-/usr/local/bin}"
+if RAILWAY_HOME_DIR="$(default_railway_home)"; then
+  if [ -n "${RAILWAY_BIN_DIR-}" ]; then
+    BIN_DIR="${RAILWAY_BIN_DIR}"
+  else
+    BIN_DIR="${RAILWAY_HOME_DIR%/}/bin"
+  fi
+else
+  if [ -n "${RAILWAY_BIN_DIR-}" ]; then
+    BIN_DIR="${RAILWAY_BIN_DIR}"
+  else
+    BIN_DIR=""
+  fi
+fi
 
 if [ -z "${RAILWAY_ARCH-}" ]; then
   ARCH="$(detect_arch)"
@@ -383,7 +450,6 @@ while [ "$#" -gt 0 ]; do
     ;;
   -b | --bin-dir)
     BIN_DIR="$2"
-    BIN_DIR_SET=1
     shift 2
     ;;
   -a | --arch)
@@ -411,10 +477,6 @@ while [ "$#" -gt 0 ]; do
     AGENTS=1
     shift 1
     ;;
-  --no-modify-path)
-    NO_MODIFY_PATH=1
-    shift 1
-    ;;
   -h | --help)
     HELP=1
     shift 1
@@ -425,7 +487,6 @@ while [ "$#" -gt 0 ]; do
     ;;
   -b=* | --bin-dir=*)
     BIN_DIR="${1#*=}"
-    BIN_DIR_SET=1
     shift 1
     ;;
   -a=* | --arch=*)
@@ -459,35 +520,266 @@ else
   VERBOSE=
 fi
 
-update_shell_rc_for_agents() {
-  local marker='# Added by Railway agent installer'
-  local quoted_bin_dir
-  quoted_bin_dir="$(printf "%s" "$BIN_DIR" | sed "s/'/'\\\\''/g")"
-  local bash_line="export PATH=\"\$PATH\":'$quoted_bin_dir'"
-  local fish_line="set -gx PATH \$PATH \"$BIN_DIR\""
-  local found=0
+write_env_files() {
+  local quoted_railway_home
+  local fish_railway_home
 
-  _append() {
-    local rc="$1" line="$2"
-    if ! grep -qF "$marker" "$rc" 2>/dev/null; then
-      printf '\n%s\n%s\n' "$marker" "$line" >> "$rc"
-      info "Added PATH update to $rc"
-    fi
-  }
+  if ! bin_dir_uses_railway_home; then
+    return 0
+  fi
 
-  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-    if [ -f "$rc" ]; then
-      _append "$rc" "$bash_line"
-      found=1
-    fi
+  if ! mkdir -p "$RAILWAY_HOME_DIR"; then
+    warn "Could not create $(tildify "$RAILWAY_HOME_DIR"); skipping activation file."
+    return 0
+  fi
+
+  RAILWAY_ENV_FILE="$RAILWAY_HOME_DIR/env"
+  RAILWAY_FISH_ENV_FILE="$RAILWAY_HOME_DIR/env.fish"
+
+  if [ -e "$RAILWAY_ENV_FILE" ] && { [ ! -f "$RAILWAY_ENV_FILE" ] || [ ! -w "$RAILWAY_ENV_FILE" ]; }; then
+    warn "Could not write $(tildify "$RAILWAY_ENV_FILE"); skipping activation file."
+    RAILWAY_ENV_FILE=""
+    RAILWAY_FISH_ENV_FILE=""
+    return 0
+  fi
+
+  quoted_railway_home="$(shell_quote "$RAILWAY_HOME_DIR")"
+  fish_railway_home="$(fish_quote "$RAILWAY_HOME_DIR")"
+
+  if ! {
+    printf 'export RAILWAY_HOME=%s\n' "$quoted_railway_home"
+    printf 'case ":$PATH:" in\n'
+    printf '  *":$RAILWAY_HOME/bin:"*) ;;\n'
+    printf '  *) export PATH="$RAILWAY_HOME/bin:$PATH" ;;\n'
+    printf 'esac\n'
+  } > "$RAILWAY_ENV_FILE"; then
+    warn "Could not write $(tildify "$RAILWAY_ENV_FILE"); skipping activation file."
+    RAILWAY_ENV_FILE=""
+    RAILWAY_FISH_ENV_FILE=""
+    return 0
+  fi
+
+  if [ -e "$RAILWAY_FISH_ENV_FILE" ] && { [ ! -f "$RAILWAY_FISH_ENV_FILE" ] || [ ! -w "$RAILWAY_FISH_ENV_FILE" ]; }; then
+    warn "Could not write $(tildify "$RAILWAY_FISH_ENV_FILE"); fish users may need to add $(tildify "$BIN_DIR") to PATH manually."
+    RAILWAY_FISH_ENV_FILE=""
+    return 0
+  fi
+
+  if ! {
+    printf 'set -gx RAILWAY_HOME %s\n' "$fish_railway_home"
+    printf 'if not contains "$RAILWAY_HOME/bin" $PATH\n'
+    printf '  set -gx PATH "$RAILWAY_HOME/bin" $PATH\n'
+    printf 'end\n'
+  } > "$RAILWAY_FISH_ENV_FILE"; then
+    warn "Could not write $(tildify "$RAILWAY_FISH_ENV_FILE"); fish users may need to add $(tildify "$BIN_DIR") to PATH manually."
+    RAILWAY_FISH_ENV_FILE=""
+  fi
+}
+
+print_path_commands() {
+  local commands="$1"
+  local command
+
+  printf '%s\n' "$commands" | while IFS= read -r command; do
+    printf '  %s\n' "$command"
   done
-  if [ -f "$HOME/.config/fish/config.fish" ]; then
-    _append "$HOME/.config/fish/config.fish" "$fish_line"
-    found=1
+}
+
+activation_command() {
+  local shell_name=""
+  local env_file="$RAILWAY_ENV_FILE"
+
+  if [ -n "${SHELL-}" ]; then
+    shell_name="$(basename "$SHELL")"
   fi
-  if [ "$found" = "0" ]; then
-    _append "$HOME/.profile" "$bash_line"
+
+  if [ "$shell_name" = "fish" ]; then
+    if [ -n "$RAILWAY_FISH_ENV_FILE" ]; then
+      env_file="$RAILWAY_FISH_ENV_FILE"
+    else
+      return 1
+    fi
+
+    printf 'source %s' "$(fish_source_path "$env_file")"
+    return 0
   fi
+
+  if [ -n "$env_file" ]; then
+    printf 'source %s' "$(source_path "$env_file")"
+    return 0
+  fi
+
+  return 1
+}
+
+configure_shell_startup() {
+  local contents="$1"
+  local shell_name=""
+  local rc_file=""
+  local rc_dir
+  local tmp_file
+
+  SHELL_STARTUP_FILE=""
+  SHELL_STARTUP_ACTION=""
+
+  if [ -z "${HOME-}" ]; then
+    return 1
+  fi
+
+  if [ -n "${SHELL-}" ]; then
+    shell_name="$(basename "$SHELL")"
+  fi
+
+  case "$shell_name" in
+    fish)
+      rc_file="$HOME/.config/fish/config.fish"
+      ;;
+    zsh)
+      rc_file="$HOME/.zshrc"
+      ;;
+    bash)
+      if [ -f "$HOME/.bash_profile" ]; then
+        rc_file="$HOME/.bash_profile"
+      else
+        rc_file="$HOME/.bashrc"
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if [ -e "$rc_file" ] && { [ ! -f "$rc_file" ] || [ ! -w "$rc_file" ]; }; then
+    warn "Could not update $(tildify "$rc_file"); add $(tildify "$BIN_DIR") to PATH manually."
+    return 1
+  fi
+
+  rc_dir="$(dirname "$rc_file")"
+  if ! mkdir -p "$rc_dir"; then
+    warn "Could not create $(tildify "$rc_dir"); add $(tildify "$BIN_DIR") to PATH manually."
+    return 1
+  fi
+
+  if [ -f "$rc_file" ]; then
+    if grep -qF "$RAILWAY_PATH_MARKER_BEGIN" "$rc_file"; then
+      SHELL_STARTUP_ACTION="Updated"
+    else
+      SHELL_STARTUP_ACTION="Added"
+    fi
+  else
+    SHELL_STARTUP_ACTION="Created"
+  fi
+
+  tmp_file="$(get_tmpfile shell)"
+  if [ -f "$rc_file" ]; then
+    if ! awk -v begin="$RAILWAY_PATH_MARKER_BEGIN" -v end="$RAILWAY_PATH_MARKER_END" '
+      $0 == begin { skip = 1; next }
+      $0 == end { skip = 0; next }
+      !skip { print }
+    ' "$rc_file" > "$tmp_file"; then
+      rm -f "$tmp_file"
+      warn "Could not update $(tildify "$rc_file"); add $(tildify "$BIN_DIR") to PATH manually."
+      return 1
+    fi
+  else
+    : > "$tmp_file"
+  fi
+
+  {
+    printf '\n%s\n' "$RAILWAY_PATH_MARKER_BEGIN"
+    printf '%s\n' "$contents"
+    printf '%s\n' "$RAILWAY_PATH_MARKER_END"
+  } >> "$tmp_file"
+
+  if [ -f "$rc_file" ]; then
+    if ! cat "$tmp_file" > "$rc_file"; then
+      rm -f "$tmp_file"
+      warn "Could not update $(tildify "$rc_file"); add $(tildify "$BIN_DIR") to PATH manually."
+      return 1
+    fi
+    rm -f "$tmp_file"
+  elif ! mv "$tmp_file" "$rc_file"; then
+    rm -f "$tmp_file"
+    warn "Could not create $(tildify "$rc_file"); add $(tildify "$BIN_DIR") to PATH manually."
+    return 1
+  fi
+
+  SHELL_STARTUP_FILE="$rc_file"
+  return 0
+}
+
+configure_shell_path() {
+  local quoted_bin_dir
+  local quoted_railway_home
+  local fish_bin_dir
+  local fish_railway_home
+  local bash_line
+  local bash_contents
+  local fish_line
+  local fish_contents
+  local path_commands
+  local startup_contents
+  local activation
+  local shell_name
+
+  if bin_dir_uses_railway_home; then
+    quoted_railway_home="$(shell_quote "$RAILWAY_HOME_DIR")"
+    fish_railway_home="$(fish_quote "$RAILWAY_HOME_DIR")"
+    bash_line='export PATH="$RAILWAY_HOME/bin:$PATH"'
+    bash_contents="export RAILWAY_HOME=$quoted_railway_home
+$bash_line"
+    fish_line='set -gx PATH "$RAILWAY_HOME/bin" $PATH'
+    fish_contents="set -gx RAILWAY_HOME $fish_railway_home
+$fish_line"
+  else
+    quoted_bin_dir="$(shell_quote "$BIN_DIR")"
+    fish_bin_dir="$(fish_quote "$BIN_DIR")"
+    bash_line="export PATH=$quoted_bin_dir:\"\$PATH\""
+    bash_contents="$bash_line"
+    fish_line="set -gx PATH $fish_bin_dir \$PATH"
+    fish_contents="$fish_line"
+  fi
+
+  shell_name=""
+  if [ -n "${SHELL-}" ]; then
+    shell_name="$(basename "$SHELL")"
+  fi
+
+  path_commands="$bash_contents"
+  startup_contents="$bash_contents"
+  if [ "$shell_name" = "fish" ]; then
+    path_commands="$fish_contents"
+    startup_contents="$fish_contents"
+  fi
+
+  if activation="$(activation_command)"; then
+    path_commands="$activation"
+    startup_contents="$activation"
+  fi
+
+  warn "Railway was installed to $(tildify "$BIN_DIR"), but this shell does not resolve 'railway' from there yet."
+  if configure_shell_startup "$startup_contents"; then
+    info "$SHELL_STARTUP_ACTION Railway PATH setup in $(tildify "$SHELL_STARTUP_FILE")"
+    info "New terminals will have railway available automatically."
+  else
+    info "To make railway available in new terminals, add this command to your shell startup file:"
+    print_path_commands "$startup_contents"
+  fi
+  info "To use railway in this terminal, run:"
+  print_path_commands "$path_commands"
+  PATH_ACTIVATION_PRINTED=1
+}
+
+installed_railway_is_on_path() {
+  local railway_on_path
+  local installed_bin
+
+  railway_on_path="$(command -v railway 2>/dev/null || true)"
+  installed_bin="${BIN_DIR%/}/railway"
+
+  [ -n "$railway_on_path" ] || return 1
+  [ "$railway_on_path" = "$installed_bin" ] && return 0
+  [ -e "$railway_on_path" ] && [ -e "$installed_bin" ] && [ "$railway_on_path" -ef "$installed_bin" ]
 }
 
 extract_railway_version() {
@@ -574,6 +866,24 @@ print_cli_conflicts() {
   fi
 }
 
+warn_existing_path_conflict() {
+  local railway_on_path
+  local installed_bin
+
+  railway_on_path="$(command -v railway 2>/dev/null || true)"
+  installed_bin="${BIN_DIR%/}/railway"
+
+  [ -n "$railway_on_path" ] || return 0
+  [ -x "$installed_bin" ] || return 0
+
+  if installed_railway_is_on_path; then
+    return 0
+  fi
+
+  warn "Another Railway CLI is already on PATH: $railway_on_path"
+  warn "After activation, shells will use $(tildify "$installed_bin") first."
+}
+
 run_agent_setup() {
   local railway_bin="$1"
   local yes=""
@@ -608,21 +918,31 @@ if [ "$UNINSTALL" = 1 ]; then
 
   msg=""
   sudo=""
+  railway_bin="$(command -v railway 2>/dev/null || true)"
+
+  if [ -z "$railway_bin" ] && [ -x "$BIN_DIR/railway" ]; then
+    railway_bin="$BIN_DIR/railway"
+  fi
+
+  if [ -z "$railway_bin" ]; then
+    error "Could not find railway on PATH or at $BIN_DIR/railway"
+    exit 1
+  fi
 
   info "REMOVING railway"
 
-  if test_writeable "$(dirname "$(which railway)")"; then
+  if test_writeable "$(dirname "$railway_bin")"; then
     sudo=""
     msg="Removing railway, please wait…"
   else
-    warn "Escalated permissions are required to install to ${BIN_DIR}"
+    warn "Escalated permissions are required to remove ${railway_bin}"
     elevate_priv
     sudo="sudo"
     msg="Removing railway as root, please wait…"
   fi
 
   info "$msg"
-  ${sudo} rm "$(which railway)"
+  ${sudo} rm "$railway_bin"
   ${sudo} rm -f /tmp/railway 2>/dev/null || true
 
   info "Removed railway"
@@ -711,12 +1031,12 @@ if [ "$AGENTS" = 1 ] && has railway; then
 
   info "Upgrading Railway CLI in place: $EXISTING_BIN_DIR"
   BIN_DIR="$EXISTING_BIN_DIR"
-  BIN_DIR_SET=1
   RAILWAY_UPGRADE_AGENT=1
 fi
 
-if [ "$AGENTS" = 1 ] && [ "$BIN_DIR_SET" = 0 ] && [ -z "${RAILWAY_BIN_DIR-}" ]; then
-  BIN_DIR="${RAILWAY_AGENT_BIN_DIR:-$HOME/.railway/bin}"
+if [ -z "$BIN_DIR" ]; then
+  error "Set RAILWAY_BIN_DIR or pass --bin-dir to choose an install directory."
+  exit 1
 fi
 
 TARGET="$(detect_target "${ARCH}" "${PLATFORM}")"
@@ -748,12 +1068,26 @@ debug "Tarball URL: ${UNDERLINE}${BLUE}${URL}${NO_COLOR}"
 if [ "$RAILWAY_UPGRADE_AGENT" != "1" ]; then
   confirm "Install railway ${GREEN}${RAILWAY_VERSION}${NO_COLOR} to ${BOLD}${GREEN}${BIN_DIR}${NO_COLOR}?"
 fi
-if [ "$AGENTS" = 1 ]; then
-  mkdir -p "${BIN_DIR}"
-fi
+mkdir -p "${BIN_DIR}" || {
+  error "Failed to create installation location ${BIN_DIR}"
+  exit 1
+}
 check_bin_dir "${BIN_DIR}"
 
 install "${EXT}"
+
+completed "railway was installed successfully to $(tildify "$BIN_DIR/railway")"
+if [ "$RAILWAY_UPGRADE_AGENT" != "1" ]; then
+  write_env_files
+fi
+
+if ! installed_railway_is_on_path; then
+  configure_shell_path
+fi
+
+if [ "$AGENTS" != 1 ]; then
+  warn_existing_path_conflict
+fi
 
 if [ "$AGENTS" = 1 ]; then
   RAILWAY_BIN="$BIN_DIR/railway"
@@ -762,22 +1096,21 @@ if [ "$AGENTS" = 1 ]; then
     exit 1
   fi
 
-  export PATH="$PATH:$BIN_DIR"
+  export PATH="$BIN_DIR:$PATH"
 
   if [ "$RAILWAY_UPGRADE_AGENT" = "1" ]; then
     info "Upgraded Railway CLI to ${GREEN}${RAILWAY_VERSION}${NO_COLOR}."
-  elif [ "$NO_MODIFY_PATH" = 0 ]; then
-    update_shell_rc_for_agents
-  else
-    warn "PATH update skipped by --no-modify-path. Agent MCP config requires railway on PATH."
   fi
 
   print_cli_conflicts
   run_agent_setup "$RAILWAY_BIN"
 
-  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$NO_MODIFY_PATH" = 0 ]; then
-    warn "IMPORTANT: Railway was installed to $BIN_DIR and your shell PATH was updated."
-    warn "Restart your terminal and AI editor so agent MCP config can find 'railway mcp'."
+  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ] && activation="$(activation_command)"; then
+    warn "IMPORTANT: Railway was installed to $BIN_DIR."
+    warn "Run '$activation' in new shells before calling railway, or add it to your shell startup file."
+  elif [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ]; then
+    warn "IMPORTANT: Railway was installed to $BIN_DIR."
+    warn "Add it to PATH before calling railway in new shells."
   fi
 fi
 
