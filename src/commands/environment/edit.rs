@@ -20,15 +20,24 @@ use super::new::{
 pub async fn edit_environment(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let linked_project = if args.project.is_some() {
+        None
+    } else {
+        Some(configs.get_linked_project().await?)
+    };
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|linked| linked.project.clone()))
+        .ok_or_else(|| RailwayError::NoLinkedProject)?;
+    let project = get_project(&client, &configs, project_id.clone()).await?;
     let stdin_is_terminal = std::io::stdin().is_terminal();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let is_interactive = stdin_is_terminal && stdout_is_terminal;
     let json = args.json;
 
     // Resolve environment: --environment flag, or linked environment
-    let environment_id = resolve_environment(&args, &project, &linked_project)?;
+    let environment_id = resolve_environment(&args, &project, linked_project.as_ref())?;
 
     // Get environment name for display
     let environment_name = project
@@ -39,8 +48,7 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         .map(|e| e.node.name.clone())
         .unwrap_or_else(|| environment_id.clone());
     let environment_instances =
-        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
-            .await?;
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
 
     // Get config from stdin (if piped), CLI flags, or interactive prompts
     let env_config = get_edit_config(
@@ -165,7 +173,7 @@ pub async fn edit_environment(args: Args) -> Result<()> {
 fn resolve_environment(
     args: &Args,
     project: &queries::project::ProjectProject,
-    linked_project: &crate::config::LinkedProject,
+    linked_project: Option<&crate::config::LinkedProject>,
 ) -> Result<String> {
     if let Some(ref env_input) = args.environment {
         // Find environment by name or ID
@@ -183,6 +191,11 @@ fn resolve_environment(
         }
     } else {
         // Use linked environment
+        let linked_project = linked_project.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No environment specified. Use --environment or run `railway link` to link one."
+            )
+        })?;
         let env_id = linked_project.environment_id()?.to_string();
         let environment = get_matched_environment(project, env_id)?;
         fake_select("Environment", &environment.name);
