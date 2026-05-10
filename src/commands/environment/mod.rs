@@ -92,6 +92,10 @@ structstruck::strike! {
         /// Edit an environment's configuration
         #[clap(visible_alias = "update")]
         Edit(pub struct {
+            /// Project ID/name to edit (defaults to linked project)
+            #[clap(long, short = 'p')]
+            pub project: Option<String>,
+
             /// The environment to edit (defaults to linked environment)
             #[clap(long, short)]
             pub environment: Option<String>,
