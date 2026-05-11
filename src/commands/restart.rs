@@ -45,6 +45,7 @@ pub async fn command(args: Args) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
     let service_id = ctx.service_id;
     let service_name = ctx.service_name;
+    let environment_name = ctx.environment_name;
 
     let environment_instances =
         get_environment_instances(&client, &configs, &ctx.project_id, &ctx.environment_id).await?;
@@ -61,7 +62,7 @@ pub async fn command(args: Args) -> Result<()> {
         prompt_confirm_with_default(
             format!(
                 "Restart the latest deployment from service {} in environment {}?",
-                service_name, ctx.environment_id
+                service_name, environment_name
             )
             .as_str(),
             false,

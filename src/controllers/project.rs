@@ -219,6 +219,7 @@ pub struct ServiceContext {
     pub project: ProjectProject,
     pub project_id: String,
     pub environment_id: String,
+    pub environment_name: String,
     pub service_id: String,
     pub service_name: String,
 }
@@ -263,10 +264,16 @@ pub async fn resolve_service_context(
             .environment_id()?
             .to_string(),
     };
-    let environment_id = get_matched_environment(&project, env)?.id;
+    let environment = get_matched_environment(&project, env)?;
+    let environment_id = environment.id;
+    let environment_name = environment.name;
 
     let linked_service = linked_project.and_then(|lp| lp.service);
     let services = &project.services.edges;
+    if services.is_empty() {
+        bail!(RailwayError::ProjectHasNoServices);
+    }
+
     let (service_id, service_name) = match (service_arg, linked_service) {
         (Some(service_arg), _) => {
             let service = services
@@ -296,6 +303,7 @@ pub async fn resolve_service_context(
         project,
         project_id,
         environment_id,
+        environment_name,
         service_id,
         service_name,
     })

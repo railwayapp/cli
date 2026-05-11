@@ -35,6 +35,7 @@ pub async fn command(args: Args) -> Result<()> {
     let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
     let project_id = ctx.project_id;
     let environment_id = ctx.environment_id;
+    let environment_name = ctx.environment_name;
     let service = ctx.service_id;
     let project_name = ctx.project.name.clone();
 
@@ -51,7 +52,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let linked_project_environment = format!(
         "{} environment of project {}",
-        environment_id.bold(),
+        environment_name.bold(),
         project_name.bold()
     );
 

@@ -45,7 +45,7 @@ pub async fn command(args: Args) -> Result<()> {
     let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
     let project_id = ctx.project_id;
     let environment_id = ctx.environment_id;
-    let environment_name = environment_id.as_str();
+    let environment_name = ctx.environment_name;
     let service_id = ctx.service_id;
     let service_name = &ctx.service_name;
     let service_node_id = service_id.clone();
