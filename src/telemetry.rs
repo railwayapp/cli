@@ -1,10 +1,11 @@
-use std::{collections::HashMap, io::IsTerminal, sync::OnceLock};
+use std::{collections::HashMap, fs, io::IsTerminal, path::PathBuf, sync::OnceLock};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::client::GQLClient;
 use crate::config::Configs;
@@ -371,7 +372,17 @@ fn caller_from_process_name(command: &str) -> Option<&'static str> {
     if lower.contains("factory-droid") || lower.contains("factory_droid") {
         return Some("factory_droid");
     }
-    if lower.contains("claude") {
+    // Tighter than bare "claude": bare-substring matched Claude Desktop
+    // helper paths, MCP server binaries with "claude" in argv, scripts in
+    // ~/.claude/, etc., over-attributing those invocations to claude_code.
+    // The audit on 2026-05-10 confirmed claude_code dominated event counts
+    // partly due to this. Match the known agent identifiers explicitly,
+    // plus the literal `claude` argv0 (the official CLI entry point).
+    if lower.contains("claude-code")
+        || lower.contains("claude_code")
+        || lower.contains("anthropic.claude-code")
+        || basename == "claude"
+    {
         return Some("claude_code");
     }
     if lower.contains("windsurf") {
@@ -706,6 +717,272 @@ fn caller_from_mcp_client_name(name: &str) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Persistent agent session file
+// ---------------------------------------------------------------------------
+//
+// Recovers a stable `agent_session_id` across `railway` invocations when no
+// harness env var (RAILWAY_AGENT_SESSION, CLAUDE_CODE_SESSION_ID, ...) is
+// present. Keyed by the immediate parent process identity (pid + boot time +
+// argv0) so concurrent agents and shells get separate sessions automatically.
+//
+// File layout: `~/.railway/sessions/<16-hex-of-sha256>.session` containing a
+// small JSON blob (id + parent invariants + creation timestamp).
+//
+// Lifecycle:
+//   - Created on first agent-attributed CLI invocation with a recognizable
+//     parent process.
+//   - Reused as long as the parent pid is still alive and its boot time
+//     matches the persisted value (defends against PID reuse).
+//   - Hard age cap of 7 days as a backstop against very-long-lived parents
+//     or boot-time detection drift.
+//   - Cleaned opportunistically on every CLI invocation: stale files
+//     (parent gone, btime mismatch, age cap exceeded) are deleted; the
+//     directory is also capped at SESSION_DIR_FILE_LIMIT files with oldest-
+//     by-mtime evicted first.
+
+const SESSION_FILE_MAX_AGE_DAYS: i64 = 7;
+const SESSION_DIR_FILE_LIMIT: usize = 100;
+
+#[derive(Serialize, Deserialize)]
+struct PersistedSession {
+    agent_session_id: String,
+    parent_pid: u32,
+    parent_btime: u64,
+    created_at: String,
+}
+
+struct ParentIdentity {
+    pid: u32,
+    btime: u64,
+    argv0: String,
+}
+
+fn sessions_dir() -> Option<PathBuf> {
+    if let Ok(override_dir) = std::env::var("RAILWAY_SESSIONS_DIR") {
+        return Some(PathBuf::from(override_dir));
+    }
+    dirs::home_dir().map(|h| h.join(".railway/sessions"))
+}
+
+fn parent_identity() -> Option<ParentIdentity> {
+    let snapshot = process_snapshot();
+    if snapshot.is_empty() {
+        return None;
+    }
+    let me = snapshot.get(&std::process::id())?;
+    if me.ppid == 0 {
+        return None;
+    }
+    let parent = snapshot.get(&me.ppid)?;
+    let argv0 = parent
+        .command
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let btime = parent_boot_time(me.ppid)?;
+    Some(ParentIdentity {
+        pid: me.ppid,
+        btime,
+        argv0,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parent_boot_time(pid: u32) -> Option<u64> {
+    // /proc/<pid>/stat field 22 (1-indexed) is starttime in clock ticks
+    // since system boot. The comm field at position 2 is parenthesized and
+    // may contain spaces, so we slice from the last `)` to avoid tokenizing
+    // through it.
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    let rest = &stat[close + 2..];
+    // After comm, fields are: state, ppid, pgrp, session, tty_nr, tpgid,
+    // flags, minflt, cminflt, majflt, cmajflt, utime, stime, cutime,
+    // cstime, priority, nice, num_threads, itrealvalue, starttime
+    // → starttime is index 19 in the post-comm tokens.
+    rest.split_whitespace().nth(19)?.parse::<u64>().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn parent_boot_time(pid: u32) -> Option<u64> {
+    // macOS doesn't expose start time via /proc; use `ps -o lstart=` which
+    // prints a stable per-process start timestamp. Hash it to a u64 so the
+    // on-disk schema doesn't depend on the textual format.
+    let out = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    let bytes = h.finalize();
+    let mut out8 = [0u8; 8];
+    out8.copy_from_slice(&bytes[..8]);
+    Some(u64::from_be_bytes(out8))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn parent_boot_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+fn session_filename(parent: &ParentIdentity) -> String {
+    let mut h = Sha256::new();
+    h.update(parent.pid.to_be_bytes());
+    h.update(parent.btime.to_be_bytes());
+    h.update(parent.argv0.as_bytes());
+    let bytes = h.finalize();
+    let mut hex = String::with_capacity(16);
+    for byte in &bytes[..8] {
+        hex.push_str(&format!("{:02x}", byte));
+    }
+    format!("{hex}.session")
+}
+
+/// Generate a v4 UUID without pulling in the `uuid` crate.
+fn new_session_uuid() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    // Set version (4) and variant (RFC 4122) bits per UUID v4 spec.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+fn is_session_too_old(created_at: &str) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(created_at) {
+        Ok(t) => {
+            let age = chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc));
+            age > chrono::Duration::days(SESSION_FILE_MAX_AGE_DAYS)
+        }
+        Err(_) => true,
+    }
+}
+
+fn read_persisted_session(path: &std::path::Path, parent: &ParentIdentity) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let persisted: PersistedSession = serde_json::from_str(&contents).ok()?;
+    if persisted.parent_pid != parent.pid {
+        return None;
+    }
+    if persisted.parent_btime != parent.btime {
+        return None;
+    }
+    if is_session_too_old(&persisted.created_at) {
+        return None;
+    }
+    safe_telemetry_value(&persisted.agent_session_id)
+}
+
+fn write_persisted_session(
+    path: &std::path::Path,
+    parent: &ParentIdentity,
+    id: &str,
+) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).context("create sessions dir")?;
+    }
+    let payload = PersistedSession {
+        agent_session_id: id.to_string(),
+        parent_pid: parent.pid,
+        parent_btime: parent.btime,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let json = serde_json::to_string(&payload)?;
+    crate::util::write_atomic(path, &json)
+}
+
+/// Best-effort cleanup: drop session files whose parent is gone or whose
+/// recorded invariants don't match a live process, plus a defense-in-depth
+/// directory size cap. Silent on errors — telemetry should never fail loud.
+fn cleanup_stale_sessions(dir: &std::path::Path) {
+    let snapshot = process_snapshot();
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut surviving: Vec<(PathBuf, std::time::SystemTime)> = vec![];
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("session") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let contents = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+        };
+        let persisted: PersistedSession = match serde_json::from_str(&contents) {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+        };
+        let parent_alive = snapshot.get(&persisted.parent_pid).is_some();
+        let too_old = is_session_too_old(&persisted.created_at);
+        if !parent_alive || too_old {
+            let _ = fs::remove_file(&path);
+        } else {
+            surviving.push((path, mtime));
+        }
+    }
+    if surviving.len() > SESSION_DIR_FILE_LIMIT {
+        surviving.sort_by_key(|(_, mtime)| *mtime);
+        let excess = surviving.len() - SESSION_DIR_FILE_LIMIT;
+        for (path, _) in surviving.iter().take(excess) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Read or mint a persistent agent session ID for the current parent process.
+/// Cached for the lifetime of the CLI invocation. Returns None when parent
+/// identity can't be determined (non-unix, missing /proc, etc.); callers
+/// fall back to the per-process `cli_<base64>` mint.
+fn persistent_agent_session_id() -> Option<String> {
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let dir = sessions_dir()?;
+            let parent = parent_identity()?;
+            let path = dir.join(session_filename(&parent));
+
+            // Opportunistic cleanup — runs once per CLI invocation.
+            cleanup_stale_sessions(&dir);
+
+            if let Some(id) = read_persisted_session(&path, &parent) {
+                return Some(id);
+            }
+            let id = new_session_uuid();
+            let _ = write_persisted_session(&path, &parent, &id);
+            Some(id)
+        })
+        .clone()
+}
+
+// ---------------------------------------------------------------------------
 // Composer — main detection entry point
 // ---------------------------------------------------------------------------
 
@@ -863,12 +1140,40 @@ impl TelemetryContext {
         let agent_session_id = safe_env(RAILWAY_AGENT_SESSION_ENV)
             .or_else(|| safe_env("COPILOT_AGENT_SESSION_ID"))
             .or_else(|| safe_env("CLAUDE_CODE_SESSION_ID"))
-            .or_else(|| safe_env("OPENCODE_SESSION_ID"))
+            // Verified 2026-05-11 via live env capture: Codex exports
+            // CODEX_THREAD_ID as a UUID v7 in every spawned bash; previous
+            // CODEX_SESSION_ID guess did not exist in the env at all (which
+            // matched the 100% per-process fallback observed in the warehouse).
+            .or_else(|| safe_env("CODEX_THREAD_ID"))
+            // Verified 2026-05-11 via live env capture: OpenCode exports
+            // OPENCODE_RUN_ID as a UUID v4. The previous OPENCODE_SESSION_ID
+            // entry was checking for a variable that does not exist, which
+            // matched the ~100% per-process fallback observed for opencode.
+            .or_else(|| safe_env("OPENCODE_RUN_ID"))
+            // Verified 2026-05-11 via a live interactive Amp session.
             .or_else(|| safe_env("AMP_CURRENT_THREAD_ID"))
+            // Verified 2026-05-11: Cursor does NOT propagate a session
+            // identifier into its bash tool — only CURSOR_AGENT=1 (presence
+            // flag, used for caller detection) and CURSOR_SANDBOX metadata.
+            // CURSOR_TRACE_ID is documented for the IDE but does not appear
+            // in the agent's spawned subprocess env. Kept here as a no-cost
+            // forward-compat hook in case Cursor adds propagation later.
             .or_else(|| safe_env("CURSOR_TRACE_ID"))
+            // Cross-agent convention exposed by Amp (verified) and observed
+            // in some other harnesses' docs. Late in the precedence chain
+            // so harness-specific IDs win when both are set; catches any
+            // future agent that adopts this generic name.
+            .or_else(|| safe_env("AGENT_THREAD_ID"))
             .or_else(|| {
                 if is_agent_caller(&caller) {
-                    Some(session_id.clone())
+                    // Try the persistent session-file fallback first. It
+                    // recovers a stable UUID across `railway` invocations
+                    // spawned by the same parent process when the harness
+                    // doesn't propagate its session env var (e.g. when an
+                    // agent's bash tool doesn't whitelist its own session
+                    // ID). Falls through to the per-process mint when
+                    // parent identity can't be determined (non-unix, etc.).
+                    persistent_agent_session_id().or(Some(session_id.clone()))
                 } else {
                     None
                 }
@@ -1128,7 +1433,7 @@ pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        caller_from_mcp_client_name, caller_from_process_name, is_agent_caller,
+        caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, new_session_uuid,
         parent_kind_from_command,
     };
 
@@ -1338,5 +1643,66 @@ mod tests {
         assert!(is_agent_caller("agent_unknown:python"));
         assert!(is_agent_caller("agent_unknown:vscode"));
         assert!(is_agent_caller("cloud_ide:codespaces"));
+    }
+
+    #[test]
+    fn claude_substring_no_longer_overmatches() {
+        // Before tightening: every one of these returned Some("claude_code"),
+        // over-attributing Claude Desktop helpers / MCP binaries / install
+        // paths to the claude_code agent.
+        assert_eq!(
+            caller_from_process_name("/Applications/Claude.app/Contents/Helpers/claude-helper"),
+            None
+        );
+        assert_eq!(
+            caller_from_process_name("node /opt/anthropic-claude-mcp/server.js"),
+            None
+        );
+        assert_eq!(caller_from_process_name("bash ~/.claude/scripts/setup.sh"), None);
+
+        // True positives still match.
+        assert_eq!(
+            caller_from_process_name("node /usr/local/lib/claude-code/cli.js"),
+            Some("claude_code")
+        );
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/claude --dangerously-skip-permissions"),
+            Some("claude_code")
+        );
+        assert_eq!(
+            caller_from_process_name("/anthropic.claude-code/bin/runner"),
+            Some("claude_code")
+        );
+    }
+
+    #[test]
+    fn new_session_uuid_is_v4_format() {
+        // Generated IDs must parse as v4 UUIDs so the dbt mart's
+        // is_unstitched_agent_session() macro treats them as stitched
+        // (not the `cli_<base64>` per-process fallback regex).
+        let id = new_session_uuid();
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.chars().filter(|&c| c == '-').count(), 4);
+        // Version nibble at position 14 must be '4'.
+        assert_eq!(id.chars().nth(14), Some('4'));
+        // Variant high bits at position 19 must be 8/9/a/b.
+        let variant = id.chars().nth(19).unwrap();
+        assert!(['8', '9', 'a', 'b'].contains(&variant), "variant char was {variant}");
+        // Two successive calls produce different IDs.
+        assert_ne!(id, new_session_uuid());
+    }
+
+    #[test]
+    fn new_session_uuid_does_not_match_cli_fallback_regex() {
+        // Cross-check against the dbt-side regex
+        // `^cli_[A-Za-z0-9_-]{22}$` from
+        // dbt-analytics/macros/normalize_caller.sql::is_unstitched_agent_session
+        // — a UUID must NOT match (otherwise the dbt fix would re-bin the
+        // persistent ID as unstitched, defeating the whole point).
+        let id = new_session_uuid();
+        assert!(
+            !id.starts_with("cli_"),
+            "persistent session id must not start with cli_ (would be re-flagged as fallback): {id}"
+        );
     }
 }
