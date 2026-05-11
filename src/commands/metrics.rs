@@ -74,6 +74,10 @@ pub struct Args {
     #[clap(short, long)]
     environment: Option<String>,
 
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Time window start. Accepts relative (1h, 6h, 1d, 7d) or ISO 8601. Default: 1h
     #[clap(long, short = 'S', default_value = "1h")]
     since: String,
@@ -213,27 +217,48 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
-    let linked_project = configs.get_linked_project().await?;
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
 
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
 
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let environment = match args
-        .environment
+    let project_id = args
+        .project
         .clone()
-        .or_else(|| linked_project.environment_name.clone())
-        .or_else(|| linked_project.environment.clone())
-    {
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
+
+    let environment = match args.environment.clone().or_else(|| {
+        linked_project.as_ref().and_then(|lp| {
+            lp.environment_name
+                .clone()
+                .or_else(|| lp.environment.clone())
+        })
+    }) {
         Some(environment) => environment,
-        None => linked_project.environment_id()?.to_string(),
+        None => linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string(),
     };
     let environment = get_matched_environment(&project, environment)?;
     let environment_id = environment.id.clone();
     let environment_name = environment.name.clone();
     let environment_instances =
-        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
-            .await?;
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
 
     // Cross-service mode: --all
     let show_spinner = !args.json && !args.raw && !args.watch;
@@ -250,7 +275,7 @@ pub async fn command(args: Args) -> Result<()> {
                 crate::controllers::metrics_tui::ProjectTuiParams {
                     client: client.clone(),
                     backboard: backboard.clone(),
-                    project_id: linked_project.project.clone(),
+                    project_id: project_id.clone(),
                     project: project.clone(),
                     environment_instances: environment_instances.clone(),
                     environment_id: environment_id.clone(),
@@ -281,7 +306,7 @@ pub async fn command(args: Args) -> Result<()> {
             FetchProjectMetricsParams {
                 client: &client,
                 backboard: &backboard,
-                project_id: &linked_project.project,
+                project_id: &project_id,
                 environment_id: &environment_id,
                 start_date,
                 end_date,
@@ -372,7 +397,8 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     let services = project.services.edges.iter().collect::<Vec<_>>();
-    let (service_id, service_name) = match (args.service.as_deref(), linked_project.service) {
+    let linked_service = linked_project.as_ref().and_then(|lp| lp.service.as_ref());
+    let (service_id, service_name) = match (args.service.as_deref(), linked_service) {
         (Some(service_arg), _) => {
             let s = services
                 .iter()
@@ -383,10 +409,10 @@ pub async fn command(args: Args) -> Result<()> {
         (_, Some(linked_service)) => {
             let name = services
                 .iter()
-                .find(|s| s.node.id == linked_service)
+                .find(|s| s.node.id == *linked_service)
                 .map(|s| s.node.name.clone())
                 .unwrap_or_else(|| linked_service.clone());
-            (linked_service, name)
+            (linked_service.clone(), name)
         }
         _ => bail!(
             "No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."
@@ -509,7 +535,7 @@ pub async fn command(args: Args) -> Result<()> {
         fetch_deployments(
             &client,
             &backboard,
-            &linked_project.project,
+            &project_id,
             &environment_id,
             &service_id,
         )

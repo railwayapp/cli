@@ -6,11 +6,7 @@ use is_terminal::IsTerminal;
 use queries::domains::DomainsDomains;
 use serde_json::json;
 
-use crate::{
-    consts::TICK_STRING,
-    controllers::project::{ensure_project_and_environment_exist, get_project},
-    errors::RailwayError,
-};
+use crate::{consts::TICK_STRING, controllers::project::resolve_service_context};
 
 use super::*;
 
@@ -27,6 +23,14 @@ pub struct Args {
     #[clap(short, long)]
     service: Option<String>,
 
+    /// Environment to use (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Optionally, specify a custom domain to use. If not specified, a domain will be generated.
     ///
     /// Specifying a custom domain will also return the required DNS records
@@ -40,29 +44,36 @@ pub struct Args {
 
 pub async fn command(args: Args) -> Result<()> {
     if let Some(domain) = args.domain {
-        create_custom_domain(domain, args.port, args.service, args.json).await?;
+        create_custom_domain(
+            domain,
+            args.port,
+            args.project,
+            args.service,
+            args.environment,
+            args.json,
+        )
+        .await?;
     } else {
-        create_service_domain(args.service, args.json).await?;
+        create_service_domain(args.project, args.service, args.environment, args.json).await?;
     }
     Ok(())
 }
 
-async fn create_service_domain(service_name: Option<String>, json: bool) -> Result<()> {
+async fn create_service_domain(
+    project: Option<String>,
+    service_name: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let service = get_service(&linked_project, &project, service_name)?;
+    let ctx = resolve_service_context(project, service_name, environment).await?;
 
     let vars = queries::domains::Variables {
-        project_id: linked_project.project.clone(),
-        environment_id: linked_project.environment_id()?.to_string(),
-        service_id: service.id.clone(),
+        project_id: ctx.project_id.clone(),
+        environment_id: ctx.environment_id.clone(),
+        service_id: ctx.service_id.clone(),
     };
 
     let domains = post_graphql::<queries::Domains, _>(&client, configs.get_backboard(), vars)
@@ -79,8 +90,8 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
         .and_then(|s| s.ok());
 
     let vars = mutations::service_domain_create::Variables {
-        service_id: service.id.clone(),
-        environment_id: linked_project.environment_id()?.to_string(),
+        service_id: ctx.service_id.clone(),
+        environment_id: ctx.environment_id.clone(),
     };
     let domain =
         post_graphql::<mutations::ServiceDomainCreate, _>(&client, configs.get_backboard(), vars)
@@ -162,50 +173,6 @@ fn print_existing_domains(domains: &DomainsDomains, json: bool) -> Result<()> {
     Ok(())
 }
 
-// Returns a reference to save on Heap allocations
-pub fn get_service<'a>(
-    linked_project: &'a LinkedProject,
-    project: &'a queries::project::ProjectProject,
-    service_name: Option<String>,
-) -> anyhow::Result<&'a queries::project::ProjectProjectServicesEdgesNode> {
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-
-    if services.is_empty() {
-        bail!(RailwayError::NoServices);
-    }
-
-    if project.services.edges.len() == 1 {
-        return Ok(&project.services.edges[0].node);
-    }
-
-    if let Some(service_name) = service_name {
-        if let Some(service) = project
-            .services
-            .edges
-            .iter()
-            .find(|s| s.node.name == service_name)
-        {
-            return Ok(&service.node);
-        }
-
-        bail!(RailwayError::ServiceNotFound(service_name));
-    }
-
-    if let Some(service) = linked_project.service.clone() {
-        if project.services.edges.iter().any(|s| s.node.id == service) {
-            return Ok(&project
-                .services
-                .edges
-                .iter()
-                .find(|s| s.node.id == service)
-                .unwrap()
-                .node);
-        }
-    }
-
-    bail!(RailwayError::NoServices);
-}
-
 pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicatif::ProgressBar> {
     let spinner = indicatif::ProgressBar::new_spinner()
         .with_style(
@@ -222,25 +189,21 @@ pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicat
 async fn create_custom_domain(
     domain: String,
     port: Option<u16>,
+    project: Option<String>,
     service_name: Option<String>,
+    environment: Option<String>,
     json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let service = get_service(&linked_project, &project, service_name)?;
+    let ctx = resolve_service_context(project, service_name, environment).await?;
 
     let spinner = (std::io::stdout().is_terminal() && !json)
         .then(|| {
             creating_domain_spiner(Some(format!(
                 "Creating custom domain for service {}{}...",
-                service.name,
+                ctx.service_name,
                 port.map(|p| format!(" on port {p}")).unwrap_or_default()
             )))
         })
@@ -264,9 +227,9 @@ async fn create_custom_domain(
     let vars = mutations::custom_domain_create::Variables {
         input: mutations::custom_domain_create::CustomDomainCreateInput {
             domain: domain.clone(),
-            environment_id: linked_project.environment_id()?.to_string(),
-            project_id: linked_project.project.clone(),
-            service_id: service.id.clone(),
+            environment_id: ctx.environment_id.clone(),
+            project_id: ctx.project_id.clone(),
+            service_id: ctx.service_id.clone(),
             target_port: port.map(|p| p as i64),
         },
     };

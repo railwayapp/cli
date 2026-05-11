@@ -56,9 +56,6 @@ pub enum RailwayError {
     #[error("No projects found. Run `railway init` to create a new project")]
     NoProjects,
 
-    #[error("Project does not have any services")]
-    NoServices,
-
     #[error(
         "Environment \"{0}\" not found.\nRun `railway environment` to connect to an environment."
     )]

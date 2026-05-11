@@ -1,10 +1,7 @@
-use anyhow::bail;
 use std::collections::BTreeMap;
 
 use crate::{
-    controllers::project::{ensure_project_and_environment_exist, get_project},
-    controllers::variables::get_service_variables,
-    errors::RailwayError,
+    controllers::project::resolve_service_context, controllers::variables::get_service_variables,
 };
 
 use super::*;
@@ -34,6 +31,14 @@ pub struct Args {
     #[clap(short, long)]
     service: Option<String>,
 
+    /// Environment to pull variables from (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Open shell without banner
     #[clap(long)]
     silent: bool,
@@ -42,47 +47,20 @@ pub struct Args {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
 
     let mut all_variables = BTreeMap::<String, String>::new();
     all_variables.insert("IN_RAILWAY_SHELL".to_owned(), "true".to_owned());
 
-    if let Some(service) = args.service {
-        let service_id = project
-            .services
-            .edges
-            .iter()
-            .find(|s| s.node.name == service || s.node.id == service)
-            .ok_or_else(|| RailwayError::ServiceNotFound(service))?;
-
-        let mut variables = get_service_variables(
-            &client,
-            &configs,
-            linked_project.project.clone(),
-            linked_project.environment_id()?.to_string(),
-            service_id.node.id.clone(),
-        )
-        .await?;
-
-        all_variables.append(&mut variables);
-    } else if let Some(ref service) = linked_project.service {
-        let mut variables = get_service_variables(
-            &client,
-            &configs,
-            linked_project.project.clone(),
-            linked_project.environment_id()?.to_string(),
-            service.clone(),
-        )
-        .await?;
-
-        all_variables.append(&mut variables);
-    } else {
-        bail!("No service linked. Please link one with `railway service`");
-    }
+    let mut variables = get_service_variables(
+        &client,
+        &configs,
+        ctx.project_id,
+        ctx.environment_id,
+        ctx.service_id,
+    )
+    .await?;
+    all_variables.append(&mut variables);
 
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
         "windows" => match windows_shell_detection().await {

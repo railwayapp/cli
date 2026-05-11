@@ -1,15 +1,11 @@
 use std::time::Duration;
 
-use anyhow::bail;
-
 use super::{
     queries::{deployments::DeploymentListInput, deployments::DeploymentStatus},
     *,
 };
 use crate::{
-    consts::TICK_STRING,
-    controllers::{environment::get_matched_environment, project::get_project},
-    errors::RailwayError,
+    consts::TICK_STRING, controllers::project::resolve_service_context,
     util::prompt::prompt_confirm_with_default,
 };
 
@@ -24,6 +20,10 @@ pub struct Args {
     #[clap(short, long)]
     environment: Option<String>,
 
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     bypass: bool,
@@ -32,37 +32,17 @@ pub struct Args {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let environment = match args.environment.clone() {
-        Some(env) => env,
-        None => linked_project.environment_id()?.to_string(),
-    };
-
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-
-    let environment_id = get_matched_environment(&project, environment)?.id;
-    let service = match (args.service, linked_project.service) {
-        // If the user specified a service, use that
-        (Some(service_arg), _) => services
-            .iter()
-            .find(|service| service.node.name == service_arg || service.node.id == service_arg)
-            .with_context(|| format!("Service '{service_arg}' not found"))?
-            .node
-            .id
-            .to_owned(),
-        // Otherwise if we have a linked service, use that
-        (_, Some(linked_service)) => linked_service,
-        // Otherwise it's a user error
-        _ => bail!(RailwayError::NoServiceLinked),
-    };
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+    let project_id = ctx.project_id;
+    let environment_id = ctx.environment_id;
+    let environment_name = ctx.environment_name;
+    let service = ctx.service_id;
+    let project_name = ctx.project.name.clone();
 
     let vars = queries::deployments::Variables {
         input: DeploymentListInput {
-            project_id: Some(linked_project.project.clone()),
-            environment_id: Some(environment_id),
+            project_id: Some(project_id.clone()),
+            environment_id: Some(environment_id.clone()),
             service_id: Some(service),
             include_deleted: None,
             status: None,
@@ -70,20 +50,10 @@ pub async fn command(args: Args) -> Result<()> {
         first: None,
     };
 
-    let linked_project_name = linked_project
-        .name
-        .as_deref()
-        .unwrap_or(linked_project.project.as_str());
-
-    let linked_environment_name = linked_project
-        .environment_name
-        .as_deref()
-        .unwrap_or(linked_project.environment.as_deref().unwrap_or("unknown"));
-
     let linked_project_environment = format!(
         "{} environment of project {}",
-        linked_environment_name.bold(),
-        linked_project_name.bold()
+        environment_name.bold(),
+        project_name.bold()
     );
 
     let deployments =
