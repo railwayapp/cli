@@ -293,7 +293,11 @@ fn process_snapshot() -> &'static HashMap<u32, ProcessNode> {
         {
             build_unix_snapshot().unwrap_or_default()
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "windows")]
+        {
+            build_windows_snapshot().unwrap_or_default()
+        }
+        #[cfg(not(any(unix, target_os = "windows")))]
         {
             HashMap::new()
         }
@@ -333,6 +337,67 @@ fn build_unix_snapshot() -> Option<HashMap<u32, ProcessNode>> {
         let command: String = tokens.collect::<Vec<_>>().join(" ").to_ascii_lowercase();
         map.insert(pid, ProcessNode { ppid, command });
     }
+    Some(map)
+}
+
+/// Windows equivalent of `build_unix_snapshot`. Uses the toolhelp32 API to
+/// walk the live process table. The `command` field on each node is the
+/// executable basename (e.g. `claude.exe`) rather than the full argv —
+/// `PROCESSENTRY32W::szExeFile` is the only command-style field the
+/// snapshot API exposes, and fetching the full command line per process
+/// requires `NtQueryInformationProcess` which is undocumented kernel API.
+/// Basename matches are sufficient for the substring-based caller detection
+/// that consumes this snapshot.
+#[cfg(target_os = "windows")]
+fn build_windows_snapshot() -> Option<HashMap<u32, ProcessNode>> {
+    use std::mem::size_of;
+    use winapi::shared::minwindef::FALSE;
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::tlhelp32::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut map = HashMap::new();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+
+        if Process32FirstW(snapshot, &mut entry) == FALSE {
+            CloseHandle(snapshot);
+            return None;
+        }
+
+        loop {
+            // szExeFile is a UTF-16 array, null-terminated. Find the null
+            // terminator and decode just the populated prefix.
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let command = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
+            map.insert(
+                entry.th32ProcessID,
+                ProcessNode {
+                    ppid: entry.th32ParentProcessID,
+                    command,
+                },
+            );
+
+            if Process32NextW(snapshot, &mut entry) == FALSE {
+                break;
+            }
+        }
+
+        CloseHandle(snapshot);
+    }
+
     Some(map)
 }
 
@@ -838,7 +903,55 @@ fn parent_boot_time(pid: u32) -> Option<u64> {
     Some(u64::from_be_bytes(out8))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn parent_boot_time(pid: u32) -> Option<u64> {
+    // Windows process creation time is a FILETIME — 100-nanosecond intervals
+    // since 1601-01-01 UTC, stable across the lifetime of the process and
+    // not affected by reboots in the way Linux clock-tick `starttime` is.
+    // Combined with the pid, this gives us the same invariant as the unix
+    // paths: a PID-reuse collision would have to land on the *exact same*
+    // creation timestamp to be confused for the original process.
+    use winapi::shared::minwindef::{FALSE, FILETIME};
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
+    use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut kernel = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut user = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == FALSE {
+            return None;
+        }
+        Some(filetime_to_u64(creation))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn filetime_to_u64(ft: winapi::shared::minwindef::FILETIME) -> u64 {
+    ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn parent_boot_time(_pid: u32) -> Option<u64> {
     None
 }
@@ -1717,6 +1830,41 @@ mod tests {
         );
         // Two successive calls produce different IDs.
         assert_ne!(id, new_session_uuid());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn filetime_to_u64_combines_high_and_low_halves() {
+        use super::filetime_to_u64;
+        use winapi::shared::minwindef::FILETIME;
+        // FILETIME is two 32-bit halves. The high half shifts into the
+        // top 32 bits; low half occupies the bottom 32.
+        let ft = FILETIME {
+            dwLowDateTime: 0x12345678,
+            dwHighDateTime: 0x9ABCDEF0,
+        };
+        assert_eq!(filetime_to_u64(ft), 0x9ABCDEF012345678);
+
+        // Round-trips: any u64 → FILETIME → u64 is identity.
+        let original: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let ft = FILETIME {
+            dwLowDateTime: original as u32,
+            dwHighDateTime: (original >> 32) as u32,
+        };
+        assert_eq!(filetime_to_u64(ft), original);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_snapshot_includes_self_and_parent() {
+        // Sanity check that the toolhelp32 snapshot at least sees our own
+        // pid and that it has a non-zero parent pid. Catches gross runtime
+        // failures (missing winapi linkage, snapshot perm errors, etc.)
+        // without coupling to specific platform versions.
+        let snapshot = super::build_windows_snapshot().expect("snapshot");
+        let me = snapshot.get(&std::process::id()).expect("self pid present");
+        assert!(me.ppid != 0, "parent pid should be non-zero");
+        assert!(!me.command.is_empty(), "command should be populated");
     }
 
     #[test]
