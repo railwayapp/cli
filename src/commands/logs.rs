@@ -9,8 +9,7 @@ use crate::{
             FetchLogsParams, fetch_build_logs, fetch_deploy_logs, fetch_http_logs,
             stream_build_logs, stream_deploy_logs, stream_http_logs,
         },
-        environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project},
+        project::resolve_service_context,
     },
     util::{
         logs::{LogFormat, print_http_log, print_log},
@@ -201,6 +200,10 @@ pub struct Args {
     #[clap(short, long)]
     environment: Option<String>,
 
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Show deployment logs
     #[clap(short, long, group = "log_type")]
     deployment: bool,
@@ -288,9 +291,6 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
     // Build filter before args is partially moved by service matching below
     let http_filter = build_http_filter(&args);
@@ -309,38 +309,16 @@ pub async fn command(args: Args) -> Result<()> {
     // Stream only if no line limit or time filter is specified and running in a terminal
     let should_stream = args.lines.is_none() && !has_time_filter && std::io::stdout().is_terminal();
 
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let environment = match args.environment.clone() {
-        Some(env) => env,
-        None => linked_project.environment_id()?.to_string(),
-    };
-
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-
-    let environment_id = get_matched_environment(&project, environment)?.id;
-    let service = match (args.service, linked_project.service) {
-        // If the user specified a service, use that
-        (Some(service_arg), _) => services
-            .iter()
-            .find(|service| service.node.name == service_arg || service.node.id == service_arg)
-            .with_context(|| format!("Service '{service_arg}' not found"))?
-            .node
-            .id
-            .to_owned(),
-        // Otherwise if we have a linked service, use that
-        (_, Some(linked_service)) => linked_service,
-        // Otherwise it's a user error
-        _ => bail!(
-            "No service could be found. Please either link one with `railway service` or specify one via the `--service` flag."
-        ),
-    };
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+    let project_id = ctx.project_id;
+    let environment_id = ctx.environment_id;
+    let service = ctx.service_id;
 
     // Fetch all deployments so we can find a sensible default deployment id if
     // none is provided
     let vars = queries::deployments::Variables {
         input: DeploymentListInput {
-            project_id: Some(linked_project.project.clone()),
+            project_id: Some(project_id.clone()),
             environment_id: Some(environment_id),
             service_id: Some(service),
             include_deleted: None,

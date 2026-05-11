@@ -4,10 +4,8 @@ use is_terminal::IsTerminal;
 
 use crate::{
     controllers::project::{
-        ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
-        get_project,
+        find_service_instance, get_environment_instances, resolve_service_context,
     },
-    errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
     util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
@@ -23,6 +21,14 @@ pub struct Args {
     #[clap(long, short)]
     service: Option<String>,
 
+    /// Environment to restart in (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
     yes: bool,
@@ -35,38 +41,14 @@ pub struct Args {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
     let is_terminal = std::io::stdout().is_terminal();
+    let service_id = ctx.service_id;
+    let service_name = ctx.service_name;
 
-    let service_id = args
-        .service
-        .or_else(|| linked_project.service.clone())
-        .ok_or_else(|| {
-            anyhow!(
-                "No service found. Please link one via `railway link` or specify one via the `--service` flag."
-            )
-        })?;
-    let service = project
-        .services
-        .edges
-        .iter()
-        .find(|s| {
-            s.node.id == service_id || s.node.name.to_lowercase() == service_id.to_lowercase()
-        })
-        .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
-
-    let environment_instances = get_environment_instances(
-        &client,
-        &configs,
-        &linked_project.project,
-        linked_project.environment_id()?,
-    )
-    .await?;
-    let service_in_env = find_service_instance(&environment_instances, &service.node.id)
+    let environment_instances =
+        get_environment_instances(&client, &configs, &ctx.project_id, &ctx.environment_id).await?;
+    let service_in_env = find_service_instance(&environment_instances, &service_id)
         .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
 
     let Some(ref latest) = service_in_env.latest_deployment else {
@@ -79,11 +61,7 @@ pub async fn command(args: Args) -> Result<()> {
         prompt_confirm_with_default(
             format!(
                 "Restart the latest deployment from service {} in environment {}?",
-                service.node.name,
-                linked_project
-                    .environment_name
-                    .clone()
-                    .unwrap_or("unknown".to_string())
+                service_name, ctx.environment_id
             )
             .as_str(),
             false,
@@ -102,7 +80,7 @@ pub async fn command(args: Args) -> Result<()> {
         !args.json,
         format!(
             "Restarting the latest deployment from service {}...",
-            service.node.name
+            service_name
         ),
     );
 
@@ -123,7 +101,7 @@ pub async fn command(args: Args) -> Result<()> {
     let spinner = spinner.unwrap();
     spinner.set_message(format!(
         "Waiting for deployment from service {} to be healthy...",
-        service.node.name
+        service_name
     ));
 
     let mut stream =
@@ -149,21 +127,21 @@ pub async fn command(args: Args) -> Result<()> {
                 DeploymentStatus::SUCCESS => {
                     spinner.finish_with_message(format!(
                         "The latest deployment from service {} has been restarted and is healthy",
-                        service.node.name.green()
+                        service_name.green()
                     ));
                     return Ok(());
                 }
                 DeploymentStatus::FAILED => {
                     spinner.finish_with_message(format!(
                         "Deployment from service {} failed",
-                        service.node.name.red()
+                        service_name.red()
                     ));
                     bail!("Deployment failed");
                 }
                 DeploymentStatus::CRASHED => {
                     spinner.finish_with_message(format!(
                         "Deployment from service {} crashed",
-                        service.node.name.red()
+                        service_name.red()
                     ));
                     bail!("Deployment crashed");
                 }
@@ -174,7 +152,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     spinner.finish_with_message(format!(
         "The latest deployment from service {} has been restarted",
-        service.node.name.green()
+        service_name.green()
     ));
 
     Ok(())

@@ -35,6 +35,10 @@ pub struct Args {
     #[clap(long, short)]
     environment: Option<String>,
 
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Output in JSON format
     #[clap(long)]
     json: bool,
@@ -53,28 +57,46 @@ Maximum: 50 total replicas across regions."#;
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
     let project = post_graphql::<queries::Project, _>(
         &client,
         configs.get_backboard(),
         queries::project::Variables {
-            id: linked_project.project.clone(),
+            id: project_id.clone(),
         },
     )
     .await?
     .project;
     let environment = match args.environment.clone() {
         Some(env) => env,
-        None => linked_project.environment_id()?.to_string(),
+        None => linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string(),
     };
     let environment = get_matched_environment(&project, environment)?;
     let environment_id = environment.id;
     let environment_name = environment.name;
     let environment_instances =
-        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
-            .await?;
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
+    let linked_service = linked_project.as_ref().and_then(|lp| lp.service.as_ref());
     let (existing, service_id) =
-        get_existing_config(&args, &linked_project, &project, &environment_instances)?;
+        get_existing_config(&args, linked_service, &project, &environment_instances)?;
     let service_name = project
         .services
         .edges
@@ -87,7 +109,7 @@ pub async fn command(args: Args) -> Result<()> {
             &args,
             &configs,
             &client,
-            &linked_project.project,
+            &project_id,
             &service_name,
             &environment_name,
             &existing,
@@ -117,8 +139,7 @@ pub async fn command(args: Args) -> Result<()> {
         println!("{}", serde_json::json!({"regions": region_data}));
     } else {
         let region_locations =
-            fetch_region_locations_for_project(&client, &configs, Some(&linked_project.project))
-                .await;
+            fetch_region_locations_for_project(&client, &configs, Some(&project_id)).await;
         print_scale_result(
             &service_name,
             &service_id,
@@ -217,13 +238,13 @@ async fn commit_scale_patch(
 /// Returns (existing_config, service_id)
 fn get_existing_config(
     args: &Args,
-    linked_project: &LinkedProject,
+    linked_service: Option<&String>,
     project: &queries::project::ProjectProject,
     environment_instances: &ProjectEnvironmentInstances,
 ) -> Result<(Value, String)> {
     let service_input = match args.service.as_ref() {
         Some(s) => s,
-        None => linked_project.service.as_ref().ok_or_else(|| {
+        None => linked_service.ok_or_else(|| {
             anyhow::anyhow!("No service linked. Please either specify a service with the --service flag or link one with `railway service`")
         })?,
     };

@@ -56,6 +56,7 @@ pub enum RailwayError {
     #[error("No projects found. Run `railway init` to create a new project")]
     NoProjects,
 
+    #[allow(dead_code)]
     #[error("Project does not have any services")]
     NoServices,
 

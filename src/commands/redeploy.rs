@@ -3,10 +3,8 @@ use is_terminal::IsTerminal;
 
 use crate::{
     controllers::project::{
-        ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
-        get_project,
+        find_service_instance, get_environment_instances, resolve_service_context,
     },
-    errors::RailwayError,
     util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
 
@@ -19,6 +17,14 @@ pub struct Args {
     /// The service ID/name to redeploy from
     #[clap(long, short)]
     service: Option<String>,
+
+    /// Environment to redeploy in (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
 
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
@@ -36,39 +42,17 @@ pub struct Args {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let environment_id = linked_project.environment_id()?.to_string();
-    let environment_name = linked_project
-        .environment_name
-        .as_deref()
-        .unwrap_or("unknown");
-
-    let service_id = args
-        .service
-        .or_else(|| linked_project.service.clone())
-        .ok_or_else(|| {
-            anyhow!(
-                "No service found. Please link one via `railway link` or specify one via the `--service` flag."
-            )
-        })?;
-    let service = project
-        .services
-        .edges
-        .iter()
-        .find(|s| {
-            s.node.id == service_id || s.node.name.to_lowercase() == service_id.to_lowercase()
-        })
-        .ok_or_else(|| anyhow!(RailwayError::ServiceNotFound(service_id)))?;
-    let service_name = &service.node.name;
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+    let project_id = ctx.project_id;
+    let environment_id = ctx.environment_id;
+    let environment_name = environment_id.as_str();
+    let service_id = ctx.service_id;
+    let service_name = &ctx.service_name;
+    let service_node_id = service_id.clone();
 
     let environment_instances =
-        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
-            .await?;
-    let service_in_env = find_service_instance(&environment_instances, &service.node.id)
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
+    let service_in_env = find_service_instance(&environment_instances, &service_node_id)
         .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
 
     let latest_deployment_id = if args.from_source {
@@ -134,7 +118,7 @@ pub async fn command(args: Args) -> Result<()> {
                 configs.get_backboard(),
                 mutations::service_instance_deploy_latest_commit::Variables {
                     environment_id,
-                    service_id: service.node.id.clone(),
+                    service_id: service_id.clone(),
                 },
             )
             .await?;

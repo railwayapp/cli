@@ -84,6 +84,10 @@ struct ListArgs {
     #[clap(short, long)]
     environment: Option<String>,
 
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Output in JSON format
     #[clap(long)]
     json: bool,
@@ -98,6 +102,10 @@ struct DeleteArgs {
     /// Environment to delete the service from (defaults to linked environment)
     #[clap(short, long)]
     environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
 
     /// Skip confirmation dialog
     #[clap(short = 'y', long = "yes")]
@@ -129,6 +137,10 @@ struct StatusArgs {
     /// Service name or ID to show status for (defaults to linked service)
     #[clap(short, long)]
     service: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
 
     /// Deprecated: use `railway service list` instead. Kept for backwards compatibility.
     #[clap(short, long, hide = true)]
@@ -175,20 +187,43 @@ pub async fn command(args: Args) -> Result<()> {
 async fn list_command(args: ListArgs) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
+
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
 
     let (project, region_locations) = tokio::join!(
-        get_project(&client, &configs, linked_project.project.clone()),
+        get_project(&client, &configs, project_id.clone()),
         fetch_region_locations(&client, &configs),
     );
     let project = project?;
 
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
     let env_id = if let Some(env_name) = args.environment {
         get_matched_environment(&project, env_name)?.id
     } else {
-        linked_project.environment_id()?.to_string()
+        linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string()
     };
     let env_name = project
         .environments
@@ -199,9 +234,9 @@ async fn list_command(args: ListArgs) -> Result<()> {
         .expect("environment resolved above");
 
     let environment_instances =
-        get_environment_instances(&client, &configs, &linked_project.project, &env_id).await?;
+        get_environment_instances(&client, &configs, &project_id, &env_id).await?;
     let service_ids_in_env = get_service_ids_in_env(&environment_instances);
-    let linked_service_id = linked_project.service.as_deref();
+    let linked_service_id = linked_project.as_ref().and_then(|lp| lp.service.as_deref());
 
     let mut services: Vec<_> = project
         .services
@@ -247,18 +282,48 @@ async fn list_command(args: ListArgs) -> Result<()> {
 async fn delete_command(args: DeleteArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
+
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
     let local_linked_project = configs.get_local_linked_project().ok();
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
     let is_terminal = std::io::stdout().is_terminal();
-    let environment =
-        resolve_environment_to_delete(&project, &linked_project, args.environment.as_deref())?;
+    let environment = if let Some(environment_arg) = args.environment.as_deref() {
+        get_matched_environment(&project, environment_arg.to_string())?
+    } else {
+        resolve_environment_to_delete(
+            &project,
+            linked_project
+                .as_ref()
+                .context("No environment linked. Use --environment when using --project")?,
+            None,
+        )?
+    };
     let environment_id = environment.id.clone();
     let environment_name = environment.name.clone();
 
     let environment_instances =
-        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
-            .await?;
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
     let service_ids_in_env = get_service_ids_in_env(&environment_instances);
     let services_in_env: Vec<_> = project
         .services
@@ -271,7 +336,7 @@ async fn delete_command(args: DeleteArgs) -> Result<()> {
     let service = select_service_to_delete(
         services_in_env,
         args.service.as_deref(),
-        linked_project.service.as_deref(),
+        linked_project.as_ref().and_then(|lp| lp.service.as_deref()),
         &environment_name,
         !args.json,
         is_terminal,
@@ -318,7 +383,7 @@ async fn delete_command(args: DeleteArgs) -> Result<()> {
     .await?;
 
     let unlink_path = local_linked_project.as_ref().and_then(|project| {
-        (project.project == linked_project.project
+        (project.project == project_id
             && project.service.as_deref() == Some(service_id.as_str())
             && project.environment_id().ok() == Some(environment_id.as_str()))
         .then(|| project.project_path.clone())
@@ -499,17 +564,41 @@ async fn status_command(args: StatusArgs) -> Result<()> {
 
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
 
     // Determine which environment to use
     let environment_id = if let Some(env_name) = args.environment {
         let env = get_matched_environment(&project, env_name)?;
         env.id
     } else {
-        linked_project.environment_id()?.to_string()
+        linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string()
     };
 
     let environment_name = project
@@ -523,8 +612,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
     // Collect service instances for the environment
     let mut service_statuses: Vec<ServiceStatusOutput> = Vec::new();
     let environment_instances =
-        get_environment_instances(&client, &configs, &linked_project.project, &environment_id)
-            .await?;
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
 
     for instance_edge in service_instances_in_env(&environment_instances) {
         let instance = &instance_edge.node;
@@ -575,8 +663,8 @@ async fn status_command(args: StatusArgs) -> Result<()> {
         } else {
             // Use linked service
             let linked_service_id = linked_project
-                .service
                 .as_ref()
+                .and_then(|lp| lp.service.as_ref())
                 .context("No service linked. Use --service flag or --all to see all services")?;
 
             service_statuses
