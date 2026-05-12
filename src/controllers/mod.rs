@@ -16,4 +16,5 @@ pub mod ssh_keys;
 pub mod upload;
 pub mod user;
 pub mod variables;
+pub mod volume_browser;
 pub mod workflow;

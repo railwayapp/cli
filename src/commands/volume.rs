@@ -3,9 +3,10 @@ use crate::{
     controllers::environment::get_matched_environment,
     controllers::project::{
         ProjectEnvironmentInstances, ProjectVolumeInstanceNode,
-        ensure_project_and_environment_exist, get_environment_instances, get_project,
-        volume_instances_in_env,
+        ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
+        get_project, volume_instances_in_env,
     },
+    controllers::volume_browser::{VolumeBrowserParams, run as run_volume_browser},
     errors::RailwayError,
     queries::project::ProjectProject,
     util::{
@@ -17,7 +18,7 @@ use crate::{
 use anyhow::{anyhow, bail};
 use clap::Parser;
 use is_terminal::IsTerminal;
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
 
 /// Manage project volumes
 #[derive(Parser)]
@@ -131,6 +132,21 @@ structstruck::strike! {
             /// Output in JSON format
             #[clap(long)]
             json: bool,
+        }),
+
+        /// Browse volume files over SSH/SCP
+        Browse(struct {
+            /// The ID/name of the volume you wish to browse
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// Path to identity (private key) file to use, like `ssh -i`
+            #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
+            identity_file: Option<PathBuf>,
+
+            /// Local directory used for downloads and relative uploads
+            #[clap(long, value_name = "PATH")]
+            local_dir: Option<PathBuf>,
         })
     }
 }
@@ -234,7 +250,79 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?
         }
+        Commands::Browse(b) => {
+            browse(
+                environment,
+                &environment_instances,
+                b.volume,
+                project,
+                b.identity_file,
+                b.local_dir,
+                &client,
+                &configs,
+            )
+            .await?
+        }
     }
+
+    Ok(())
+}
+
+async fn browse(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    identity_file: Option<PathBuf>,
+    local_dir: Option<PathBuf>,
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<()> {
+    let is_terminal = std::io::stdout().is_terminal();
+    if !is_terminal {
+        bail!("Volume browsing requires an interactive terminal");
+    }
+
+    let volume = select_volume(
+        project.clone(),
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?
+    .0;
+
+    let service_id = volume.service_id.clone().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service. Attach it before browsing.",
+            volume.volume.name
+        )
+    })?;
+
+    let service_name = project
+        .services
+        .edges
+        .iter()
+        .find(|service| service.node.id == service_id)
+        .map(|service| service.node.name.clone())
+        .ok_or_else(|| anyhow!("The service attached to this volume doesn't exist"))?;
+
+    let service_instance_id = find_service_instance(environment_instances, &service_id)
+        .map(|instance| instance.id.clone())
+        .ok_or_else(|| anyhow!("No active service instance found for service {service_name}"))?;
+
+    if identity_file.is_none() {
+        super::ssh::native::ensure_ssh_key(client, configs).await?;
+    }
+
+    run_volume_browser(VolumeBrowserParams {
+        service_instance_id,
+        service_name,
+        volume_name: volume.volume.name,
+        mount_path: PathBuf::from(volume.mount_path),
+        local_dir: local_dir.unwrap_or(std::env::current_dir()?),
+        identity_file,
+    })?;
 
     Ok(())
 }

@@ -7,7 +7,7 @@ use crate::{client::GQLClient, config::Configs};
 
 mod common;
 mod keys;
-mod native;
+pub(super) mod native;
 mod tel;
 
 use common::*;
