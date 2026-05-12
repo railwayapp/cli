@@ -67,6 +67,135 @@ pub fn get_chat_url(configs: &Configs) -> String {
     format!("https://backboard.{}/api/v1/agent", configs.get_host())
 }
 
+pub fn get_threads_url(configs: &Configs) -> String {
+    format!(
+        "https://backboard.{}/api/v1/agent/threads",
+        configs.get_host()
+    )
+}
+
+pub fn get_thread_messages_url(configs: &Configs, thread_id: &str) -> String {
+    format!(
+        "https://backboard.{}/api/v1/agent/threads/{}/messages",
+        configs.get_host(),
+        thread_id
+    )
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatMessagePart {
+    Text {
+        content: String,
+    },
+    Tool {
+        id: String,
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        #[serde(default)]
+        args: Option<serde_json::Value>,
+        #[serde(default)]
+        result: Option<serde_json::Value>,
+        #[serde(rename = "isError", default)]
+        is_error: bool,
+    },
+    Attachment {
+        name: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    #[serde(default)]
+    pub parts: Vec<ChatMessagePart>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadMessagesResponse {
+    messages: Vec<ChatMessage>,
+}
+
+pub async fn get_thread_messages(
+    client: &Client,
+    url: &str,
+    limit: Option<u32>,
+) -> Result<Vec<ChatMessage>> {
+    let mut request = client.get(url).header("Accept", "application/json");
+    if let Some(limit) = limit {
+        request = request.query(&[("limit", limit.to_string())]);
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        match status.as_u16() {
+            401 | 403 => return Err(auth_failure_error().into()),
+            429 => return Err(RailwayError::Ratelimited.into()),
+            _ => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("Get thread messages failed ({}): {}", status, body);
+            }
+        }
+    }
+
+    let parsed: ThreadMessagesResponse = response.json().await?;
+    Ok(parsed.messages)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThread {
+    pub id: String,
+    pub title: Option<String>,
+    pub resource_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListThreadsResponse {
+    threads: Vec<ChatThread>,
+}
+
+pub async fn list_threads(
+    client: &Client,
+    url: &str,
+    environment_id: &str,
+    limit: Option<u32>,
+) -> Result<Vec<ChatThread>> {
+    let mut request = client
+        .get(url)
+        .header("Accept", "application/json")
+        .query(&[("environmentId", environment_id)]);
+    if let Some(limit) = limit {
+        request = request.query(&[("limit", limit.to_string())]);
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        match status.as_u16() {
+            401 | 403 => return Err(auth_failure_error().into()),
+            429 => return Err(RailwayError::Ratelimited.into()),
+            _ => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("List threads request failed ({}): {}", status, body);
+            }
+        }
+    }
+
+    let parsed: ListThreadsResponse = response.json().await?;
+    Ok(parsed.threads)
+}
+
 /// Build an HTTP client for the chat API.
 ///
 /// The chat endpoint requires user OAuth tokens — project access tokens
