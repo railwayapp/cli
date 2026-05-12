@@ -732,16 +732,24 @@ fn caller_from_mcp_client_name(name: &str) -> &'static str {
 //
 // Recovers a stable `agent_session_id` across `railway` invocations when no
 // harness env var (RAILWAY_AGENT_SESSION, CLAUDE_CODE_SESSION_ID, ...) is
-// present. Keyed by the immediate parent process identity (pid + boot time +
-// argv0) so concurrent agents and shells get separate sessions automatically.
+// present. Keyed on the *recognized agent ancestor's* process identity
+// (pid + boot time + argv0), discovered by walking the ancestor chain the
+// same way `agent_from_process_tree` does. Falls back to the immediate
+// parent only when no agent ancestor is recognized.
+//
+// The ancestor walk matters: agents like claude_code spawn a fresh shell
+// (`bash -c "..."`) per Bash tool call, so the immediate parent dies
+// between `railway` invocations. Keying on the short-lived shell would
+// mint a new session file every call (which is exactly what 4.57.3 did
+// before this anchoring change — see warehouse audit 2026-05-12).
 //
 // File layout: `~/.railway/sessions/<16-hex-of-sha256>.session` containing a
 // small JSON blob (id + parent invariants + creation timestamp).
 //
 // Lifecycle:
 //   - Created on first agent-attributed CLI invocation with a recognizable
-//     parent process.
-//   - Reused as long as the parent pid is still alive and its boot time
+//     anchor process.
+//   - Reused as long as the anchor pid is still alive and its boot time
 //     matches the persisted value (defends against PID reuse).
 //   - Hard age cap of 7 days as a backstop against very-long-lived parents
 //     or boot-time detection drift.
@@ -783,19 +791,40 @@ fn parent_identity() -> Option<ParentIdentity> {
     if me.ppid == 0 {
         return None;
     }
-    let parent = snapshot.get(&me.ppid)?;
+    let anchor_pid = agent_ancestor_pid(snapshot, me.ppid).unwrap_or(me.ppid);
+    let parent = snapshot.get(&anchor_pid)?;
     let argv0 = parent
         .command
         .split_whitespace()
         .next()
         .unwrap_or("")
         .to_string();
-    let btime = parent_boot_time(me.ppid)?;
+    let btime = parent_boot_time(anchor_pid)?;
     Some(ParentIdentity {
-        pid: me.ppid,
+        pid: anchor_pid,
         btime,
         argv0,
     })
+}
+
+/// Walk up to 15 ancestors from `start_pid` (inclusive) and return the pid
+/// of the first process whose command resolves to a recognized agent slug
+/// via [`caller_from_process_name`]. Mirrors the depth used by
+/// [`agent_from_process_tree`] so the session anchor and the caller bucket
+/// stay consistent for any given invocation.
+fn agent_ancestor_pid(snapshot: &HashMap<u32, ProcessNode>, start_pid: u32) -> Option<u32> {
+    let mut current = start_pid;
+    for _ in 0..15 {
+        let node = snapshot.get(&current)?;
+        if caller_from_process_name(&node.command).is_some() {
+            return Some(current);
+        }
+        if node.ppid == 0 || node.ppid == current {
+            return None;
+        }
+        current = node.ppid;
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -1454,9 +1483,17 @@ pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, new_session_uuid,
-        parent_kind_from_command,
+        ProcessNode, agent_ancestor_pid, caller_from_mcp_client_name, caller_from_process_name,
+        is_agent_caller, new_session_uuid, parent_kind_from_command,
     };
+    use std::collections::HashMap;
+
+    fn node(ppid: u32, command: &str) -> ProcessNode {
+        ProcessNode {
+            ppid,
+            command: command.to_ascii_lowercase(),
+        }
+    }
 
     #[test]
     fn detects_pi_process_name() {
@@ -1651,6 +1688,52 @@ mod tests {
                 .map(|(_, c)| c.starts_with("claude"))
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn anchor_walks_past_transient_bash_to_claude_code() {
+        // claude_code (pid 5000) -> bash (pid 5500) -> railway (pid 5600)
+        // The Bash tool spawns a fresh `bash -c "railway ..."` per tool call,
+        // so the immediate parent (bash) is short-lived. The session anchor
+        // must walk past it and land on claude_code so the persistent file
+        // is reused across the agent's many railway invocations.
+        let mut snap = HashMap::new();
+        snap.insert(5600, node(5500, "railway up"));
+        snap.insert(5500, node(5000, "bash -c 'railway up'"));
+        snap.insert(
+            5000,
+            node(1, "node /usr/local/lib/claude-code/cli.js --dangerously-skip-permissions"),
+        );
+        assert_eq!(agent_ancestor_pid(&snap, 5500), Some(5000));
+    }
+
+    #[test]
+    fn anchor_walks_past_transient_bash_to_codex() {
+        // codex (pid 7000) -> sh (pid 7300) -> railway (pid 7400)
+        let mut snap = HashMap::new();
+        snap.insert(7400, node(7300, "railway logs"));
+        snap.insert(7300, node(7000, "sh -c 'railway logs'"));
+        snap.insert(7000, node(1, "/usr/local/bin/codex"));
+        assert_eq!(agent_ancestor_pid(&snap, 7300), Some(7000));
+    }
+
+    #[test]
+    fn anchor_returns_none_when_no_agent_ancestor() {
+        // A pure tty user: zsh -> railway. There's no agent in the chain;
+        // parent_identity should fall back to the immediate parent (zsh).
+        let mut snap = HashMap::new();
+        snap.insert(8400, node(8000, "railway status"));
+        snap.insert(8000, node(1, "-/bin/zsh"));
+        assert_eq!(agent_ancestor_pid(&snap, 8000), None);
+    }
+
+    #[test]
+    fn anchor_walk_terminates_on_cycle() {
+        // Defensive: even with a self-referential ppid loop the walk must
+        // terminate within 15 hops without panicking.
+        let mut snap = HashMap::new();
+        snap.insert(9100, node(9100, "weird-self-loop"));
+        assert_eq!(agent_ancestor_pid(&snap, 9100), None);
     }
 
     #[test]
