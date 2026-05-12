@@ -1702,7 +1702,10 @@ mod tests {
         snap.insert(5500, node(5000, "bash -c 'railway up'"));
         snap.insert(
             5000,
-            node(1, "node /usr/local/lib/claude-code/cli.js --dangerously-skip-permissions"),
+            node(
+                1,
+                "node /usr/local/lib/claude-code/cli.js --dangerously-skip-permissions",
+            ),
         );
         assert_eq!(agent_ancestor_pid(&snap, 5500), Some(5000));
     }
