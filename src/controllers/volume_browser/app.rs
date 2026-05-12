@@ -1,13 +1,7 @@
 use std::path::PathBuf;
 
+use crate::controllers::volume_files::VolumeFileEntry;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-#[derive(Debug, Clone)]
-pub struct RemoteEntry {
-    pub path: PathBuf,
-    pub name: String,
-    pub is_dir: bool,
-}
 
 #[derive(Debug, Clone)]
 pub enum BrowserAction {
@@ -26,8 +20,14 @@ pub enum BrowserAction {
 
 #[derive(Debug, Clone)]
 pub enum PendingTransfer {
-    Download { remote: RemoteEntry, local: PathBuf },
-    Upload { local: PathBuf, remote: PathBuf },
+    Download {
+        remote: VolumeFileEntry,
+        local: PathBuf,
+    },
+    Upload {
+        local: PathBuf,
+        remote: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub struct VolumeBrowserApp {
     pub mount_path: PathBuf,
     pub current_path: PathBuf,
     pub local_dir: PathBuf,
-    pub entries: Vec<RemoteEntry>,
+    pub entries: Vec<VolumeFileEntry>,
     pub selected: usize,
     pub status: Option<String>,
     pub error: Option<String>,
@@ -77,14 +77,15 @@ impl VolumeBrowserApp {
         }
     }
 
-    pub fn selected_entry(&self) -> Option<&RemoteEntry> {
+    pub fn selected_entry(&self) -> Option<&VolumeFileEntry> {
         self.entries.get(self.selected)
     }
 
-    pub fn set_entries(&mut self, mut entries: Vec<RemoteEntry>) {
+    pub fn set_entries(&mut self, mut entries: Vec<VolumeFileEntry>) {
         entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
+            b.kind
+                .is_dir()
+                .cmp(&a.kind.is_dir())
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                 .then_with(|| a.name.cmp(&b.name))
         });

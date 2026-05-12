@@ -7,6 +7,7 @@ use crate::{
         get_project, volume_instances_in_env,
     },
     controllers::volume_browser::{VolumeBrowserParams, run as run_volume_browser},
+    controllers::volume_files::{VolumeFileClient, VolumeFileKind},
     errors::RailwayError,
     queries::project::ProjectProject,
     util::{
@@ -18,12 +19,15 @@ use crate::{
 use anyhow::{anyhow, bail};
 use clap::Parser;
 use is_terminal::IsTerminal;
-use std::{fmt::Display, path::PathBuf};
+use std::{
+    fmt::Display,
+    path::{Component, Path, PathBuf},
+};
 
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume ls pgdata --volume postgres-volume --json\n  railway volume download pgdata/postgresql.conf ./postgresql.conf --volume postgres-volume\n  railway volume upload ./postgresql.conf pgdata/postgresql.conf --volume postgres-volume --yes --json\n  railway volume browse --volume data\n\nAliases:\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n  download: dl, get\n  upload: up, put\n  ls: files\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  File command remote paths are relative to the volume mount path unless absolute. Use --yes for non-interactive overwrite and --json for structured success output."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -45,7 +49,7 @@ structstruck::strike! {
     #[strikethrough[derive(Parser)]]
     enum Commands {
         /// List volumes
-        #[clap(visible_alias = "ls")]
+        #[clap(visible_alias = "volumes")]
         List(struct {
             /// Output in JSON format
             #[clap(long)]
@@ -147,6 +151,77 @@ structstruck::strike! {
             /// Local directory used for downloads and relative uploads
             #[clap(long, value_name = "PATH")]
             local_dir: Option<PathBuf>,
+        }),
+
+        /// List files in a volume path
+        #[clap(name = "ls", visible_alias = "files")]
+        Ls(struct {
+            /// Remote path to list, relative to the volume mount path unless absolute
+            path: PathBuf,
+
+            /// The ID/name of the volume
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// Path to identity (private key) file to use, like `ssh -i`
+            #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
+            identity_file: Option<PathBuf>,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
+        }),
+
+        /// Download a file or directory from a volume
+        #[clap(visible_alias = "dl", visible_alias = "get")]
+        Download(struct {
+            /// Remote file or directory path, relative to the volume mount path unless absolute
+            remote_path: PathBuf,
+
+            /// Local destination path
+            local_path: PathBuf,
+
+            /// The ID/name of the volume
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// Path to identity (private key) file to use, like `ssh -i`
+            #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
+            identity_file: Option<PathBuf>,
+
+            /// Overwrite the local destination if it exists
+            #[clap(short = 'y', long = "yes")]
+            yes: bool,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
+        }),
+
+        /// Upload a file or directory to a volume
+        #[clap(visible_alias = "up", visible_alias = "put")]
+        Upload(struct {
+            /// Local file or directory path
+            local_path: PathBuf,
+
+            /// Remote destination path, relative to the volume mount path unless absolute
+            remote_path: PathBuf,
+
+            /// The ID/name of the volume
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// Path to identity (private key) file to use, like `ssh -i`
+            #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
+            identity_file: Option<PathBuf>,
+
+            /// Overwrite the remote destination if it exists
+            #[clap(short = 'y', long = "yes")]
+            yes: bool,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
         })
     }
 }
@@ -263,6 +338,52 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?
         }
+        Commands::Ls(l) => {
+            file_ls(
+                environment,
+                &environment_instances,
+                l.volume,
+                project,
+                l.path,
+                l.identity_file,
+                l.json,
+                &client,
+                &configs,
+            )
+            .await?
+        }
+        Commands::Download(d) => {
+            file_download(
+                environment,
+                &environment_instances,
+                d.volume,
+                project,
+                d.remote_path,
+                d.local_path,
+                d.identity_file,
+                d.yes,
+                d.json,
+                &client,
+                &configs,
+            )
+            .await?
+        }
+        Commands::Upload(u) => {
+            file_upload(
+                environment,
+                &environment_instances,
+                u.volume,
+                project,
+                u.local_path,
+                u.remote_path,
+                u.identity_file,
+                u.yes,
+                u.json,
+                &client,
+                &configs,
+            )
+            .await?
+        }
     }
 
     Ok(())
@@ -283,6 +404,44 @@ async fn browse(
         bail!("Volume browsing requires an interactive terminal");
     }
 
+    let target = resolve_volume_file_target(
+        environment,
+        environment_instances,
+        volume,
+        project,
+        is_terminal,
+    )?;
+
+    if identity_file.is_none() {
+        super::ssh::native::ensure_ssh_key(client, configs).await?;
+    }
+
+    run_volume_browser(VolumeBrowserParams {
+        service_instance_id: target.service_instance_id,
+        service_name: target.service_name,
+        volume_name: target.volume_name,
+        mount_path: target.mount_path,
+        local_dir: local_dir.unwrap_or(std::env::current_dir()?),
+        identity_file,
+    })?;
+
+    Ok(())
+}
+
+struct ResolvedVolumeFileTarget {
+    service_instance_id: String,
+    service_name: String,
+    volume_name: String,
+    mount_path: PathBuf,
+}
+
+fn resolve_volume_file_target(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    is_terminal: bool,
+) -> Result<ResolvedVolumeFileTarget> {
     let volume = select_volume(
         project.clone(),
         environment_instances,
@@ -311,20 +470,338 @@ async fn browse(
         .map(|instance| instance.id.clone())
         .ok_or_else(|| anyhow!("No active service instance found for service {service_name}"))?;
 
-    if identity_file.is_none() {
-        super::ssh::native::ensure_ssh_key(client, configs).await?;
-    }
-
-    run_volume_browser(VolumeBrowserParams {
+    Ok(ResolvedVolumeFileTarget {
         service_instance_id,
         service_name,
         volume_name: volume.volume.name,
         mount_path: PathBuf::from(volume.mount_path),
-        local_dir: local_dir.unwrap_or(std::env::current_dir()?),
-        identity_file,
-    })?;
+    })
+}
+
+async fn file_ls(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    path: PathBuf,
+    identity_file: Option<PathBuf>,
+    json: bool,
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<()> {
+    let target = prepare_file_target(
+        environment,
+        environment_instances,
+        volume,
+        project,
+        identity_file.clone(),
+        client,
+        configs,
+    )
+    .await?;
+    let remote_path = resolve_remote_path(&target.mount_path, &path)?;
+    let file_client = VolumeFileClient::connect(target.service_instance_id.clone(), identity_file)?;
+    let entries = file_client.list_dir(&remote_path)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "volume": target.volume_name,
+                "service": target.service_name,
+                "path": remote_path,
+                "entries": entries,
+            }))?
+        );
+    } else {
+        println!("{}", remote_path.display());
+        println!();
+        for entry in entries {
+            println!("{} {}", entry.kind.marker(), entry.name);
+        }
+    }
 
     Ok(())
+}
+
+async fn file_download(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    remote_path: PathBuf,
+    local_path: PathBuf,
+    identity_file: Option<PathBuf>,
+    yes: bool,
+    json: bool,
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<()> {
+    let target = prepare_file_target(
+        environment,
+        environment_instances,
+        volume,
+        project,
+        identity_file.clone(),
+        client,
+        configs,
+    )
+    .await?;
+    let remote_path = resolve_remote_path(&target.mount_path, &remote_path)?;
+    let file_client = VolumeFileClient::connect(target.service_instance_id.clone(), identity_file)?;
+    let kind = file_client.stat_kind(&remote_path)?;
+    let local_path = resolve_download_local_path(&remote_path, local_path, kind)?;
+
+    confirm_local_overwrite(&local_path, yes)?;
+    if local_path.exists() {
+        remove_local_path(&local_path)?;
+    }
+
+    file_client.download(&remote_path, &local_path, kind)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "success": true,
+                "volume": target.volume_name,
+                "service": target.service_name,
+                "remotePath": remote_path,
+                "localPath": std::fs::canonicalize(&local_path).unwrap_or(local_path.clone()),
+                "kind": kind,
+            }))?
+        );
+    } else {
+        println!(
+            "Downloaded \"{}\" to \"{}\"",
+            remote_path.display(),
+            local_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+async fn file_upload(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    local_path: PathBuf,
+    remote_path: PathBuf,
+    identity_file: Option<PathBuf>,
+    yes: bool,
+    json: bool,
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<()> {
+    let local_path = if local_path.is_absolute() {
+        local_path
+    } else {
+        std::env::current_dir()?.join(local_path)
+    };
+    if !local_path.exists() {
+        bail!("Local path does not exist: {}", local_path.display());
+    }
+
+    let target = prepare_file_target(
+        environment,
+        environment_instances,
+        volume,
+        project,
+        identity_file.clone(),
+        client,
+        configs,
+    )
+    .await?;
+    let remote_path = resolve_remote_path(&target.mount_path, &remote_path)?;
+    let file_client = VolumeFileClient::connect(target.service_instance_id.clone(), identity_file)?;
+    let remote_path = resolve_upload_remote_path(&file_client, &local_path, remote_path)?;
+    let kind = if local_path.is_dir() {
+        VolumeFileKind::Directory
+    } else {
+        VolumeFileKind::File
+    };
+
+    confirm_remote_overwrite(&file_client, &remote_path, yes)?;
+    if file_client.exists(&remote_path)? {
+        file_client.remove_path(&remote_path)?;
+    }
+
+    file_client.upload(&local_path, &remote_path)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "success": true,
+                "volume": target.volume_name,
+                "service": target.service_name,
+                "remotePath": remote_path,
+                "localPath": std::fs::canonicalize(&local_path).unwrap_or(local_path.clone()),
+                "kind": kind,
+            }))?
+        );
+    } else {
+        println!(
+            "Uploaded \"{}\" to \"{}\"",
+            local_path.display(),
+            remote_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+async fn prepare_file_target(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    identity_file: Option<PathBuf>,
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<ResolvedVolumeFileTarget> {
+    let is_terminal = std::io::stdout().is_terminal();
+    let target = resolve_volume_file_target(
+        environment,
+        environment_instances,
+        volume,
+        project,
+        is_terminal,
+    )?;
+
+    if identity_file.is_none() {
+        super::ssh::native::ensure_ssh_key(client, configs).await?;
+    }
+
+    Ok(target)
+}
+
+fn resolve_remote_path(mount_path: &Path, input: &Path) -> Result<PathBuf> {
+    let path = if input.is_absolute() {
+        normalize_path(input)
+    } else {
+        normalize_path(&mount_path.join(input))
+    };
+
+    if !input.is_absolute() && !path.starts_with(mount_path) {
+        bail!("Remote path escapes the volume mount path");
+    }
+
+    Ok(path)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn resolve_download_local_path(
+    remote_path: &Path,
+    local_path: PathBuf,
+    kind: VolumeFileKind,
+) -> Result<PathBuf> {
+    let local_path = if local_path.is_absolute() {
+        local_path
+    } else {
+        std::env::current_dir()?.join(local_path)
+    };
+
+    if kind == VolumeFileKind::File && local_path.is_dir() {
+        let filename = remote_path
+            .file_name()
+            .ok_or_else(|| anyhow!("Remote file path has no filename"))?;
+        Ok(local_path.join(filename))
+    } else {
+        Ok(local_path)
+    }
+}
+
+fn resolve_upload_remote_path(
+    file_client: &VolumeFileClient,
+    local_path: &Path,
+    remote_path: PathBuf,
+) -> Result<PathBuf> {
+    if local_path.is_file()
+        && file_client.exists(&remote_path)?
+        && file_client.stat_kind(&remote_path)?.is_dir()
+    {
+        let filename = local_path
+            .file_name()
+            .ok_or_else(|| anyhow!("Local file path has no filename"))?;
+        Ok(remote_path.join(filename))
+    } else {
+        Ok(remote_path)
+    }
+}
+
+fn confirm_local_overwrite(path: &Path, yes: bool) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if yes {
+        return Ok(());
+    }
+
+    if std::io::stdout().is_terminal() {
+        if prompt_confirm_with_default(
+            format!("Local path {} already exists. Overwrite?", path.display()).as_str(),
+            false,
+        )? {
+            Ok(())
+        } else {
+            bail!("Download cancelled")
+        }
+    } else {
+        bail!("Local destination exists. Use --yes to overwrite in non-interactive mode.")
+    }
+}
+
+fn confirm_remote_overwrite(file_client: &VolumeFileClient, path: &Path, yes: bool) -> Result<()> {
+    if !file_client.exists(path)? {
+        return Ok(());
+    }
+
+    if yes {
+        return Ok(());
+    }
+
+    if std::io::stdout().is_terminal() {
+        if prompt_confirm_with_default(
+            format!("Remote path {} already exists. Overwrite?", path.display()).as_str(),
+            false,
+        )? {
+            Ok(())
+        } else {
+            bail!("Upload cancelled")
+        }
+    } else {
+        bail!("Remote destination exists. Use --yes to overwrite in non-interactive mode.")
+    }
+}
+
+fn remove_local_path(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Failed to inspect local path {}", path.display()))?;
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+    .with_context(|| format!("Failed to remove existing local path {}", path.display()))
 }
 
 async fn attach(

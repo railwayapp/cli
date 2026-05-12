@@ -17,4 +17,5 @@ pub mod upload;
 pub mod user;
 pub mod variables;
 pub mod volume_browser;
+pub mod volume_files;
 pub mod workflow;

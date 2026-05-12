@@ -102,13 +102,13 @@ fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         app.entries
             .iter()
             .map(|entry| {
-                let marker = if entry.is_dir { "[d]" } else { "[f]" };
-                let style = if entry.is_dir {
+                let marker = entry.kind.marker();
+                let style = if entry.kind.is_dir() {
                     Style::default().fg(Color::Blue)
                 } else {
                     Style::default().fg(Color::White)
                 };
-                let suffix = if entry.is_dir { "/" } else { "" };
+                let suffix = if entry.kind.is_dir() { "/" } else { "" };
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, Style::default().fg(LABEL_COLOR)),
                     Span::raw(" "),
