@@ -10,6 +10,7 @@ use super::app::{BrowserMode, PendingTransfer, VolumeBrowserApp};
 
 const LABEL_COLOR: Color = Color::DarkGray;
 const BORDER_COLOR: Color = Color::DarkGray;
+const ACCENT_COLOR: Color = Color::Cyan;
 const SELECTED_STYLE: Style = Style::new()
     .fg(Color::White)
     .bg(Color::Indexed(238))
@@ -27,17 +28,15 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
     }
 
     let chunks = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Min(6),
-        Constraint::Length(1),
         Constraint::Length(3),
     ])
     .split(area);
 
     render_header(app, frame, chunks[0]);
     render_entries(app, frame, chunks[1]);
-    render_help_bar(app, frame, chunks[2]);
-    render_status(app, frame, chunks[3]);
+    render_footer(app, frame, chunks[2]);
 
     match app.mode {
         BrowserMode::UploadInput => render_upload_popup(app, frame, area),
@@ -48,9 +47,13 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
 }
 
 fn render_header(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(BORDER_COLOR));
     let lines = vec![
         Line::from(vec![
-            Span::styled("  Volume ", Style::default().fg(LABEL_COLOR)),
+            Span::raw(" "),
+            Span::styled("Volume ", Style::default().fg(LABEL_COLOR)),
             Span::styled(
                 app.volume_name.clone(),
                 Style::default()
@@ -66,14 +69,27 @@ fn render_header(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Remote ", Style::default().fg(LABEL_COLOR)),
-            Span::raw(app.current_path.display().to_string()),
-            Span::styled("  Local ", Style::default().fg(LABEL_COLOR)),
-            Span::raw(app.local_dir.display().to_string()),
+            Span::raw(" "),
+            Span::styled("Remote ", Style::default().fg(LABEL_COLOR)),
+            Span::styled(
+                app.current_path.display().to_string(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Local  ", Style::default().fg(LABEL_COLOR)),
+            Span::styled(
+                app.local_dir.display().to_string(),
+                Style::default().fg(Color::White),
+            ),
         ]),
     ];
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+    frame.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
@@ -86,13 +102,18 @@ fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         app.entries
             .iter()
             .map(|entry| {
-                let marker = if entry.is_dir { "[-]" } else { "---" };
-                let name = if entry.is_dir {
-                    format!("{marker} {}/", entry.name)
+                let marker = if entry.is_dir { "[d]" } else { "[f]" };
+                let style = if entry.is_dir {
+                    Style::default().fg(Color::Blue)
                 } else {
-                    format!("{marker} {}", entry.name)
+                    Style::default().fg(Color::White)
                 };
-                ListItem::new(Line::from(name))
+                let suffix = if entry.is_dir { "/" } else { "" };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(LABEL_COLOR)),
+                    Span::raw(" "),
+                    Span::styled(format!("{}{suffix}", entry.name), style),
+                ]))
             })
             .collect()
     };
@@ -100,7 +121,8 @@ fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let list = List::new(items)
         .block(
             Block::default()
-                .borders(Borders::TOP | Borders::BOTTOM)
+                .title(" Files ")
+                .borders(Borders::ALL)
                 .border_style(Style::default().fg(BORDER_COLOR)),
         )
         .highlight_style(SELECTED_STYLE);
@@ -112,26 +134,9 @@ fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
-    let help = match app.mode {
-        BrowserMode::Browse => {
-            "Up/Down move  Enter open  Left parent  d download  u upload  r refresh  ? help  q quit"
-        }
-        BrowserMode::UploadInput => "Type local path  Enter upload  Esc cancel",
-        BrowserMode::ConfirmOverwrite => "Enter/y overwrite  n/Esc cancel",
-        BrowserMode::Help => "Esc close help",
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            help,
-            Style::default().fg(LABEL_COLOR),
-        ))),
-        area,
-    );
-}
-
-fn render_status(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+fn render_footer(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let mut lines = Vec::new();
+    lines.push(help_line(app.mode));
     if let Some(error) = &app.error {
         lines.push(Line::from(Span::styled(
             error.clone(),
@@ -143,7 +148,54 @@ fn render_status(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::Green),
         )));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(BORDER_COLOR)),
+            )
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn help_line(mode: BrowserMode) -> Line<'static> {
+    let items: &[(&str, &str)] = match mode {
+        BrowserMode::Browse => &[
+            ("Up/Down", "move"),
+            ("Enter", "open"),
+            ("Left", "parent"),
+            ("d", "download"),
+            ("e", "edit"),
+            ("u", "upload"),
+            ("r", "refresh"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        BrowserMode::UploadInput => &[
+            ("type", "local path"),
+            ("Enter", "upload"),
+            ("Esc", "cancel"),
+        ],
+        BrowserMode::ConfirmOverwrite => &[("Enter/y", "overwrite"), ("n/Esc", "cancel")],
+        BrowserMode::Help => &[("Esc", "close help")],
+    };
+
+    let mut spans = vec![Span::raw(" ")];
+    for (idx, (key, label)) in items.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            *key,
+            Style::default()
+                .fg(ACCENT_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {label}")));
+    }
+    Line::from(spans)
 }
 
 fn render_upload_popup(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
@@ -188,6 +240,7 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from("Enter or Right    Open directory"),
         Line::from("Left or Backspace Parent directory"),
         Line::from("d                 Download selected file or directory"),
+        Line::from("e                 Edit selected file and sync it back"),
         Line::from("u                 Upload local file or directory"),
         Line::from("r                 Refresh"),
         Line::from("q or Esc          Quit"),

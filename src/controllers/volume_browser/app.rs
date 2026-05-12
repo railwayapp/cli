@@ -17,6 +17,7 @@ pub enum BrowserAction {
     OpenSelected,
     Parent,
     DownloadSelected,
+    EditSelected,
     StartUpload,
     SubmitUpload(PathBuf),
     ConfirmOverwrite,
@@ -140,6 +141,7 @@ impl VolumeBrowserApp {
             KeyCode::Left | KeyCode::Backspace => BrowserAction::Parent,
             KeyCode::Char('r') => BrowserAction::Refresh,
             KeyCode::Char('d') => BrowserAction::DownloadSelected,
+            KeyCode::Char('e') => BrowserAction::EditSelected,
             KeyCode::Char('u') => {
                 self.mode = BrowserMode::UploadInput;
                 self.upload_input.clear();

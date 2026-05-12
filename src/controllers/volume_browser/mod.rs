@@ -79,6 +79,7 @@ pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
                         run_pending_transfer(&remote, &mut app, &mut terminal)
                     }
                 }
+                BrowserAction::EditSelected => edit_selected(&remote, &mut app, &mut terminal),
                 BrowserAction::StartUpload => app.set_status("Enter a local path to upload"),
                 BrowserAction::SubmitUpload(path) => {
                     if queue_upload(&remote, &mut app, path) {
@@ -96,6 +97,39 @@ pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
             Event::Resize(_, _) => terminal.clear()?,
             _ => {}
         }
+    }
+}
+
+fn edit_selected(
+    remote: &NativeRemote,
+    app: &mut VolumeBrowserApp,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    let Some(entry) = app.selected_entry().cloned() else {
+        app.set_status("Nothing selected");
+        return;
+    };
+
+    if entry.is_dir {
+        app.set_status("Selected entry is a directory");
+        return;
+    }
+
+    let result = run_with_restored_terminal(terminal, || {
+        let temp_path = edit_temp_path(&entry.name);
+        remote.download(&entry.path, &temp_path, false)?;
+        run_editor(&temp_path)?;
+        remote.upload(&temp_path, &entry.path)?;
+        let _ = fs::remove_file(&temp_path);
+        Ok(format!("Edited and synced {}", entry.name))
+    });
+
+    match result {
+        Ok(message) => {
+            app.set_status(message);
+            refresh_entries(remote, app);
+        }
+        Err(error) => app.set_error(error.to_string()),
     }
 }
 
@@ -589,6 +623,36 @@ fn shell_quote(path: &Path) -> String {
 fn shell_quote_path_fragment(value: &std::ffi::OsStr) -> String {
     let value = value.to_string_lossy();
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn edit_temp_path(name: &str) -> PathBuf {
+    let safe_name = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    env::temp_dir().join(format!("railway-volume-edit-{}-{safe_name}", process::id()))
+}
+
+fn run_editor(path: &Path) -> Result<()> {
+    let editor = env::var("VISUAL")
+        .or_else(|_| env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let status = Command::new(editor)
+        .arg(path)
+        .status()
+        .context("Failed to launch editor")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("Editor exited without saving changes")
+    }
 }
 
 fn remove_local_path(path: &Path) -> Result<()> {
