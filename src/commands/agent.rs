@@ -176,11 +176,14 @@ fn render_history(messages: &[ChatMessage], thread_id: Option<&str>) {
     };
     println!("{}", banner.dimmed());
 
+    let skin = termimad::MadSkin::default();
+
     for message in messages {
+        let is_assistant = message.role == "assistant";
         let role_label = match message.role.as_str() {
-            "user" => "You:".dimmed().bold(),
-            "assistant" => "Railway Agent:".dimmed().bold(),
-            other => other.dimmed().bold(),
+            "user" => "You:".bold(),
+            "assistant" => "Railway Agent:".purple().bold(),
+            other => other.bold(),
         };
         println!("{}", role_label);
 
@@ -199,7 +202,11 @@ fn render_history(messages: &[ChatMessage], thread_id: Option<&str>) {
             text_parts.join("")
         };
         if !text.trim().is_empty() {
-            println!("{}", text.dimmed());
+            if is_assistant {
+                skin.print_text(&text);
+            } else {
+                println!("{}", text);
+            }
         }
 
         for part in &message.parts {
