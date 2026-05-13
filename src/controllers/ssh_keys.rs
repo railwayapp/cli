@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use std::path::{Path, PathBuf};
@@ -14,10 +15,29 @@ use crate::gql::queries::{GitHubSshKeys, SshPublicKeys, git_hub_ssh_keys, ssh_pu
 /// Local SSH key info
 #[derive(Debug, Clone)]
 pub struct LocalSshKey {
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     pub public_key: String,
     pub fingerprint: String,
     pub key_type: String,
+    pub key_comment: Option<String>,
+}
+
+impl LocalSshKey {
+    pub fn key_name(&self) -> Cow<'_, str> {
+        match (self.key_comment.as_ref(), self.path.as_ref()) {
+            (Some(comment), _) if !comment.is_empty() => comment.into(),
+            (Some(_), None) => "SSH Agent Key".into(),
+            (_, Some(path)) => path.file_stem().unwrap().to_string_lossy(),
+            _ => (&self.fingerprint).into(),
+        }
+    }
+
+    pub fn key_source(&self) -> Cow<'_, str> {
+        self.path
+            .as_ref()
+            .map(|p| p.to_string_lossy())
+            .unwrap_or_else(|| "SSH Agent".into())
+    }
 }
 
 /// Supported SSH key types (in order of preference)
@@ -30,8 +50,29 @@ const SUPPORTED_KEY_TYPES: &[&str] = &[
     "ssh-dss",
 ];
 
-/// Find local SSH keys by scanning ~/.ssh/ for .pub files
 pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
+    let mut seen = std::collections::HashMap::new();
+    for key in fetch_keys_from_ssh_agent()? {
+        seen.entry(key.fingerprint.clone()).or_insert(key);
+    }
+
+    for key in find_ssh_key_files()? {
+        seen.entry(key.fingerprint.clone()).or_insert(key);
+    }
+
+    let mut keys = seen.into_values().collect::<Vec<_>>();
+    keys.sort_by_key(|k| {
+        SUPPORTED_KEY_TYPES
+            .iter()
+            .position(|t| k.key_type.starts_with(t))
+            .unwrap_or(usize::MAX)
+    });
+
+    Ok(keys)
+}
+
+/// Find local SSH keys by scanning ~/.ssh/ for .pub files
+pub fn find_ssh_key_files() -> Result<Vec<LocalSshKey>> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let ssh_dir = home.join(".ssh");
 
@@ -59,15 +100,39 @@ pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
         }
     }
 
-    // Sort by key type preference (ed25519 first, then ecdsa, then rsa, then dss)
-    keys.sort_by_key(|k| {
-        SUPPORTED_KEY_TYPES
-            .iter()
-            .position(|t| k.key_type.starts_with(t))
-            .unwrap_or(usize::MAX)
-    });
-
     Ok(keys)
+}
+
+// Pull SSH keys from the agent directly.
+pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
+    let output = Command::new("ssh-add")
+        .arg("-L")
+        .output()
+        .context("Failed to run ssh-add -L")?;
+
+    if !output.status.success() {
+        bail!(
+            "ssh-add -L failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .split("\n")
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let parts: Vec<_> = s.split_whitespace().collect();
+            let fingerprint = compute_fingerprint_from_pubkey(s)?;
+
+            Ok(LocalSshKey {
+                path: None,
+                public_key: s.trim().to_string(),
+                fingerprint,
+                key_type: parts[0].to_string(),
+                key_comment: parts[2..].join(" ").into(),
+            })
+        })
+        .collect()
 }
 
 /// Read and parse an SSH public key file
@@ -81,15 +146,17 @@ fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
 
     let key_type = parts[0].to_string();
     let public_key = content.trim().to_string();
+    let key_comment = parts[2..].join(" ").into();
 
     // Compute fingerprint using ssh-keygen
     let fingerprint = compute_fingerprint(path)?;
 
     Ok(LocalSshKey {
-        path: path.to_path_buf(),
+        path: Some(path.into()),
         public_key,
         fingerprint,
         key_type,
+        key_comment,
     })
 }
 
