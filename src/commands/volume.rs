@@ -2,13 +2,14 @@ use super::*;
 use crate::{
     controllers::environment::get_matched_environment,
     controllers::project::{
-        ProjectEnvironmentInstances, ProjectVolumeInstanceNode,
+        ProjectEnvironmentInstances, ProjectServiceInstanceNode, ProjectVolumeInstanceNode,
         ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
         get_project, volume_instances_in_env,
     },
     controllers::volume_browser::{VolumeBrowserParams, run as run_volume_browser},
     controllers::volume_files::{VolumeFileClient, VolumeFileKind},
     errors::RailwayError,
+    gql::queries::environment_instances::{DeploymentInstanceStatus, DeploymentStatus},
     queries::project::ProjectProject,
     util::{
         progress::create_spinner,
@@ -473,16 +474,67 @@ fn resolve_volume_file_target(
         .map(|service| service.node.name.clone())
         .ok_or_else(|| anyhow!("The service attached to this volume doesn't exist"))?;
 
-    let service_instance_id = find_service_instance(environment_instances, &service_id)
-        .map(|instance| instance.id.clone())
+    let service_instance = find_service_instance(environment_instances, &service_id)
         .ok_or_else(|| anyhow!("No active service instance found for service {service_name}"))?;
 
+    ensure_service_running(service_instance, &service_name)?;
+
     Ok(ResolvedVolumeFileTarget {
-        service_instance_id,
+        service_instance_id: service_instance.id.clone(),
         service_name,
         volume_name: volume.volume.name,
         mount_path: PathBuf::from(volume.mount_path),
     })
+}
+
+fn ensure_service_running(
+    service_instance: &ProjectServiceInstanceNode,
+    service_name: &str,
+) -> Result<()> {
+    let active_running = service_instance
+        .active_deployments
+        .iter()
+        .any(deployment_can_accept_ssh);
+    let latest_running = service_instance
+        .latest_deployment
+        .as_ref()
+        .is_some_and(latest_deployment_can_accept_ssh);
+
+    if active_running || latest_running {
+        Ok(())
+    } else {
+        bail!(
+            "Service {service_name} is not running. Start it before accessing volume files over SSH."
+        )
+    }
+}
+
+fn deployment_can_accept_ssh(
+    deployment: &crate::gql::queries::environment_instances::EnvironmentInstancesEnvironmentServiceInstancesEdgesNodeActiveDeployments,
+) -> bool {
+    if deployment.deployment_stopped {
+        return false;
+    }
+
+    matches!(deployment.status, DeploymentStatus::SUCCESS)
+        || deployment
+            .instances
+            .iter()
+            .any(|instance| matches!(instance.status, DeploymentInstanceStatus::RUNNING))
+}
+
+fn latest_deployment_can_accept_ssh(
+    deployment: &crate::gql::queries::environment_instances::EnvironmentInstancesEnvironmentServiceInstancesEdgesNodeLatestDeployment,
+) -> bool {
+    if deployment.deployment_stopped {
+        return false;
+    }
+
+    matches!(deployment.status, DeploymentStatus::SUCCESS)
+        || deployment
+            .instances
+            .iter()
+            .any(|instance| matches!(instance.status, DeploymentInstanceStatus::RUNNING))
 }
 
 async fn file_ls(
