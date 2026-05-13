@@ -13,7 +13,10 @@ pub enum BrowserAction {
     DownloadSelected,
     EditSelected,
     StartUpload,
-    SubmitUpload(PathBuf),
+    OpenLocalSelected,
+    LocalParent,
+    SubmitSelectedUpload,
+    RefreshLocal,
     ConfirmOverwrite,
     CancelPrompt,
 }
@@ -33,9 +36,16 @@ pub enum PendingTransfer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
     Browse,
-    UploadInput,
+    UploadPicker,
     ConfirmOverwrite,
     Help,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalFileEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_dir: bool,
 }
 
 #[derive(Debug)]
@@ -47,10 +57,12 @@ pub struct VolumeBrowserApp {
     pub local_dir: PathBuf,
     pub entries: Vec<VolumeFileEntry>,
     pub selected: usize,
+    pub local_current_path: PathBuf,
+    pub local_entries: Vec<LocalFileEntry>,
+    pub local_selected: usize,
     pub status: Option<String>,
     pub error: Option<String>,
     pub mode: BrowserMode,
-    pub upload_input: String,
     pub pending_transfer: Option<PendingTransfer>,
 }
 
@@ -66,19 +78,25 @@ impl VolumeBrowserApp {
             volume_name,
             current_path: mount_path.clone(),
             mount_path,
+            local_current_path: local_dir.clone(),
             local_dir,
             entries: Vec::new(),
             selected: 0,
+            local_entries: Vec::new(),
+            local_selected: 0,
             status: None,
             error: None,
             mode: BrowserMode::Browse,
-            upload_input: String::new(),
             pending_transfer: None,
         }
     }
 
     pub fn selected_entry(&self) -> Option<&VolumeFileEntry> {
         self.entries.get(self.selected)
+    }
+
+    pub fn selected_local_entry(&self) -> Option<&LocalFileEntry> {
+        self.local_entries.get(self.local_selected)
     }
 
     pub fn set_entries(&mut self, mut entries: Vec<VolumeFileEntry>) {
@@ -95,6 +113,22 @@ impl VolumeBrowserApp {
             self.selected = 0;
         } else {
             self.selected = self.selected.min(self.entries.len() - 1);
+        }
+    }
+
+    pub fn set_local_entries(&mut self, mut entries: Vec<LocalFileEntry>) {
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        self.local_entries = entries;
+        if self.local_entries.is_empty() {
+            self.local_selected = 0;
+        } else {
+            self.local_selected = self.local_selected.min(self.local_entries.len() - 1);
         }
     }
 
@@ -115,7 +149,7 @@ impl VolumeBrowserApp {
 
         match self.mode {
             BrowserMode::Browse => self.handle_browse_key(key),
-            BrowserMode::UploadInput => self.handle_upload_key(key),
+            BrowserMode::UploadPicker => self.handle_upload_key(key),
             BrowserMode::ConfirmOverwrite => self.handle_confirm_key(key),
             BrowserMode::Help => self.handle_help_key(key),
         }
@@ -144,8 +178,7 @@ impl VolumeBrowserApp {
             KeyCode::Char('d') => BrowserAction::DownloadSelected,
             KeyCode::Char('e') => BrowserAction::EditSelected,
             KeyCode::Char('u') => {
-                self.mode = BrowserMode::UploadInput;
-                self.upload_input.clear();
+                self.mode = BrowserMode::UploadPicker;
                 BrowserAction::StartUpload
             }
             _ => BrowserAction::Continue,
@@ -158,18 +191,24 @@ impl VolumeBrowserApp {
                 self.mode = BrowserMode::Browse;
                 BrowserAction::CancelPrompt
             }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.local_selected = self.local_selected.saturating_sub(1);
+                BrowserAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !self.local_entries.is_empty() {
+                    self.local_selected =
+                        (self.local_selected + 1).min(self.local_entries.len() - 1);
+                }
+                BrowserAction::Continue
+            }
+            KeyCode::Right => BrowserAction::OpenLocalSelected,
             KeyCode::Enter => {
                 self.mode = BrowserMode::Browse;
-                BrowserAction::SubmitUpload(PathBuf::from(self.upload_input.trim()))
+                BrowserAction::SubmitSelectedUpload
             }
-            KeyCode::Backspace => {
-                self.upload_input.pop();
-                BrowserAction::Continue
-            }
-            KeyCode::Char(ch) => {
-                self.upload_input.push(ch);
-                BrowserAction::Continue
-            }
+            KeyCode::Left | KeyCode::Backspace => BrowserAction::LocalParent,
+            KeyCode::Char('r') => BrowserAction::RefreshLocal,
             _ => BrowserAction::Continue,
         }
     }

@@ -9,7 +9,7 @@ use std::{
     process::{self, Command},
 };
 
-pub use app::{BrowserAction, PendingTransfer, VolumeBrowserApp};
+pub use app::{BrowserAction, LocalFileEntry, PendingTransfer, VolumeBrowserApp};
 
 use anyhow::{Context, Result, bail};
 use crossterm::{
@@ -80,9 +80,15 @@ pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
                     }
                 }
                 BrowserAction::EditSelected => edit_selected(&remote, &mut app, &mut terminal),
-                BrowserAction::StartUpload => app.set_status("Enter a local path to upload"),
-                BrowserAction::SubmitUpload(path) => {
-                    if queue_upload(&remote, &mut app, path) {
+                BrowserAction::StartUpload => {
+                    refresh_local_entries(&mut app);
+                    app.set_status("Select a local file or directory to upload");
+                }
+                BrowserAction::OpenLocalSelected => open_local_selected(&mut app),
+                BrowserAction::LocalParent => open_local_parent(&mut app),
+                BrowserAction::RefreshLocal => refresh_local_entries(&mut app),
+                BrowserAction::SubmitSelectedUpload => {
+                    if queue_selected_upload(&remote, &mut app) {
                         run_pending_transfer(&remote, &mut app, &mut terminal)
                     }
                 }
@@ -198,18 +204,59 @@ fn queue_download(app: &mut VolumeBrowserApp) -> bool {
     }
 }
 
-fn queue_upload(remote: &VolumeFileClient, app: &mut VolumeBrowserApp, input: PathBuf) -> bool {
-    if input.as_os_str().is_empty() {
-        app.set_status("Upload cancelled");
-        return false;
+fn refresh_local_entries(app: &mut VolumeBrowserApp) {
+    match fs::read_dir(&app.local_current_path) {
+        Ok(read_dir) => {
+            let entries = read_dir
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    let path = entry.path();
+                    let metadata = entry.metadata().ok()?;
+                    Some(LocalFileEntry {
+                        name: entry.file_name().to_string_lossy().to_string(),
+                        path,
+                        is_dir: metadata.is_dir(),
+                    })
+                })
+                .collect();
+            app.set_local_entries(entries);
+        }
+        Err(error) => app.set_error(format!("Failed to list local directory: {error}")),
     }
+}
 
-    let local = if input.is_absolute() {
-        input
-    } else {
-        app.local_dir.join(input)
+fn open_local_selected(app: &mut VolumeBrowserApp) {
+    let Some(entry) = app.selected_local_entry().cloned() else {
+        app.set_status("Nothing selected");
+        return;
     };
 
+    if !entry.is_dir {
+        app.set_status("Press Enter to upload selected file");
+        return;
+    }
+
+    app.local_current_path = entry.path;
+    app.local_selected = 0;
+    refresh_local_entries(app);
+}
+
+fn open_local_parent(app: &mut VolumeBrowserApp) {
+    let Some(parent) = app.local_current_path.parent() else {
+        return;
+    };
+    app.local_current_path = parent.to_path_buf();
+    app.local_selected = 0;
+    refresh_local_entries(app);
+}
+
+fn queue_selected_upload(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) -> bool {
+    let Some(local_entry) = app.selected_local_entry().cloned() else {
+        app.set_status("Nothing selected");
+        return false;
+    };
+
+    let local = local_entry.path;
     if !local.exists() {
         app.set_error(format!("Local path does not exist: {}", local.display()));
         return false;

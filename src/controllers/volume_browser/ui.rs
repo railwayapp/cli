@@ -35,11 +35,19 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
     .split(area);
 
     render_header(app, frame, chunks[0]);
-    render_entries(app, frame, chunks[1]);
+    if app.mode == BrowserMode::UploadPicker {
+        let panes = Layout::horizontal([Constraint::Min(42), Constraint::Length(42)])
+            .spacing(1)
+            .split(chunks[1]);
+        render_entries(app, frame, panes[0]);
+        render_local_entries(app, frame, panes[1]);
+    } else {
+        render_entries(app, frame, chunks[1]);
+    }
     render_footer(app, frame, chunks[2]);
 
     match app.mode {
-        BrowserMode::UploadInput => render_upload_popup(app, frame, area),
+        BrowserMode::UploadPicker => {}
         BrowserMode::ConfirmOverwrite => render_confirm_popup(app, frame, area),
         BrowserMode::Help => render_help_popup(frame, area),
         BrowserMode::Browse => {}
@@ -134,6 +142,49 @@ fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn render_local_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let title = format!(" Upload from {} ", app.local_current_path.display());
+    let items = if app.local_entries.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  Directory is empty.",
+            Style::default().fg(LABEL_COLOR),
+        )))]
+    } else {
+        app.local_entries
+            .iter()
+            .map(|entry| {
+                let marker = if entry.is_dir { "[d]" } else { "[f]" };
+                let suffix = if entry.is_dir { "/" } else { "" };
+                let style = if entry.is_dir {
+                    Style::default().fg(Color::Blue)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(LABEL_COLOR)),
+                    Span::raw(" "),
+                    Span::styled(format!("{}{suffix}", entry.name), style),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT_COLOR)),
+        )
+        .highlight_style(SELECTED_STYLE);
+
+    let mut state = ListState::default();
+    if !app.local_entries.is_empty() {
+        state.select(Some(app.local_selected));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
 fn render_footer(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let mut lines = Vec::new();
     lines.push(help_line(app.mode));
@@ -173,9 +224,12 @@ fn help_line(mode: BrowserMode) -> Line<'static> {
             ("?", "help"),
             ("q", "quit"),
         ],
-        BrowserMode::UploadInput => &[
-            ("type", "local path"),
+        BrowserMode::UploadPicker => &[
+            ("Up/Down", "move"),
+            ("Right", "open dir"),
+            ("Left", "parent"),
             ("Enter", "upload"),
+            ("r", "refresh"),
             ("Esc", "cancel"),
         ],
         BrowserMode::ConfirmOverwrite => &[("Enter/y", "overwrite"), ("n/Esc", "cancel")],
@@ -196,20 +250,6 @@ fn help_line(mode: BrowserMode) -> Line<'static> {
         spans.push(Span::raw(format!(" {label}")));
     }
     Line::from(spans)
-}
-
-fn render_upload_popup(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(72, 5, area);
-    frame.render_widget(Clear, popup);
-    let input = Paragraph::new(vec![
-        Line::from("Local path to upload"),
-        Line::from(Span::styled(
-            app.upload_input.clone(),
-            Style::default().fg(Color::White),
-        )),
-    ])
-    .block(Block::default().borders(Borders::ALL).title(" Upload "));
-    frame.render_widget(input, popup);
 }
 
 fn render_confirm_popup(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
@@ -241,7 +281,8 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from("Left or Backspace Parent directory"),
         Line::from("d                 Download selected file or directory"),
         Line::from("e                 Edit selected file and sync it back"),
-        Line::from("u                 Upload local file or directory"),
+        Line::from("u                 Open local upload picker"),
+        Line::from("Enter             Upload selected local entry from picker"),
         Line::from("r                 Refresh"),
         Line::from("q or Esc          Quit"),
     ])
