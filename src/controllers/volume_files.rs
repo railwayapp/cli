@@ -7,13 +7,17 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use inquire::Password;
 use is_terminal::IsTerminal;
 use russh::{
     Preferred, client,
     keys::{PrivateKeyWithHashAlg, load_secret_key},
 };
-use russh_sftp::client::SftpSession;
+use russh_sftp::{
+    client::{SftpSession, error::Error as SftpError},
+    protocol::StatusCode,
+};
 use serde::Serialize;
 use tokio::{fs::File, io::AsyncWriteExt};
 
@@ -21,6 +25,8 @@ use crate::controllers::ssh_keys::find_local_ssh_keys;
 
 const SSH_HOST: &str = "ssh.railway.com";
 const SSH_PORT: u16 = 22;
+const DIRECTORY_FILE_CONCURRENCY: usize = 16;
+const DIRECTORY_SUBDIR_CONCURRENCY: usize = 4;
 
 pub struct VolumeFileClient {
     sftp: SftpSession,
@@ -98,12 +104,7 @@ impl VolumeFileClient {
     }
 
     pub fn exists(&self, path: &Path) -> Result<bool> {
-        block_on(async {
-            self.sftp
-                .try_exists(remote_path(path))
-                .await
-                .with_context(|| format!("Failed to check remote path {}", path.display()))
-        })
+        block_on(self.exists_async(path))
     }
 
     pub fn stat_kind(&self, path: &Path) -> Result<VolumeFileKind> {
@@ -163,14 +164,7 @@ impl VolumeFileClient {
             if current.as_os_str().is_empty() || current == Path::new("/") {
                 continue;
             }
-            if !self
-                .sftp
-                .try_exists(remote_path(&current))
-                .await
-                .with_context(|| {
-                    format!("Failed to check remote directory {}", current.display())
-                })?
-            {
+            if !self.exists_async(&current).await? {
                 self.sftp
                     .create_dir(remote_path(&current))
                     .await
@@ -181,6 +175,15 @@ impl VolumeFileClient {
         }
 
         Ok(())
+    }
+
+    async fn exists_async(&self, path: &Path) -> Result<bool> {
+        match self.sftp.symlink_metadata(remote_path(path)).await {
+            Ok(_) => Ok(true),
+            Err(error) if is_missing_remote_error(&error) => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("Failed to check remote path {}", path.display())),
+        }
     }
 
     async fn list_dir_async(&self, path: &Path) -> Result<Vec<VolumeFileEntry>> {
@@ -252,17 +255,45 @@ impl VolumeFileClient {
     }
 
     async fn download_dir(&self, remote: &Path, local: &Path) -> Result<()> {
+        let created_root = !tokio::fs::try_exists(local)
+            .await
+            .with_context(|| format!("Failed to inspect local directory {}", local.display()))?;
         tokio::fs::create_dir_all(local)
             .await
             .with_context(|| format!("Failed to create local directory {}", local.display()))?;
 
-        for entry in self.list_dir_async(remote).await? {
-            let child_local = local.join(&entry.name);
-            if entry.kind.is_dir() {
-                Box::pin(self.download_dir(&entry.path, &child_local)).await?;
-            } else {
-                self.download_file(&entry.path, &child_local).await?;
+        let result = async {
+            let entries = self.list_dir_async(remote).await?;
+            let (dirs, files): (Vec<_>, Vec<_>) =
+                entries.into_iter().partition(|entry| entry.kind.is_dir());
+
+            stream::iter(files)
+                .map(|entry| async move {
+                    let child_local = local.join(&entry.name);
+                    self.download_file(&entry.path, &child_local).await
+                })
+                .buffer_unordered(DIRECTORY_FILE_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await?;
+
+            stream::iter(dirs)
+                .map(|entry| async move {
+                    let child_local = local.join(&entry.name);
+                    self.download_dir(&entry.path, &child_local).await
+                })
+                .buffer_unordered(DIRECTORY_SUBDIR_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await?;
+
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = result {
+            if created_root {
+                let _ = tokio::fs::remove_dir_all(local).await;
             }
+            return Err(error);
         }
 
         Ok(())
@@ -304,25 +335,58 @@ impl VolumeFileClient {
     }
 
     async fn upload_dir(&self, local: &Path, remote: &Path) -> Result<()> {
+        let created_root = !self
+            .exists_async(remote)
+            .await
+            .with_context(|| format!("Failed to inspect remote directory {}", remote.display()))?;
         self.create_dir_all_async(remote).await?;
 
-        let mut entries = tokio::fs::read_dir(local)
-            .await
-            .with_context(|| format!("Failed to read local directory {}", local.display()))?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .with_context(|| format!("Failed to read local directory {}", local.display()))?
-        {
-            let file_type = entry.file_type().await.with_context(|| {
-                format!("Failed to inspect local path {}", entry.path().display())
-            })?;
-            let child_remote = remote.join(entry.file_name());
-            if file_type.is_dir() {
-                Box::pin(self.upload_dir(&entry.path(), &child_remote)).await?;
-            } else if file_type.is_file() {
-                self.upload_file(&entry.path(), &child_remote).await?;
+        let result =
+            async {
+                let mut read_dir = tokio::fs::read_dir(local).await.with_context(|| {
+                    format!("Failed to read local directory {}", local.display())
+                })?;
+                let mut dirs = Vec::new();
+                let mut files = Vec::new();
+
+                while let Some(entry) = read_dir.next_entry().await.with_context(|| {
+                    format!("Failed to read local directory {}", local.display())
+                })? {
+                    let file_type = entry.file_type().await.with_context(|| {
+                        format!("Failed to inspect local path {}", entry.path().display())
+                    })?;
+                    if file_type.is_dir() {
+                        dirs.push((entry.path(), remote.join(entry.file_name())));
+                    } else if file_type.is_file() {
+                        files.push((entry.path(), remote.join(entry.file_name())));
+                    }
+                }
+
+                stream::iter(files)
+                    .map(|(local_path, remote_path)| async move {
+                        self.upload_file(&local_path, &remote_path).await
+                    })
+                    .buffer_unordered(DIRECTORY_FILE_CONCURRENCY)
+                    .try_collect::<Vec<_>>()
+                    .await?;
+
+                stream::iter(dirs)
+                    .map(|(local_path, remote_path)| async move {
+                        self.upload_dir(&local_path, &remote_path).await
+                    })
+                    .buffer_unordered(DIRECTORY_SUBDIR_CONCURRENCY)
+                    .try_collect::<Vec<_>>()
+                    .await?;
+
+                Ok(())
             }
+            .await;
+
+        if let Err(error) = result {
+            if created_root {
+                let _ = self.remove_path_async(remote).await;
+            }
+            return Err(error);
         }
 
         Ok(())
@@ -476,6 +540,17 @@ fn kind_from_file_type(file_type: russh_sftp::protocol::FileType) -> VolumeFileK
         VolumeFileKind::Symlink
     } else {
         VolumeFileKind::Other
+    }
+}
+
+fn is_missing_remote_error(error: &SftpError) -> bool {
+    match error {
+        SftpError::Status(status) if status.status_code == StatusCode::NoSuchFile => true,
+        SftpError::Status(status) if status.status_code == StatusCode::Failure => status
+            .error_message
+            .to_ascii_lowercase()
+            .contains("no such file or directory"),
+        _ => false,
     }
 }
 
