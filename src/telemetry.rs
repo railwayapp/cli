@@ -1322,6 +1322,41 @@ async fn post_telemetry_body(client: &reqwest::Client, url: String, body: Value)
     matches!(result, Ok(Ok(true)))
 }
 
+/// HTTP headers that carry the same telemetry envelope as the `cliEventTrack`
+/// GraphQL mutation, for REST endpoints (e.g. the backboard `POST .../up`
+/// upload handler) that emit their own analytics events server-side.
+/// Today those server-side events lack caller / agent_session_id / cli
+/// session_id because the request lacks any way to pass them — these
+/// headers close the gap so backboard can attribute the resulting
+/// `CLI - Create Up` / etc. event to the correct caller cohort.
+///
+/// Returns an empty Vec when telemetry is disabled so disabled clients
+/// stay opted out across both telemetry surfaces.
+///
+/// Header names mirror the propagation contract used by railway-skills
+/// (X-Railway-Skill-Id / X-Railway-Skill-Version / X-Railway-Agent-Session)
+/// to keep one envelope across surfaces.
+pub fn http_telemetry_headers() -> Vec<(&'static str, String)> {
+    if is_telemetry_disabled() {
+        return Vec::new();
+    }
+    let configs = match Configs::new() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let context = TelemetryContext::current(&configs);
+    let mut headers = Vec::with_capacity(4);
+    headers.push(("X-Railway-CLI-Version", env!("CARGO_PKG_VERSION").to_string()));
+    headers.push(("X-Railway-Session", context.session_id));
+    if !context.caller.is_empty() {
+        headers.push(("X-Railway-Caller", context.caller));
+    }
+    if let Some(asid) = context.agent_session_id {
+        headers.push(("X-Railway-Agent-Session", asid));
+    }
+    headers
+}
+
 pub async fn send(event: CliTrackEvent) {
     send_with_caller_override(event, None).await;
 }
