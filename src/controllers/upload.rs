@@ -107,12 +107,18 @@ pub async fn upload_deploy_tarball(
     }
 
     let body_len = body.len();
-    let res = client
+    let mut request = client
         .post(url.to_string())
-        .header("Content-Type", "application/gzip")
-        .body(body)
-        .send()
-        .await?;
+        .header("Content-Type", "application/gzip");
+    // Propagate the cliEventTrack telemetry envelope as HTTP headers so
+    // backboard's POST .../up handler can attribute the `CLI - Create Up`
+    // event it emits to the correct caller / agent session / CLI session.
+    // Without these the resulting `cli_create_up` event lands in the
+    // warehouse with null caller, breaking per-cohort deploy attribution.
+    for (name, value) in crate::telemetry::http_telemetry_headers() {
+        request = request.header(name, value);
+    }
+    let res = request.body(body).send().await?;
 
     let status = res.status();
     if status != 200 {
