@@ -400,7 +400,15 @@ async fn browse(
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
     if !is_terminal {
-        bail!("Volume browsing requires an interactive terminal");
+        bail!(
+            "Volume browsing requires an interactive terminal. Use `railway volume files`, `railway volume download`, or `railway volume upload` for non-interactive access."
+        );
+    }
+
+    if is_agent_environment() {
+        bail!(
+            "Volume browsing is interactive and is not available from detected agent environments. Use `railway volume files`, `railway volume download`, or `railway volume upload` instead."
+        );
     }
 
     let target = resolve_volume_file_target(
@@ -425,6 +433,44 @@ async fn browse(
     })?;
 
     Ok(())
+}
+
+fn is_agent_environment() -> bool {
+    if std::env::var("AGENT")
+        .map(|value| value.eq_ignore_ascii_case("amp"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let agent_env_vars = [
+        "AIDER",
+        "AI_AGENT",
+        "AMP_CURRENT_THREAD_ID",
+        "CLAUDECODE",
+        "CLAUDE_CODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLINE_ACTIVE",
+        "CODEX_SANDBOX",
+        "COPILOT_AGENT_SESSION_ID",
+        "COPILOT_CLI",
+        "CURSOR_AGENT",
+        "CURSOR_TRACE_ID",
+        "FACTORY_DROID",
+        "GEMINI_CLI",
+        "OPENAI_CODEX",
+        "OPENCODE",
+        "OPENCODE_SESSION_ID",
+        "PI_CODING_AGENT",
+        "REPLIT_AGENT",
+        "ROO_ACTIVE",
+        "__COG_BASHRC_SOURCED",
+    ];
+
+    agent_env_vars
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
 }
 
 struct ResolvedVolumeFileTarget {
