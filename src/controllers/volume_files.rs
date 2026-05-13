@@ -1,6 +1,5 @@
 use std::{
     env, fs,
-    fs::File,
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
 };
@@ -206,9 +205,12 @@ impl VolumeFileClient {
         command
     }
 
-    fn transfer_ssh_command(&self) -> Command {
-        let mut command = self.base_ssh_command();
-        command.arg("-T").arg(self.target());
+    fn scp_command(&self) -> Command {
+        let mut command = Command::new("scp");
+        if let Some(identity_file) = &self.identity_file {
+            command.arg("-i").arg(identity_file);
+        }
+        command.args(["-r", "-o", "BatchMode=yes"]);
         command
     }
 
@@ -221,30 +223,25 @@ impl VolumeFileClient {
             })?;
         }
 
-        let file = File::create(local)
-            .with_context(|| format!("Failed to create local file {}", local.display()))?;
+        let output = self
+            .scp_command()
+            .arg(format!("{}:{}", self.target(), remote.display()))
+            .arg(local)
+            .output()
+            .context("Failed to run scp for file download")?;
 
-        let status = self
-            .transfer_ssh_command()
-            .arg(format!("cat -- {}", shell_quote(remote)))
-            .stdout(file)
-            .status()
-            .context("Failed to run ssh for file download")?;
-
-        if status.success() {
+        if output.status.success() {
             Ok(())
         } else {
-            bail!("File download failed for {}", remote.display())
+            bail!(
+                "scp download failed for {}: {}",
+                remote.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         }
     }
 
     fn download_dir(&self, remote: &Path, local: &Path) -> Result<()> {
-        let remote_name = remote
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Remote directory has no name"))?;
-        let remote_parent = remote
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Remote directory has no parent"))?;
         let local_parent = local
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Local directory has no parent"))?;
@@ -256,53 +253,18 @@ impl VolumeFileClient {
             )
         })?;
 
-        let extracted_path = local_parent.join(remote_name);
-        if extracted_path.exists() {
-            remove_local_path(&extracted_path)?;
-        }
+        self.download_file(remote, local_parent)?;
 
-        let mut remote_tar = self.transfer_ssh_command();
-        remote_tar
-            .arg(format!(
-                "tar -C {} -cf - -- {}",
-                shell_quote(remote_parent),
-                shell_quote_path_fragment(remote_name)
-            ))
-            .stdout(Stdio::piped());
-
-        let mut remote_tar = remote_tar
-            .spawn()
-            .context("Failed to start remote tar for directory download")?;
-        let stdout = remote_tar
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to capture remote tar output"))?;
-
-        let mut local_tar = Command::new("tar")
-            .arg("-xf")
-            .arg("-")
-            .arg("-C")
-            .arg(local_parent)
-            .stdin(stdout)
-            .spawn()
-            .context("Failed to start local tar for directory download")?;
-
-        let local_status = local_tar
-            .wait()
-            .context("Failed waiting for local tar during directory download")?;
-        let remote_status = remote_tar
-            .wait()
-            .context("Failed waiting for remote tar during directory download")?;
-
-        if !remote_status.success() || !local_status.success() {
-            bail!("Directory download failed for {}", remote.display());
-        }
-
-        if extracted_path != local {
-            fs::rename(&extracted_path, local).with_context(|| {
+        let downloaded_path = local_parent.join(
+            remote
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Remote directory has no name"))?,
+        );
+        if downloaded_path != local {
+            fs::rename(&downloaded_path, local).with_context(|| {
                 format!(
                     "Failed to move downloaded directory from {} to {}",
-                    extracted_path.display(),
+                    downloaded_path.display(),
                     local.display()
                 )
             })?;
@@ -316,95 +278,32 @@ impl VolumeFileClient {
             self.create_dir_all(parent)?;
         }
 
-        let file = File::open(local)
-            .with_context(|| format!("Failed to open local file {}", local.display()))?;
+        let output = self
+            .scp_command()
+            .arg(local)
+            .arg(format!("{}:{}", self.target(), remote.display()))
+            .output()
+            .context("Failed to run scp for file upload")?;
 
-        let status = self
-            .transfer_ssh_command()
-            .arg(format!("cat > {}", shell_quote(remote)))
-            .stdin(file)
-            .status()
-            .context("Failed to run ssh for file upload")?;
-
-        if status.success() {
+        if output.status.success() {
             Ok(())
         } else {
-            bail!("File upload failed for {}", local.display())
+            bail!(
+                "scp upload failed for {}: {}",
+                local.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         }
     }
 
     fn upload_dir(&self, local: &Path, remote: &Path) -> Result<()> {
-        let local_name = local
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Local directory has no name"))?;
-        let local_parent = local
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Local directory has no parent"))?;
         let remote_parent = remote
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Remote directory has no parent"))?;
 
         self.create_dir_all(remote_parent)?;
 
-        let extracted_path = remote_parent.join(local_name);
-        if extracted_path != remote && self.exists(&extracted_path)? {
-            self.remove_path(&extracted_path)?;
-        }
-
-        let mut local_tar = Command::new("tar")
-            .arg("-C")
-            .arg(local_parent)
-            .arg("-cf")
-            .arg("-")
-            .arg(local_name)
-            .stdout(Stdio::piped())
-            .spawn()
-            .context("Failed to start local tar for directory upload")?;
-        let stdout = local_tar
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to capture local tar output"))?;
-
-        let mut remote_tar = self.transfer_ssh_command();
-        remote_tar
-            .arg(format!("tar -xf - -C {}", shell_quote(remote_parent)))
-            .stdin(stdout);
-
-        let mut remote_tar = remote_tar
-            .spawn()
-            .context("Failed to start remote tar for directory upload")?;
-
-        let local_status = local_tar
-            .wait()
-            .context("Failed waiting for local tar during directory upload")?;
-        let remote_status = remote_tar
-            .wait()
-            .context("Failed waiting for remote tar during directory upload")?;
-
-        if !local_status.success() || !remote_status.success() {
-            bail!("Directory upload failed for {}", local.display());
-        }
-
-        if extracted_path != remote {
-            let status = self
-                .ssh_command()
-                .arg(format!(
-                    "mv -- {} {}",
-                    shell_quote(&extracted_path),
-                    shell_quote(remote)
-                ))
-                .status()
-                .context("Failed to rename uploaded remote directory")?;
-            if !status.success() {
-                bail!(
-                    "Failed to move uploaded directory from {} to {}",
-                    extracted_path.display(),
-                    remote.display()
-                );
-            }
-        }
-
-        Ok(())
+        self.upload_file(local, remote)
     }
 }
 
@@ -482,20 +381,4 @@ fn control_path(service_instance_id: &str) -> PathBuf {
 fn shell_quote(path: &Path) -> String {
     let value = path.display().to_string();
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn shell_quote_path_fragment(fragment: &std::ffi::OsStr) -> String {
-    let value = fragment.to_string_lossy();
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn remove_local_path(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("Failed to inspect local path {}", path.display()))?;
-    if metadata.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-    .with_context(|| format!("Failed to remove existing local path {}", path.display()))
 }
