@@ -27,7 +27,7 @@ use std::{
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume ls pgdata --volume postgres-volume --json\n  railway volume download pgdata/postgresql.conf ./postgresql.conf --volume postgres-volume\n  railway volume upload ./postgresql.conf pgdata/postgresql.conf --volume postgres-volume --yes --json\n  railway volume browse --volume data\n\nAliases:\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n  download: dl, get\n  upload: up, put\n  ls: files\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  File command remote paths are relative to the volume mount path unless absolute. Use --yes for non-interactive overwrite and --json for structured success output."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume files pgdata --volume postgres-volume --json\n  railway volume download pgdata/postgresql.conf ./postgresql.conf --volume postgres-volume\n  railway volume upload ./postgresql.conf pgdata/postgresql.conf --volume postgres-volume --yes --json\n  railway volume browse --volume data\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n  download: dl, get\n  upload: up, put\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  File command remote paths are relative to the volume mount path unless absolute. Use --yes for non-interactive overwrite and --json for structured success output."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -49,7 +49,7 @@ structstruck::strike! {
     #[strikethrough[derive(Parser)]]
     enum Commands {
         /// List volumes
-        #[clap(visible_alias = "volumes")]
+        #[clap(visible_alias = "ls")]
         List(struct {
             /// Output in JSON format
             #[clap(long)]
@@ -154,8 +154,7 @@ structstruck::strike! {
         }),
 
         /// List files in a volume path
-        #[clap(name = "ls", visible_alias = "files")]
-        Ls(struct {
+        Files(struct {
             /// Remote path to list, relative to the volume mount path unless absolute
             path: PathBuf,
 
@@ -338,7 +337,7 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?
         }
-        Commands::Ls(l) => {
+        Commands::Files(l) => {
             file_ls(
                 environment,
                 &environment_instances,
