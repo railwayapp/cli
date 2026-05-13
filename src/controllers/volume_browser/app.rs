@@ -172,8 +172,8 @@ impl VolumeBrowserApp {
                 }
                 BrowserAction::Continue
             }
-            KeyCode::Enter | KeyCode::Right => BrowserAction::OpenSelected,
-            KeyCode::Left | KeyCode::Backspace => BrowserAction::Parent,
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => BrowserAction::OpenSelected,
+            KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => BrowserAction::Parent,
             KeyCode::Char('r') => BrowserAction::Refresh,
             KeyCode::Char('d') => BrowserAction::DownloadSelected,
             KeyCode::Char('e') => BrowserAction::EditSelected,
@@ -202,12 +202,12 @@ impl VolumeBrowserApp {
                 }
                 BrowserAction::Continue
             }
-            KeyCode::Right => BrowserAction::OpenLocalSelected,
+            KeyCode::Right | KeyCode::Char('l') => BrowserAction::OpenLocalSelected,
             KeyCode::Enter => {
                 self.mode = BrowserMode::Browse;
                 BrowserAction::SubmitSelectedUpload
             }
-            KeyCode::Left | KeyCode::Backspace => BrowserAction::LocalParent,
+            KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => BrowserAction::LocalParent,
             KeyCode::Char('r') => BrowserAction::RefreshLocal,
             _ => BrowserAction::Continue,
         }
