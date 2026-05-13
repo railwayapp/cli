@@ -206,6 +206,12 @@ impl VolumeFileClient {
         command
     }
 
+    fn transfer_ssh_command(&self) -> Command {
+        let mut command = self.base_ssh_command();
+        command.arg("-T").arg(self.target());
+        command
+    }
+
     fn download_file(&self, remote: &Path, local: &Path) -> Result<()> {
         if let Some(parent) = local.parent()
             && !parent.as_os_str().is_empty()
@@ -219,7 +225,7 @@ impl VolumeFileClient {
             .with_context(|| format!("Failed to create local file {}", local.display()))?;
 
         let status = self
-            .ssh_command()
+            .transfer_ssh_command()
             .arg(format!("cat -- {}", shell_quote(remote)))
             .stdout(file)
             .status()
@@ -255,7 +261,7 @@ impl VolumeFileClient {
             remove_local_path(&extracted_path)?;
         }
 
-        let mut remote_tar = self.ssh_command();
+        let mut remote_tar = self.transfer_ssh_command();
         remote_tar
             .arg(format!(
                 "tar -C {} -cf - -- {}",
@@ -314,7 +320,7 @@ impl VolumeFileClient {
             .with_context(|| format!("Failed to open local file {}", local.display()))?;
 
         let status = self
-            .ssh_command()
+            .transfer_ssh_command()
             .arg(format!("cat > {}", shell_quote(remote)))
             .stdin(file)
             .status()
@@ -359,7 +365,7 @@ impl VolumeFileClient {
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture local tar output"))?;
 
-        let mut remote_tar = self.ssh_command();
+        let mut remote_tar = self.transfer_ssh_command();
         remote_tar
             .arg(format!("tar -xf - -C {}", shell_quote(remote_parent)))
             .stdin(stdout);
