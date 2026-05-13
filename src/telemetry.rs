@@ -1135,6 +1135,10 @@ fn is_agent_caller(caller: &str) -> bool {
     true
 }
 
+pub(crate) fn is_agent_invocation() -> bool {
+    is_agent_caller(&detect_caller())
+}
+
 fn error_class(message: Option<&str>) -> String {
     let Some(message) = message else {
         return "UNKNOWN".to_string();
