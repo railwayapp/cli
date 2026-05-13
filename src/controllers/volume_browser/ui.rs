@@ -214,9 +214,9 @@ fn render_footer(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 fn help_line(mode: BrowserMode) -> Line<'static> {
     let items: &[(&str, &str)] = match mode {
         BrowserMode::Browse => &[
-            ("j/k", "move"),
-            ("l/Enter", "open"),
-            ("h/Left", "parent"),
+            ("Up/Down", "move"),
+            ("Enter", "open"),
+            ("Left", "parent"),
             ("d", "download"),
             ("e", "edit"),
             ("u", "upload"),
@@ -225,9 +225,9 @@ fn help_line(mode: BrowserMode) -> Line<'static> {
             ("q", "quit"),
         ],
         BrowserMode::UploadPicker => &[
-            ("j/k", "move"),
-            ("l/Right", "open dir"),
-            ("h/Left", "parent"),
+            ("Up/Down", "move"),
+            ("Right", "open dir"),
+            ("Left", "parent"),
             ("Enter", "upload"),
             ("r", "refresh"),
             ("Esc", "cancel"),
@@ -277,8 +277,8 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from("Browse Railway volume files over SSH/SCP."),
         Line::from(""),
         Line::from("Up/Down or k/j    Move selection"),
-        Line::from("Enter, Right, l   Open directory"),
-        Line::from("Left, Backspace, h Parent directory"),
+        Line::from("Enter or Right    Open directory"),
+        Line::from("Left or Backspace Parent directory"),
         Line::from("d                 Download selected file or directory"),
         Line::from("e                 Edit selected file and sync it back"),
         Line::from("u                 Open local upload picker"),
