@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub(super) struct VolumeSftp {
     service_instance_id: String,
+    mount_path: String,
     session: Option<russh::client::Handle<VolumeSftpHandler>>,
     sftp: Option<russh_sftp::client::SftpSession>,
     disconnected: Arc<AtomicBool>,
@@ -59,9 +60,10 @@ impl russh::client::Handler for VolumeSftpHandler {
 }
 
 impl VolumeSftp {
-    pub(super) fn new(service_instance_id: String) -> Self {
+    pub(super) fn new(service_instance_id: String, mount_path: String) -> Self {
         Self {
             service_instance_id,
+            mount_path,
             session: None,
             sftp: None,
             disconnected: Arc::new(AtomicBool::new(false)),
@@ -80,7 +82,7 @@ impl VolumeSftp {
             .await
             .with_context(|| format!("Failed to connect to Railway SFTP at {ADDR}"))?;
 
-            super::ssh_agent::authenticate(&mut session, &self.service_instance_id).await?;
+            super::ssh_key::authenticate(&mut session, &self.service_instance_id).await?;
 
             let channel = session
                 .channel_open_session()
@@ -138,9 +140,10 @@ impl VolumeSftp {
         local_path: &Path,
         overwrite: bool,
     ) -> Result<()> {
+        let remote_path = self.mount_prefixed_path(remote_path);
         let sftp = self.connect().await?;
         let mut remote_file = sftp
-            .open(remote_path)
+            .open(&remote_path)
             .await
             .with_context(|| format!("Failed to open remote file {remote_path}"))?;
 
@@ -169,5 +172,28 @@ impl VolumeSftp {
             })?;
 
         Ok(())
+    }
+
+    // crazy that Rust has no std library that handles UnixPaths exclusively
+    fn mount_prefixed_path(&self, path: &str) -> String {
+        let mount_path = self.mount_path.trim_end_matches('/');
+        if mount_path.is_empty() || mount_path == "/" {
+            return format!("/{}", path.trim_start_matches('/'));
+        }
+
+        if path == mount_path
+            || path
+                .strip_prefix(mount_path)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            return path.to_string();
+        }
+
+        let path = path.trim_start_matches('/');
+        if path.is_empty() {
+            mount_path.to_string()
+        } else {
+            format!("{mount_path}/{path}")
+        }
     }
 }

@@ -20,7 +20,7 @@ use is_terminal::IsTerminal;
 use std::{fmt::Display, path::PathBuf};
 
 mod sftp;
-mod ssh_agent;
+mod ssh_key;
 use sftp::VolumeSftp;
 
 /// Manage project volumes
@@ -128,12 +128,12 @@ structstruck::strike! {
             volume: Option<String>,
 
             /// The path on the remote server to download from
-            #[clap(long, short)]
+            #[clap(value_name = "REMOTE_PATH")]
             remote_path: String,
 
             /// The path to save the downloaded volume
-            #[clap(long, short)]
-            path: Option<String>,
+            #[clap(value_name = "LOCAL_PATH", default_value = ".")]
+            local_path: Option<String>,
 
             /// Output in JSON format
             #[clap(long)]
@@ -207,7 +207,7 @@ pub async fn command(args: Args) -> Result<()> {
                 d.volume,
                 project,
                 d.remote_path,
-                d.path,
+                d.local_path,
                 d.json,
             )
             .await?
@@ -285,7 +285,7 @@ async fn download(
     volume: Option<String>,
     project: ProjectProject,
     remote_path: String,
-    path: Option<String>,
+    local_path: Option<String>,
     _json: bool,
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
@@ -296,6 +296,7 @@ async fn download(
         volume,
         is_terminal,
     )?;
+
     let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
         anyhow!(
             "Volume {} is not attached to any service",
@@ -309,8 +310,8 @@ async fn download(
                 volume.0.volume.name
             )
         })?;
-    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone());
-    let local_path = download_path(path, &remote_path)?;
+    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
+    let local_path = download_path(local_path, &remote_path)?;
     volume_sftp
         .download(&remote_path, &local_path, false)
         .await?;
