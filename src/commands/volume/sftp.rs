@@ -17,6 +17,13 @@ pub(super) struct VolumeSftp {
     disconnected: Arc<AtomicBool>,
 }
 
+pub(super) struct VolumeFileEntry {
+    pub(super) name: String,
+    pub(super) path: String,
+    pub(super) kind: &'static str,
+    pub(super) size: u64,
+}
+
 #[derive(Debug, Error)]
 pub(super) enum VolumeSftpError {
     #[error(
@@ -181,6 +188,17 @@ impl VolumeSftp {
         }
     }
 
+    pub(super) async fn list_files(&mut self, remote_path: &str) -> Result<Vec<VolumeFileEntry>> {
+        match self.list_files_once(remote_path).await {
+            Ok(entries) => Ok(entries),
+            Err(_err) if self.is_disconnected() => self
+                .list_files_once(remote_path)
+                .await
+                .with_context(|| format!("Failed to list {remote_path} after reconnect")),
+            Err(err) => Err(err),
+        }
+    }
+
     pub(super) fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
         if local_path.is_dir() {
             let filename = remote_path
@@ -314,6 +332,45 @@ impl VolumeSftp {
             .with_context(|| format!("Failed to rename remote file {old_path} to {new_path}"))?;
 
         Ok(())
+    }
+
+    async fn list_files_once(&mut self, remote_path: &str) -> Result<Vec<VolumeFileEntry>> {
+        let mounted_remote_path = self.mount_prefixed_path(remote_path);
+        let sftp = self.connect().await?;
+        let entries = sftp
+            .read_dir(&mounted_remote_path)
+            .await
+            .with_context(|| format!("Failed to list remote directory {mounted_remote_path}"))?
+            .map(|entry| {
+                let metadata = entry.metadata();
+                let name = entry.file_name();
+                VolumeFileEntry {
+                    path: Self::join_remote_path(remote_path, &name),
+                    name,
+                    kind: if metadata.is_dir() {
+                        "directory"
+                    } else if metadata.is_regular() {
+                        "file"
+                    } else if metadata.is_symlink() {
+                        "symlink"
+                    } else {
+                        "other"
+                    },
+                    size: metadata.len(),
+                }
+            })
+            .collect();
+
+        Ok(entries)
+    }
+
+    fn join_remote_path(parent: &str, name: &str) -> String {
+        let parent = parent.trim_end_matches('/');
+        if parent.is_empty() || parent == "/" {
+            format!("/{name}")
+        } else {
+            format!("{parent}/{name}")
+        }
     }
 
     // crazy that Rust has no std library that handles UnixPaths exclusively
