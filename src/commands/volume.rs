@@ -133,7 +133,7 @@ structstruck::strike! {
 
             /// The path to save the downloaded volume
             #[clap(value_name = "LOCAL_PATH", default_value = ".")]
-            local_path: Option<String>,
+            local_path: PathBuf,
 
             /// Output in JSON format
             #[clap(long)]
@@ -285,7 +285,7 @@ async fn download(
     volume: Option<String>,
     project: ProjectProject,
     remote_path: String,
-    local_path: Option<String>,
+    local_path: PathBuf,
     _json: bool,
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
@@ -311,34 +311,11 @@ async fn download(
             )
         })?;
     let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    let local_path = download_path(local_path, &remote_path)?;
     volume_sftp
         .download(&remote_path, &local_path, false)
         .await?;
 
     Ok(())
-}
-
-fn download_path(path: Option<String>, remote_path: &str) -> Result<PathBuf> {
-    let Some(path) = path else {
-        let filename = remote_path
-            .rsplit('/')
-            .find(|segment| !segment.is_empty())
-            .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
-
-        return Ok(PathBuf::from(filename));
-    };
-
-    let path = PathBuf::from(path);
-    if path.is_dir() {
-        let filename = remote_path
-            .rsplit('/')
-            .find(|segment| !segment.is_empty())
-            .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
-        Ok(path.join(filename))
-    } else {
-        Ok(path)
-    }
 }
 
 async fn attach(

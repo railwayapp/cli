@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use thiserror::Error;
 
 pub(super) struct VolumeSftp {
@@ -116,13 +116,30 @@ impl VolumeSftp {
         local_path: &Path,
         overwrite: bool,
     ) -> Result<()> {
-        match self.download_once(remote_path, local_path, overwrite).await {
+        let local_path = Self::download_destination(remote_path, local_path)?;
+
+        match self
+            .download_once(remote_path, &local_path, overwrite)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(_err) if self.is_disconnected() => self
-                .download_once(remote_path, local_path, overwrite)
+                .download_once(remote_path, &local_path, overwrite)
                 .await
                 .with_context(|| format!("Failed to download {remote_path} after reconnect")),
             Err(err) => Err(err),
+        }
+    }
+
+    fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
+        if local_path.is_dir() {
+            let filename = remote_path
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
+            Ok(local_path.join(filename))
+        } else {
+            Ok(local_path.to_path_buf())
         }
     }
 
