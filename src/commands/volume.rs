@@ -20,6 +20,7 @@ use is_terminal::IsTerminal;
 use std::{fmt::Display, path::PathBuf};
 
 mod sftp;
+mod ssh_agent;
 use sftp::VolumeSftp;
 
 /// Manage project volumes

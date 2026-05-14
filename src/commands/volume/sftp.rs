@@ -9,8 +9,6 @@ use std::{
 use anyhow::{Context, Result};
 use thiserror::Error;
 
-use crate::controllers::ssh_keys::find_local_ssh_keys;
-
 pub(super) struct VolumeSftp {
     service_instance_id: String,
     session: Option<russh::client::Handle<VolumeSftpHandler>>,
@@ -74,13 +72,15 @@ impl VolumeSftp {
         if self.session.is_none() || self.is_disconnected() {
             self.disconnected.store(false, Ordering::SeqCst);
 
-            let session = russh::client::connect(
+            let mut session = russh::client::connect(
                 Arc::new(russh::client::Config::default()),
                 (ADDR, 22),
                 VolumeSftpHandler::new(Arc::clone(&self.disconnected)),
             )
             .await
             .with_context(|| format!("Failed to connect to Railway SFTP at {ADDR}"))?;
+
+            super::ssh_agent::authenticate(&mut session, &self.service_instance_id).await?;
 
             let channel = session
                 .channel_open_session()
