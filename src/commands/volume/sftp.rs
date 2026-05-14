@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -7,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use colored::Colorize;
 use thiserror::Error;
 
 pub(super) struct VolumeSftp {
@@ -22,6 +24,80 @@ pub(super) struct VolumeFileEntry {
     pub(super) path: String,
     pub(super) kind: &'static str,
     pub(super) size: u64,
+}
+
+pub(super) struct VolumeFileTree {
+    entries: Vec<VolumeFileEntry>,
+}
+
+impl VolumeFileTree {
+    fn new(mut entries: Vec<VolumeFileEntry>) -> Self {
+        entries.sort_by_key(|entry| entry.name.to_lowercase());
+        Self { entries }
+    }
+
+    pub(super) fn entries(&self) -> &[VolumeFileEntry] {
+        &self.entries
+    }
+}
+
+impl fmt::Display for VolumeFileTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const COLUMN_GAP: usize = 2;
+        const MAX_WIDTH: usize = 80;
+
+        let name_width = self
+            .entries
+            .iter()
+            .map(|entry| display_name(entry).len())
+            .max()
+            .unwrap_or(0);
+        let column_width = name_width + COLUMN_GAP;
+        let columns = if column_width == 0 {
+            1
+        } else {
+            (MAX_WIDTH / column_width).max(1)
+        };
+
+        for row in self.entries.chunks(columns) {
+            for (index, entry) in row.iter().enumerate() {
+                let name = display_name(entry);
+                let styled_name = styled_display_name(entry);
+
+                if index + 1 == row.len() {
+                    write!(f, "{styled_name}")?;
+                } else {
+                    write!(
+                        f,
+                        "{styled_name:<width$}",
+                        width = column_width + styled_name.len() - name.len()
+                    )?;
+                }
+            }
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn display_name(entry: &VolumeFileEntry) -> String {
+    if entry.kind == "directory" {
+        format!("{}/", entry.name)
+    } else {
+        entry.name.clone()
+    }
+}
+
+fn styled_display_name(entry: &VolumeFileEntry) -> String {
+    let name = display_name(entry);
+    if entry.kind == "directory" {
+        name.blue().bold().to_string()
+    } else if entry.kind == "symlink" {
+        name.cyan().to_string()
+    } else {
+        name
+    }
 }
 
 #[derive(Debug, Error)]
@@ -188,13 +264,14 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) async fn list_files(&mut self, remote_path: &str) -> Result<Vec<VolumeFileEntry>> {
+    pub(super) async fn list_files(&mut self, remote_path: &str) -> Result<VolumeFileTree> {
         match self.list_files_once(remote_path).await {
-            Ok(entries) => Ok(entries),
+            Ok(entries) => Ok(VolumeFileTree::new(entries)),
             Err(_err) if self.is_disconnected() => self
                 .list_files_once(remote_path)
                 .await
-                .with_context(|| format!("Failed to list {remote_path} after reconnect")),
+                .with_context(|| format!("Failed to list {remote_path} after reconnect"))
+                .map(VolumeFileTree::new),
             Err(err) => Err(err),
         }
     }
