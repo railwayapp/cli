@@ -23,6 +23,10 @@ pub(super) enum VolumeSftpError {
         "Local path {0} already exists. Use --overwrite (or --override) to replace it, or choose a different LOCAL_PATH."
     )]
     LocalPathExists(PathBuf),
+    #[error(
+        "Remote path {0} already exists. Use --overwrite to replace it, or choose a different REMOTE_PATH."
+    )]
+    RemotePathExists(String),
 }
 
 struct VolumeSftpHandler {
@@ -134,6 +138,49 @@ impl VolumeSftp {
         }
     }
 
+    pub(super) async fn upload(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        overwrite: bool,
+    ) -> Result<String> {
+        let remote_path = Self::upload_destination(local_path, remote_path)?;
+
+        match self.upload_once(local_path, &remote_path, overwrite).await {
+            Ok(()) => Ok(remote_path),
+            Err(_err) if self.is_disconnected() => self
+                .upload_once(local_path, &remote_path, overwrite)
+                .await
+                .with_context(|| {
+                    format!("Failed to upload {} after reconnect", local_path.display())
+                })
+                .map(|()| remote_path),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(super) async fn delete_file(&mut self, remote_path: &str) -> Result<()> {
+        match self.delete_file_once(remote_path).await {
+            Ok(()) => Ok(()),
+            Err(_err) if self.is_disconnected() => self
+                .delete_file_once(remote_path)
+                .await
+                .with_context(|| format!("Failed to delete {remote_path} after reconnect")),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(super) async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        match self.rename_once(old_path, new_path).await {
+            Ok(()) => Ok(()),
+            Err(_err) if self.is_disconnected() => self
+                .rename_once(old_path, new_path)
+                .await
+                .with_context(|| format!("Failed to rename {old_path} after reconnect")),
+            Err(err) => Err(err),
+        }
+    }
+
     pub(super) fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
         if local_path.is_dir() {
             let filename = remote_path
@@ -143,6 +190,23 @@ impl VolumeSftp {
             Ok(local_path.join(filename))
         } else {
             Ok(local_path.to_path_buf())
+        }
+    }
+
+    pub(super) fn upload_destination(local_path: &Path, remote_path: &str) -> Result<String> {
+        if remote_path.ends_with('/') {
+            let filename = local_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Could not infer a remote filename from local path {}",
+                        local_path.display()
+                    )
+                })?;
+            Ok(format!("{remote_path}{filename}"))
+        } else {
+            Ok(remote_path.to_string())
         }
     }
 
@@ -190,6 +254,64 @@ impl VolumeSftp {
                     local_path.display()
                 )
             })?;
+
+        Ok(())
+    }
+
+    async fn upload_once(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        overwrite: bool,
+    ) -> Result<()> {
+        let remote_path = self.mount_prefixed_path(remote_path);
+        let sftp = self.connect().await?;
+        let remote_path_exists = sftp
+            .try_exists(&remote_path)
+            .await
+            .with_context(|| format!("Failed to check if remote file {remote_path} exists"))?;
+
+        if remote_path_exists && !overwrite {
+            return Err(VolumeSftpError::RemotePathExists(remote_path).into());
+        }
+
+        let mut local_file = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("Failed to open local file {}", local_path.display()))?;
+        let mut remote_file = sftp
+            .create(&remote_path)
+            .await
+            .with_context(|| format!("Failed to create remote file {remote_path}"))?;
+
+        tokio::io::copy(&mut local_file, &mut remote_file)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to copy local file {} to remote file {remote_path}",
+                    local_path.display()
+                )
+            })?;
+
+        Ok(())
+    }
+
+    async fn delete_file_once(&mut self, remote_path: &str) -> Result<()> {
+        let remote_path = self.mount_prefixed_path(remote_path);
+        let sftp = self.connect().await?;
+        sftp.remove_file(&remote_path)
+            .await
+            .with_context(|| format!("Failed to delete remote file {remote_path}"))?;
+
+        Ok(())
+    }
+
+    async fn rename_once(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        let old_path = self.mount_prefixed_path(old_path);
+        let new_path = self.mount_prefixed_path(new_path);
+        let sftp = self.connect().await?;
+        sftp.rename(&old_path, &new_path)
+            .await
+            .with_context(|| format!("Failed to rename remote file {old_path} to {new_path}"))?;
 
         Ok(())
     }

@@ -26,7 +26,7 @@ use sftp::VolumeSftp;
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Use --json for machine-readable download details."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n  railway volume upload --volume data ./backup.tar /backup.tar --json\n  railway volume delete-file --volume data /backup.tar --yes --json\n  railway volume rename-file --volume data /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -145,6 +145,67 @@ structstruck::strike! {
             overwrite: bool,
         })
 
+        /// Upload a file to a volume
+        Upload(struct {
+            /// The ID/name of the volume you wish to upload to
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The local file to upload
+            #[clap(value_name = "LOCAL_PATH")]
+            local_path: PathBuf,
+
+            /// The path on the remote server to upload to
+            #[clap(value_name = "REMOTE_PATH")]
+            remote_path: String,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
+
+            /// Replace REMOTE_PATH if it already exists
+            #[clap(long)]
+            overwrite: bool,
+        })
+
+        /// Delete a file from a volume
+        DeleteFile(struct {
+            /// The ID/name of the volume you wish to delete from
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The path on the remote server to delete
+            #[clap(value_name = "REMOTE_PATH")]
+            remote_path: String,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
+
+            /// Skip confirmation dialog
+            #[clap(short = 'y', long = "yes")]
+            yes: bool,
+        })
+
+        /// Rename a file in a volume
+        RenameFile(struct {
+            /// The ID/name of the volume you wish to rename within
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The current path on the remote server
+            #[clap(value_name = "OLD_REMOTE_PATH")]
+            old_remote_path: String,
+
+            /// The new path on the remote server
+            #[clap(value_name = "NEW_REMOTE_PATH")]
+            new_remote_path: String,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
+        })
+
         /// Attach a volume to a service
         Attach(struct {
             /// The ID/name of the volume you wish to attach
@@ -204,9 +265,6 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::Download(d) => {
             download(
-                &client,
-                &configs,
-                &project_id,
                 &environment,
                 &environment_instances,
                 d.volume,
@@ -215,6 +273,43 @@ pub async fn command(args: Args) -> Result<()> {
                 d.local_path,
                 d.json,
                 d.overwrite,
+            )
+            .await?
+        }
+        Commands::Upload(u) => {
+            upload(
+                &environment,
+                &environment_instances,
+                u.volume,
+                project,
+                u.local_path,
+                u.remote_path,
+                u.json,
+                u.overwrite,
+            )
+            .await?
+        }
+        Commands::DeleteFile(d) => {
+            delete_file(
+                &environment,
+                &environment_instances,
+                d.volume,
+                project,
+                d.remote_path,
+                d.yes,
+                d.json,
+            )
+            .await?
+        }
+        Commands::RenameFile(r) => {
+            rename_file(
+                &environment,
+                &environment_instances,
+                r.volume,
+                project,
+                r.old_remote_path,
+                r.new_remote_path,
+                r.json,
             )
             .await?
         }
@@ -283,9 +378,6 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 async fn download(
-    _client: &reqwest::Client,
-    _configs: &Configs,
-    _project_id: &str,
     environment: &str,
     environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
@@ -342,6 +434,203 @@ async fn download(
             "Downloaded {} to {}",
             remote_path.cyan(),
             downloaded_path.display().to_string().green()
+        );
+    }
+
+    Ok(())
+}
+
+async fn upload(
+    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    local_path: PathBuf,
+    remote_path: String,
+    json: bool,
+    overwrite: bool,
+) -> Result<()> {
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment,
+        volume,
+        is_terminal,
+    )?;
+
+    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service",
+            volume.0.volume.name
+        )
+    })?;
+    let service_instance =
+        find_service_instance(environment_instances, service_id).ok_or_else(|| {
+            anyhow!(
+                "No service instance found for volume {}",
+                volume.0.volume.name
+            )
+        })?;
+    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
+    let uploaded_path = volume_sftp
+        .upload(&local_path, &remote_path, overwrite)
+        .await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "volume": {
+                    "id": volume.0.volume.id,
+                    "name": volume.0.volume.name,
+                    "mountPath": volume.0.mount_path,
+                },
+                "serviceInstanceId": service_instance.id,
+                "localPath": local_path,
+                "remotePath": uploaded_path,
+                "overwritten": overwrite,
+            }))?
+        );
+    } else {
+        println!(
+            "Uploaded {} to {}",
+            local_path.display().to_string().cyan(),
+            uploaded_path.green()
+        );
+    }
+
+    Ok(())
+}
+
+async fn delete_file(
+    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    remote_path: String,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment,
+        volume,
+        is_terminal,
+    )?;
+
+    let confirm = if yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
+            format!(r#"Are you sure you want to delete "{}"?"#, remote_path).as_str(),
+            false,
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
+
+    if !confirm {
+        return Ok(());
+    }
+
+    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service",
+            volume.0.volume.name
+        )
+    })?;
+    let service_instance =
+        find_service_instance(environment_instances, service_id).ok_or_else(|| {
+            anyhow!(
+                "No service instance found for volume {}",
+                volume.0.volume.name
+            )
+        })?;
+    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
+    volume_sftp.delete_file(&remote_path).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "volume": {
+                    "id": volume.0.volume.id,
+                    "name": volume.0.volume.name,
+                    "mountPath": volume.0.mount_path,
+                },
+                "serviceInstanceId": service_instance.id,
+                "remotePath": remote_path,
+                "deleted": true,
+            }))?
+        );
+    } else {
+        println!("Deleted {}", remote_path.cyan());
+    }
+
+    Ok(())
+}
+
+async fn rename_file(
+    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    old_remote_path: String,
+    new_remote_path: String,
+    json: bool,
+) -> Result<()> {
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment,
+        volume,
+        is_terminal,
+    )?;
+
+    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service",
+            volume.0.volume.name
+        )
+    })?;
+    let service_instance =
+        find_service_instance(environment_instances, service_id).ok_or_else(|| {
+            anyhow!(
+                "No service instance found for volume {}",
+                volume.0.volume.name
+            )
+        })?;
+    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
+    volume_sftp
+        .rename(&old_remote_path, &new_remote_path)
+        .await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "volume": {
+                    "id": volume.0.volume.id,
+                    "name": volume.0.volume.name,
+                    "mountPath": volume.0.mount_path,
+                },
+                "serviceInstanceId": service_instance.id,
+                "oldRemotePath": old_remote_path,
+                "newRemotePath": new_remote_path,
+                "renamed": true,
+            }))?
+        );
+    } else {
+        println!(
+            "Renamed {} to {}",
+            old_remote_path.cyan(),
+            new_remote_path.green()
         );
     }
 
