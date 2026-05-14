@@ -26,7 +26,7 @@ use sftp::VolumeSftp;
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Use --json for machine-readable download details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -122,6 +122,7 @@ structstruck::strike! {
             json: bool,
         })
 
+        /// Download a file from a volume
         Download(struct {
             /// The ID/name of the volume you wish to download
             #[clap(long, short)]
@@ -138,6 +139,10 @@ structstruck::strike! {
             /// Output in JSON format
             #[clap(long)]
             json: bool,
+
+            /// Replace LOCAL_PATH if it already exists
+            #[clap(long, visible_alias = "override")]
+            overwrite: bool,
         })
 
         /// Attach a volume to a service
@@ -209,6 +214,7 @@ pub async fn command(args: Args) -> Result<()> {
                 d.remote_path,
                 d.local_path,
                 d.json,
+                d.overwrite,
             )
             .await?
         }
@@ -286,7 +292,8 @@ async fn download(
     project: ProjectProject,
     remote_path: String,
     local_path: PathBuf,
-    _json: bool,
+    json: bool,
+    overwrite: bool,
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
     let volume = select_volume(
@@ -311,9 +318,32 @@ async fn download(
             )
         })?;
     let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    volume_sftp
-        .download(&remote_path, &local_path, false)
+    let downloaded_path = volume_sftp
+        .download(&remote_path, &local_path, overwrite)
         .await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "volume": {
+                    "id": volume.0.volume.id,
+                    "name": volume.0.volume.name,
+                    "mountPath": volume.0.mount_path,
+                },
+                "serviceInstanceId": service_instance.id,
+                "remotePath": remote_path,
+                "localPath": downloaded_path,
+                "overwritten": overwrite,
+            }))?
+        );
+    } else {
+        println!(
+            "Downloaded {} to {}",
+            remote_path.cyan(),
+            downloaded_path.display().to_string().green()
+        );
+    }
 
     Ok(())
 }

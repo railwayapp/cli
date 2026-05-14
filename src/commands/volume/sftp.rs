@@ -19,7 +19,9 @@ pub(super) struct VolumeSftp {
 
 #[derive(Debug, Error)]
 pub(super) enum VolumeSftpError {
-    #[error("Local path {0} already exists")]
+    #[error(
+        "Local path {0} already exists. Use --overwrite (or --override) to replace it, or choose a different LOCAL_PATH."
+    )]
     LocalPathExists(PathBuf),
 }
 
@@ -115,23 +117,24 @@ impl VolumeSftp {
         remote_path: &str,
         local_path: &Path,
         overwrite: bool,
-    ) -> Result<()> {
+    ) -> Result<PathBuf> {
         let local_path = Self::download_destination(remote_path, local_path)?;
 
         match self
             .download_once(remote_path, &local_path, overwrite)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(local_path),
             Err(_err) if self.is_disconnected() => self
                 .download_once(remote_path, &local_path, overwrite)
                 .await
-                .with_context(|| format!("Failed to download {remote_path} after reconnect")),
+                .with_context(|| format!("Failed to download {remote_path} after reconnect"))
+                .map(|()| local_path),
             Err(err) => Err(err),
         }
     }
 
-    fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
+    pub(super) fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
         if local_path.is_dir() {
             let filename = remote_path
                 .rsplit('/')

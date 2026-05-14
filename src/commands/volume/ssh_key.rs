@@ -1,4 +1,5 @@
 use std::{
+    io::IsTerminal,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -6,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg};
 
-use crate::controllers::ssh_keys::find_local_ssh_keys;
+use crate::{controllers::ssh_keys::find_local_ssh_keys, telemetry};
 
 pub(super) async fn authenticate<H>(
     session: &mut russh::client::Handle<H>,
@@ -27,7 +28,7 @@ where
     let mut attempted_auth = false;
 
     for path in key_paths {
-        let key = match russh::keys::load_secret_key(&path, None) {
+        let key = match load_secret_key(&path)? {
             Ok(key) => key,
             Err(err) => {
                 load_errors.push(format!("{}: {err}", path.display()));
@@ -57,9 +58,32 @@ where
     }
 
     bail!(
-        "No loadable SSH private keys were found in ~/.ssh. Encrypted keys are not supported for volume SFTP yet.\n\nSkipped keys:\n{}",
+        "No loadable SSH private keys were found in ~/.ssh.\n\nFor agents/non-interactive runs, use an unencrypted SSH key registered with Railway via `railway ssh keys add`, or run this command from an interactive terminal where a passphrase can be entered.\n\nSkipped keys:\n{}",
         load_errors.join("\n")
     );
+}
+
+fn load_secret_key(path: &Path) -> Result<Result<russh::keys::PrivateKey, anyhow::Error>> {
+    match russh::keys::load_secret_key(path, None) {
+        Ok(key) => Ok(Ok(key)),
+        Err(err) if telemetry::is_agent() || !std::io::stdin().is_terminal() => {
+            Ok(Err(anyhow::anyhow!(
+                "{err}. If this key is encrypted, agents cannot enter SSH key passphrases. Add an unencrypted key with `railway ssh keys add --key {}` or run from an interactive terminal.",
+                path.display()
+            )))
+        }
+        Err(_err) => {
+            let passphrase =
+                inquire::Password::new(&format!("Enter passphrase for SSH key {}", path.display()))
+                    .without_confirmation()
+                    .with_render_config(crate::commands::Configs::get_render_config())
+                    .prompt()
+                    .context("Failed to prompt for SSH key passphrase")?;
+
+            Ok(russh::keys::load_secret_key(path, Some(&passphrase))
+                .with_context(|| format!("Failed to load SSH key {}", path.display())))
+        }
+    }
 }
 
 fn discover_private_key_paths() -> Result<Vec<PathBuf>> {
