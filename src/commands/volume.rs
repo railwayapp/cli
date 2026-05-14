@@ -3,8 +3,8 @@ use crate::{
     controllers::environment::get_matched_environment,
     controllers::project::{
         ProjectEnvironmentInstances, ProjectVolumeInstanceNode,
-        ensure_project_and_environment_exist, get_environment_instances, get_project,
-        volume_instances_in_env,
+        ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
+        get_project, volume_instances_in_env,
     },
     errors::RailwayError,
     queries::project::ProjectProject,
@@ -17,7 +17,10 @@ use crate::{
 use anyhow::{anyhow, bail};
 use clap::Parser;
 use is_terminal::IsTerminal;
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
+
+mod sftp;
+use sftp::VolumeSftp;
 
 /// Manage project volumes
 #[derive(Parser)]
@@ -118,6 +121,24 @@ structstruck::strike! {
             json: bool,
         })
 
+        Download(struct {
+            /// The ID/name of the volume you wish to download
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The path on the remote server to download from
+            #[clap(long, short)]
+            remote_path: String,
+
+            /// The path to save the downloaded volume
+            #[clap(long, short)]
+            path: Option<String>,
+
+            /// Output in JSON format
+            #[clap(long)]
+            json: bool,
+        })
+
         /// Attach a volume to a service
         Attach(struct {
             /// The ID/name of the volume you wish to attach
@@ -175,6 +196,21 @@ pub async fn command(args: Args) -> Result<()> {
         get_environment_instances(&client, &configs, &project_id, &environment).await?;
 
     match args.command {
+        Commands::Download(d) => {
+            download(
+                &client,
+                &configs,
+                &project_id,
+                &environment,
+                &environment_instances,
+                d.volume,
+                project,
+                d.remote_path,
+                d.path,
+                d.json,
+            )
+            .await?
+        }
         Commands::Add(a) => {
             add(
                 service,
@@ -237,6 +273,70 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn download(
+    _client: &reqwest::Client,
+    _configs: &Configs,
+    _project_id: &str,
+    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    remote_path: String,
+    path: Option<String>,
+    _json: bool,
+) -> Result<()> {
+    let is_terminal = std::io::stdout().is_terminal();
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment,
+        volume,
+        is_terminal,
+    )?;
+    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service",
+            volume.0.volume.name
+        )
+    })?;
+    let service_instance =
+        find_service_instance(environment_instances, service_id).ok_or_else(|| {
+            anyhow!(
+                "No service instance found for volume {}",
+                volume.0.volume.name
+            )
+        })?;
+    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone());
+    let local_path = download_path(path, &remote_path)?;
+    volume_sftp
+        .download(&remote_path, &local_path, false)
+        .await?;
+
+    Ok(())
+}
+
+fn download_path(path: Option<String>, remote_path: &str) -> Result<PathBuf> {
+    let Some(path) = path else {
+        let filename = remote_path
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
+
+        return Ok(PathBuf::from(filename));
+    };
+
+    let path = PathBuf::from(path);
+    if path.is_dir() {
+        let filename = remote_path
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
+        Ok(path.join(filename))
+    } else {
+        Ok(path)
+    }
 }
 
 async fn attach(
