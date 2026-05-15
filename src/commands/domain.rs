@@ -10,6 +10,8 @@ use crate::{consts::TICK_STRING, controllers::project::resolve_service_context};
 
 use super::*;
 
+const RAILWAY_VERIFY_PREFIX: &str = "railway-verify=";
+
 /// Add a custom domain or generate a railway provided domain for a service.
 ///
 /// There is a maximum of 1 railway provided domain per service.
@@ -296,7 +298,7 @@ fn print_dns(
             (Some(host), Some(token)) => {
                 // Strip the zone suffix from the verification DNS host (e.g., "_railway-verify.example.com" -> "_railway-verify")
                 let host_label = host.strip_suffix(&format!(".{}", zone)).unwrap_or(host);
-                Some((host_label.to_string(), format!("railway-verify={}", token)))
+                Some((host_label.to_string(), verification_txt_value(token)))
             }
             _ => None,
         }
@@ -370,6 +372,32 @@ fn print_dns(
             width_type = padding_type,
             width_host = padding_hostlabel,
             width_value = padding_value
+        );
+    }
+}
+
+pub(crate) fn verification_txt_value(token: &str) -> String {
+    if token.starts_with(RAILWAY_VERIFY_PREFIX) {
+        token.to_string()
+    } else {
+        format!("{RAILWAY_VERIFY_PREFIX}{token}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verification_txt_value;
+
+    #[test]
+    fn verification_txt_value_adds_prefix_to_raw_token() {
+        assert_eq!(verification_txt_value("abc123"), "railway-verify=abc123");
+    }
+
+    #[test]
+    fn verification_txt_value_preserves_prefixed_token() {
+        assert_eq!(
+            verification_txt_value("railway-verify=abc123"),
+            "railway-verify=abc123"
         );
     }
 }

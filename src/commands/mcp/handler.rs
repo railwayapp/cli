@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use super::params::*;
 
+use crate::commands::domain::verification_txt_value;
+
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -656,8 +658,9 @@ impl RailwayMcp {
                         .map(|r| r.zone.as_str())
                         .unwrap_or("");
                     let host_label = host.strip_suffix(&format!(".{zone}")).unwrap_or(host);
+                    let value = verification_txt_value(token);
                     output.push_str(&format!(
-                        "\nVerification TXT record (required):\n  TXT {host_label} -> railway-verify={token}\n"
+                        "\nVerification TXT record (required):\n  TXT {host_label} -> {value}\n"
                     ));
                 }
             }
