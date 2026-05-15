@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,10 +15,46 @@ use crate::gql::queries::{GitHubSshKeys, SshPublicKeys, git_hub_ssh_keys, ssh_pu
 /// Local SSH key info
 #[derive(Debug, Clone)]
 pub struct LocalSshKey {
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     pub public_key: String,
     pub fingerprint: String,
     pub key_type: String,
+}
+
+impl LocalSshKey {
+    pub fn display_name(&self) -> String {
+        self.path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| ssh_key_comment(&self.public_key).map(ToString::to_string))
+            .unwrap_or_else(|| "ssh-agent".to_string())
+    }
+
+    pub fn display_source(&self) -> String {
+        self.path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "ssh-agent".to_string())
+    }
+
+    pub fn default_name(&self) -> String {
+        self.path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|name| name.to_str())
+            .map(ToString::to_string)
+            .or_else(|| ssh_key_comment(&self.public_key).map(sanitize_key_name))
+            .unwrap_or_else(|| "ssh-agent-key".to_string())
+    }
+
+    pub fn source_label(&self) -> &'static str {
+        if self.path.is_some() {
+            "local (~/.ssh/)"
+        } else {
+            "ssh-agent"
+        }
+    }
 }
 
 /// Supported SSH key types (in order of preference)
@@ -30,19 +67,17 @@ const SUPPORTED_KEY_TYPES: &[&str] = &[
     "ssh-dss",
 ];
 
-/// Find local SSH keys by scanning ~/.ssh/ for .pub files
+/// Find SSH keys available to local ssh, from ~/.ssh/*.pub and ssh-agent.
 pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let ssh_dir = home.join(".ssh");
 
-    if !ssh_dir.exists() {
-        return Ok(vec![]);
-    }
-
     let mut keys = Vec::new();
 
     // Scan for all .pub files in ~/.ssh/
-    if let Ok(entries) = std::fs::read_dir(&ssh_dir) {
+    if ssh_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&ssh_dir)
+    {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "pub") {
@@ -59,6 +94,16 @@ pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
         }
     }
 
+    let mut seen = keys
+        .iter()
+        .map(|key| key.fingerprint.clone())
+        .collect::<HashSet<_>>();
+    for key in find_agent_ssh_keys() {
+        if seen.insert(key.fingerprint.clone()) {
+            keys.push(key);
+        }
+    }
+
     // Sort by key type preference (ed25519 first, then ecdsa, then rsa, then dss)
     keys.sort_by_key(|k| {
         SUPPORTED_KEY_TYPES
@@ -68,6 +113,50 @@ pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
     });
 
     Ok(keys)
+}
+
+fn find_agent_ssh_keys() -> Vec<LocalSshKey> {
+    if std::env::var_os("SSH_AUTH_SOCK").is_none() {
+        return Vec::new();
+    }
+
+    let Ok(output) = Command::new("ssh-add").arg("-L").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    agent_keys_from_output(&stdout, compute_fingerprint_from_pubkey)
+}
+
+fn agent_keys_from_output<F>(output: &str, mut fingerprint: F) -> Vec<LocalSshKey>
+where
+    F: FnMut(&str) -> Result<String>,
+{
+    output
+        .lines()
+        .filter_map(|line| {
+            let public_key = line.trim();
+            let key_type = supported_key_type(public_key)?;
+            let fingerprint = fingerprint(public_key).ok()?;
+            Some(LocalSshKey {
+                path: None,
+                public_key: public_key.to_string(),
+                fingerprint,
+                key_type,
+            })
+        })
+        .collect()
+}
+
+fn supported_key_type(public_key: &str) -> Option<String> {
+    let key_type = public_key.split_whitespace().next()?;
+    SUPPORTED_KEY_TYPES
+        .iter()
+        .any(|supported| key_type.starts_with(supported))
+        .then(|| key_type.to_string())
 }
 
 /// Read and parse an SSH public key file
@@ -86,7 +175,7 @@ fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
     let fingerprint = compute_fingerprint(path)?;
 
     Ok(LocalSshKey {
-        path: path.to_path_buf(),
+        path: Some(path.to_path_buf()),
         public_key,
         fingerprint,
         key_type,
@@ -226,4 +315,65 @@ pub async fn get_github_ssh_keys(
     let response = post_graphql::<GitHubSshKeys, _>(client, configs.get_backboard(), vars).await?;
 
     Ok(response.git_hub_ssh_keys)
+}
+
+fn ssh_key_comment(public_key: &str) -> Option<&str> {
+    public_key.split_whitespace().nth(2)
+}
+
+fn sanitize_key_name(value: &str) -> String {
+    let name = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    if name.is_empty() {
+        "ssh-agent-key".to_string()
+    } else {
+        name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ED25519_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA laptop";
+
+    #[test]
+    fn agent_keys_parse_supported_public_keys() {
+        let output = format!("{ED25519_KEY}\nssh-unsupported AAAAC3Nza unsupported\n\nnot-a-key\n");
+
+        let keys = agent_keys_from_output(&output, |key| Ok(format!("fp-{}", key.len())));
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].path, None);
+        assert_eq!(keys[0].key_type, "ssh-ed25519");
+        assert_eq!(keys[0].public_key, ED25519_KEY);
+        assert!(keys[0].fingerprint.starts_with("fp-"));
+    }
+
+    #[test]
+    fn agent_key_display_name_prefers_comment() {
+        let key = LocalSshKey {
+            path: None,
+            public_key: ED25519_KEY.to_string(),
+            fingerprint: "SHA256:test".to_string(),
+            key_type: "ssh-ed25519".to_string(),
+        };
+
+        assert_eq!(key.display_name(), "laptop");
+        assert_eq!(key.default_name(), "laptop");
+        assert_eq!(key.display_source(), "ssh-agent");
+        assert_eq!(key.source_label(), "ssh-agent");
+    }
 }

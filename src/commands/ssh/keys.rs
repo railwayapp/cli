@@ -19,16 +19,7 @@ struct LocalKeyOption(LocalSshKey);
 
 impl fmt::Display for LocalKeyOption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ({})",
-            self.0
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy(),
-            self.0.fingerprint
-        )
+        write!(f, "{} ({})", self.0.display_name(), self.0.fingerprint)
     }
 }
 
@@ -187,7 +178,12 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
                 println!("    Hostname:    {}", hostname);
             }
             if local_match.is_some() {
-                println!("    Source:      local (~/.ssh/)");
+                println!(
+                    "    Source:      {}",
+                    local_match
+                        .map(|key| key.source_label())
+                        .unwrap_or_default()
+                );
             }
             println!();
         }
@@ -255,22 +251,19 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     }
 
     if !unregistered.is_empty() {
-        println!("Local Keys (not registered):");
+        println!("Available Keys (not registered):");
         for key in unregistered {
             // Extract hostname from public key
             let parts: Vec<&str> = key.public_key.split_whitespace().collect();
             let hostname = parts.get(2).unwrap_or(&"");
 
-            println!(
-                "  {}",
-                key.path.file_name().unwrap_or_default().to_string_lossy()
-            );
+            println!("  {}", key.display_name());
             println!("    Fingerprint: {}", key.fingerprint);
             println!("    Type:        {}", key.key_type);
             if !hostname.is_empty() {
                 println!("    Hostname:    {}", hostname);
             }
-            println!("    Path:        {}", key.path.display());
+            println!("    Source:      {}", key.display_source());
             println!();
         }
         println!("Add with:\n    railway ssh keys add");
@@ -290,8 +283,9 @@ async fn add_key(
     let local_keys = find_local_ssh_keys()?;
     if local_keys.is_empty() {
         bail!(
-            "No SSH keys found in ~/.ssh/\n\n\
+            "No SSH keys found in ~/.ssh or ssh-agent\n\n\
             Generate one with:\n  ssh-keygen -t ed25519\n\n\
+            If you use ssh-agent, make sure `SSH_AUTH_SOCK` is set and `ssh-add -L` lists your public key.\n\n\
             Then run this command again."
         );
     }
@@ -318,7 +312,11 @@ async fn add_key(
         // Find by path
         local_keys
             .iter()
-            .find(|k| k.path.to_string_lossy().contains(&path))
+            .find(|k| {
+                k.path
+                    .as_ref()
+                    .is_some_and(|key_path| key_path.to_string_lossy().contains(&path))
+            })
             .ok_or_else(|| anyhow::anyhow!("Key not found: {}", path))?
             .clone()
     } else if unregistered.len() == 1 {
@@ -336,18 +334,11 @@ async fn add_key(
     };
 
     // Determine name
-    let key_name = name.unwrap_or_else(|| {
-        key_to_add
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ssh-key")
-            .to_string()
-    });
+    let key_name = name.unwrap_or_else(|| key_to_add.default_name());
 
     println!(
         "Registering key: {} ({})",
-        key_to_add.path.display(),
+        key_to_add.display_source(),
         key_to_add.fingerprint
     );
 

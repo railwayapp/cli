@@ -21,11 +21,10 @@ const SSH_HOST: &str = "ssh.railway.com";
 /// so we can surface actionable guidance instead of a cryptic failure.
 pub fn preflight_db_stats_ssh() -> Result<(), String> {
     match find_local_ssh_keys() {
-        Ok(keys) if keys.is_empty() => Err(
-            "no local SSH key found in ~/.ssh\n  \
-             generate one with `ssh-keygen -t ed25519`, then register it with `railway ssh keys add`"
-                .to_string(),
-        ),
+        Ok(keys) if keys.is_empty() => Err("no SSH key found in ~/.ssh or ssh-agent\n  \
+             generate one with `ssh-keygen -t ed25519`, or make sure `ssh-add -L` lists an \
+             agent key, then register it with `railway ssh keys add`"
+            .to_string()),
         Ok(_) => Ok(()),
         Err(e) => Err(format!(
             "unable to read ~/.ssh: {e}\n  \

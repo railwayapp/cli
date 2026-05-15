@@ -44,8 +44,9 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     if local_keys.is_empty() {
         bail!(
-            "No SSH keys found in ~/.ssh/\n\n\
+            "No SSH keys found in ~/.ssh or ssh-agent\n\n\
             Generate one with:\n  ssh-keygen -t ed25519\n\n\
+            If you use ssh-agent, make sure `SSH_AUTH_SOCK` is set and `ssh-add -L` lists your public key.\n\n\
             Then run this command again."
         );
     }
@@ -61,7 +62,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     });
 
     if let Some(key) = registered_local {
-        eprintln!("Using SSH key: {}", key.path.display());
+        eprintln!("Using SSH key: {}", key.display_source());
         return Ok(());
     }
 
@@ -83,7 +84,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         struct KeyOption<'a>(&'a crate::controllers::ssh_keys::LocalSshKey);
         impl fmt::Display for KeyOption<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{} ({})", self.0.path.display(), self.0.fingerprint)
+                write!(f, "{} ({})", self.0.display_source(), self.0.fingerprint)
             }
         }
         let options: Vec<KeyOption> = local_keys.iter().map(KeyOption).collect();
@@ -93,7 +94,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     println!(
         "Key: {} ({})",
-        key_to_register.path.display(),
+        key_to_register.display_source(),
         key_to_register.fingerprint
     );
     println!();
@@ -107,12 +108,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         );
     }
 
-    let key_name = key_to_register
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("ssh-key")
-        .to_string();
+    let key_name = key_to_register.default_name();
 
     register_ssh_key(
         client,
