@@ -6,6 +6,7 @@ use crate::{
         ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
         get_project, volume_instances_in_env,
     },
+    controllers::volume_browser::{self, VolumeBrowserParams},
     errors::RailwayError,
     queries::project::ProjectProject,
     util::{
@@ -19,14 +20,14 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 use std::{fmt::Display, path::PathBuf};
 
-mod sftp;
+pub(crate) mod sftp;
 mod ssh_key;
 use sftp::VolumeSftp;
 
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume list-files --volume data / --json\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n  railway volume upload --volume data ./backup.tar /backup.tar --json\n  railway volume delete-file --volume data /backup.tar --yes --json\n  railway volume rename-file --volume data /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume list-files --volume data / --json\n  railway volume browse --volume data /\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n  railway volume upload --volume data ./backup.tar /backup.tar --json\n  railway volume delete-file --volume data /backup.tar --yes --json\n  railway volume rename-file --volume data /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -183,6 +184,17 @@ structstruck::strike! {
             json: bool,
         })
 
+        /// Browse files in a volume interactively
+        Browse(struct {
+            /// The ID/name of the volume you wish to browse
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The directory path on the remote server to open
+            #[clap(value_name = "REMOTE_PATH", default_value = "/")]
+            remote_path: String,
+        })
+
         /// Delete a file from a volume
         DeleteFile(struct {
             /// The ID/name of the volume you wish to delete from
@@ -312,6 +324,16 @@ pub async fn command(args: Args) -> Result<()> {
                 project,
                 l.remote_path,
                 l.json,
+            )
+            .await?
+        }
+        Commands::Browse(b) => {
+            browse(
+                &environment,
+                &environment_instances,
+                b.volume,
+                project,
+                b.remote_path,
             )
             .await?
         }
@@ -593,6 +615,49 @@ async fn list_files(
     }
 
     Ok(())
+}
+
+async fn browse(
+    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+    remote_path: String,
+) -> Result<()> {
+    let is_terminal = std::io::stdout().is_terminal();
+    if !is_terminal {
+        bail!("The browse command requires an interactive terminal");
+    }
+
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment,
+        volume,
+        is_terminal,
+    )?;
+
+    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service",
+            volume.0.volume.name
+        )
+    })?;
+    let service_instance =
+        find_service_instance(environment_instances, service_id).ok_or_else(|| {
+            anyhow!(
+                "No service instance found for volume {}",
+                volume.0.volume.name
+            )
+        })?;
+
+    volume_browser::run(VolumeBrowserParams {
+        service_instance_id: service_instance.id.clone(),
+        volume_name: volume.0.volume.name.clone(),
+        mount_path: volume.0.mount_path.clone(),
+        remote_path,
+    })
+    .await
 }
 
 async fn delete_file(

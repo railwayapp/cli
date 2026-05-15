@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use thiserror::Error;
 
-pub(super) struct VolumeSftp {
+pub(crate) struct VolumeSftp {
     service_instance_id: String,
     mount_path: String,
     session: Option<russh::client::Handle<VolumeSftpHandler>>,
@@ -19,14 +19,15 @@ pub(super) struct VolumeSftp {
     disconnected: Arc<AtomicBool>,
 }
 
-pub(super) struct VolumeFileEntry {
-    pub(super) name: String,
-    pub(super) path: String,
-    pub(super) kind: &'static str,
-    pub(super) size: u64,
+#[derive(Debug, Clone)]
+pub(crate) struct VolumeFileEntry {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) kind: &'static str,
+    pub(crate) size: u64,
 }
 
-pub(super) struct VolumeFileTree {
+pub(crate) struct VolumeFileTree {
     entries: Vec<VolumeFileEntry>,
 }
 
@@ -36,7 +37,7 @@ impl VolumeFileTree {
         Self { entries }
     }
 
-    pub(super) fn entries(&self) -> &[VolumeFileEntry] {
+    pub(crate) fn entries(&self) -> &[VolumeFileEntry] {
         &self.entries
     }
 }
@@ -101,7 +102,7 @@ fn styled_display_name(entry: &VolumeFileEntry) -> String {
 }
 
 #[derive(Debug, Error)]
-pub(super) enum VolumeSftpError {
+pub(crate) enum VolumeSftpError {
     #[error(
         "Local path {0} already exists. Use --overwrite (or --override) to replace it, or choose a different LOCAL_PATH."
     )]
@@ -149,7 +150,7 @@ impl russh::client::Handler for VolumeSftpHandler {
 }
 
 impl VolumeSftp {
-    pub(super) fn new(service_instance_id: String, mount_path: String) -> Self {
+    pub(crate) fn new(service_instance_id: String, mount_path: String) -> Self {
         Self {
             service_instance_id,
             mount_path,
@@ -159,7 +160,7 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) async fn connect(&mut self) -> Result<&russh_sftp::client::SftpSession> {
+    pub(crate) async fn connect(&mut self) -> Result<&russh_sftp::client::SftpSession> {
         if self.session.is_none() || self.is_disconnected() {
             self.disconnected.store(false, Ordering::SeqCst);
 
@@ -199,7 +200,7 @@ impl VolumeSftp {
         })
     }
 
-    pub(super) async fn download(
+    pub(crate) async fn download(
         &mut self,
         remote_path: &str,
         local_path: &Path,
@@ -221,7 +222,7 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) async fn upload(
+    pub(crate) async fn upload(
         &mut self,
         local_path: &Path,
         remote_path: &str,
@@ -242,7 +243,7 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) async fn delete_file(&mut self, remote_path: &str) -> Result<()> {
+    pub(crate) async fn delete_file(&mut self, remote_path: &str) -> Result<()> {
         match self.delete_file_once(remote_path).await {
             Ok(()) => Ok(()),
             Err(_err) if self.is_disconnected() => self
@@ -253,7 +254,7 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+    pub(crate) async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
         match self.rename_once(old_path, new_path).await {
             Ok(()) => Ok(()),
             Err(_err) if self.is_disconnected() => self
@@ -264,7 +265,7 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) async fn list_files(&mut self, remote_path: &str) -> Result<VolumeFileTree> {
+    pub(crate) async fn list_files(&mut self, remote_path: &str) -> Result<VolumeFileTree> {
         match self.list_files_once(remote_path).await {
             Ok(entries) => Ok(VolumeFileTree::new(entries)),
             Err(_err) if self.is_disconnected() => self
@@ -276,7 +277,7 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
+    pub(crate) fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
         if local_path.is_dir() {
             let filename = remote_path
                 .rsplit('/')
@@ -288,7 +289,7 @@ impl VolumeSftp {
         }
     }
 
-    pub(super) fn upload_destination(local_path: &Path, remote_path: &str) -> Result<String> {
+    pub(crate) fn upload_destination(local_path: &Path, remote_path: &str) -> Result<String> {
         if remote_path.ends_with('/') {
             let filename = local_path
                 .file_name()
