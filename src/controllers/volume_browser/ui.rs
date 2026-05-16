@@ -90,7 +90,6 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         vec![Row::new(vec![
             Cell::from(Span::styled("No files", Style::default().fg(LABEL_COLOR))),
             Cell::from(""),
-            Cell::from(""),
         ])]
     } else {
         app.remote_entries
@@ -99,7 +98,6 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
                 let row = Row::new(vec![
                     Cell::from(remote_name(entry, app.is_busy())),
                     Cell::from(remote_meta(entry.kind, app.is_busy())),
-                    Cell::from(remote_meta(format_size(entry.size), app.is_busy())),
                 ]);
 
                 if app.is_busy() {
@@ -117,35 +115,26 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     }
 
     let title = " Remote files ";
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(64),
-            Constraint::Length(12),
-            Constraint::Length(12),
-        ],
-    )
-    .header(
-        Row::new(vec!["Name", "Type", "Size"]).style(if app.is_busy() {
+    let table = Table::new(rows, [Constraint::Min(20), Constraint::Length(12)])
+        .header(Row::new(vec!["Name", "Type"]).style(if app.is_busy() {
             disabled_tree_style()
         } else {
             Style::default()
                 .fg(LABEL_COLOR)
                 .add_modifier(Modifier::BOLD)
-        }),
-    )
-    .block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(BORDER_COLOR)),
-    )
-    .style(if app.is_busy() {
-        disabled_tree_style()
-    } else {
-        Style::default()
-    })
-    .row_highlight_style(SELECTED_STYLE);
+        }))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR)),
+        )
+        .style(if app.is_busy() {
+            disabled_tree_style()
+        } else {
+            Style::default()
+        })
+        .row_highlight_style(SELECTED_STYLE);
 
     frame.render_stateful_widget(table, area, &mut state);
 }
@@ -309,7 +298,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("Use arrow keys to move through remote files."),
         Line::from("Enter opens the selected remote folder."),
         Line::from("U opens a local cwd sidebar for file upload."),
-        Line::from("D downloads the selected file into the local cwd."),
+        Line::from("D downloads the selected file or folder into the local cwd."),
         Line::from("E opens the selected file in your editor and uploads it back."),
         Line::from("R refreshes the remote file list."),
         Line::from("Vim movement keys are also supported."),
@@ -372,23 +361,6 @@ fn local_row_style(entry: &LocalEntry) -> Style {
         Style::default().fg(Color::Blue)
     } else {
         Style::default()
-    }
-}
-
-fn format_size(size: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-
-    let size = size as f64;
-    if size >= GB {
-        format!("{:.1} GB", size / GB)
-    } else if size >= MB {
-        format!("{:.1} MB", size / MB)
-    } else if size >= KB {
-        format!("{:.1} KB", size / KB)
-    } else {
-        format!("{} B", size as u64)
     }
 }
 

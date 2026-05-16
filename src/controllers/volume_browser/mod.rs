@@ -119,10 +119,10 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                 );
                                 app.mark_refreshing();
                             }
-                            BrowserAction::Download { local_path, remote_path, overwrite } => {
+                            BrowserAction::Download { local_path, remote_path, is_dir, overwrite } => {
                                 app.mark_busy(BusyState::Downloading, "Downloading...");
                                 terminal.draw(|frame| ui::render(&app, frame))?;
-                                handle_download(&mut app, &params, local_path, remote_path, overwrite).await;
+                                handle_download(&mut app, &params, local_path, remote_path, is_dir, overwrite).await;
                             }
                             BrowserAction::Upload { local_path, remote_path, overwrite } => {
                                 app.mark_busy(BusyState::Uploading, "Uploading...");
@@ -232,6 +232,7 @@ async fn handle_download(
     params: &VolumeBrowserParams,
     local_path: PathBuf,
     remote_path: String,
+    is_dir: bool,
     overwrite: bool,
 ) {
     let mut sftp = VolumeSftp::new(
@@ -239,7 +240,15 @@ async fn handle_download(
         params.mount_path.clone(),
     );
 
-    match sftp.download(&remote_path, &local_path, overwrite).await {
+    let download_result = if is_dir {
+        sftp.download_dir(&remote_path, &local_path, overwrite)
+            .await
+    } else {
+        sftp.download_file(&remote_path, &local_path, overwrite)
+            .await
+    };
+
+    match download_result {
         Ok(downloaded_path) => app.set_status(format!(
             "Downloaded {remote_path} to {}",
             downloaded_path.display()
@@ -253,7 +262,8 @@ async fn handle_download(
                     ConfirmAction::Download,
                     local_path,
                     remote_path,
-                    "A local file already exists at the download destination.".to_string(),
+                    is_dir,
+                    "A local path already exists at the download destination.".to_string(),
                 );
             } else {
                 app.set_error(err.to_string());
@@ -291,6 +301,7 @@ async fn handle_upload(
                     ConfirmAction::Upload,
                     local_path,
                     remote_path,
+                    false,
                     "A remote file already exists at the upload destination.".to_string(),
                 );
             } else {

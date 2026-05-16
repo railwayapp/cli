@@ -38,6 +38,7 @@ pub struct ConfirmRequest {
     pub message: String,
     pub local_path: PathBuf,
     pub remote_path: String,
+    pub is_dir: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,7 @@ pub enum BrowserAction {
     Download {
         local_path: PathBuf,
         remote_path: String,
+        is_dir: bool,
         overwrite: bool,
     },
     Upload {
@@ -171,10 +173,11 @@ impl VolumeBrowserApp {
         action: ConfirmAction,
         local_path: PathBuf,
         remote_path: String,
+        is_dir: bool,
         message: String,
     ) {
         let title = match action {
-            ConfirmAction::Download => "Overwrite local file?",
+            ConfirmAction::Download => "Overwrite local path?",
             ConfirmAction::Upload => "Overwrite remote file?",
         };
         self.confirm = Some(ConfirmRequest {
@@ -183,6 +186,7 @@ impl VolumeBrowserApp {
             message,
             local_path,
             remote_path,
+            is_dir,
         });
         self.mode = BrowserMode::Confirm;
     }
@@ -308,6 +312,7 @@ impl VolumeBrowserApp {
                     ConfirmAction::Download => BrowserAction::Download {
                         local_path: confirm.local_path,
                         remote_path: confirm.remote_path,
+                        is_dir: confirm.is_dir,
                         overwrite: true,
                     },
                     ConfirmAction::Upload => BrowserAction::Upload {
@@ -340,14 +345,11 @@ impl VolumeBrowserApp {
         let Some(entry) = self.selected_remote() else {
             return BrowserAction::Continue;
         };
-        if entry.kind == "directory" {
-            self.set_error("Directory download is not supported yet.");
-            return BrowserAction::Continue;
-        }
 
         BrowserAction::Download {
             local_path: self.local_cwd.clone(),
             remote_path: entry.path.clone(),
+            is_dir: entry.kind == "directory",
             overwrite,
         }
     }
@@ -535,6 +537,7 @@ mod tests {
             ConfirmAction::Upload,
             PathBuf::from("dump.sql"),
             "/dump.sql".to_string(),
+            false,
             "exists".to_string(),
         );
 

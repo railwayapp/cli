@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use russh_sftp::client::fs::Metadata;
 use thiserror::Error;
 
@@ -113,6 +114,7 @@ impl VolumeSftpHandler {
 }
 
 const ADDR: &str = "ssh.railway.com";
+const CONCURRENT_DOWNLOADS: usize = 32;
 
 impl russh::client::Handler for VolumeSftpHandler {
     type Error = anyhow::Error;
@@ -195,6 +197,19 @@ impl VolumeSftp {
         local_path: &Path,
         overwrite: bool,
     ) -> Result<PathBuf> {
+        if self.stat(remote_path).await?.is_dir() {
+            return self.download_dir(remote_path, local_path, overwrite).await;
+        }
+
+        self.download_file(remote_path, local_path, overwrite).await
+    }
+
+    pub(crate) async fn download_file(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        overwrite: bool,
+    ) -> Result<PathBuf> {
         let local_path = Self::download_destination(remote_path, local_path)?;
 
         match self
@@ -211,12 +226,44 @@ impl VolumeSftp {
         }
     }
 
+    pub(crate) async fn download_dir(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        overwrite: bool,
+    ) -> Result<PathBuf> {
+        let local_path = Self::download_destination(remote_path, local_path)?;
+
+        match self
+            .download_dir_once(remote_path, &local_path, overwrite)
+            .await
+        {
+            Ok(()) => Ok(local_path),
+            Err(_err) if self.is_disconnected() => self
+                .download_dir_once(remote_path, &local_path, overwrite)
+                .await
+                .with_context(|| {
+                    format!("Failed to download directory {remote_path} after reconnect")
+                })
+                .map(|()| local_path),
+            Err(err) => Err(err),
+        }
+    }
+
     pub(crate) async fn upload(
         &mut self,
         local_path: &Path,
         remote_path: &str,
         overwrite: bool,
     ) -> Result<String> {
+        let local_metadata = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("Failed to stat local path {}", local_path.display()))?;
+
+        if local_metadata.is_dir() {
+            return self.upload_dir(local_path, remote_path, overwrite).await;
+        }
+
         let remote_path = Self::upload_destination(local_path, remote_path)?;
 
         match self.upload_once(local_path, &remote_path, overwrite).await {
@@ -226,6 +273,33 @@ impl VolumeSftp {
                 .await
                 .with_context(|| {
                     format!("Failed to upload {} after reconnect", local_path.display())
+                })
+                .map(|()| remote_path),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(crate) async fn upload_dir(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        overwrite: bool,
+    ) -> Result<String> {
+        let remote_path = Self::upload_destination(local_path, remote_path)?;
+
+        match self
+            .upload_dir_once(local_path, &remote_path, overwrite)
+            .await
+        {
+            Ok(()) => Ok(remote_path),
+            Err(_err) if self.is_disconnected() => self
+                .upload_dir_once(local_path, &remote_path, overwrite)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to upload directory {} after reconnect",
+                        local_path.display()
+                    )
                 })
                 .map(|()| remote_path),
             Err(err) => Err(err),
@@ -293,8 +367,17 @@ impl VolumeSftp {
     ) -> Result<()> {
         let remote_path = self.mount_prefixed_path(remote_path);
         let sftp = self.connect().await?;
+        Self::download_file_with_sftp(sftp, &remote_path, local_path, overwrite).await
+    }
+
+    async fn download_file_with_sftp(
+        sftp: &russh_sftp::client::SftpSession,
+        remote_path: &str,
+        local_path: &Path,
+        overwrite: bool,
+    ) -> Result<()> {
         let mut remote_file = sftp
-            .open(&remote_path)
+            .open(remote_path)
             .await
             .with_context(|| format!("Failed to open remote file {remote_path}"))?;
 
@@ -358,6 +441,145 @@ impl VolumeSftp {
                     local_path.display()
                 )
             })?;
+
+        Ok(())
+    }
+
+    async fn download_dir_once(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        overwrite: bool,
+    ) -> Result<()> {
+        let local_path_exists = tokio::fs::try_exists(local_path).await.with_context(|| {
+            format!(
+                "Failed to check if local path {} exists",
+                local_path.display()
+            )
+        })?;
+
+        if local_path_exists && !local_path.is_dir() {
+            if !overwrite {
+                return Err(VolumeSftpError::LocalPathExists(local_path.to_path_buf()).into());
+            }
+            tokio::fs::remove_file(local_path)
+                .await
+                .with_context(|| format!("Failed to remove local file {}", local_path.display()))?;
+        }
+
+        tokio::fs::create_dir_all(local_path)
+            .await
+            .with_context(|| {
+                format!("Failed to create local directory {}", local_path.display())
+            })?;
+
+        let mut pending = vec![(remote_path.to_string(), local_path.to_path_buf())];
+
+        while let Some((remote_dir, local_dir)) = pending.pop() {
+            let mut files = Vec::new();
+
+            for entry in self.list_files_once(&remote_dir).await? {
+                let local_entry_path = local_dir.join(&entry.name);
+
+                if entry.kind == "directory" {
+                    tokio::fs::create_dir_all(&local_entry_path)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Failed to create local directory {}",
+                                local_entry_path.display()
+                            )
+                        })?;
+                    pending.push((entry.path, local_entry_path));
+                } else {
+                    files.push((self.mount_prefixed_path(&entry.path), local_entry_path));
+                }
+            }
+
+            if !files.is_empty() {
+                let sftp = self.connect().await?;
+                stream::iter(files)
+                    .map(|(remote_file, local_file)| async move {
+                        Self::download_file_with_sftp(sftp, &remote_file, &local_file, overwrite)
+                            .await
+                    })
+                    .buffer_unordered(CONCURRENT_DOWNLOADS)
+                    .try_collect::<Vec<_>>()
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn upload_dir_once(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        overwrite: bool,
+    ) -> Result<()> {
+        self.create_remote_dir(remote_path, overwrite).await?;
+
+        let mut pending = vec![(local_path.to_path_buf(), remote_path.to_string())];
+
+        while let Some((local_dir, remote_dir)) = pending.pop() {
+            let mut entries = tokio::fs::read_dir(&local_dir).await.with_context(|| {
+                format!("Failed to read local directory {}", local_dir.display())
+            })?;
+
+            while let Some(entry) = entries.next_entry().await.with_context(|| {
+                format!(
+                    "Failed to read local directory entry in {}",
+                    local_dir.display()
+                )
+            })? {
+                let local_entry_path = entry.path();
+                let name = entry.file_name().into_string().map_err(|name| {
+                    anyhow!(
+                        "Could not infer a remote filename from local path {}",
+                        PathBuf::from(name).display()
+                    )
+                })?;
+                let remote_entry_path = Self::join_remote_path(&remote_dir, &name);
+                let file_type = entry.file_type().await.with_context(|| {
+                    format!(
+                        "Failed to read local file type for {}",
+                        local_entry_path.display()
+                    )
+                })?;
+
+                if file_type.is_dir() {
+                    self.create_remote_dir(&remote_entry_path, overwrite)
+                        .await?;
+                    pending.push((local_entry_path, remote_entry_path));
+                } else {
+                    self.upload_once(&local_entry_path, &remote_entry_path, overwrite)
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn create_remote_dir(&mut self, remote_path: &str, overwrite: bool) -> Result<()> {
+        let remote_path = self.mount_prefixed_path(remote_path);
+        let sftp = self.connect().await?;
+        let remote_path_exists = sftp
+            .try_exists(&remote_path)
+            .await
+            .with_context(|| format!("Failed to check if remote directory {remote_path} exists"))?;
+
+        if remote_path_exists {
+            if overwrite {
+                return Ok(());
+            }
+            return Err(VolumeSftpError::RemotePathExists(remote_path).into());
+        }
+
+        sftp.create_dir(&remote_path)
+            .await
+            .with_context(|| format!("Failed to create remote directory {remote_path}"))?;
 
         Ok(())
     }
