@@ -6,7 +6,9 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::commands::volume::sftp::{VolumeFileEntry, VolumeTransferProgress};
+use crate::commands::volume::sftp::{
+    LocalOverwritePolicy, VolumeFileEntry, VolumeTransferProgress,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
@@ -37,11 +39,13 @@ pub struct ConfirmRequest {
     pub title: String,
     pub message: String,
     pub local_path: PathBuf,
+    pub overwrite_path: Option<PathBuf>,
     pub remote_path: String,
     pub is_dir: bool,
+    pub progress_base: Option<TransferProgressState>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferProgressState {
     pub current_path: String,
     pub completed: usize,
@@ -68,7 +72,8 @@ pub enum BrowserAction {
         local_path: PathBuf,
         remote_path: String,
         is_dir: bool,
-        overwrite: bool,
+        overwrite_policy: LocalOverwritePolicy,
+        progress_base: Option<TransferProgressState>,
     },
     Upload {
         local_path: PathBuf,
@@ -134,7 +139,7 @@ impl VolumeBrowserApp {
             .remote_selected
             .min(self.remote_entries.len().saturating_sub(1));
         self.busy = BusyState::Idle;
-        self.status = Some(format!("Loaded {}", self.remote_dir));
+        self.status = None;
         self.error = None;
         self.transfer_progress = None;
     }
@@ -155,6 +160,10 @@ impl VolumeBrowserApp {
 
     pub fn mark_refreshing(&mut self) {
         self.mark_busy(BusyState::Refreshing, "Refreshing...");
+    }
+
+    pub fn mark_loading(&mut self) {
+        self.mark_busy(BusyState::Refreshing, "Loading...");
     }
 
     pub fn mark_busy(&mut self, busy: BusyState, message: impl Into<String>) {
@@ -199,11 +208,13 @@ impl VolumeBrowserApp {
         &mut self,
         action: ConfirmAction,
         local_path: PathBuf,
+        overwrite_path: Option<PathBuf>,
         remote_path: String,
         is_dir: bool,
         message: String,
     ) {
         let title = match action {
+            ConfirmAction::Download if is_dir => "Overwrite local paths?",
             ConfirmAction::Download => "Overwrite local path?",
             ConfirmAction::Upload => "Overwrite remote file?",
         };
@@ -212,8 +223,10 @@ impl VolumeBrowserApp {
             title: title.to_string(),
             message,
             local_path,
+            overwrite_path,
             remote_path,
             is_dir,
+            progress_base: self.transfer_progress.clone(),
         });
         self.mode = BrowserMode::Confirm;
     }
@@ -340,7 +353,11 @@ impl VolumeBrowserApp {
                         local_path: confirm.local_path,
                         remote_path: confirm.remote_path,
                         is_dir: confirm.is_dir,
-                        overwrite: true,
+                        overwrite_policy: confirm
+                            .overwrite_path
+                            .map(LocalOverwritePolicy::Path)
+                            .unwrap_or(LocalOverwritePolicy::All),
+                        progress_base: confirm.progress_base,
                     },
                     ConfirmAction::Upload => BrowserAction::Upload {
                         local_path: confirm.local_path,
@@ -349,7 +366,27 @@ impl VolumeBrowserApp {
                     },
                 }
             }
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                let Some(confirm) = self.confirm.take() else {
+                    self.mode = BrowserMode::Browse;
+                    return BrowserAction::Continue;
+                };
+
+                if !(confirm.action == ConfirmAction::Download && confirm.is_dir) {
+                    self.confirm = Some(confirm);
+                    return BrowserAction::Continue;
+                }
+
+                self.mode = BrowserMode::Browse;
+                BrowserAction::Download {
+                    local_path: confirm.local_path,
+                    remote_path: confirm.remote_path,
+                    is_dir: confirm.is_dir,
+                    overwrite_policy: LocalOverwritePolicy::All,
+                    progress_base: confirm.progress_base,
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
                 self.confirm = None;
                 self.mode = BrowserMode::Browse;
                 BrowserAction::Continue
@@ -377,7 +414,8 @@ impl VolumeBrowserApp {
             local_path: self.local_cwd.clone(),
             remote_path: entry.path.clone(),
             is_dir: entry.kind == "directory",
-            overwrite,
+            overwrite_policy: LocalOverwritePolicy::from_bool(overwrite),
+            progress_base: None,
         }
     }
 
@@ -565,6 +603,7 @@ mod tests {
         app.request_overwrite(
             ConfirmAction::Upload,
             PathBuf::from("dump.sql"),
+            None,
             "/dump.sql".to_string(),
             false,
             "exists".to_string(),
@@ -576,6 +615,139 @@ mod tests {
                 local_path: PathBuf::from("dump.sql"),
                 remote_path: "/dump.sql".to_string(),
                 overwrite: true,
+            }
+        );
+        assert_eq!(app.mode, BrowserMode::Browse);
+    }
+
+    #[test]
+    fn directory_download_enter_overwrites_only_conflicting_path() {
+        let mut app = VolumeBrowserApp {
+            volume_name: "data".to_string(),
+            mount_path: "/data".to_string(),
+            remote_dir: "/".to_string(),
+            remote_entries: Vec::new(),
+            remote_selected: 0,
+            local_cwd: PathBuf::from("."),
+            local_entries: Vec::new(),
+            local_selected: 0,
+            mode: BrowserMode::Browse,
+            busy: BusyState::Idle,
+            status: None,
+            error: None,
+            transfer_progress: None,
+            confirm: None,
+        };
+
+        app.request_overwrite(
+            ConfirmAction::Download,
+            PathBuf::from("."),
+            Some(PathBuf::from("./backups/dump.sql")),
+            "/backups".to_string(),
+            true,
+            "exists".to_string(),
+        );
+
+        assert!(app.confirm.as_ref().is_some_and(|confirm| {
+            confirm.action == ConfirmAction::Download && confirm.is_dir
+        }));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            BrowserAction::Download {
+                local_path: PathBuf::from("."),
+                remote_path: "/backups".to_string(),
+                is_dir: true,
+                overwrite_policy: LocalOverwritePolicy::Path(PathBuf::from("./backups/dump.sql")),
+                progress_base: None,
+            }
+        );
+        assert_eq!(app.mode, BrowserMode::Browse);
+    }
+
+    #[test]
+    fn overwrite_confirmation_preserves_progress_base() {
+        let mut app = VolumeBrowserApp {
+            volume_name: "data".to_string(),
+            mount_path: "/data".to_string(),
+            remote_dir: "/".to_string(),
+            remote_entries: Vec::new(),
+            remote_selected: 0,
+            local_cwd: PathBuf::from("."),
+            local_entries: Vec::new(),
+            local_selected: 0,
+            mode: BrowserMode::Browse,
+            busy: BusyState::Idle,
+            status: None,
+            error: None,
+            transfer_progress: Some(TransferProgressState {
+                current_path: "/backups/a.sql".to_string(),
+                completed: 3,
+                total: 9,
+            }),
+            confirm: None,
+        };
+
+        app.request_overwrite(
+            ConfirmAction::Download,
+            PathBuf::from("."),
+            Some(PathBuf::from("./backups/dump.sql")),
+            "/backups".to_string(),
+            true,
+            "exists".to_string(),
+        );
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            BrowserAction::Download {
+                local_path: PathBuf::from("."),
+                remote_path: "/backups".to_string(),
+                is_dir: true,
+                overwrite_policy: LocalOverwritePolicy::Path(PathBuf::from("./backups/dump.sql")),
+                progress_base: Some(TransferProgressState {
+                    current_path: "/backups/a.sql".to_string(),
+                    completed: 3,
+                    total: 9,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn directory_download_confirmation_supports_overwrite_all_shortcut() {
+        let mut app = VolumeBrowserApp {
+            volume_name: "data".to_string(),
+            mount_path: "/data".to_string(),
+            remote_dir: "/".to_string(),
+            remote_entries: Vec::new(),
+            remote_selected: 0,
+            local_cwd: PathBuf::from("."),
+            local_entries: Vec::new(),
+            local_selected: 0,
+            mode: BrowserMode::Browse,
+            busy: BusyState::Idle,
+            status: None,
+            error: None,
+            transfer_progress: None,
+            confirm: None,
+        };
+
+        app.request_overwrite(
+            ConfirmAction::Download,
+            PathBuf::from("."),
+            Some(PathBuf::from("./backups/dump.sql")),
+            "/backups".to_string(),
+            true,
+            "exists".to_string(),
+        );
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            BrowserAction::Download {
+                local_path: PathBuf::from("."),
+                remote_path: "/backups".to_string(),
+                is_dir: true,
+                overwrite_policy: LocalOverwritePolicy::All,
+                progress_base: None,
             }
         );
         assert_eq!(app.mode, BrowserMode::Browse);

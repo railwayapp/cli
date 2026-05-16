@@ -22,11 +22,12 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::commands::volume::sftp::{
-    VolumeFileEntry, VolumeSftp, VolumeSftpError, VolumeTransferProgressCallback,
+    LocalOverwritePolicy, VolumeFileEntry, VolumeSftp, VolumeSftpError, VolumeTransferProgress,
+    VolumeTransferProgressCallback,
 };
 
 use app::{
-    BrowserAction, BusyState, ConfirmAction, VolumeBrowserApp, normalize_remote_dir,
+    BrowserAction, BrowserMode, BusyState, ConfirmAction, VolumeBrowserApp, normalize_remote_dir,
     parent_remote_dir,
 };
 
@@ -100,7 +101,13 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                             continue;
                         }
-                        match app.handle_key(key) {
+                        let was_confirming = app.mode == BrowserMode::Confirm;
+                        let action = app.handle_key(key);
+                        if was_confirming && !matches!(action, BrowserAction::Continue) {
+                            terminal.draw(|frame| ui::render(&app, frame))?;
+                        }
+
+                        match action {
                             BrowserAction::Continue => {}
                             BrowserAction::Quit => break 'main,
                             BrowserAction::Refresh => {
@@ -121,15 +128,30 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                     &mut active_refresh_request_id,
                                     normalize_remote_dir(&remote_dir),
                                 );
-                                app.mark_refreshing();
+                                app.mark_loading();
                             }
-                            BrowserAction::Download { local_path, remote_path, is_dir, overwrite } => {
-                                app.mark_busy(BusyState::Downloading, "Downloading...");
+                            BrowserAction::Download { local_path, remote_path, is_dir, overwrite_policy, progress_base } => {
+                                let message = if matches!(overwrite_policy, LocalOverwritePolicy::All) {
+                                    "Overwriting all..."
+                                } else if matches!(overwrite_policy, LocalOverwritePolicy::Path(_)) {
+                                    "Overwriting..."
+                                } else if is_dir {
+                                    "Preparing download..."
+                                } else {
+                                    "Downloading..."
+                                };
+                                app.mark_busy(BusyState::Downloading, message);
+                                app.transfer_progress = progress_base.clone();
                                 terminal.draw(|frame| ui::render(&app, frame))?;
-                                handle_download(&mut app, &mut terminal, &params, local_path, remote_path, is_dir, overwrite).await?;
+                                handle_download(&mut app, &mut terminal, &params, local_path, remote_path, is_dir, overwrite_policy, progress_base).await?;
                             }
                             BrowserAction::Upload { local_path, remote_path, overwrite } => {
-                                app.mark_busy(BusyState::Uploading, "Uploading...");
+                                let message = if overwrite {
+                                    "Overwriting..."
+                                } else {
+                                    "Uploading..."
+                                };
+                                app.mark_busy(BusyState::Uploading, message);
                                 terminal.draw(|frame| ui::render(&app, frame))?;
                                 let uploaded = handle_upload(&mut app, &params, local_path, remote_path, overwrite).await;
                                 if uploaded {
@@ -239,7 +261,8 @@ async fn handle_download(
     local_path: PathBuf,
     remote_path: String,
     is_dir: bool,
-    overwrite: bool,
+    overwrite_policy: LocalOverwritePolicy,
+    progress_base: Option<app::TransferProgressState>,
 ) -> Result<()> {
     let mut sftp = VolumeSftp::new(
         params.service_instance_id.clone(),
@@ -248,31 +271,55 @@ async fn handle_download(
     sftp.set_transfer_concurrency(params.transfer_concurrency);
 
     let download_result = if is_dir {
+        if let LocalOverwritePolicy::Path(overwrite_path) = &overwrite_policy {
+            let completed = progress_base
+                .as_ref()
+                .map_or(0, |progress| progress.completed);
+            let total = progress_base.as_ref().map_or(1, |progress| progress.total);
+            app.set_transfer_progress(VolumeTransferProgress {
+                current_path: overwrite_path.display().to_string(),
+                completed,
+                total,
+            });
+            terminal.draw(|frame| ui::render(app, frame))?;
+        }
+
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let progress: VolumeTransferProgressCallback = Arc::new(move |progress| {
             let _ = progress_tx.send(progress);
         });
 
-        let download =
-            sftp.download_dir_with_progress(&remote_path, &local_path, overwrite, Some(progress));
+        let download = sftp.download_dir_with_progress_and_overwrite_policy(
+            &remote_path,
+            &local_path,
+            overwrite_policy,
+            Some(progress),
+        );
         tokio::pin!(download);
 
         loop {
             tokio::select! {
-                result = &mut download => break result,
+                result = &mut download => {
+                    while let Ok(progress) = progress_rx.try_recv() {
+                        app.set_transfer_progress(adjust_progress(progress, progress_base.as_ref()));
+                        terminal.draw(|frame| ui::render(app, frame))?;
+                    }
+                    break result;
+                }
                 Some(progress) = progress_rx.recv() => {
-                    app.set_transfer_progress(progress);
+                    app.set_transfer_progress(adjust_progress(progress, progress_base.as_ref()));
                     terminal.draw(|frame| ui::render(app, frame))?;
                 }
             }
         }
     } else {
-        app.set_transfer_progress(crate::commands::volume::sftp::VolumeTransferProgress {
+        app.set_transfer_progress(VolumeTransferProgress {
             current_path: remote_path.clone(),
             completed: 0,
             total: 1,
         });
         terminal.draw(|frame| ui::render(app, frame))?;
+        let overwrite = !matches!(overwrite_policy, LocalOverwritePolicy::None);
         sftp.download_file(&remote_path, &local_path, overwrite)
             .await
     };
@@ -283,13 +330,13 @@ async fn handle_download(
             downloaded_path.display()
         )),
         Err(err) => {
-            if err
-                .downcast_ref::<VolumeSftpError>()
-                .is_some_and(|err| matches!(err, VolumeSftpError::LocalPathExists(_)))
+            if let Some(VolumeSftpError::LocalPathExists(overwrite_path)) =
+                err.downcast_ref::<VolumeSftpError>()
             {
                 app.request_overwrite(
                     ConfirmAction::Download,
                     local_path,
+                    Some(overwrite_path.clone()),
                     remote_path,
                     is_dir,
                     "A local path already exists at the download destination.".to_string(),
@@ -301,6 +348,20 @@ async fn handle_download(
     }
 
     Ok(())
+}
+
+fn adjust_progress(
+    mut progress: VolumeTransferProgress,
+    base: Option<&app::TransferProgressState>,
+) -> VolumeTransferProgress {
+    let Some(base) = base else {
+        return progress;
+    };
+
+    let total = base.total.max(progress.total);
+    progress.completed = base.completed.saturating_add(progress.completed).min(total);
+    progress.total = total;
+    progress
 }
 
 async fn handle_upload(
@@ -331,6 +392,7 @@ async fn handle_upload(
                 app.request_overwrite(
                     ConfirmAction::Upload,
                     local_path,
+                    None,
                     remote_path,
                     false,
                     "A remote file already exists at the upload destination.".to_string(),

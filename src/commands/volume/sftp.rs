@@ -104,6 +104,27 @@ pub(crate) enum VolumeSftpError {
     RemotePathExists(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocalOverwritePolicy {
+    None,
+    Path(PathBuf),
+    All,
+}
+
+impl LocalOverwritePolicy {
+    pub(crate) fn from_bool(overwrite: bool) -> Self {
+        if overwrite { Self::All } else { Self::None }
+    }
+
+    fn allows(&self, path: &Path) -> bool {
+        match self {
+            Self::None => false,
+            Self::Path(allowed_path) => allowed_path == path,
+            Self::All => true,
+        }
+    }
+}
+
 struct VolumeSftpHandler {
     disconnected: Arc<AtomicBool>,
 }
@@ -258,15 +279,36 @@ impl VolumeSftp {
         overwrite: bool,
         progress: Option<VolumeTransferProgressCallback>,
     ) -> Result<PathBuf> {
+        self.download_dir_with_progress_and_overwrite_policy(
+            remote_path,
+            local_path,
+            LocalOverwritePolicy::from_bool(overwrite),
+            progress,
+        )
+        .await
+    }
+
+    pub(crate) async fn download_dir_with_progress_and_overwrite_policy(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        overwrite_policy: LocalOverwritePolicy,
+        progress: Option<VolumeTransferProgressCallback>,
+    ) -> Result<PathBuf> {
         let local_path = Self::download_destination(remote_path, local_path)?;
 
         match self
-            .download_dir_once(remote_path, &local_path, overwrite, progress.clone())
+            .download_dir_once(
+                remote_path,
+                &local_path,
+                &overwrite_policy,
+                progress.clone(),
+            )
             .await
         {
             Ok(()) => Ok(local_path),
             Err(_err) if self.is_disconnected() => self
-                .download_dir_once(remote_path, &local_path, overwrite, progress)
+                .download_dir_once(remote_path, &local_path, &overwrite_policy, progress)
                 .await
                 .with_context(|| {
                     format!("Failed to download directory {remote_path} after reconnect")
@@ -475,7 +517,7 @@ impl VolumeSftp {
         &mut self,
         remote_path: &str,
         local_path: &Path,
-        overwrite: bool,
+        overwrite_policy: &LocalOverwritePolicy,
         progress: Option<VolumeTransferProgressCallback>,
     ) -> Result<()> {
         let local_path_exists = tokio::fs::try_exists(local_path).await.with_context(|| {
@@ -486,7 +528,7 @@ impl VolumeSftp {
         })?;
 
         if local_path_exists && !local_path.is_dir() {
-            if !overwrite {
+            if !overwrite_policy.allows(local_path) {
                 return Err(VolumeSftpError::LocalPathExists(local_path.to_path_buf()).into());
             }
             tokio::fs::remove_file(local_path)
@@ -527,16 +569,25 @@ impl VolumeSftp {
             }
         }
 
+        if let LocalOverwritePolicy::Path(overwrite_path) = overwrite_policy {
+            files.sort_by_key(|(_, _, local_file)| local_file != overwrite_path);
+        }
+
         if !files.is_empty() {
             let total = files.len();
             let completed = Arc::new(AtomicUsize::new(0));
-            let concurrency = self.transfer_concurrency;
+            let concurrency = if matches!(overwrite_policy, LocalOverwritePolicy::Path(_)) {
+                1
+            } else {
+                self.transfer_concurrency
+            };
             let sftp = self.connect().await?;
 
             stream::iter(files)
                 .map(|(display_remote_file, remote_file, local_file)| {
                     let completed = Arc::clone(&completed);
                     let progress = progress.clone();
+                    let overwrite = overwrite_policy.allows(&local_file);
 
                     async move {
                         if let Some(progress) = &progress {

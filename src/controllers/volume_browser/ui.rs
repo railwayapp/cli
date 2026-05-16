@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use super::app::{BrowserMode, LocalEntry, VolumeBrowserApp};
+use super::app::{BrowserMode, ConfirmAction, ConfirmRequest, LocalEntry, VolumeBrowserApp};
 use crate::commands::volume::sftp::VolumeFileEntry;
 
 const LABEL_COLOR: Color = Color::DarkGray;
@@ -245,27 +245,36 @@ fn render_local_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
-    let help = match app.mode {
-        BrowserMode::Browse => vec![
-            ("Up/Down", "move"),
-            ("Enter", "open folder"),
-            ("U", "upload"),
-            ("D", "download"),
-            ("E", "edit"),
-            ("R", "refresh"),
-            ("?", "help"),
-            ("Q", "quit"),
-        ],
-        BrowserMode::Upload => vec![
-            ("Up/Down", "move"),
-            ("Enter", "open/upload"),
-            ("Left", "parent"),
-            ("Esc", "remote files"),
-            ("R", "refresh local"),
-        ],
-        BrowserMode::Confirm => vec![("Enter", "overwrite"), ("Esc", "cancel")],
-        BrowserMode::Help => vec![("Esc", "close help")],
-    };
+    let help =
+        match app.mode {
+            BrowserMode::Browse => vec![
+                ("Up/Down", "move"),
+                ("Enter", "open folder"),
+                ("U", "upload"),
+                ("D", "download"),
+                ("E", "edit"),
+                ("R", "refresh"),
+                ("?", "help"),
+                ("Q", "quit"),
+            ],
+            BrowserMode::Upload => vec![
+                ("Up/Down", "move"),
+                ("Enter", "open/upload"),
+                ("Left", "parent"),
+                ("Esc", "remote files"),
+                ("R", "refresh local"),
+            ],
+            BrowserMode::Confirm => {
+                if app.confirm.as_ref().is_some_and(|confirm| {
+                    confirm.is_dir && confirm.action == ConfirmAction::Download
+                }) {
+                    vec![("Enter", "overwrite"), ("A", "overwrite all")]
+                } else {
+                    vec![("Enter", "overwrite")]
+                }
+            }
+            BrowserMode::Help => vec![("Esc", "close help")],
+        };
 
     frame.render_widget(Paragraph::new(Line::from(help_spans(help))), area);
 }
@@ -286,11 +295,9 @@ fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(confirm.message.clone()),
+        Line::from(confirm_target_line(confirm)),
         Line::from(""),
-        Line::from(Span::styled(
-            "Enter overwrite  Esc cancel",
-            Style::default().fg(LABEL_COLOR),
-        )),
+        Line::from(help_spans(confirm_help_items(confirm))),
     ];
 
     let block = Block::default()
@@ -347,6 +354,31 @@ fn help_spans(items: Vec<(&'static str, &'static str)>) -> Vec<Span<'static>> {
         ));
     }
     spans
+}
+
+fn confirm_help_items(confirm: &ConfirmRequest) -> Vec<(&'static str, &'static str)> {
+    if confirm.is_dir && confirm.action == ConfirmAction::Download {
+        vec![("Enter", "overwrite"), ("A", "overwrite all")]
+    } else {
+        vec![("Enter", "overwrite")]
+    }
+}
+
+fn confirm_target_line(confirm: &ConfirmRequest) -> Line<'static> {
+    let target = match confirm.action {
+        ConfirmAction::Download => confirm
+            .overwrite_path
+            .as_ref()
+            .unwrap_or(&confirm.local_path)
+            .display()
+            .to_string(),
+        ConfirmAction::Upload => confirm.remote_path.clone(),
+    };
+
+    Line::from(vec![
+        Span::styled("Path ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(target, Style::default().fg(Color::White)),
+    ])
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
