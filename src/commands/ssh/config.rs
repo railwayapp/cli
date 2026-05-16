@@ -54,7 +54,7 @@ pub struct Args {
 struct ResolvedConfig {
     service_name: String,
     alias: String,
-    service_instance_id: Option<String>,
+    service_instance_id: String,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -62,73 +62,32 @@ pub async fn command(args: Args) -> Result<()> {
         bail!("--write and --remove cannot be used together");
     }
 
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let params = get_ssh_connect_params(
-        super::Args {
-            subcommand: None,
-            project: args.project.clone(),
-            service: args.service.clone(),
-            environment: args.environment.clone(),
-            deployment_instance: None,
-            session: None,
-            native: false,
-            identity_file: None,
-            command: Vec::new(),
-        },
-        &configs,
-        &client,
-    )
-    .await?;
-
-    let alias = args
-        .alias
-        .as_deref()
-        .map(sanitize_alias)
-        .unwrap_or_else(|| format!("railway-{}", sanitize_alias(&params.service_name)));
-
-    let service_instance_id = if args.remove {
-        None
-    } else {
-        Some(
-            native::get_service_instance_id(
-                &client,
-                &configs,
-                &params.environment_id,
-                &params.service_id,
-            )
-            .await?,
-        )
-    };
-
-    let resolved = ResolvedConfig {
-        service_name: params.service_name,
-        alias,
-        service_instance_id,
-    };
-
     if args.remove {
+        let service_name = if let Some(service_name) = args.service.as_deref() {
+            service_name.to_string()
+        } else {
+            resolve_service_name(args.clone()).await?
+        };
+
         let path = expand_tilde(&args.path)?;
-        let removed = remove_config_block(&path, &resolved.service_name)?;
+        let removed = remove_config_block(&path, &service_name)?;
         if removed {
             eprintln!("Removed Railway SSH config block from {}", path.display());
         } else {
             eprintln!(
                 "No Railway SSH config block found for {} in {}",
-                resolved.service_name,
+                service_name,
                 path.display()
             );
         }
         return Ok(());
     }
 
+    let resolved = resolve(args.clone()).await?;
     let block = render_config_block(
         &resolved.service_name,
         &resolved.alias,
-        resolved
-            .service_instance_id
-            .as_deref()
-            .context("service instance ID is required to render SSH config")?,
+        &resolved.service_instance_id,
         args.identity_file.as_deref(),
         &Utc::now().format("%Y-%m-%d").to_string(),
     );
@@ -142,6 +101,56 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn resolve(args: Args) -> Result<ResolvedConfig> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let params =
+        get_ssh_connect_params(ssh_args_from_config_args(&args), &configs, &client).await?;
+
+    let alias = args
+        .alias
+        .as_deref()
+        .map(sanitize_alias)
+        .unwrap_or_else(|| format!("railway-{}", sanitize_alias(&params.service_name)));
+
+    let service_instance_id = native::get_service_instance_id(
+        &client,
+        &configs,
+        &params.environment_id,
+        &params.service_id,
+    )
+    .await?;
+
+    Ok(ResolvedConfig {
+        service_name: params.service_name,
+        alias,
+        service_instance_id,
+    })
+}
+
+async fn resolve_service_name(args: Args) -> Result<String> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let params =
+        get_ssh_connect_params(ssh_args_from_config_args(&args), &configs, &client).await?;
+
+    Ok(params.service_name)
+}
+
+fn ssh_args_from_config_args(args: &Args) -> super::Args {
+    super::Args {
+        subcommand: None,
+        project: args.project.clone(),
+        service: args.service.clone(),
+        environment: args.environment.clone(),
+        deployment_instance: None,
+        session: None,
+        native: false,
+        identity_file: None,
+        command: Vec::new(),
+    }
 }
 
 fn render_config_block(
@@ -171,7 +180,7 @@ fn render_config_block(
         writeln!(
             block,
             "    IdentityFile {}",
-            identity_file.to_string_lossy()
+            quote_ssh_config_value(&identity_file.to_string_lossy())
         )
         .expect("writing to String cannot fail");
     }
@@ -334,6 +343,31 @@ fn sanitize_alias(input: &str) -> String {
     }
 }
 
+fn quote_ssh_config_value(value: &str) -> String {
+    if !value
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\\'))
+    {
+        return value.to_string();
+    }
+
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+
+    for c in value.chars() {
+        match c {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            _ => quoted.push(c),
+        }
+    }
+
+    quoted.push('"');
+    quoted
+}
+
 fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let path = path.to_string_lossy();
 
@@ -375,7 +409,7 @@ mod tests {
             "API",
             "railway-api",
             "new-id",
-            Some(Path::new("~/.ssh/id_ed25519")),
+            Some(Path::new("/Users/me/My Keys/id_ed25519")),
             "2026-05-18",
         );
 
@@ -391,7 +425,7 @@ mod tests {
         assert!(contents.contains("Host railway-api\n"));
         assert!(contents.contains("    HostName ssh.railway.com\n"));
         assert!(contents.contains("    User new-id\n"));
-        assert!(contents.contains("    IdentityFile ~/.ssh/id_ed25519\n"));
+        assert!(contents.contains("    IdentityFile \"/Users/me/My Keys/id_ed25519\"\n"));
         assert!(!contents.contains("old-id"));
 
         #[cfg(unix)]
@@ -410,8 +444,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn remove_deletes_marked_block_and_is_noop_when_absent() {
+    #[tokio::test]
+    async fn remove_with_service_arg_deletes_marked_block_without_resolving() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".ssh/config");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -428,11 +462,35 @@ Host later
         )
         .unwrap();
 
-        assert!(remove_config_block(&path, "API").unwrap());
+        command(Args {
+            project: None,
+            service: Some("API".to_string()),
+            environment: None,
+            alias: None,
+            identity_file: None,
+            write: false,
+            remove: true,
+            path: path.clone(),
+        })
+        .await
+        .unwrap();
+
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "Host existing\nHost later\n"
         );
-        assert!(!remove_config_block(&path, "API").unwrap());
+
+        command(Args {
+            project: None,
+            service: Some("API".to_string()),
+            environment: None,
+            alias: None,
+            identity_file: None,
+            write: false,
+            remove: true,
+            path,
+        })
+        .await
+        .unwrap();
     }
 }
