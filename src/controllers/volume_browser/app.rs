@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::commands::volume::sftp::VolumeFileEntry;
+use crate::commands::volume::sftp::{VolumeFileEntry, VolumeTransferProgress};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
@@ -39,6 +39,23 @@ pub struct ConfirmRequest {
     pub local_path: PathBuf,
     pub remote_path: String,
     pub is_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferProgressState {
+    pub current_path: String,
+    pub completed: usize,
+    pub total: usize,
+}
+
+impl From<VolumeTransferProgress> for TransferProgressState {
+    fn from(progress: VolumeTransferProgress) -> Self {
+        Self {
+            current_path: progress.current_path,
+            completed: progress.completed,
+            total: progress.total,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +101,7 @@ pub struct VolumeBrowserApp {
     pub busy: BusyState,
     pub status: Option<String>,
     pub error: Option<String>,
+    pub transfer_progress: Option<TransferProgressState>,
     pub confirm: Option<ConfirmRequest>,
 }
 
@@ -103,6 +121,7 @@ impl VolumeBrowserApp {
             busy: BusyState::Idle,
             status: Some("Loading remote files...".to_string()),
             error: None,
+            transfer_progress: None,
             confirm: None,
         };
         app.refresh_local_entries();
@@ -117,17 +136,20 @@ impl VolumeBrowserApp {
         self.busy = BusyState::Idle;
         self.status = Some(format!("Loaded {}", self.remote_dir));
         self.error = None;
+        self.transfer_progress = None;
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
         self.status = None;
+        self.transfer_progress = None;
         self.busy = BusyState::Idle;
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status = Some(message.into());
         self.error = None;
+        self.transfer_progress = None;
         self.busy = BusyState::Idle;
     }
 
@@ -139,6 +161,11 @@ impl VolumeBrowserApp {
         self.busy = busy;
         self.status = Some(message.into());
         self.error = None;
+        self.transfer_progress = None;
+    }
+
+    pub fn set_transfer_progress(&mut self, progress: VolumeTransferProgress) {
+        self.transfer_progress = Some(progress.into());
     }
 
     pub fn is_busy(&self) -> bool {
@@ -500,6 +527,7 @@ mod tests {
             busy: BusyState::Idle,
             status: None,
             error: None,
+            transfer_progress: None,
             confirm: None,
         };
 
@@ -530,6 +558,7 @@ mod tests {
             busy: BusyState::Idle,
             status: None,
             error: None,
+            transfer_progress: None,
             confirm: None,
         };
 

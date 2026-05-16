@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -19,6 +19,7 @@ pub(crate) struct VolumeSftp {
     session: Option<russh::client::Handle<VolumeSftpHandler>>,
     sftp: Option<russh_sftp::client::SftpSession>,
     disconnected: Arc<AtomicBool>,
+    transfer_concurrency: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +115,16 @@ impl VolumeSftpHandler {
 }
 
 const ADDR: &str = "ssh.railway.com";
-const CONCURRENT_DOWNLOADS: usize = 32;
+pub(crate) const DEFAULT_TRANSFER_CONCURRENCY: usize = 32;
+
+#[derive(Debug, Clone)]
+pub(crate) struct VolumeTransferProgress {
+    pub(crate) current_path: String,
+    pub(crate) completed: usize,
+    pub(crate) total: usize,
+}
+
+pub(crate) type VolumeTransferProgressCallback = Arc<dyn Fn(VolumeTransferProgress) + Send + Sync>;
 
 impl russh::client::Handler for VolumeSftpHandler {
     type Error = anyhow::Error;
@@ -148,7 +158,12 @@ impl VolumeSftp {
             session: None,
             sftp: None,
             disconnected: Arc::new(AtomicBool::new(false)),
+            transfer_concurrency: DEFAULT_TRANSFER_CONCURRENCY,
         }
+    }
+
+    pub(crate) fn set_transfer_concurrency(&mut self, transfer_concurrency: usize) {
+        self.transfer_concurrency = transfer_concurrency.max(1);
     }
 
     pub(crate) async fn connect(&mut self) -> Result<&russh_sftp::client::SftpSession> {
@@ -232,15 +247,26 @@ impl VolumeSftp {
         local_path: &Path,
         overwrite: bool,
     ) -> Result<PathBuf> {
+        self.download_dir_with_progress(remote_path, local_path, overwrite, None)
+            .await
+    }
+
+    pub(crate) async fn download_dir_with_progress(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        overwrite: bool,
+        progress: Option<VolumeTransferProgressCallback>,
+    ) -> Result<PathBuf> {
         let local_path = Self::download_destination(remote_path, local_path)?;
 
         match self
-            .download_dir_once(remote_path, &local_path, overwrite)
+            .download_dir_once(remote_path, &local_path, overwrite, progress.clone())
             .await
         {
             Ok(()) => Ok(local_path),
             Err(_err) if self.is_disconnected() => self
-                .download_dir_once(remote_path, &local_path, overwrite)
+                .download_dir_once(remote_path, &local_path, overwrite, progress)
                 .await
                 .with_context(|| {
                     format!("Failed to download directory {remote_path} after reconnect")
@@ -450,6 +476,7 @@ impl VolumeSftp {
         remote_path: &str,
         local_path: &Path,
         overwrite: bool,
+        progress: Option<VolumeTransferProgressCallback>,
     ) -> Result<()> {
         let local_path_exists = tokio::fs::try_exists(local_path).await.with_context(|| {
             format!(
@@ -474,10 +501,9 @@ impl VolumeSftp {
             })?;
 
         let mut pending = vec![(remote_path.to_string(), local_path.to_path_buf())];
+        let mut files = Vec::new();
 
         while let Some((remote_dir, local_dir)) = pending.pop() {
-            let mut files = Vec::new();
-
             for entry in self.list_files_once(&remote_dir).await? {
                 let local_entry_path = local_dir.join(&entry.name);
 
@@ -492,21 +518,53 @@ impl VolumeSftp {
                         })?;
                     pending.push((entry.path, local_entry_path));
                 } else {
-                    files.push((self.mount_prefixed_path(&entry.path), local_entry_path));
+                    files.push((
+                        entry.path.clone(),
+                        self.mount_prefixed_path(&entry.path),
+                        local_entry_path,
+                    ));
                 }
             }
+        }
 
-            if !files.is_empty() {
-                let sftp = self.connect().await?;
-                stream::iter(files)
-                    .map(|(remote_file, local_file)| async move {
+        if !files.is_empty() {
+            let total = files.len();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let concurrency = self.transfer_concurrency;
+            let sftp = self.connect().await?;
+
+            stream::iter(files)
+                .map(|(display_remote_file, remote_file, local_file)| {
+                    let completed = Arc::clone(&completed);
+                    let progress = progress.clone();
+
+                    async move {
+                        if let Some(progress) = &progress {
+                            progress(VolumeTransferProgress {
+                                current_path: display_remote_file.clone(),
+                                completed: completed.load(Ordering::SeqCst),
+                                total,
+                            });
+                        }
+
                         Self::download_file_with_sftp(sftp, &remote_file, &local_file, overwrite)
-                            .await
-                    })
-                    .buffer_unordered(CONCURRENT_DOWNLOADS)
-                    .try_collect::<Vec<_>>()
-                    .await?;
-            }
+                            .await?;
+
+                        let completed = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                        if let Some(progress) = &progress {
+                            progress(VolumeTransferProgress {
+                                current_path: display_remote_file,
+                                completed,
+                                total,
+                            });
+                        }
+
+                        Ok::<(), anyhow::Error>(())
+                    }
+                })
+                .buffer_unordered(concurrency)
+                .try_collect::<Vec<_>>()
+                .await?;
         }
 
         Ok(())

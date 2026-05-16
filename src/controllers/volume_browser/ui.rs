@@ -33,13 +33,15 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(8),
+        Constraint::Length(2),
         Constraint::Length(1),
     ])
     .split(area);
 
     render_header(app, frame, chunks[0]);
     render_body(app, frame, chunks[1]);
-    render_help_bar(app, frame, chunks[2]);
+    render_status(app, frame, chunks[2]);
+    render_help_bar(app, frame, chunks[3]);
 
     match app.mode {
         BrowserMode::Confirm => render_confirm(app, frame, area),
@@ -72,6 +74,70 @@ fn render_header(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         Span::styled(app.remote_dir.clone(), Style::default().fg(Color::Cyan)),
     ]);
     frame.render_widget(Paragraph::new(vec![line, Line::from("")]), area);
+}
+
+fn render_status(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    if let Some(progress) = &app.transfer_progress {
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+        let ratio = if progress.total == 0 {
+            0.0
+        } else {
+            progress.completed as f64 / progress.total as f64
+        };
+
+        render_progress_bar(
+            frame,
+            chunks[0],
+            ratio,
+            &format!("{}/{}", progress.completed, progress.total),
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Downloading ", Style::default().fg(LABEL_COLOR)),
+                Span::raw(progress.current_path.clone()),
+            ])),
+            chunks[1],
+        );
+    } else if let Some(status) = &app.status {
+        frame.render_widget(
+            Paragraph::new(status.clone()).style(Style::default().fg(LABEL_COLOR)),
+            area,
+        );
+    }
+}
+
+fn render_progress_bar(frame: &mut Frame, area: Rect, ratio: f64, label: &str) {
+    let width = area.width as usize;
+    if width == 0 {
+        return;
+    }
+
+    let ratio = ratio.clamp(0.0, 1.0);
+    let filled_width = (ratio * width as f64).round() as usize;
+    let label_width = label.chars().count().min(width);
+    let label_start = width.saturating_sub(label_width) / 2;
+    let label_chars = label.chars().take(label_width).collect::<Vec<_>>();
+
+    let mut spans = Vec::with_capacity(width);
+    for index in 0..width {
+        let label_index = index
+            .checked_sub(label_start)
+            .filter(|idx| *idx < label_width);
+        let text = label_index
+            .and_then(|idx| label_chars.get(idx).copied())
+            .unwrap_or(' ')
+            .to_string();
+
+        let style = if index < filled_width {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(LABEL_COLOR).bg(Color::Indexed(238))
+        };
+
+        spans.push(Span::styled(text, style));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_body(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {

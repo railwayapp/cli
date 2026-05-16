@@ -6,6 +6,7 @@ use std::{
     panic,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,7 +21,9 @@ use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
-use crate::commands::volume::sftp::{VolumeFileEntry, VolumeSftp, VolumeSftpError};
+use crate::commands::volume::sftp::{
+    VolumeFileEntry, VolumeSftp, VolumeSftpError, VolumeTransferProgressCallback,
+};
 
 use app::{
     BrowserAction, BusyState, ConfirmAction, VolumeBrowserApp, normalize_remote_dir,
@@ -32,6 +35,7 @@ pub struct VolumeBrowserParams {
     pub volume_name: String,
     pub mount_path: String,
     pub remote_path: String,
+    pub transfer_concurrency: usize,
 }
 
 struct RefreshResult {
@@ -122,7 +126,7 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                             BrowserAction::Download { local_path, remote_path, is_dir, overwrite } => {
                                 app.mark_busy(BusyState::Downloading, "Downloading...");
                                 terminal.draw(|frame| ui::render(&app, frame))?;
-                                handle_download(&mut app, &params, local_path, remote_path, is_dir, overwrite).await;
+                                handle_download(&mut app, &mut terminal, &params, local_path, remote_path, is_dir, overwrite).await?;
                             }
                             BrowserAction::Upload { local_path, remote_path, overwrite } => {
                                 app.mark_busy(BusyState::Uploading, "Uploading...");
@@ -192,6 +196,7 @@ fn spawn_refresh(
         volume_name: params.volume_name.clone(),
         mount_path: params.mount_path.clone(),
         remote_path: params.remote_path.clone(),
+        transfer_concurrency: params.transfer_concurrency,
     };
 
     tokio::spawn(async move {
@@ -229,21 +234,45 @@ async fn fetch_entries_inner(
 
 async fn handle_download(
     app: &mut VolumeBrowserApp,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     params: &VolumeBrowserParams,
     local_path: PathBuf,
     remote_path: String,
     is_dir: bool,
     overwrite: bool,
-) {
+) -> Result<()> {
     let mut sftp = VolumeSftp::new(
         params.service_instance_id.clone(),
         params.mount_path.clone(),
     );
+    sftp.set_transfer_concurrency(params.transfer_concurrency);
 
     let download_result = if is_dir {
-        sftp.download_dir(&remote_path, &local_path, overwrite)
-            .await
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let progress: VolumeTransferProgressCallback = Arc::new(move |progress| {
+            let _ = progress_tx.send(progress);
+        });
+
+        let download =
+            sftp.download_dir_with_progress(&remote_path, &local_path, overwrite, Some(progress));
+        tokio::pin!(download);
+
+        loop {
+            tokio::select! {
+                result = &mut download => break result,
+                Some(progress) = progress_rx.recv() => {
+                    app.set_transfer_progress(progress);
+                    terminal.draw(|frame| ui::render(app, frame))?;
+                }
+            }
+        }
     } else {
+        app.set_transfer_progress(crate::commands::volume::sftp::VolumeTransferProgress {
+            current_path: remote_path.clone(),
+            completed: 0,
+            total: 1,
+        });
+        terminal.draw(|frame| ui::render(app, frame))?;
         sftp.download_file(&remote_path, &local_path, overwrite)
             .await
     };
@@ -270,6 +299,8 @@ async fn handle_download(
             }
         }
     }
+
+    Ok(())
 }
 
 async fn handle_upload(

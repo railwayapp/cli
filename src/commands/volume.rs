@@ -144,6 +144,10 @@ structstruck::strike! {
             /// Replace LOCAL_PATH if it already exists
             #[clap(long, visible_alias = "override")]
             overwrite: bool,
+
+            /// Concurrent file downloads when REMOTE_PATH is a directory
+            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
+            concurrency: usize,
         })
 
         /// Download a directory from a volume
@@ -167,6 +171,10 @@ structstruck::strike! {
             /// Replace LOCAL_PATH if it already exists
             #[clap(long, visible_alias = "override")]
             overwrite: bool,
+
+            /// Concurrent file downloads
+            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
+            concurrency: usize,
         })
 
         /// Upload a file to a volume
@@ -216,6 +224,10 @@ structstruck::strike! {
             /// The directory path on the remote server to open
             #[clap(value_name = "REMOTE_PATH", default_value = "/")]
             remote_path: String,
+
+            /// Concurrent file downloads
+            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
+            concurrency: usize,
         })
 
         /// Delete a file from a volume
@@ -323,6 +335,7 @@ pub async fn command(args: Args) -> Result<()> {
                 d.local_path,
                 d.json,
                 d.overwrite,
+                d.concurrency,
             )
             .await?
         }
@@ -336,6 +349,7 @@ pub async fn command(args: Args) -> Result<()> {
                 d.local_path,
                 d.json,
                 d.overwrite,
+                d.concurrency,
             )
             .await?
         }
@@ -370,6 +384,7 @@ pub async fn command(args: Args) -> Result<()> {
                 b.volume,
                 project,
                 b.remote_path,
+                b.concurrency,
             )
             .await?
         }
@@ -470,6 +485,7 @@ async fn download_dir(
     local_path: PathBuf,
     json: bool,
     overwrite: bool,
+    concurrency: usize,
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
     let volume = select_volume(
@@ -494,6 +510,7 @@ async fn download_dir(
             )
         })?;
     let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
+    volume_sftp.set_transfer_concurrency(concurrency);
     volume_sftp
         .download_dir(&remote_path, &local_path, overwrite)
         .await?;
@@ -527,6 +544,7 @@ async fn download(
     local_path: PathBuf,
     json: bool,
     overwrite: bool,
+    concurrency: usize,
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
     let volume = select_volume(
@@ -551,6 +569,7 @@ async fn download(
             )
         })?;
     let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
+    volume_sftp.set_transfer_concurrency(concurrency);
     let downloaded_path = volume_sftp
         .download(&remote_path, &local_path, overwrite)
         .await?;
@@ -716,6 +735,7 @@ async fn browse(
     volume: Option<String>,
     project: ProjectProject,
     remote_path: String,
+    concurrency: usize,
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
     if !is_terminal {
@@ -749,6 +769,7 @@ async fn browse(
         volume_name: volume.0.volume.name.clone(),
         mount_path: volume.0.mount_path.clone(),
         remote_path,
+        transfer_concurrency: concurrency,
     })
     .await
 }
