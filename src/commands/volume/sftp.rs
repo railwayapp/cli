@@ -47,12 +47,15 @@ impl fmt::Display for VolumeFileTree {
         const COLUMN_GAP: usize = 2;
         const MAX_WIDTH: usize = 80;
 
-        let name_width = self
+        let names = self
             .entries
             .iter()
-            .map(|entry| display_name(entry).len())
-            .max()
-            .unwrap_or(0);
+            .map(|entry| match entry.kind {
+                "directory" => format!("{}/", entry.name),
+                _ => entry.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let name_width = names.iter().map(String::len).max().unwrap_or(0);
         let column_width = name_width + COLUMN_GAP;
         let columns = if column_width == 0 {
             1
@@ -60,12 +63,16 @@ impl fmt::Display for VolumeFileTree {
             (MAX_WIDTH / column_width).max(1)
         };
 
-        for row in self.entries.chunks(columns) {
-            for (index, entry) in row.iter().enumerate() {
-                let name = display_name(entry);
-                let styled_name = styled_display_name(entry);
+        for row in self.entries.chunks(columns).zip(names.chunks(columns)) {
+            let (entries, names) = row;
+            for (index, (entry, name)) in entries.iter().zip(names).enumerate() {
+                let styled_name = match entry.kind {
+                    "directory" => name.blue().bold().to_string(),
+                    "symlink" => name.cyan().to_string(),
+                    _ => name.clone(),
+                };
 
-                if index + 1 == row.len() {
+                if index + 1 == entries.len() {
                     write!(f, "{styled_name}")?;
                 } else {
                     write!(
@@ -79,25 +86,6 @@ impl fmt::Display for VolumeFileTree {
         }
 
         Ok(())
-    }
-}
-
-fn display_name(entry: &VolumeFileEntry) -> String {
-    if entry.kind == "directory" {
-        format!("{}/", entry.name)
-    } else {
-        entry.name.clone()
-    }
-}
-
-fn styled_display_name(entry: &VolumeFileEntry) -> String {
-    let name = display_name(entry);
-    if entry.kind == "directory" {
-        name.blue().bold().to_string()
-    } else if entry.kind == "symlink" {
-        name.cyan().to_string()
-    } else {
-        name
     }
 }
 
@@ -425,14 +413,11 @@ impl VolumeSftp {
                 VolumeFileEntry {
                     path: Self::join_remote_path(remote_path, &name),
                     name,
-                    kind: if metadata.is_dir() {
-                        "directory"
-                    } else if metadata.is_regular() {
-                        "file"
-                    } else if metadata.is_symlink() {
-                        "symlink"
-                    } else {
-                        "other"
+                    kind: match metadata {
+                        _ if metadata.is_dir() => "directory",
+                        _ if metadata.is_regular() => "file",
+                        _ if metadata.is_symlink() => "symlink",
+                        _ => "other",
                     },
                     size: metadata.len(),
                 }
