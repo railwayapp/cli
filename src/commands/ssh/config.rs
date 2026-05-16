@@ -206,7 +206,7 @@ fn upsert_config_block(path: &Path, service_name: &str, block: &str) -> Result<(
 
 fn remove_config_block(path: &Path, service_name: &str) -> Result<bool> {
     let existing = read_config(path)?;
-    let pattern = config_block_regex(service_name, true)?;
+    let pattern = config_block_regex_with_case(service_name, true, true)?;
 
     if !pattern.is_match(&existing) {
         return Ok(false);
@@ -299,14 +299,23 @@ fn append_config_block(mut existing: String, block: &str) -> String {
 }
 
 fn config_block_regex(service_name: &str, include_preceding_blank: bool) -> Result<Regex> {
+    config_block_regex_with_case(service_name, include_preceding_blank, false)
+}
+
+fn config_block_regex_with_case(
+    service_name: &str,
+    include_preceding_blank: bool,
+    case_insensitive: bool,
+) -> Result<Regex> {
     let marker = regex::escape(&marker_name(service_name));
     let preceding_blank = if include_preceding_blank {
         r"(?:^[ \t]*\r?\n)?"
     } else {
         ""
     };
+    let flags = if case_insensitive { "(?ims)" } else { "(?ms)" };
     Regex::new(&format!(
-        r"(?ms){preceding_blank}^# BEGIN railway:{marker}(?: .*)?\r?\n.*?^# END railway:{marker}[ \t]*(?:\r?\n)?"
+        r"{flags}{preceding_blank}^# BEGIN railway:{marker}(?: .*)?\r?\n.*?^# END railway:{marker}[ \t]*(?:\r?\n)?"
     ))
     .context("Failed to build Railway SSH config marker regex")
 }
@@ -464,7 +473,7 @@ Host later
 
         command(Args {
             project: None,
-            service: Some("API".to_string()),
+            service: Some("api".to_string()),
             environment: None,
             alias: None,
             identity_file: None,
