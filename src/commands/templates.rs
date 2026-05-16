@@ -1,7 +1,8 @@
 use std::{
-    env,
-    io::stdout,
+    env, fs,
+    io::{Read, stdout},
     panic,
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -23,7 +24,17 @@ use ratatui::{
 };
 use tokio::{sync::mpsc, time::Instant};
 
-use crate::{client::post_graphql, consts::TICK_STRING};
+use crate::{
+    client::post_graphql,
+    consts::TICK_STRING,
+    controllers::{environment::get_matched_environment, project::get_project},
+    errors::RailwayError,
+    util::{
+        progress::create_spinner_if,
+        prompt::{fake_select, prompt_options, prompt_text_with_placeholder_disappear},
+    },
+    workspace::workspaces,
+};
 
 use super::*;
 
@@ -31,12 +42,49 @@ type TemplateSearchResponse = queries::template_search::ResponseData;
 type TemplateSearchConnection = queries::template_search::TemplateSearchTemplateSearch;
 type TemplateSearchEdge = queries::template_search::TemplateSearchTemplateSearchEdges;
 type TemplateSearchItem = queries::template_search::TemplateSearchTemplateSearchEdgesNode;
+type TemplateDetailItem = queries::template::TemplateTemplate;
+type GeneratedTemplate = mutations::template_generate::TemplateGenerateTemplateGenerate;
+type PublishedTemplate = mutations::template_publish::TemplatePublishTemplatePublish;
 
 const DEFAULT_LIMIT: i64 = 20;
 const MAX_LIMIT: i64 = 50;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const RESULT_PADDING: &str = "  ";
+const DESCRIPTION_MIN: usize = 25;
+const DESCRIPTION_MAX: usize = 75;
+const README_MIN: usize = 250;
+const README_MAX: usize = 10_000;
+const TEMPLATE_CATEGORIES: &[&str] = &[
+    "AI/ML",
+    "Analytics",
+    "Authentication",
+    "Automation",
+    "Blogs",
+    "Bots",
+    "CMS",
+    "Observability",
+    "Other",
+    "Starters",
+    "Storage",
+    "Queues",
+];
+const REQUIRED_README_SECTIONS: &[&str] = &[
+    "# Deploy and Host",
+    "## About Hosting",
+    "## Why Deploy",
+    "## Common Use Cases",
+    "## Dependencies for",
+    "### Deployment Dependencies",
+];
+const DEFAULT_README_TEXT: &[&str] = &[
+    "[What is X?",
+    "[Roughly 100 word",
+    "[Use case",
+    "[Dependency",
+    "[Include any external links",
+    "[Include Github",
+];
 
 #[derive(Clone, Copy)]
 enum TerminalTheme {
@@ -47,7 +95,7 @@ enum TerminalTheme {
 /// Discover Railway templates
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
+    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -59,6 +107,13 @@ enum Commands {
     /// Search published templates
     #[clap(visible_alias = "find", visible_alias = "list", visible_alias = "ls")]
     Search(SearchArgs),
+
+    /// Create an unpublished template from a project
+    #[clap(visible_alias = "generate")]
+    Create(CreateArgs),
+
+    /// Publish an unpublished template to the marketplace
+    Publish(PublishArgs),
 }
 
 #[derive(Parser, Clone)]
@@ -85,6 +140,65 @@ struct SearchArgs {
     /// Filter by verification state
     #[arg(long)]
     verified: Option<bool>,
+}
+
+#[derive(Parser, Clone)]
+#[clap(
+    after_help = "Examples:\n\n  railway templates create --json\n  railway templates create --project project-id --json\n  railway templates create --project project-id --environment production --json\n\nAutomation notes:\n  This matches the dashboard Generate Template action: it creates an unpublished template from a project.\n  By default generation is project-level. Pass --environment only when you intentionally want to generate from one environment."
+)]
+struct CreateArgs {
+    /// Project ID or name. Defaults to the linked project.
+    #[arg(short, long)]
+    project: Option<String>,
+
+    /// Environment ID or name to generate from. Defaults to the dashboard behavior: project-level generation.
+    #[arg(short, long)]
+    environment: Option<String>,
+
+    /// Print the created template as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser, Clone)]
+#[clap(
+    after_help = "Examples:\n\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates publish template-id --category AI/ML --description \"Deploy and Host My Agent with Railway\" --readme-file - --json\n\nValid categories:\n  AI/ML, Analytics, Authentication, Automation, Blogs, Bots, CMS,\n  Observability, Other, Starters, Storage, Queues\n\nAutomation notes:\n  First publish requires a template overview via --readme-file or --readme.\n  Use the template ID returned by `railway templates create --json`."
+)]
+struct PublishArgs {
+    /// Template ID or code
+    template: String,
+
+    /// Marketplace category
+    #[arg(long)]
+    category: Option<String>,
+
+    /// Short marketplace description
+    #[arg(long)]
+    description: Option<String>,
+
+    /// Template overview markdown. Prefer --readme-file for multi-line content.
+    #[arg(long)]
+    readme: Option<String>,
+
+    /// File containing the template overview markdown. Use "-" to read from stdin.
+    #[arg(long)]
+    readme_file: Option<PathBuf>,
+
+    /// Image URL for the marketplace card
+    #[arg(long)]
+    image: Option<String>,
+
+    /// Public demo project ID
+    #[arg(long)]
+    demo_project: Option<String>,
+
+    /// Workspace ID or name. Defaults to the template workspace.
+    #[arg(short, long)]
+    workspace: Option<String>,
+
+    /// Print the published template as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone)]
@@ -120,7 +234,580 @@ struct SearchMessage {
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::Search(args) => search_command(args).await,
+        Commands::Create(args) => create_command(args).await,
+        Commands::Publish(args) => publish_command(args).await,
     }
+}
+
+async fn create_command(args: CreateArgs) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let project_id = resolve_template_project(&client, &configs, args.project).await?;
+    let environment_id =
+        resolve_template_environment(&client, &configs, &project_id, args.environment).await?;
+
+    let spinner = create_spinner_if(!args.json, "Creating template...".to_string());
+    let response = post_graphql::<mutations::TemplateGenerate, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::template_generate::Variables {
+            project_id,
+            environment_id,
+        },
+    )
+    .await?;
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    let template = response.template_generate;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&template_json(&configs, &template))?
+        );
+    } else {
+        print_created_template(&configs, &template);
+    }
+
+    Ok(())
+}
+
+async fn publish_command(args: PublishArgs) -> Result<()> {
+    if args.readme.is_some() && args.readme_file.is_some() {
+        bail!("Use either --readme or --readme-file, not both");
+    }
+
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let template = fetch_template_by_ref(&client, &configs, &args.template).await?;
+    let is_updating = status_label(&template.status) == "PUBLISHED";
+
+    let category = args
+        .category
+        .clone()
+        .or_else(|| template.category.clone())
+        .unwrap_or_else(|| {
+            fake_select("Select category", "Other");
+            "Other".to_string()
+        });
+    let description = args
+        .description
+        .clone()
+        .or_else(|| template.description.clone())
+        .unwrap_or_else(|| short_description(&template.name));
+    let readme = resolve_readme(args.readme, args.readme_file, &template, is_updating)?;
+    let image = args
+        .image
+        .clone()
+        .or_else(|| template.image.clone())
+        .and_then(non_empty_string);
+    let demo_project_id = args
+        .demo_project
+        .clone()
+        .or_else(|| template.demo_project_id.clone())
+        .and_then(non_empty_string);
+    let workspace_id = match args.workspace {
+        Some(workspace) => Some(resolve_workspace_id(&workspace).await?),
+        None => template.workspace_id.clone(),
+    };
+
+    validate_publish_fields(
+        &category,
+        &description,
+        readme.as_str(),
+        image.as_deref(),
+        is_updating,
+    )?;
+
+    let spinner = create_spinner_if(!args.json, "Publishing template...".to_string());
+    let response = post_graphql::<mutations::TemplatePublish, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::template_publish::Variables {
+            id: template.id,
+            description,
+            category,
+            readme,
+            image,
+            demo_project_id,
+            workspace_id,
+        },
+    )
+    .await?;
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    let template = response.template_publish;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&published_template_json(&configs, &template))?
+        );
+    } else {
+        print_published_template(&configs, &template, is_updating);
+    }
+
+    Ok(())
+}
+
+#[derive(Clone)]
+struct TemplateProjectChoice {
+    id: String,
+    name: String,
+    workspace_name: String,
+}
+
+impl std::fmt::Display for TemplateProjectChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.workspace_name)
+    }
+}
+
+async fn resolve_template_project(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project: Option<String>,
+) -> Result<String> {
+    if let Some(project) = project {
+        return resolve_project_arg(client, configs, &project).await;
+    }
+
+    if let Ok(linked_project) = configs.get_linked_project().await {
+        fake_select(
+            "Select project",
+            linked_project
+                .name
+                .as_deref()
+                .unwrap_or(linked_project.project.as_str()),
+        );
+        return Ok(linked_project.project);
+    }
+
+    if !std::io::stdout().is_terminal() {
+        bail!("Project required in non-interactive mode. Use --project <id or name>.");
+    }
+
+    let choices = project_choices().await?;
+    if choices.is_empty() {
+        bail!(RailwayError::NoProjects);
+    }
+
+    let choice = prompt_options("Select project", choices)?;
+    Ok(choice.id)
+}
+
+async fn resolve_project_arg(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project: &str,
+) -> Result<String> {
+    match get_project(client, configs, project.to_string()).await {
+        Ok(project) => {
+            fake_select("Select project", &project.name);
+            return Ok(project.id);
+        }
+        Err(RailwayError::ProjectNotFound) => {}
+        Err(RailwayError::GraphQLError(message)) if message.contains("Project not found") => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let choice = find_project_choice(project).await?;
+    fake_select("Select project", &choice.to_string());
+    Ok(choice.id)
+}
+
+async fn resolve_template_environment(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project_id: &str,
+    environment: Option<String>,
+) -> Result<Option<String>> {
+    let project = get_project(client, configs, project_id.to_string()).await?;
+    if project.deleted_at.is_some() {
+        bail!(RailwayError::ProjectDeleted);
+    }
+
+    let Some(environment) = environment else {
+        return Ok(None);
+    };
+
+    let environment = get_matched_environment(&project, environment)?;
+    fake_select("Select environment", &environment.name);
+    Ok(Some(environment.id))
+}
+
+async fn find_project_choice(project: &str) -> Result<TemplateProjectChoice> {
+    let choices = project_choices().await?;
+    let id_matches = choices
+        .iter()
+        .filter(|choice| choice.id.eq_ignore_ascii_case(project))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(choice) = single_match(id_matches, project, "project ID")? {
+        return Ok(choice);
+    }
+
+    let name_matches = choices
+        .into_iter()
+        .filter(|choice| choice.name.eq_ignore_ascii_case(project))
+        .collect::<Vec<_>>();
+
+    if let Some(choice) = single_match(name_matches, project, "project name")? {
+        return Ok(choice);
+    }
+
+    bail!("Project \"{}\" not found", project)
+}
+
+fn single_match(
+    matches: Vec<TemplateProjectChoice>,
+    input: &str,
+    kind: &str,
+) -> Result<Option<TemplateProjectChoice>> {
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => {
+            let available = matches
+                .iter()
+                .map(|choice| format!("{} ({})", choice.id, choice.workspace_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("Ambiguous {kind} \"{input}\". Use one of these project IDs: {available}");
+        }
+    }
+}
+
+async fn project_choices() -> Result<Vec<TemplateProjectChoice>> {
+    let mut choices = Vec::new();
+    for workspace in workspaces().await? {
+        let workspace_name = workspace.name().to_string();
+        choices.extend(
+            workspace
+                .projects()
+                .into_iter()
+                .filter(|project| project.deleted_at().is_none())
+                .map(|project| TemplateProjectChoice {
+                    id: project.id().to_string(),
+                    name: project.name().to_string(),
+                    workspace_name: workspace_name.clone(),
+                }),
+        );
+    }
+    Ok(choices)
+}
+
+async fn fetch_template_by_ref(
+    client: &reqwest::Client,
+    configs: &Configs,
+    template_ref: &str,
+) -> Result<TemplateDetailItem> {
+    match fetch_template(client, configs, Some(template_ref.to_string()), None).await {
+        Ok(template) => Ok(template),
+        Err(RailwayError::GraphQLError(message)) if message.contains("Template not found") => {
+            fetch_template(client, configs, None, Some(template_ref.to_string()))
+                .await
+                .map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn fetch_template(
+    client: &reqwest::Client,
+    configs: &Configs,
+    id: Option<String>,
+    code: Option<String>,
+) -> Result<TemplateDetailItem, RailwayError> {
+    let response = post_graphql::<queries::Template, _>(
+        client,
+        configs.get_backboard(),
+        queries::template::Variables { id, code },
+    )
+    .await?;
+    Ok(response.template)
+}
+
+async fn resolve_workspace_id(workspace: &str) -> Result<String> {
+    let matches = workspaces()
+        .await?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.id().eq_ignore_ascii_case(workspace)
+                || candidate.name().eq_ignore_ascii_case(workspace)
+                || candidate
+                    .team_id()
+                    .is_some_and(|team_id| team_id.eq_ignore_ascii_case(workspace))
+        })
+        .collect::<Vec<_>>();
+
+    match matches.len() {
+        0 => bail!(RailwayError::WorkspaceNotFound(workspace.to_string())),
+        1 => {
+            let workspace = matches[0].clone();
+            fake_select("Select workspace", workspace.name());
+            Ok(workspace.id().to_string())
+        }
+        _ => bail!(
+            "Workspace \"{}\" is ambiguous. Use the workspace ID.",
+            workspace
+        ),
+    }
+}
+
+fn resolve_readme(
+    readme: Option<String>,
+    readme_file: Option<PathBuf>,
+    template: &TemplateDetailItem,
+    is_updating: bool,
+) -> Result<String> {
+    if let Some(readme) = readme {
+        fake_select("Template overview", "<provided inline>");
+        return Ok(readme);
+    }
+
+    if let Some(path) = readme_file {
+        return read_readme_file(path);
+    }
+
+    if let Some(readme) = &template.readme {
+        fake_select("Template overview", "<existing template readme>");
+        return Ok(readme.clone());
+    }
+
+    if is_updating {
+        return Ok(default_readme(&template.name));
+    }
+
+    if !std::io::stdout().is_terminal() {
+        bail!("Template overview required. Use --readme-file <path> or --readme <markdown>.");
+    }
+
+    let path = prompt_text_with_placeholder_disappear("Template overview file", "README.md")?;
+    read_readme_file(PathBuf::from(path))
+}
+
+fn read_readme_file(path: PathBuf) -> Result<String> {
+    if path.as_os_str() == "-" {
+        fake_select("Template overview file", "<stdin>");
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        return Ok(input);
+    }
+
+    fake_select("Template overview file", &path.display().to_string());
+    Ok(fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read template overview from {}", path.display()))?)
+}
+
+fn validate_publish_fields(
+    category: &str,
+    description: &str,
+    readme: &str,
+    image: Option<&str>,
+    is_updating: bool,
+) -> Result<()> {
+    validate_description(description)?;
+    validate_category(category)?;
+    if !is_updating {
+        validate_readme(readme)?;
+    }
+    if let Some(image) = image {
+        validate_image(image)?;
+    }
+    Ok(())
+}
+
+fn validate_description(description: &str) -> Result<()> {
+    let len = description.trim().chars().count();
+    if len < DESCRIPTION_MIN {
+        bail!("description: Must be {DESCRIPTION_MIN} or more characters long");
+    }
+    if len > DESCRIPTION_MAX {
+        bail!("description: Must be {DESCRIPTION_MAX} or fewer characters long");
+    }
+    Ok(())
+}
+
+fn validate_category(category: &str) -> Result<()> {
+    if !TEMPLATE_CATEGORIES
+        .iter()
+        .any(|item| *item == category.trim())
+    {
+        bail!(
+            "category: Invalid category. Valid categories: {}",
+            TEMPLATE_CATEGORIES.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn validate_readme(readme: &str) -> Result<()> {
+    let len = readme.trim().chars().count();
+    if len < README_MIN {
+        bail!("readme: Must be {README_MIN} or more characters long");
+    }
+    if len > README_MAX {
+        bail!("readme: Must be {README_MAX} or fewer characters long");
+    }
+
+    let missing = REQUIRED_README_SECTIONS
+        .iter()
+        .filter(|section| !readme.contains(**section))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!("readme: Missing required sections: {}", missing.join(", "));
+    }
+
+    if DEFAULT_README_TEXT
+        .iter()
+        .any(|default_text| readme.contains(default_text))
+    {
+        bail!("readme: Please update the default text in each section.");
+    }
+
+    Ok(())
+}
+
+fn validate_image(image: &str) -> Result<()> {
+    let image = image.trim();
+    if image.is_empty() {
+        return Ok(());
+    }
+
+    let url = url::Url::parse(image).context("image: Invalid image URL")?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("image: Invalid image URL");
+    }
+
+    let path = url.path().to_lowercase();
+    if !["jpg", "jpeg", "png", "webp", "avif", "gif", "svg", "ico"]
+        .iter()
+        .any(|extension| path.ends_with(&format!(".{extension}")))
+    {
+        bail!("image: Invalid image URL");
+    }
+
+    Ok(())
+}
+
+fn short_description(name: &str) -> String {
+    format!("Deploy and Host {name} with Railway")
+}
+
+fn default_readme(name: &str) -> String {
+    format!(
+        "# Deploy and Host {name} on Railway\n\n\
+         ## About Hosting {name}\n\n\
+         ## Common Use Cases\n\n\
+         ## Dependencies for {name} Hosting\n\n\
+         ### Deployment Dependencies\n\n\
+         ## Why Deploy {name} on Railway?\n\n\
+         Railway is a singular platform to deploy your infrastructure stack. Railway will host your infrastructure so you don't have to deal with configuration, while allowing you to vertically and horizontally scale it.\n"
+    )
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn print_created_template(configs: &Configs, template: &GeneratedTemplate) {
+    println!(
+        "{} {} ({})",
+        "Created template".green().bold(),
+        template.name.bold(),
+        template.id
+    );
+    println!("Status: {}", status_label(&template.status));
+    println!();
+    println!("Edit in dashboard:");
+    println!(
+        "  {}",
+        template_editor_url(configs, &template.id)
+            .bold()
+            .underline()
+    );
+    println!();
+    println!("Publish with:");
+    println!(
+        "  railway templates publish {} --category Other --description {} --readme-file README.md",
+        shell_arg(&template.id),
+        shell_arg(&short_description(&template.name))
+    );
+}
+
+fn print_published_template(configs: &Configs, template: &PublishedTemplate, is_updating: bool) {
+    let action = if is_updating {
+        "Updated template"
+    } else {
+        "Published template"
+    };
+    println!(
+        "{} {} ({})",
+        action.green().bold(),
+        template.name.bold(),
+        template.code
+    );
+    println!("Status: {}", status_label(&template.status));
+    println!();
+    println!(
+        "{}",
+        template_url(configs, &template.code).bold().underline()
+    );
+}
+
+fn template_json(configs: &Configs, template: &GeneratedTemplate) -> serde_json::Value {
+    serde_json::json!({
+        "id": template.id,
+        "code": template.code,
+        "name": template.name,
+        "description": template.description,
+        "status": status_label(&template.status),
+        "workspaceId": template.workspace_id,
+        "editorUrl": template_editor_url(configs, &template.id),
+    })
+}
+
+fn published_template_json(configs: &Configs, template: &PublishedTemplate) -> serde_json::Value {
+    serde_json::json!({
+        "id": template.id,
+        "code": template.code,
+        "name": template.name,
+        "description": template.description,
+        "image": template.image,
+        "category": template.category,
+        "readme": template.readme,
+        "demoProjectId": template.demo_project_id,
+        "status": status_label(&template.status),
+        "workspaceId": template.workspace_id,
+        "url": template_url(configs, &template.code),
+    })
+}
+
+fn template_editor_url(configs: &Configs, template_id: &str) -> String {
+    format!(
+        "https://{}/workspace/templates/{template_id}",
+        configs.get_host()
+    )
+}
+
+fn template_url(configs: &Configs, code: &str) -> String {
+    template_url_from_host(configs.get_host(), code)
+}
+
+fn template_url_from_host(host: &str, code: &str) -> String {
+    format!("https://{host}/deploy/{code}")
+}
+
+fn status_label<T: std::fmt::Debug>(status: &T) -> String {
+    format!("{status:?}")
 }
 
 async fn search_command(args: SearchArgs) -> Result<()> {
