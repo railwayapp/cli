@@ -2553,6 +2553,7 @@ dependencies = [
  "pathdiff",
  "rand 0.8.5",
  "ratatui",
+ "regex",
  "reqwest",
  "reqwest-websocket",
  "rmcp",
