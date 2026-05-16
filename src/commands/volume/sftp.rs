@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
+use russh_sftp::client::fs::Metadata;
 use thiserror::Error;
 
 pub(crate) struct VolumeSftp {
@@ -265,32 +266,14 @@ impl VolumeSftp {
         }
     }
 
-    pub(crate) fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
-        if local_path.is_dir() {
-            let filename = remote_path
-                .rsplit('/')
-                .find(|segment| !segment.is_empty())
-                .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
-            Ok(local_path.join(filename))
-        } else {
-            Ok(local_path.to_path_buf())
-        }
-    }
-
-    pub(crate) fn upload_destination(local_path: &Path, remote_path: &str) -> Result<String> {
-        if remote_path.ends_with('/') {
-            let filename = local_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Could not infer a remote filename from local path {}",
-                        local_path.display()
-                    )
-                })?;
-            Ok(format!("{remote_path}{filename}"))
-        } else {
-            Ok(remote_path.to_string())
+    pub(crate) async fn stat(&mut self, remote_path: &str) -> Result<Metadata> {
+        match self.stat_once(remote_path).await {
+            Ok(metadata) => Ok(metadata),
+            Err(_err) if self.is_disconnected() => self
+                .stat_once(remote_path)
+                .await
+                .with_context(|| format!("Failed to stat {remote_path} after reconnect")),
+            Err(err) => Err(err),
         }
     }
 
@@ -427,6 +410,14 @@ impl VolumeSftp {
         Ok(entries)
     }
 
+    async fn stat_once(&mut self, remote_path: &str) -> Result<Metadata> {
+        let remote_path = self.mount_prefixed_path(remote_path);
+        let sftp = self.connect().await?;
+        sftp.metadata(&remote_path)
+            .await
+            .with_context(|| format!("Failed to stat remote path {remote_path}"))
+    }
+
     fn join_remote_path(parent: &str, name: &str) -> String {
         let parent = parent.trim_end_matches('/');
         if parent.is_empty() || parent == "/" {
@@ -456,6 +447,39 @@ impl VolumeSftp {
             mount_path.to_string()
         } else {
             format!("{mount_path}/{path}")
+        }
+    }
+
+    // When downloading to a directory, infer the filename from the remote path.
+    // Example: downloading /data/app.log into ./logs/ writes ./logs/app.log.
+    fn download_destination(remote_path: &str, local_path: &Path) -> Result<PathBuf> {
+        if !local_path.is_dir() {
+            Ok(local_path.to_path_buf())
+        } else {
+            let filename = remote_path
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
+            Ok(local_path.join(filename))
+        }
+    }
+
+    // When uploading to a directory, infer the filename from the local path.
+    // Example: uploading ./app.log into /data/ writes /data/app.log.
+    fn upload_destination(local_path: &Path, remote_path: &str) -> Result<String> {
+        if !remote_path.ends_with('/') {
+            Ok(remote_path.to_string())
+        } else {
+            let filename = local_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Could not infer a remote filename from local path {}",
+                        local_path.display()
+                    )
+                })?;
+            Ok(format!("{remote_path}{filename}"))
         }
     }
 }
