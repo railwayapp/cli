@@ -51,6 +51,7 @@ const MAX_LIMIT: i64 = 50;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const RESULT_PADDING: &str = "  ";
+
 const DESCRIPTION_MIN: usize = 25;
 const DESCRIPTION_MAX: usize = 75;
 const README_MIN: usize = 250;
@@ -85,6 +86,7 @@ const DEFAULT_README_TEXT: &[&str] = &[
     "[Include any external links",
     "[Include Github",
 ];
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "avif", "gif", "svg", "ico"];
 
 #[derive(Clone, Copy)]
 enum TerminalTheme {
@@ -282,7 +284,10 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let template = fetch_template_by_ref(&client, &configs, &args.template).await?;
-    let is_updating = status_label(&template.status) == "PUBLISHED";
+    let is_updating = matches!(
+        &template.status,
+        queries::template::TemplateStatus::PUBLISHED
+    );
 
     let category = args
         .category
@@ -624,7 +629,7 @@ fn validate_publish_fields(
 }
 
 fn validate_description(description: &str) -> Result<()> {
-    let len = description.trim().chars().count();
+    let len = js_string_len(description.trim());
     if len < DESCRIPTION_MIN {
         bail!("description: Must be {DESCRIPTION_MIN} or more characters long");
     }
@@ -648,7 +653,7 @@ fn validate_category(category: &str) -> Result<()> {
 }
 
 fn validate_readme(readme: &str) -> Result<()> {
-    let len = readme.trim().chars().count();
+    let len = js_string_len(readme.trim());
     if len < README_MIN {
         bail!("readme: Must be {README_MIN} or more characters long");
     }
@@ -681,20 +686,28 @@ fn validate_image(image: &str) -> Result<()> {
         return Ok(());
     }
 
-    let url = url::Url::parse(image).context("image: Invalid image URL")?;
-    if !matches!(url.scheme(), "http" | "https") {
+    let path = if let Some(path) = image.strip_prefix("http://") {
+        path
+    } else if let Some(path) = image.strip_prefix("https://") {
+        path
+    } else {
         bail!("image: Invalid image URL");
-    }
+    };
 
-    let path = url.path().to_lowercase();
-    if !["jpg", "jpeg", "png", "webp", "avif", "gif", "svg", "ico"]
-        .iter()
-        .any(|extension| path.ends_with(&format!(".{extension}")))
+    if image.contains(['\n', '\r'])
+        || !IMAGE_EXTENSIONS.iter().any(|extension| {
+            let suffix = format!(".{extension}");
+            image.ends_with(&suffix) && path.len() > suffix.len()
+        })
     {
         bail!("image: Invalid image URL");
     }
 
     Ok(())
+}
+
+fn js_string_len(value: &str) -> usize {
+    value.encode_utf16().count()
 }
 
 fn short_description(name: &str) -> String {
