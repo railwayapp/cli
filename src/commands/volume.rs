@@ -198,6 +198,10 @@ structstruck::strike! {
             /// Replace REMOTE_PATH if it already exists
             #[clap(long)]
             overwrite: bool,
+
+            /// Concurrent file uploads when LOCAL_PATH is a directory
+            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
+            concurrency: usize,
         })
 
         /// List files in a volume directory
@@ -363,6 +367,7 @@ pub async fn command(args: Args) -> Result<()> {
                 u.remote_path,
                 u.json,
                 u.overwrite,
+                u.concurrency,
             )
             .await?
         }
@@ -511,7 +516,7 @@ async fn download_dir(
         })?;
     let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
     volume_sftp.set_transfer_concurrency(concurrency);
-    volume_sftp
+    let downloaded_path = volume_sftp
         .download_dir(&remote_path, &local_path, overwrite)
         .await?;
 
@@ -526,7 +531,7 @@ async fn download_dir(
                 },
                 "serviceInstanceId": service_instance.id,
                 "remotePath": remote_path,
-                "localPath": local_path,
+                "localPath": downloaded_path,
                 "overwritten": overwrite,
             }))?
         );
@@ -609,6 +614,7 @@ async fn upload(
     remote_path: String,
     json: bool,
     overwrite: bool,
+    concurrency: usize,
 ) -> Result<()> {
     let is_terminal = std::io::stdout().is_terminal();
     let volume = select_volume(
@@ -633,6 +639,7 @@ async fn upload(
             )
         })?;
     let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
+    volume_sftp.set_transfer_concurrency(concurrency);
     let uploaded_path = volume_sftp
         .upload(&local_path, &remote_path, overwrite)
         .await?;
