@@ -41,6 +41,23 @@ pub struct Args {
     json: bool,
 }
 
+impl Args {
+    pub(crate) fn for_service_link(
+        project: Option<String>,
+        environment: Option<String>,
+        service: Option<String>,
+    ) -> Self {
+        Self {
+            environment,
+            project,
+            service,
+            team: None,
+            workspace: None,
+            json: false,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LinkOutput {
@@ -55,6 +72,14 @@ struct LinkOutput {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    link_command(args, false).await
+}
+
+pub(crate) async fn command_requiring_service(args: Args) -> Result<()> {
+    link_command(args, true).await
+}
+
+async fn link_command(args: Args, require_service: bool) -> Result<()> {
     let mut configs = Configs::new()?;
 
     // Support both team (deprecated) and workspace arguments
@@ -84,7 +109,7 @@ pub async fn command(args: Args) -> Result<()> {
     let environment_instances =
         get_environment_instances(&client, &configs, &project.id, &environment.id).await?;
     let service_ids = get_service_ids_in_env(&environment_instances);
-    let service = select_service(&project, &service_ids, args.service)?;
+    let service = select_service(&project, &service_ids, args.service, require_service)?;
 
     configs.link_project(
         project.id.clone(),
@@ -128,6 +153,7 @@ fn select_service(
     project: &NormalisedProject,
     service_ids: &HashSet<String>,
     service: Option<String>,
+    require_service: bool,
 ) -> Result<Option<NormalisedService>, anyhow::Error> {
     let useful_services = project
         .services
@@ -164,7 +190,11 @@ fn select_service(
                 );
             }
         } else if std::io::stdout().is_terminal() {
-            prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+            if require_service {
+                Some(prompt_options("Select a service", useful_services)?)
+            } else {
+                prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+            }
         } else if useful_services.len() == 1 {
             let svc = useful_services.into_iter().next().unwrap();
             eprintln!("No service specified — auto-selecting \"{}\"", svc.name);
@@ -180,6 +210,13 @@ fn select_service(
             } else {
                 String::new()
             };
+            if require_service {
+                bail!(
+                    "Multiple services available — use --service <name> to link one.\nAvailable: {}{}",
+                    names.join(", "),
+                    suffix
+                );
+            }
             eprintln!(
                 "Multiple services available — use --service <name> to link one.\nAvailable: {}{}",
                 names.join(", "),
@@ -188,6 +225,9 @@ fn select_service(
             None
         }
     } else {
+        if require_service {
+            bail!("No services found");
+        }
         None
     };
     Ok(service)

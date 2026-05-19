@@ -12,7 +12,7 @@ use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
 use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
-const SSH_HOST: &str = "ssh.railway.com";
+pub(super) const SSH_HOST: &str = "ssh.railway.com";
 
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
