@@ -10,6 +10,7 @@ use crate::controllers::{
 use super::Args;
 
 pub struct SshConnectParams {
+    pub project_id: String,
     pub environment_id: String,
     pub service_id: String,
     pub service_name: String,
@@ -84,6 +85,7 @@ pub async fn get_ssh_connect_params(
     };
 
     Ok(SshConnectParams {
+        project_id: project.id,
         environment_id,
         service_id,
         service_name,
