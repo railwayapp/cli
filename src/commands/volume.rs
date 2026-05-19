@@ -9,6 +9,7 @@ use crate::{
     controllers::volume_browser::{self, VolumeBrowserParams},
     errors::RailwayError,
     queries::project::ProjectProject,
+    telemetry,
     util::{
         progress::create_spinner,
         prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
@@ -790,6 +791,13 @@ async fn delete_file(
     yes: bool,
     json: bool,
 ) -> Result<()> {
+    if telemetry::is_agent() {
+        bail!(
+            "{}",
+            agent_file_delete_refusal(volume.as_deref(), &remote_path)
+        );
+    }
+
     let is_terminal = std::io::stdout().is_terminal();
     let volume = select_volume(
         project,
@@ -851,6 +859,33 @@ async fn delete_file(
     }
 
     Ok(())
+}
+
+fn agent_file_delete_refusal(volume: Option<&str>, remote_path: &str) -> String {
+    let command = human_delete_file_command(volume, remote_path);
+    format!("Refusing: agents cannot delete files. Ask a human to run:\n\n  {command}")
+}
+
+fn human_delete_file_command(volume: Option<&str>, remote_path: &str) -> String {
+    let mut command = "railway volume delete-file".to_string();
+    if let Some(volume) = volume {
+        command.push_str(" --volume ");
+        command.push_str(&shell_quote(volume));
+    }
+    command.push(' ');
+    command.push_str(&shell_quote(remote_path));
+    command
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 async fn rename_file(
@@ -1475,5 +1510,30 @@ struct Volume(ProjectVolumeInstanceNode);
 impl Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.volume.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{agent_file_delete_refusal, human_delete_file_command};
+
+    #[test]
+    fn agent_file_delete_refusal_includes_human_command() {
+        let message = agent_file_delete_refusal(Some("data volume"), "/data/secrets.txt");
+
+        assert!(message.contains("Refusing: agents cannot delete files."));
+        assert!(
+            message.contains("railway volume delete-file --volume 'data volume' /data/secrets.txt")
+        );
+    }
+
+    #[test]
+    fn human_delete_file_command_quotes_remote_path() {
+        let command = human_delete_file_command(Some("data"), "/data/file with spaces.txt");
+
+        assert_eq!(
+            command,
+            "railway volume delete-file --volume data '/data/file with spaces.txt'"
+        );
     }
 }
