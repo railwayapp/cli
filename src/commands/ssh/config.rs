@@ -5,13 +5,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
+use is_terminal::IsTerminal;
 use regex::{NoExpand, Regex};
 use tempfile::NamedTempFile;
 
-use crate::{client::GQLClient, config::Configs};
+use crate::{client::GQLClient, config::Configs, errors::RailwayError};
 
 use super::{common::get_ssh_connect_params, native};
 
@@ -22,7 +23,8 @@ pub struct Args {
     #[clap(short, long)]
     project: Option<String>,
 
-    /// Service to connect to (defaults to linked service)
+    /// Service to connect to (defaults to linked service).
+    /// With --remove, this can remove a local marker by service name without resolving Railway.
     #[clap(short, long)]
     service: Option<String>,
 
@@ -34,16 +36,16 @@ pub struct Args {
     #[clap(long)]
     alias: Option<String>,
 
-    /// Path to identity (private key) file to use
+    /// Emit an IdentityFile directive for this private key path
     #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
     identity_file: Option<PathBuf>,
 
-    /// Upsert the generated block into the SSH config file
-    #[clap(long)]
+    /// Insert or update the generated block in the SSH config file
+    #[clap(long, conflicts_with = "remove")]
     write: bool,
 
     /// Remove the generated block from the SSH config file
-    #[clap(long)]
+    #[clap(long, conflicts_with = "write")]
     remove: bool,
 
     /// SSH config file to update
@@ -58,9 +60,7 @@ struct ResolvedConfig {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    if args.write && args.remove {
-        bail!("--write and --remove cannot be used together");
-    }
+    ensure_default_target_has_linked_service(&args).await?;
 
     if args.remove {
         let service_name = if let Some(service_name) = args.service.as_deref() {
@@ -101,6 +101,35 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn ensure_default_target_has_linked_service(args: &Args) -> Result<()> {
+    if args.remove || args.project.is_some() || args.environment.is_some() || args.service.is_some()
+    {
+        return Ok(());
+    }
+    if !std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+
+    let configs = Configs::new()?;
+    match configs.get_linked_project().await {
+        Ok(linked_project) if linked_project.service.is_some() => Ok(()),
+        Ok(_) => crate::commands::service::link_current_project_service(None).await,
+        Err(error) => {
+            if error
+                .downcast_ref::<RailwayError>()
+                .is_some_and(|error| matches!(error, RailwayError::NoLinkedProject))
+            {
+                crate::commands::link::command_requiring_service(
+                    crate::commands::link::Args::for_service_link(None, None, None),
+                )
+                .await
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 async fn resolve(args: Args) -> Result<ResolvedConfig> {
@@ -169,7 +198,7 @@ fn render_config_block(
     .expect("writing to String cannot fail");
     writeln!(
         block,
-        "# If you delete and re-add this service, re-run this command."
+        "# If you rename, delete, or re-add this service, re-run this command."
     )
     .expect("writing to String cannot fail");
     writeln!(block, "Host {alias}").expect("writing to String cannot fail");
@@ -194,7 +223,7 @@ fn render_config_block(
 
 fn upsert_config_block(path: &Path, service_name: &str, block: &str) -> Result<()> {
     let existing = read_config(path)?;
-    let pattern = config_block_regex(service_name, false)?;
+    let pattern = config_block_regex_with_case(service_name, false, true)?;
     let updated = if pattern.is_match(&existing) {
         pattern.replace(&existing, NoExpand(block)).into_owned()
     } else {
@@ -227,13 +256,10 @@ fn read_config(path: &Path) -> Result<String> {
 }
 
 fn write_config(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-        secure_ssh_dir(parent)?;
-    }
+    let parent = writable_parent(path);
+    fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
+    secure_ssh_dir(parent)?;
 
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut temp_file = NamedTempFile::new_in(parent)
         .with_context(|| format!("Failed to create temporary file in {}", parent.display()))?;
     temp_file
@@ -251,6 +277,12 @@ fn write_config(path: &Path, contents: &str) -> Result<()> {
     secure_file(path)?;
 
     Ok(())
+}
+
+fn writable_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 #[cfg(unix)]
@@ -296,10 +328,6 @@ fn append_config_block(mut existing: String, block: &str) -> String {
 
     existing.push_str(block);
     existing
-}
-
-fn config_block_regex(service_name: &str, include_preceding_blank: bool) -> Result<Regex> {
-    config_block_regex_with_case(service_name, include_preceding_blank, false)
 }
 
 fn config_block_regex_with_case(
@@ -415,7 +443,7 @@ mod tests {
 
         let old_block = render_config_block("API", "railway-api", "old-id", None, "2026-05-17");
         let new_block = render_config_block(
-            "API",
+            "api",
             "railway-api",
             "new-id",
             Some(Path::new("/Users/me/My Keys/id_ed25519")),
@@ -423,14 +451,14 @@ mod tests {
         );
 
         upsert_config_block(&path, "API", &old_block).unwrap();
-        upsert_config_block(&path, "API", &new_block).unwrap();
-        upsert_config_block(&path, "API", &new_block).unwrap();
+        upsert_config_block(&path, "api", &new_block).unwrap();
+        upsert_config_block(&path, "api", &new_block).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
 
-        assert_eq!(contents.matches("# BEGIN railway:API").count(), 1);
+        assert_eq!(contents.matches("# BEGIN railway:").count(), 1);
         assert!(contents.starts_with("Host existing\n    HostName example.com\n\n"));
-        assert!(contents.contains("# BEGIN railway:API ----- written 2026-05-18"));
+        assert!(contents.contains("# BEGIN railway:api ----- written 2026-05-18"));
         assert!(contents.contains("Host railway-api\n"));
         assert!(contents.contains("    HostName ssh.railway.com\n"));
         assert!(contents.contains("    User new-id\n"));
