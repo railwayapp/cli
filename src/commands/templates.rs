@@ -31,7 +31,11 @@ use crate::{
     errors::RailwayError,
     util::{
         progress::create_spinner_if,
-        prompt::{fake_select, prompt_options, prompt_text_with_placeholder_disappear},
+        prompt::{
+            fake_select, prompt_confirm_with_default, prompt_options,
+            prompt_text_with_placeholder_disappear, prompt_text_with_placeholder_if_blank,
+        },
+        two_factor::validate_two_factor_if_enabled,
     },
     workspace::workspaces_with_client,
 };
@@ -87,6 +91,11 @@ const DEFAULT_README_TEXT: &[&str] = &[
     "[Include Github",
 ];
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "avif", "gif", "svg", "ico"];
+const GENERATE_SOURCE_PROJECT: &str = "Entire project (dashboard default)";
+const GENERATE_SOURCE_ENVIRONMENT: &str = "Specific environment";
+const README_SOURCE_EXISTING: &str = "Use existing README";
+const README_SOURCE_GENERATED: &str = "Use generated README";
+const README_SOURCE_FILE: &str = "Read from file";
 
 #[derive(Clone, Copy)]
 enum TerminalTheme {
@@ -97,7 +106,7 @@ enum TerminalTheme {
 /// Discover Railway templates
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
+    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates unpublish template-code --yes --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -116,6 +125,9 @@ enum Commands {
 
     /// Publish an unpublished template to the marketplace
     Publish(PublishArgs),
+
+    /// Unpublish a published template from the marketplace
+    Unpublish(UnpublishArgs),
 }
 
 #[derive(Parser, Clone)]
@@ -146,7 +158,7 @@ struct SearchArgs {
 
 #[derive(Parser, Clone)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates create --json\n  railway templates create --project project-id --json\n  railway templates create --project project-id --environment production --json\n\nAutomation notes:\n  This matches the dashboard Generate Template action: it creates an unpublished template from a project.\n  By default generation is project-level. Pass --environment only when you intentionally want to generate from one environment."
+    after_help = "Examples:\n\n  railway templates create --json\n  railway templates create --project project-id --json\n  railway templates create --project project-id --environment production --json\n\nAutomation notes:\n  This matches the dashboard Generate Template action: it creates an unpublished template from a project.\n  By default generation is project-level. Pass --environment only when you intentionally want to generate from one environment.\n  In interactive mode, omitted project and source choices are prompted."
 )]
 struct CreateArgs {
     /// Project ID or name. Defaults to the linked project.
@@ -164,11 +176,11 @@ struct CreateArgs {
 
 #[derive(Parser, Clone)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates publish template-id --category AI/ML --description \"Deploy and Host My Agent with Railway\" --readme-file - --json\n\nValid categories:\n  AI/ML, Analytics, Authentication, Automation, Blogs, Bots, CMS,\n  Observability, Other, Starters, Storage, Queues\n\nAutomation notes:\n  First publish requires a template overview via --readme-file or --readme.\n  Use the template ID returned by `railway templates create --json`."
+    after_help = "Examples:\n\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates publish template-id --category AI/ML --description \"Deploy and Host My Agent with Railway\" --readme-file - --json\n\nValid categories:\n  AI/ML, Analytics, Authentication, Automation, Blogs, Bots, CMS,\n  Observability, Other, Starters, Storage, Queues\n\nAutomation notes:\n  First publish requires a template overview via --readme-file or --readme.\n  In interactive mode, omitted template and metadata fields are prompted.\n  Use the template ID returned by `railway templates create --json`."
 )]
 struct PublishArgs {
     /// Template ID or code
-    template: String,
+    template: Option<String>,
 
     /// Marketplace category
     #[arg(long)]
@@ -199,6 +211,27 @@ struct PublishArgs {
     workspace: Option<String>,
 
     /// Print the published template as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser, Clone)]
+#[clap(
+    after_help = "Examples:\n\n  railway templates unpublish template-code\n  railway templates unpublish template-id --yes --json\n\nAutomation notes:\n  Non-interactive unpublish requires --yes.\n  In interactive mode, omitted template is prompted."
+)]
+struct UnpublishArgs {
+    /// Template ID or code
+    template: Option<String>,
+
+    /// Skip confirmation dialog
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
+
+    /// 2FA code for verification when required by the current auth session
+    #[arg(long = "2fa-code")]
+    two_factor_code: Option<String>,
+
+    /// Print the unpublished template result as JSON
     #[arg(long)]
     json: bool,
 }
@@ -238,15 +271,23 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Search(args) => search_command(args).await,
         Commands::Create(args) => create_command(args).await,
         Commands::Publish(args) => publish_command(args).await,
+        Commands::Unpublish(args) => unpublish_command(args).await,
     }
 }
 
 async fn create_command(args: CreateArgs) -> Result<()> {
+    let interactive = is_interactive_output(args.json);
     let configs = Configs::new()?;
     let client = GQLClient::new_user_authorized(&configs)?;
-    let project_id = resolve_template_project(&client, &configs, args.project).await?;
-    let environment_id =
-        resolve_template_environment(&client, &configs, &project_id, args.environment).await?;
+    let project_id = resolve_template_project(&client, &configs, args.project, interactive).await?;
+    let environment_id = resolve_template_environment(
+        &client,
+        &configs,
+        &project_id,
+        args.environment,
+        interactive,
+    )
+    .await?;
 
     let spinner = create_spinner_if(!args.json, "Creating template...".to_string());
     let response = post_graphql::<mutations::TemplateGenerate, _>(
@@ -281,38 +322,40 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
         bail!("Use either --readme or --readme-file, not both");
     }
 
+    let interactive = is_interactive_output(args.json);
+    let template_ref = resolve_template_ref(args.template.clone(), interactive, "publish")?;
     let configs = Configs::new()?;
     let client = GQLClient::new_user_authorized(&configs)?;
-    let template = fetch_template_by_ref(&client, &configs, &args.template).await?;
+    let template = fetch_template_by_ref(&client, &configs, &template_ref).await?;
     let is_updating = matches!(
         &template.status,
         queries::template::TemplateStatus::PUBLISHED
     );
 
-    let category = args
-        .category
-        .clone()
-        .or_else(|| template.category.clone())
-        .unwrap_or_else(|| {
-            fake_select("Select category", "Other");
-            "Other".to_string()
-        });
-    let description = args
-        .description
-        .clone()
-        .or_else(|| template.description.clone())
-        .unwrap_or_else(|| short_description(&template.name));
-    let readme = resolve_readme(args.readme, args.readme_file, &template, is_updating)?;
-    let image = args
-        .image
-        .clone()
-        .or_else(|| template.image.clone())
-        .and_then(non_empty_string);
-    let demo_project_id = args
-        .demo_project
-        .clone()
-        .or_else(|| template.demo_project_id.clone())
-        .and_then(non_empty_string);
+    let category = resolve_publish_category(args.category.clone(), &template, interactive)?;
+    let description =
+        resolve_publish_description(args.description.clone(), &template, interactive)?;
+    let readme = resolve_readme(
+        args.readme,
+        args.readme_file,
+        &template,
+        is_updating,
+        interactive,
+    )?;
+    let image = resolve_optional_publish_field(
+        args.image.clone(),
+        template.image.clone(),
+        interactive,
+        "Image URL",
+        "<none>",
+    )?;
+    let demo_project_id = resolve_optional_publish_field(
+        args.demo_project.clone(),
+        template.demo_project_id.clone(),
+        interactive,
+        "Public demo project ID",
+        "<none>",
+    )?;
     let workspace_id = match args.workspace {
         Some(workspace) => Some(resolve_workspace_id(&client, &configs, &workspace).await?),
         None => template.workspace_id.clone(),
@@ -325,6 +368,21 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
         image.as_deref(),
         is_updating,
     )?;
+
+    if interactive
+        && !confirm_publish(
+            &template,
+            &category,
+            &description,
+            &readme,
+            image.as_deref(),
+            demo_project_id.as_deref(),
+            is_updating,
+        )?
+    {
+        println!("Publish cancelled.");
+        return Ok(());
+    }
 
     let spinner = create_spinner_if(!args.json, "Publishing template...".to_string());
     let response = post_graphql::<mutations::TemplatePublish, _>(
@@ -359,6 +417,72 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
     Ok(())
 }
 
+async fn unpublish_command(args: UnpublishArgs) -> Result<()> {
+    let interactive = is_interactive_output(args.json);
+    let template_ref = resolve_template_ref(args.template.clone(), interactive, "unpublish")?;
+    let configs = Configs::new()?;
+    let client = GQLClient::new_user_authorized(&configs)?;
+    let template = fetch_template_by_ref(&client, &configs, &template_ref).await?;
+
+    if !args.yes {
+        if !interactive {
+            bail!(
+                "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+            );
+        }
+
+        let confirmed = prompt_confirm_with_default(
+            format!(
+                r#"Unpublish template "{}" from the marketplace?"#,
+                template.name.red()
+            )
+            .as_str(),
+            false,
+        )?;
+        if !confirmed {
+            println!("Unpublish cancelled.");
+            return Ok(());
+        }
+    }
+
+    validate_two_factor_if_enabled(&client, &configs, interactive, args.two_factor_code).await?;
+
+    let spinner = create_spinner_if(!args.json, "Unpublishing template...".to_string());
+    let response = post_graphql::<mutations::TemplateUnpublish, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::template_unpublish::Variables {
+            id: template.id.clone(),
+        },
+    )
+    .await?;
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": template.id,
+                "code": template.code,
+                "name": template.name,
+                "unpublished": response.template_unpublish,
+            }))?
+        );
+    } else {
+        println!(
+            "{} {} ({})",
+            "Unpublished template".green().bold(),
+            template.name.bold(),
+            template.code
+        );
+    }
+
+    Ok(())
+}
+
 #[derive(Clone)]
 struct TemplateProjectChoice {
     id: String,
@@ -372,10 +496,23 @@ impl std::fmt::Display for TemplateProjectChoice {
     }
 }
 
+#[derive(Clone)]
+struct TemplateEnvironmentChoice {
+    id: String,
+    name: String,
+}
+
+impl std::fmt::Display for TemplateEnvironmentChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
 async fn resolve_template_project(
     client: &reqwest::Client,
     configs: &Configs,
     project: Option<String>,
+    interactive: bool,
 ) -> Result<String> {
     if let Some(project) = project {
         return resolve_project_arg(client, configs, &project).await;
@@ -392,7 +529,7 @@ async fn resolve_template_project(
         return Ok(linked_project.project);
     }
 
-    if !std::io::stdout().is_terminal() {
+    if !interactive {
         bail!("Project required in non-interactive mode. Use --project <id or name>.");
     }
 
@@ -430,19 +567,56 @@ async fn resolve_template_environment(
     configs: &Configs,
     project_id: &str,
     environment: Option<String>,
+    interactive: bool,
 ) -> Result<Option<String>> {
     let project = get_project(client, configs, project_id.to_string()).await?;
     if project.deleted_at.is_some() {
         bail!(RailwayError::ProjectDeleted);
     }
 
-    let Some(environment) = environment else {
-        return Ok(None);
-    };
+    if let Some(environment) = environment {
+        let environment = get_matched_environment(&project, environment)?;
+        fake_select("Select environment", &environment.name);
+        return Ok(Some(environment.id));
+    }
 
-    let environment = get_matched_environment(&project, environment)?;
-    fake_select("Select environment", &environment.name);
-    Ok(Some(environment.id))
+    if !interactive {
+        return Ok(None);
+    }
+
+    let source = prompt_options(
+        "Generate source",
+        vec![
+            GENERATE_SOURCE_PROJECT.to_string(),
+            GENERATE_SOURCE_ENVIRONMENT.to_string(),
+        ],
+    )?;
+    if source == GENERATE_SOURCE_PROJECT {
+        return Ok(None);
+    }
+
+    Ok(Some(prompt_template_environment(&project)?))
+}
+
+fn prompt_template_environment(project: &queries::RailwayProject) -> Result<String> {
+    let all_environments = &project.environments.edges;
+    let environments = all_environments
+        .iter()
+        .filter(|environment| environment.node.can_access && environment.node.deleted_at.is_none())
+        .map(|environment| TemplateEnvironmentChoice {
+            id: environment.node.id.clone(),
+            name: environment.node.name.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    if environments.is_empty() {
+        if all_environments.is_empty() {
+            bail!("Project has no environments");
+        }
+        bail!("All environments in this project are restricted or deleted");
+    }
+
+    Ok(prompt_options("Select environment", environments)?.id)
 }
 
 async fn find_project_choice(
@@ -576,11 +750,78 @@ async fn resolve_workspace_id(
     }
 }
 
+fn resolve_template_ref(
+    template: Option<String>,
+    interactive: bool,
+    action: &str,
+) -> Result<String> {
+    if let Some(template) = template.and_then(non_empty_string) {
+        return Ok(template);
+    }
+
+    if !interactive {
+        bail!("Template required in non-interactive mode. Pass a template ID or code to {action}.");
+    }
+
+    let template =
+        prompt_text_with_placeholder_disappear("Template ID or code", "template-id-or-code")?;
+    non_empty_string(template).with_context(|| "Template ID or code is required")
+}
+
+fn resolve_publish_category(
+    category: Option<String>,
+    template: &TemplateDetailItem,
+    interactive: bool,
+) -> Result<String> {
+    if let Some(category) = category.and_then(non_empty_string) {
+        return Ok(category);
+    }
+
+    let default = template
+        .category
+        .clone()
+        .and_then(non_empty_string)
+        .filter(|category| is_template_category(category))
+        .unwrap_or_else(|| "Other".to_string());
+
+    if interactive {
+        return prompt_options("Select category", category_options(&default));
+    }
+
+    fake_select("Select category", &default);
+    Ok(default)
+}
+
+fn resolve_publish_description(
+    description: Option<String>,
+    template: &TemplateDetailItem,
+    interactive: bool,
+) -> Result<String> {
+    if let Some(description) = description.and_then(non_empty_string) {
+        return Ok(description);
+    }
+
+    let default = template
+        .description
+        .clone()
+        .and_then(non_empty_string)
+        .unwrap_or_else(|| short_description(&template.name));
+
+    if interactive {
+        let description =
+            prompt_text_with_placeholder_if_blank("Short description", &default, &default)?;
+        return Ok(non_empty_string(description).unwrap_or(default));
+    }
+
+    Ok(default)
+}
+
 fn resolve_readme(
     readme: Option<String>,
     readme_file: Option<PathBuf>,
     template: &TemplateDetailItem,
     is_updating: bool,
+    interactive: bool,
 ) -> Result<String> {
     if let Some(readme) = readme {
         fake_select("Template overview", "<provided inline>");
@@ -591,20 +832,66 @@ fn resolve_readme(
         return read_readme_file(path);
     }
 
-    if let Some(readme) = &template.readme {
+    let existing_readme = template.readme.as_ref().and_then(|readme| {
+        if readme.trim().is_empty() {
+            None
+        } else {
+            Some(readme.clone())
+        }
+    });
+
+    if interactive {
+        if let Some(existing_readme) = existing_readme {
+            let choice = prompt_options(
+                "Template overview",
+                vec![
+                    README_SOURCE_EXISTING.to_string(),
+                    README_SOURCE_FILE.to_string(),
+                ],
+            )?;
+            if choice == README_SOURCE_EXISTING {
+                return Ok(existing_readme);
+            }
+            return prompt_readme_file();
+        }
+
+        if is_updating {
+            let choice = prompt_options(
+                "Template overview",
+                vec![
+                    README_SOURCE_GENERATED.to_string(),
+                    README_SOURCE_FILE.to_string(),
+                ],
+            )?;
+            if choice == README_SOURCE_GENERATED {
+                return Ok(default_readme(&template.name));
+            }
+            return prompt_readme_file();
+        }
+
+        return prompt_readme_file();
+    }
+
+    if let Some(readme) = existing_readme {
         fake_select("Template overview", "<existing template readme>");
-        return Ok(readme.clone());
+        return Ok(readme);
     }
 
     if is_updating {
         return Ok(default_readme(&template.name));
     }
 
-    if !std::io::stdout().is_terminal() {
+    if !interactive {
         bail!("Template overview required. Use --readme-file <path> or --readme <markdown>.");
     }
 
-    let path = prompt_text_with_placeholder_disappear("Template overview file", "README.md")?;
+    prompt_readme_file()
+}
+
+fn prompt_readme_file() -> Result<String> {
+    let path =
+        prompt_text_with_placeholder_if_blank("Template overview file", "README.md", "README.md")?;
+    let path = non_empty_string(path).unwrap_or_else(|| "README.md".to_string());
     read_readme_file(PathBuf::from(path))
 }
 
@@ -619,6 +906,32 @@ fn read_readme_file(path: PathBuf) -> Result<String> {
     fake_select("Template overview file", &path.display().to_string());
     Ok(fs::read_to_string(&path)
         .with_context(|| format!("Failed to read template overview from {}", path.display()))?)
+}
+
+fn resolve_optional_publish_field(
+    value: Option<String>,
+    existing: Option<String>,
+    interactive: bool,
+    message: &str,
+    empty_placeholder: &str,
+) -> Result<Option<String>> {
+    if let Some(value) = value {
+        return Ok(non_empty_string(value));
+    }
+
+    let existing = existing.and_then(non_empty_string);
+    if !interactive {
+        return Ok(existing);
+    }
+
+    let default = existing.unwrap_or_default();
+    let placeholder = if default.is_empty() {
+        empty_placeholder
+    } else {
+        &default
+    };
+    let value = prompt_text_with_placeholder_if_blank(message, placeholder, &default)?;
+    Ok(non_empty_string(value).or_else(|| non_empty_string(default)))
 }
 
 fn validate_publish_fields(
@@ -639,6 +952,33 @@ fn validate_publish_fields(
     Ok(())
 }
 
+fn confirm_publish(
+    template: &TemplateDetailItem,
+    category: &str,
+    description: &str,
+    readme: &str,
+    image: Option<&str>,
+    demo_project_id: Option<&str>,
+    is_updating: bool,
+) -> Result<bool> {
+    println!();
+    println!("Review template:");
+    println!("  Template: {}", template.name);
+    println!("  Category: {category}");
+    println!("  Description: {description}");
+    println!("  README: {} characters", js_string_len(readme));
+    println!("  Image: {}", image.unwrap_or("none"));
+    println!("  Demo project: {}", demo_project_id.unwrap_or("none"));
+    println!();
+
+    let message = if is_updating {
+        "Update template info?"
+    } else {
+        "Publish template to the marketplace?"
+    };
+    prompt_confirm_with_default(message, true)
+}
+
 fn validate_description(description: &str) -> Result<()> {
     let len = js_string_len(description.trim());
     if len < DESCRIPTION_MIN {
@@ -651,16 +991,30 @@ fn validate_description(description: &str) -> Result<()> {
 }
 
 fn validate_category(category: &str) -> Result<()> {
-    if !TEMPLATE_CATEGORIES
-        .iter()
-        .any(|item| *item == category.trim())
-    {
+    if !is_template_category(category) {
         bail!(
             "category: Invalid category. Valid categories: {}",
             TEMPLATE_CATEGORIES.join(", ")
         );
     }
     Ok(())
+}
+
+fn is_template_category(category: &str) -> bool {
+    TEMPLATE_CATEGORIES
+        .iter()
+        .any(|item| *item == category.trim())
+}
+
+fn category_options(default: &str) -> Vec<String> {
+    let mut options = vec![default.to_string()];
+    options.extend(
+        TEMPLATE_CATEGORIES
+            .iter()
+            .filter(|category| **category != default)
+            .map(|category| category.to_string()),
+    );
+    options
 }
 
 fn validate_readme(readme: &str) -> Result<()> {
@@ -719,6 +1073,10 @@ fn validate_image(image: &str) -> Result<()> {
 
 fn js_string_len(value: &str) -> usize {
     value.encode_utf16().count()
+}
+
+fn is_interactive_output(json: bool) -> bool {
+    std::io::stdout().is_terminal() && !json
 }
 
 fn short_description(name: &str) -> String {
