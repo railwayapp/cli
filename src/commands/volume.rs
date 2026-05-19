@@ -26,7 +26,7 @@ mod ssh_key;
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume files --volume data list / --json\n  railway volume files --volume data browse /\n  railway volume files --volume data download /backup.tar ./backup.tar --json\n  railway volume files --volume data download /backup.tar ./backup.tar --overwrite --json\n  railway volume files --volume data download /backups ./backups --json\n  railway volume files --volume data upload ./backup.tar /backup.tar --json\n  railway volume files --volume data upload ./backups /backups --json\n  railway volume files --volume data delete /backup.tar --yes --json\n  railway volume files --volume data rename /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --json\n  railway volume delete --volume data --yes --json\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -123,6 +123,9 @@ structstruck::strike! {
         })
 
         /// Manage files in a volume
+        #[clap(
+            after_help = "Examples:\n\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAutomation notes:\n  Prompts for a volume by default. Pass --volume when selecting a specific target or running non-interactively."
+        )]
         Files(struct {
             /// The ID/name of the volume whose files you wish to manage
             #[clap(long, short)]

@@ -33,7 +33,7 @@ pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
 /// Manage services
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway service list --json\n  railway service delete --service api --environment production --yes --json\n  railway service rm --service api --yes --json\n  railway service link api\n  railway service files --service api list /app --json\n  railway service files --service api download /app/data.db ./data.db --json\n  railway service files --service api upload ./seed.db /app/seed.db --json\n\nAutomation notes:\n  Destructive non-interactive runs must pass exact selectors and --yes.\n  Prefer service IDs from `railway service list --json` when names may collide."
+    after_help = "Examples:\n\n  railway service list --json\n  railway service delete --service api --environment production --yes --json\n  railway service link api\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Destructive non-interactive runs must pass exact selectors and --yes.\n  Prefer service IDs from `railway service list --json` when names may collide."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -76,6 +76,9 @@ enum Commands {
 }
 
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Uses the linked service by default. Pass --service, --environment, or --project only when selecting a different target."
+)]
 struct FilesArgs {
     /// Service name or ID (defaults to linked service)
     #[clap(short, long)]
