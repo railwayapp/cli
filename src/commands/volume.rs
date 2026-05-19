@@ -6,10 +6,8 @@ use crate::{
         ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
         get_project, volume_instances_in_env,
     },
-    controllers::volume_browser::{self, VolumeBrowserParams},
     errors::RailwayError,
     queries::project::ProjectProject,
-    telemetry,
     util::{
         progress::create_spinner,
         prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
@@ -21,14 +19,14 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 use std::{fmt::Display, path::PathBuf};
 
+pub(crate) mod files;
 pub(crate) mod sftp;
 mod ssh_key;
-use sftp::VolumeSftp;
 
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume list-files --volume data / --json\n  railway volume browse --volume data /\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n  railway volume download --volume data /backups ./backups --json\n  railway volume upload --volume data ./backup.tar /backup.tar --json\n  railway volume upload --volume data ./backups /backups --json\n  railway volume delete-file --volume data /backup.tar --yes --json\n  railway volume rename-file --volume data /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume files --volume data list / --json\n  railway volume files --volume data browse /\n  railway volume files --volume data download /backup.tar ./backup.tar --json\n  railway volume files --volume data download /backup.tar ./backup.tar --overwrite --json\n  railway volume files --volume data download /backups ./backups --json\n  railway volume files --volume data upload ./backup.tar /backup.tar --json\n  railway volume files --volume data upload ./backups /backups --json\n  railway volume files --volume data delete /backup.tar --yes --json\n  railway volume files --volume data rename /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -124,7 +122,18 @@ structstruck::strike! {
             json: bool,
         })
 
+        /// Manage files in a volume
+        Files(struct {
+            /// The ID/name of the volume whose files you wish to manage
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            #[clap(subcommand)]
+            command: files::Commands,
+        })
+
         /// Download a file or directory from a volume
+        #[clap(hide = true)]
         Download(struct {
             /// The ID/name of the volume you wish to download
             #[clap(long, short)]
@@ -152,6 +161,7 @@ structstruck::strike! {
         })
 
         /// Upload a file or directory to a volume
+        #[clap(hide = true)]
         Upload(struct {
             /// The ID/name of the volume you wish to upload to
             #[clap(long, short)]
@@ -179,6 +189,7 @@ structstruck::strike! {
         })
 
         /// List files in a volume directory
+        #[clap(hide = true)]
         ListFiles(struct {
             /// The ID/name of the volume you wish to list files from
             #[clap(long, short)]
@@ -194,6 +205,7 @@ structstruck::strike! {
         })
 
         /// Browse files in a volume interactively
+        #[clap(hide = true)]
         Browse(struct {
             /// The ID/name of the volume you wish to browse
             #[clap(long, short)]
@@ -209,6 +221,7 @@ structstruck::strike! {
         })
 
         /// Delete a file from a volume
+        #[clap(hide = true)]
         DeleteFile(struct {
             /// The ID/name of the volume you wish to delete from
             #[clap(long, short)]
@@ -228,6 +241,7 @@ structstruck::strike! {
         })
 
         /// Rename a file in a volume
+        #[clap(hide = true)]
         RenameFile(struct {
             /// The ID/name of the volume you wish to rename within
             #[clap(long, short)]
@@ -303,77 +317,88 @@ pub async fn command(args: Args) -> Result<()> {
         get_environment_instances(&client, &configs, &project_id, &environment).await?;
 
     match args.command {
+        Commands::Files(f) => {
+            let target =
+                volume_file_target(&environment, &environment_instances, f.volume, project)?;
+            files::command_from_parts(target, f.command).await?
+        }
         Commands::Download(d) => {
-            download(
-                &environment,
-                &environment_instances,
-                d.volume,
-                project,
-                d.remote_path,
-                d.local_path,
-                d.json,
-                d.overwrite,
-                d.concurrency,
+            let target =
+                volume_file_target(&environment, &environment_instances, d.volume, project)?;
+            files::download(
+                target,
+                files::DownloadArgs {
+                    remote_path: d.remote_path,
+                    local_path: d.local_path,
+                    json: d.json,
+                    overwrite: d.overwrite,
+                    concurrency: d.concurrency,
+                },
             )
             .await?
         }
         Commands::Upload(u) => {
-            upload(
-                &environment,
-                &environment_instances,
-                u.volume,
-                project,
-                u.local_path,
-                u.remote_path,
-                u.json,
-                u.overwrite,
-                u.concurrency,
+            let target =
+                volume_file_target(&environment, &environment_instances, u.volume, project)?;
+            files::upload(
+                target,
+                files::UploadArgs {
+                    local_path: u.local_path,
+                    remote_path: u.remote_path,
+                    json: u.json,
+                    overwrite: u.overwrite,
+                    concurrency: u.concurrency,
+                },
             )
             .await?
         }
         Commands::ListFiles(l) => {
-            list_files(
-                &environment,
-                &environment_instances,
-                l.volume,
-                project,
-                l.remote_path,
-                l.json,
+            let target =
+                volume_file_target(&environment, &environment_instances, l.volume, project)?;
+            files::list(
+                target,
+                files::ListArgs {
+                    remote_path: l.remote_path,
+                    json: l.json,
+                },
             )
             .await?
         }
         Commands::Browse(b) => {
-            browse(
-                &environment,
-                &environment_instances,
-                b.volume,
-                project,
-                b.remote_path,
-                b.concurrency,
+            let target =
+                volume_file_target(&environment, &environment_instances, b.volume, project)?;
+            files::browse(
+                target,
+                files::BrowseArgs {
+                    remote_path: b.remote_path,
+                    concurrency: b.concurrency,
+                },
             )
             .await?
         }
         Commands::DeleteFile(d) => {
-            delete_file(
-                &environment,
-                &environment_instances,
-                d.volume,
-                project,
-                d.remote_path,
-                d.yes,
-                d.json,
+            let target =
+                volume_file_target(&environment, &environment_instances, d.volume, project)?;
+            files::delete(
+                target,
+                files::DeleteArgs {
+                    remote_path: d.remote_path,
+                    json: d.json,
+                    yes: d.yes,
+                },
             )
             .await?
         }
         Commands::RenameFile(r) => {
-            rename_file(
-                &environment,
-                &environment_instances,
-                r.volume,
-                project,
-                r.old_remote_path,
-                r.new_remote_path,
-                r.json,
+            let target =
+                volume_file_target(&environment, &environment_instances, r.volume, project)?;
+            files::rename(
+                target,
+                files::RenameArgs {
+                    old_remote_path: r.old_remote_path,
+                    new_remote_path: r.new_remote_path,
+                    json: r.json,
+                },
             )
             .await?
         }
@@ -441,17 +466,12 @@ pub async fn command(args: Args) -> Result<()> {
     Ok(())
 }
 
-async fn download(
+fn volume_file_target(
     environment: &str,
     environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     project: ProjectProject,
-    remote_path: String,
-    local_path: PathBuf,
-    json: bool,
-    overwrite: bool,
-    concurrency: usize,
-) -> Result<()> {
+) -> Result<files::FileTarget> {
     let is_terminal = std::io::stdout().is_terminal();
     let volume = select_volume(
         project,
@@ -474,380 +494,16 @@ async fn download(
                 volume.0.volume.name
             )
         })?;
-    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    volume_sftp.set_transfer_concurrency(concurrency);
-    let downloaded_path = volume_sftp
-        .download(&remote_path, &local_path, overwrite)
-        .await?;
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "volume": {
-                    "id": volume.0.volume.id,
-                    "name": volume.0.volume.name,
-                    "mountPath": volume.0.mount_path,
-                },
-                "serviceInstanceId": service_instance.id,
-                "remotePath": remote_path,
-                "localPath": downloaded_path,
-                "overwritten": overwrite,
-            }))?
-        );
-    } else {
-        println!(
-            "Downloaded {} to {}",
-            remote_path.cyan(),
-            downloaded_path.display().to_string().green()
-        );
-    }
-
-    Ok(())
-}
-
-async fn upload(
-    environment: &str,
-    environment_instances: &ProjectEnvironmentInstances,
-    volume: Option<String>,
-    project: ProjectProject,
-    local_path: PathBuf,
-    remote_path: String,
-    json: bool,
-    overwrite: bool,
-    concurrency: usize,
-) -> Result<()> {
-    let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(
-        project,
-        environment_instances,
-        environment,
-        volume,
-        is_terminal,
-    )?;
-
-    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Volume {} is not attached to any service",
-            volume.0.volume.name
-        )
-    })?;
-    let service_instance =
-        find_service_instance(environment_instances, service_id).ok_or_else(|| {
-            anyhow!(
-                "No service instance found for volume {}",
-                volume.0.volume.name
-            )
-        })?;
-    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    volume_sftp.set_transfer_concurrency(concurrency);
-    let uploaded_path = volume_sftp
-        .upload(&local_path, &remote_path, overwrite)
-        .await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "volume": {
-                    "id": volume.0.volume.id,
-                    "name": volume.0.volume.name,
-                    "mountPath": volume.0.mount_path,
-                },
-                "serviceInstanceId": service_instance.id,
-                "localPath": local_path,
-                "remotePath": uploaded_path,
-                "overwritten": overwrite,
-            }))?
-        );
-    } else {
-        println!(
-            "Uploaded {} to {}",
-            local_path.display().to_string().cyan(),
-            uploaded_path.green()
-        );
-    }
-
-    Ok(())
-}
-
-async fn list_files(
-    environment: &str,
-    environment_instances: &ProjectEnvironmentInstances,
-    volume: Option<String>,
-    project: ProjectProject,
-    remote_path: String,
-    json: bool,
-) -> Result<()> {
-    let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(
-        project,
-        environment_instances,
-        environment,
-        volume,
-        is_terminal,
-    )?;
-
-    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Volume {} is not attached to any service",
-            volume.0.volume.name
-        )
-    })?;
-    let service_instance =
-        find_service_instance(environment_instances, service_id).ok_or_else(|| {
-            anyhow!(
-                "No service instance found for volume {}",
-                volume.0.volume.name
-            )
-        })?;
-    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    let file_tree = volume_sftp.list_files(&remote_path).await?;
-
-    if json {
-        let files: Vec<serde_json::Value> = file_tree
-            .entries()
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "name": entry.name,
-                    "path": entry.path,
-                    "type": entry.kind,
-                    "size": entry.size,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "volume": {
-                    "id": volume.0.volume.id,
-                    "name": volume.0.volume.name,
-                    "mountPath": volume.0.mount_path,
-                },
-                "serviceInstanceId": service_instance.id,
-                "remotePath": remote_path,
-                "files": files,
-            }))?
-        );
-    } else {
-        print!("{file_tree}");
-    }
-
-    Ok(())
-}
-
-async fn browse(
-    environment: &str,
-    environment_instances: &ProjectEnvironmentInstances,
-    volume: Option<String>,
-    project: ProjectProject,
-    remote_path: String,
-    concurrency: usize,
-) -> Result<()> {
-    let is_terminal = std::io::stdout().is_terminal();
-    if !is_terminal {
-        bail!("The browse command requires an interactive terminal");
-    }
-
-    let volume = select_volume(
-        project,
-        environment_instances,
-        environment,
-        volume,
-        is_terminal,
-    )?;
-
-    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Volume {} is not attached to any service",
-            volume.0.volume.name
-        )
-    })?;
-    let service_instance =
-        find_service_instance(environment_instances, service_id).ok_or_else(|| {
-            anyhow!(
-                "No service instance found for volume {}",
-                volume.0.volume.name
-            )
-        })?;
-
-    volume_browser::run(VolumeBrowserParams {
+    Ok(files::FileTarget {
         service_instance_id: service_instance.id.clone(),
-        volume_name: volume.0.volume.name.clone(),
         mount_path: volume.0.mount_path.clone(),
-        remote_path,
-        transfer_concurrency: concurrency,
+        label: files::FileTargetLabel::Volume {
+            id: volume.0.volume.id.clone(),
+            name: volume.0.volume.name.clone(),
+            mount_path: volume.0.mount_path.clone(),
+        },
     })
-    .await
-}
-
-async fn delete_file(
-    environment: &str,
-    environment_instances: &ProjectEnvironmentInstances,
-    volume: Option<String>,
-    project: ProjectProject,
-    remote_path: String,
-    yes: bool,
-    json: bool,
-) -> Result<()> {
-    if telemetry::is_agent() {
-        bail!(
-            "{}",
-            agent_file_delete_refusal(volume.as_deref(), &remote_path)
-        );
-    }
-
-    let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(
-        project,
-        environment_instances,
-        environment,
-        volume,
-        is_terminal,
-    )?;
-
-    let confirm = if yes {
-        true
-    } else if is_terminal {
-        prompt_confirm_with_default(
-            format!(r#"Are you sure you want to delete "{}"?"#, remote_path).as_str(),
-            false,
-        )?
-    } else {
-        bail!(
-            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
-        );
-    };
-
-    if !confirm {
-        return Ok(());
-    }
-
-    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Volume {} is not attached to any service",
-            volume.0.volume.name
-        )
-    })?;
-    let service_instance =
-        find_service_instance(environment_instances, service_id).ok_or_else(|| {
-            anyhow!(
-                "No service instance found for volume {}",
-                volume.0.volume.name
-            )
-        })?;
-    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    volume_sftp.delete_file(&remote_path).await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "volume": {
-                    "id": volume.0.volume.id,
-                    "name": volume.0.volume.name,
-                    "mountPath": volume.0.mount_path,
-                },
-                "serviceInstanceId": service_instance.id,
-                "remotePath": remote_path,
-                "deleted": true,
-            }))?
-        );
-    } else {
-        println!("Deleted {}", remote_path.cyan());
-    }
-
-    Ok(())
-}
-
-fn agent_file_delete_refusal(volume: Option<&str>, remote_path: &str) -> String {
-    let command = human_delete_file_command(volume, remote_path);
-    format!("Refusing: agents cannot delete files. Ask a human to run:\n\n  {command}")
-}
-
-fn human_delete_file_command(volume: Option<&str>, remote_path: &str) -> String {
-    let mut command = "railway volume delete-file".to_string();
-    if let Some(volume) = volume {
-        command.push_str(" --volume ");
-        command.push_str(&shell_quote(volume));
-    }
-    command.push(' ');
-    command.push_str(&shell_quote(remote_path));
-    command
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
-
-async fn rename_file(
-    environment: &str,
-    environment_instances: &ProjectEnvironmentInstances,
-    volume: Option<String>,
-    project: ProjectProject,
-    old_remote_path: String,
-    new_remote_path: String,
-    json: bool,
-) -> Result<()> {
-    let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(
-        project,
-        environment_instances,
-        environment,
-        volume,
-        is_terminal,
-    )?;
-
-    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Volume {} is not attached to any service",
-            volume.0.volume.name
-        )
-    })?;
-    let service_instance =
-        find_service_instance(environment_instances, service_id).ok_or_else(|| {
-            anyhow!(
-                "No service instance found for volume {}",
-                volume.0.volume.name
-            )
-        })?;
-    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    volume_sftp
-        .rename(&old_remote_path, &new_remote_path)
-        .await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "volume": {
-                    "id": volume.0.volume.id,
-                    "name": volume.0.volume.name,
-                    "mountPath": volume.0.mount_path,
-                },
-                "serviceInstanceId": service_instance.id,
-                "oldRemotePath": old_remote_path,
-                "newRemotePath": new_remote_path,
-                "renamed": true,
-            }))?
-        );
-    } else {
-        println!(
-            "Renamed {} to {}",
-            old_remote_path.cyan(),
-            new_remote_path.green()
-        );
-    }
-
-    Ok(())
 }
 
 async fn attach(
@@ -1410,30 +1066,5 @@ struct Volume(ProjectVolumeInstanceNode);
 impl Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.volume.name)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{agent_file_delete_refusal, human_delete_file_command};
-
-    #[test]
-    fn agent_file_delete_refusal_includes_human_command() {
-        let message = agent_file_delete_refusal(Some("data volume"), "/data/secrets.txt");
-
-        assert!(message.contains("Refusing: agents cannot delete files."));
-        assert!(
-            message.contains("railway volume delete-file --volume 'data volume' /data/secrets.txt")
-        );
-    }
-
-    #[test]
-    fn human_delete_file_command_quotes_remote_path() {
-        let command = human_delete_file_command(Some("data"), "/data/file with spaces.txt");
-
-        assert_eq!(
-            command,
-            "railway volume delete-file --volume data '/data/file with spaces.txt'"
-        );
     }
 }
