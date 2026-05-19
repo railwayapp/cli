@@ -5,9 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
-use chrono::Utc;
-use clap::Parser;
+use anyhow::{Context, Result, bail};
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use is_terminal::IsTerminal;
 use regex::{NoExpand, Regex};
 use tempfile::NamedTempFile;
@@ -16,21 +15,14 @@ use crate::{client::GQLClient, config::Configs, errors::RailwayError};
 
 use super::{common::get_ssh_connect_params, native};
 
-/// Emit or manage an OpenSSH config block for a Railway service
+/// Add, preview, or remove an OpenSSH config block for a Railway service
 #[derive(Parser, Clone)]
 pub struct Args {
-    /// Project to connect to (defaults to linked project)
-    #[clap(short, long)]
-    project: Option<String>,
+    #[clap(subcommand)]
+    command: Option<Commands>,
 
-    /// Service to connect to (defaults to linked service).
-    /// With --remove, this can remove a local marker by service name without resolving Railway.
-    #[clap(short, long)]
-    service: Option<String>,
-
-    /// Environment to connect to (defaults to linked environment)
-    #[clap(short, long)]
-    environment: Option<String>,
+    #[clap(flatten)]
+    target: TargetArgs,
 
     /// Host alias to use in the SSH config
     #[clap(long)]
@@ -40,17 +32,47 @@ pub struct Args {
     #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
     identity_file: Option<PathBuf>,
 
-    /// Insert or update the generated block in the SSH config file
-    #[clap(long, conflicts_with = "remove")]
-    write: bool,
+    /// Print the generated block without writing the SSH config file
+    #[clap(long)]
+    dry_run: bool,
+}
 
-    /// Remove the generated block from the SSH config file
-    #[clap(long, conflicts_with = "write")]
-    remove: bool,
+#[derive(Subcommand, Clone)]
+enum Commands {
+    /// Remove the Railway block from the SSH config file
+    #[clap(visible_alias = "rm")]
+    Remove,
+}
 
-    /// SSH config file to update
-    #[clap(long, default_value = "~/.ssh/config")]
+#[derive(ClapArgs, Clone)]
+struct TargetArgs {
+    /// Project to use (defaults to linked project)
+    #[clap(short, long, global = true)]
+    project: Option<String>,
+
+    /// Service to use (defaults to linked service).
+    /// With remove, this can remove a local marker by service name without resolving Railway.
+    #[clap(short, long, global = true)]
+    service: Option<String>,
+
+    /// Environment to use (defaults to linked environment)
+    #[clap(short, long, global = true)]
+    environment: Option<String>,
+
+    /// SSH config file to update or remove from
+    #[clap(long, default_value = "~/.ssh/config", global = true)]
     path: PathBuf,
+}
+
+impl Default for TargetArgs {
+    fn default() -> Self {
+        Self {
+            project: None,
+            service: None,
+            environment: None,
+            path: PathBuf::from("~/.ssh/config"),
+        }
+    }
 }
 
 struct ResolvedConfig {
@@ -60,52 +82,65 @@ struct ResolvedConfig {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    ensure_default_target_has_linked_service(&args).await?;
-
-    if args.remove {
-        let service_name = if let Some(service_name) = args.service.as_deref() {
-            service_name.to_string()
-        } else {
-            resolve_service_name(args.clone()).await?
-        };
-
-        let path = expand_tilde(&args.path)?;
-        let removed = remove_config_block(&path, &service_name)?;
-        if removed {
-            eprintln!("Removed Railway SSH config block from {}", path.display());
-        } else {
-            eprintln!(
-                "No Railway SSH config block found for {} in {}",
-                service_name,
-                path.display()
-            );
+    if let Some(Commands::Remove) = args.command {
+        if args.alias.is_some() {
+            bail!("--alias cannot be used with remove");
         }
-        return Ok(());
+        if args.identity_file.is_some() {
+            bail!("--identity-file cannot be used with remove");
+        }
+        if args.dry_run {
+            bail!("--dry-run cannot be used with remove");
+        }
+
+        return remove_command(args.target).await;
     }
 
-    let resolved = resolve(args.clone()).await?;
+    ensure_default_target_has_linked_service(&args.target).await?;
+
+    let resolved = resolve(&args.target, args.alias.as_deref()).await?;
     let block = render_config_block(
         &resolved.service_name,
         &resolved.alias,
         &resolved.service_instance_id,
         args.identity_file.as_deref(),
-        &Utc::now().format("%Y-%m-%d").to_string(),
     );
 
-    if args.write {
-        let path = expand_tilde(&args.path)?;
+    if args.dry_run {
+        print!("{block}");
+    } else {
+        let path = expand_tilde(&args.target.path)?;
         upsert_config_block(&path, &resolved.service_name, &block)?;
         eprintln!("Wrote Railway SSH config block to {}", path.display());
-    } else {
-        print!("{block}");
     }
 
     Ok(())
 }
 
-async fn ensure_default_target_has_linked_service(args: &Args) -> Result<()> {
-    if args.remove || args.project.is_some() || args.environment.is_some() || args.service.is_some()
-    {
+async fn remove_command(target: TargetArgs) -> Result<()> {
+    let service_name = if let Some(service_name) = target.service.as_deref() {
+        service_name.to_string()
+    } else {
+        resolve_service_name(&target).await?
+    };
+
+    let path = expand_tilde(&target.path)?;
+    let removed = remove_config_block(&path, &service_name)?;
+    if removed {
+        eprintln!("Removed Railway SSH config block from {}", path.display());
+    } else {
+        eprintln!(
+            "No Railway SSH config block found for {} in {}",
+            service_name,
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+async fn ensure_default_target_has_linked_service(target: &TargetArgs) -> Result<()> {
+    if target.project.is_some() || target.environment.is_some() || target.service.is_some() {
         return Ok(());
     }
     if !std::io::stdout().is_terminal() {
@@ -132,15 +167,13 @@ async fn ensure_default_target_has_linked_service(args: &Args) -> Result<()> {
     }
 }
 
-async fn resolve(args: Args) -> Result<ResolvedConfig> {
+async fn resolve(target: &TargetArgs, alias: Option<&str>) -> Result<ResolvedConfig> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let params =
-        get_ssh_connect_params(ssh_args_from_config_args(&args), &configs, &client).await?;
+        get_ssh_connect_params(ssh_args_from_target_args(target), &configs, &client).await?;
 
-    let alias = args
-        .alias
-        .as_deref()
+    let alias = alias
         .map(sanitize_alias)
         .unwrap_or_else(|| format!("railway-{}", sanitize_alias(&params.service_name)));
 
@@ -159,21 +192,21 @@ async fn resolve(args: Args) -> Result<ResolvedConfig> {
     })
 }
 
-async fn resolve_service_name(args: Args) -> Result<String> {
+async fn resolve_service_name(target: &TargetArgs) -> Result<String> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let params =
-        get_ssh_connect_params(ssh_args_from_config_args(&args), &configs, &client).await?;
+        get_ssh_connect_params(ssh_args_from_target_args(target), &configs, &client).await?;
 
     Ok(params.service_name)
 }
 
-fn ssh_args_from_config_args(args: &Args) -> super::Args {
+fn ssh_args_from_target_args(target: &TargetArgs) -> super::Args {
     super::Args {
         subcommand: None,
-        project: args.project.clone(),
-        service: args.service.clone(),
-        environment: args.environment.clone(),
+        project: target.project.clone(),
+        service: target.service.clone(),
+        environment: target.environment.clone(),
         deployment_instance: None,
         session: None,
         native: false,
@@ -187,20 +220,11 @@ fn render_config_block(
     alias: &str,
     service_instance_id: &str,
     identity_file: Option<&Path>,
-    date: &str,
 ) -> String {
     let marker_name = marker_name(service_name);
     let mut block = String::new();
-    writeln!(
-        block,
-        "# BEGIN railway:{marker_name} ----- written {date} by `railway ssh config`"
-    )
-    .expect("writing to String cannot fail");
-    writeln!(
-        block,
-        "# If you rename, delete, or re-add this service, re-run this command."
-    )
-    .expect("writing to String cannot fail");
+
+    writeln!(block, "# BEGIN railway:{marker_name}").expect("writing to String cannot fail");
     writeln!(block, "Host {alias}").expect("writing to String cannot fail");
     writeln!(block, "    HostName {}", native::SSH_HOST).expect("writing to String cannot fail");
     writeln!(block, "    User {service_instance_id}").expect("writing to String cannot fail");
@@ -343,7 +367,7 @@ fn config_block_regex_with_case(
     };
     let flags = if case_insensitive { "(?ims)" } else { "(?ms)" };
     Regex::new(&format!(
-        r"{flags}{preceding_blank}^# BEGIN railway:{marker}(?: .*)?\r?\n.*?^# END railway:{marker}[ \t]*(?:\r?\n)?"
+        r"{flags}{preceding_blank}^# BEGIN railway:{marker}[ \t]*\r?\n.*?^# END railway:{marker}[ \t]*(?:\r?\n)?"
     ))
     .context("Failed to build Railway SSH config marker regex")
 }
@@ -435,19 +459,36 @@ mod tests {
     }
 
     #[test]
-    fn write_upserts_block_idempotently_and_sets_permissions() {
+    fn renders_config_block_with_minimal_markers() {
+        let block = render_config_block("api", "railway-api", "instance-id", None);
+
+        assert_eq!(
+            block,
+            "\
+# BEGIN railway:api
+Host railway-api
+    HostName ssh.railway.com
+    User instance-id
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+# END railway:api
+"
+        );
+    }
+
+    #[test]
+    fn upserts_block_idempotently_and_sets_permissions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".ssh/config");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "Host existing\n    HostName example.com\n").unwrap();
 
-        let old_block = render_config_block("API", "railway-api", "old-id", None, "2026-05-17");
+        let old_block = render_config_block("API", "railway-api", "old-id", None);
         let new_block = render_config_block(
             "api",
             "railway-api",
             "new-id",
             Some(Path::new("/Users/me/My Keys/id_ed25519")),
-            "2026-05-18",
         );
 
         upsert_config_block(&path, "API", &old_block).unwrap();
@@ -458,11 +499,14 @@ mod tests {
 
         assert_eq!(contents.matches("# BEGIN railway:").count(), 1);
         assert!(contents.starts_with("Host existing\n    HostName example.com\n\n"));
-        assert!(contents.contains("# BEGIN railway:api ----- written 2026-05-18"));
+        assert!(contents.contains("# BEGIN railway:api\n"));
         assert!(contents.contains("Host railway-api\n"));
         assert!(contents.contains("    HostName ssh.railway.com\n"));
         assert!(contents.contains("    User new-id\n"));
         assert!(contents.contains("    IdentityFile \"/Users/me/My Keys/id_ed25519\"\n"));
+        assert!(contents.contains("# END railway:api\n"));
+        assert!(!contents.contains("written"));
+        assert!(!contents.contains("If you rename"));
         assert!(!contents.contains("old-id"));
 
         #[cfg(unix)]
@@ -491,7 +535,7 @@ mod tests {
             "\
 Host existing
 
-# BEGIN railway:API ----- written 2026-01-01 by `railway ssh config`
+# BEGIN railway:API
 Host old
 # END railway:API
 Host later
@@ -500,14 +544,15 @@ Host later
         .unwrap();
 
         command(Args {
-            project: None,
-            service: Some("api".to_string()),
-            environment: None,
+            command: Some(Commands::Remove),
+            target: TargetArgs {
+                service: Some("api".to_string()),
+                path: path.clone(),
+                ..TargetArgs::default()
+            },
             alias: None,
             identity_file: None,
-            write: false,
-            remove: true,
-            path: path.clone(),
+            dry_run: false,
         })
         .await
         .unwrap();
@@ -518,14 +563,15 @@ Host later
         );
 
         command(Args {
-            project: None,
-            service: Some("API".to_string()),
-            environment: None,
+            command: Some(Commands::Remove),
+            target: TargetArgs {
+                service: Some("API".to_string()),
+                path,
+                ..TargetArgs::default()
+            },
             alias: None,
             identity_file: None,
-            write: false,
-            remove: true,
-            path,
+            dry_run: false,
         })
         .await
         .unwrap();

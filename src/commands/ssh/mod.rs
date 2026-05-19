@@ -56,7 +56,7 @@ pub struct Args {
 
 #[derive(Parser, Clone)]
 enum Commands {
-    /// Emit or manage an OpenSSH config block for a service
+    /// Add, preview, or remove an OpenSSH config block for a service
     Config(config::Args),
 
     /// Manage SSH keys registered with Railway
