@@ -28,7 +28,7 @@ use sftp::VolumeSftp;
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume list-files --volume data / --json\n  railway volume browse --volume data /\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n  railway volume download-dir --volume data /backups ./backups --json\n  railway volume upload --volume data ./backup.tar /backup.tar --json\n  railway volume delete-file --volume data /backup.tar --yes --json\n  railway volume rename-file --volume data /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n  railway volume list-files --volume data / --json\n  railway volume browse --volume data /\n  railway volume download --volume data /backup.tar ./backup.tar --json\n  railway volume download --volume data /backup.tar ./backup.tar --overwrite --json\n  railway volume download --volume data /backups ./backups --json\n  railway volume upload --volume data ./backup.tar /backup.tar --json\n  railway volume upload --volume data ./backups /backups --json\n  railway volume delete-file --volume data /backup.tar --yes --json\n  railway volume rename-file --volume data /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -124,7 +124,7 @@ structstruck::strike! {
             json: bool,
         })
 
-        /// Download a file from a volume
+        /// Download a file or directory from a volume
         Download(struct {
             /// The ID/name of the volume you wish to download
             #[clap(long, short)]
@@ -134,7 +134,7 @@ structstruck::strike! {
             #[clap(value_name = "REMOTE_PATH")]
             remote_path: String,
 
-            /// The path to save the downloaded volume
+            /// The path to save the download
             #[clap(value_name = "LOCAL_PATH", default_value = ".")]
             local_path: PathBuf,
 
@@ -151,40 +151,13 @@ structstruck::strike! {
             concurrency: usize,
         })
 
-        /// Download a directory from a volume
-        DownloadDir(struct {
-            /// The ID/name of the volume you wish to download from
-            #[clap(long, short)]
-            volume: Option<String>,
-
-            /// The directory path on the remote server to download from
-            #[clap(value_name = "REMOTE_PATH")]
-            remote_path: String,
-
-            /// The local directory path to save the download
-            #[clap(value_name = "LOCAL_PATH", default_value = ".")]
-            local_path: PathBuf,
-
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-
-            /// Replace LOCAL_PATH if it already exists
-            #[clap(long, visible_alias = "override")]
-            overwrite: bool,
-
-            /// Concurrent file downloads
-            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
-            concurrency: usize,
-        })
-
-        /// Upload a file to a volume
+        /// Upload a file or directory to a volume
         Upload(struct {
             /// The ID/name of the volume you wish to upload to
             #[clap(long, short)]
             volume: Option<String>,
 
-            /// The local file to upload
+            /// The local file or directory to upload
             #[clap(value_name = "LOCAL_PATH")]
             local_path: PathBuf,
 
@@ -344,20 +317,6 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?
         }
-        Commands::DownloadDir(d) => {
-            download_dir(
-                &environment,
-                &environment_instances,
-                d.volume,
-                project,
-                d.remote_path,
-                d.local_path,
-                d.json,
-                d.overwrite,
-                d.concurrency,
-            )
-            .await?
-        }
         Commands::Upload(u) => {
             upload(
                 &environment,
@@ -477,65 +436,6 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?
         }
-    }
-
-    Ok(())
-}
-
-async fn download_dir(
-    environment: &str,
-    environment_instances: &ProjectEnvironmentInstances,
-    volume: Option<String>,
-    project: ProjectProject,
-    remote_path: String,
-    local_path: PathBuf,
-    json: bool,
-    overwrite: bool,
-    concurrency: usize,
-) -> Result<()> {
-    let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(
-        project,
-        environment_instances,
-        environment,
-        volume,
-        is_terminal,
-    )?;
-
-    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Volume {} is not attached to any service",
-            volume.0.volume.name
-        )
-    })?;
-    let service_instance =
-        find_service_instance(environment_instances, service_id).ok_or_else(|| {
-            anyhow!(
-                "No service instance found for volume {}",
-                volume.0.volume.name
-            )
-        })?;
-    let mut volume_sftp = VolumeSftp::new(service_instance.id.clone(), volume.0.mount_path.clone());
-    volume_sftp.set_transfer_concurrency(concurrency);
-    let downloaded_path = volume_sftp
-        .download_dir(&remote_path, &local_path, overwrite)
-        .await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "volume": {
-                    "id": volume.0.volume.id,
-                    "name": volume.0.volume.name,
-                    "mountPath": volume.0.mount_path,
-                },
-                "serviceInstanceId": service_instance.id,
-                "remotePath": remote_path,
-                "localPath": downloaded_path,
-                "overwritten": overwrite,
-            }))?
-        );
     }
 
     Ok(())
