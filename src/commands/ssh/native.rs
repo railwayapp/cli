@@ -61,7 +61,10 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     });
 
     if let Some(key) = registered_local {
-        eprintln!("Using SSH key: {}", key.path.display());
+        match key.path.as_ref() {
+            Some(path) => eprintln!("Using SSH key from file {}: {}", path.display(), key.key_name()),
+            None => eprintln!("Using SSH key from agent: {}", key.key_name()),
+        }
         return Ok(());
     }
 
@@ -83,7 +86,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         struct KeyOption<'a>(&'a crate::controllers::ssh_keys::LocalSshKey);
         impl fmt::Display for KeyOption<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{} ({})", self.0.path.display(), self.0.fingerprint)
+                write!(f, "{} ({})", self.0.key_name(), self.0.fingerprint)
             }
         }
         let options: Vec<KeyOption> = local_keys.iter().map(KeyOption).collect();
@@ -91,11 +94,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         selected.0
     };
 
-    println!(
-        "Key: {} ({})",
-        key_to_register.path.display(),
-        key_to_register.fingerprint
-    );
+    println!("Key: {} ({})", key_to_register.key_name(), key_to_register.fingerprint);
     println!();
 
     let should_register = prompt_confirm_with_default("Register this SSH key with Railway?", true)?;
@@ -107,17 +106,10 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         );
     }
 
-    let key_name = key_to_register
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("ssh-key")
-        .to_string();
-
     register_ssh_key(
         client,
         configs,
-        &key_name,
+        &key_to_register.key_name(),
         &key_to_register.public_key,
         None,
     )

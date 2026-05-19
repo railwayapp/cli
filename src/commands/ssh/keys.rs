@@ -19,16 +19,7 @@ struct LocalKeyOption(LocalSshKey);
 
 impl fmt::Display for LocalKeyOption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ({})",
-            self.0
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy(),
-            self.0.fingerprint
-        )
+        write!(f, "{} ({})", self.0.key_name(), self.0.fingerprint)
     }
 }
 
@@ -176,18 +167,21 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
             // Extract comment/hostname from public key
             let parts: Vec<&str> = key.public_key.split_whitespace().collect();
             let key_type = parts.first().unwrap_or(&"");
-            let hostname = parts.get(2).unwrap_or(&"");
+            let comment = parts.get(2..).unwrap_or_default().join(" ");
 
             println!("  {}", key.name);
             println!("    Fingerprint: {}", key.fingerprint);
             if !key_type.is_empty() {
                 println!("    Type:        {}", key_type);
             }
-            if !hostname.is_empty() {
-                println!("    Hostname:    {}", hostname);
+            if !comment.is_empty() {
+                println!("    Comment:     {}", comment);
             }
             if local_match.is_some() {
-                println!("    Source:      local (~/.ssh/)");
+                println!(
+                    "    Source:      local ({})",
+                    local_match.unwrap().key_source()
+                );
             }
             println!();
         }
@@ -199,7 +193,7 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
         for key in &github_keys {
             let parts: Vec<&str> = key.key.split_whitespace().collect();
             let key_type = parts.first().unwrap_or(&"unknown");
-            let hostname = parts.get(2).unwrap_or(&"");
+            let comment = parts.get(2..).unwrap_or_default().join(" ");
             let fingerprint = compute_fingerprint_from_pubkey(&key.key).unwrap_or_default();
 
             // Check if already registered
@@ -210,8 +204,8 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
                 println!("    Fingerprint: {}", fingerprint);
             }
             println!("    Type:        {}", key_type);
-            if !hostname.is_empty() {
-                println!("    Hostname:    {}", hostname);
+            if !comment.is_empty() {
+                println!("    Comment:     {}", comment);
             }
             if is_registered {
                 println!("    Status:      registered");
@@ -257,20 +251,15 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     if !unregistered.is_empty() {
         println!("Local Keys (not registered):");
         for key in unregistered {
-            // Extract hostname from public key
-            let parts: Vec<&str> = key.public_key.split_whitespace().collect();
-            let hostname = parts.get(2).unwrap_or(&"");
+            let comment = key.key_comment.as_deref().unwrap_or_default();
 
-            println!(
-                "  {}",
-                key.path.file_name().unwrap_or_default().to_string_lossy()
-            );
+            println!("  {}", key.key_name());
             println!("    Fingerprint: {}", key.fingerprint);
             println!("    Type:        {}", key.key_type);
-            if !hostname.is_empty() {
-                println!("    Hostname:    {}", hostname);
+            if !comment.is_empty() {
+                println!("    Comment:     {}", comment);
             }
-            println!("    Path:        {}", key.path.display());
+            println!("    Source:      {}", key.key_source());
             println!();
         }
         println!("Add with:\n    railway ssh keys add");
@@ -318,7 +307,11 @@ async fn add_key(
         // Find by path
         local_keys
             .iter()
-            .find(|k| k.path.to_string_lossy().contains(&path))
+            .find(|k| {
+                k.path
+                    .as_ref()
+                    .is_some_and(|p| p.to_string_lossy().contains(&path))
+            })
             .ok_or_else(|| anyhow::anyhow!("Key not found: {}", path))?
             .clone()
     } else if unregistered.len() == 1 {
@@ -336,18 +329,12 @@ async fn add_key(
     };
 
     // Determine name
-    let key_name = name.unwrap_or_else(|| {
-        key_to_add
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ssh-key")
-            .to_string()
-    });
+    let key_name = name.unwrap_or_else(|| key_to_add.key_name().to_string());
 
     println!(
-        "Registering key: {} ({})",
-        key_to_add.path.display(),
+        "Registering key from {}: {} ({})",
+        key_to_add.key_source(),
+        key_to_add.key_name(),
         key_to_add.fingerprint
     );
 
