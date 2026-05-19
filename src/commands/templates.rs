@@ -33,7 +33,7 @@ use crate::{
         progress::create_spinner_if,
         prompt::{fake_select, prompt_options, prompt_text_with_placeholder_disappear},
     },
-    workspace::workspaces,
+    workspace::workspaces_with_client,
 };
 
 use super::*;
@@ -243,7 +243,7 @@ pub async fn command(args: Args) -> Result<()> {
 
 async fn create_command(args: CreateArgs) -> Result<()> {
     let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
+    let client = GQLClient::new_user_authorized(&configs)?;
     let project_id = resolve_template_project(&client, &configs, args.project).await?;
     let environment_id =
         resolve_template_environment(&client, &configs, &project_id, args.environment).await?;
@@ -282,7 +282,7 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
     }
 
     let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
+    let client = GQLClient::new_user_authorized(&configs)?;
     let template = fetch_template_by_ref(&client, &configs, &args.template).await?;
     let is_updating = matches!(
         &template.status,
@@ -314,7 +314,7 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
         .or_else(|| template.demo_project_id.clone())
         .and_then(non_empty_string);
     let workspace_id = match args.workspace {
-        Some(workspace) => Some(resolve_workspace_id(&workspace).await?),
+        Some(workspace) => Some(resolve_workspace_id(&client, &configs, &workspace).await?),
         None => template.workspace_id.clone(),
     };
 
@@ -396,7 +396,7 @@ async fn resolve_template_project(
         bail!("Project required in non-interactive mode. Use --project <id or name>.");
     }
 
-    let choices = project_choices().await?;
+    let choices = project_choices(client, configs).await?;
     if choices.is_empty() {
         bail!(RailwayError::NoProjects);
     }
@@ -420,7 +420,7 @@ async fn resolve_project_arg(
         Err(error) => return Err(error.into()),
     }
 
-    let choice = find_project_choice(project).await?;
+    let choice = find_project_choice(client, configs, project).await?;
     fake_select("Select project", &choice.to_string());
     Ok(choice.id)
 }
@@ -445,8 +445,12 @@ async fn resolve_template_environment(
     Ok(Some(environment.id))
 }
 
-async fn find_project_choice(project: &str) -> Result<TemplateProjectChoice> {
-    let choices = project_choices().await?;
+async fn find_project_choice(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project: &str,
+) -> Result<TemplateProjectChoice> {
+    let choices = project_choices(client, configs).await?;
     let id_matches = choices
         .iter()
         .filter(|choice| choice.id.eq_ignore_ascii_case(project))
@@ -488,9 +492,12 @@ fn single_match(
     }
 }
 
-async fn project_choices() -> Result<Vec<TemplateProjectChoice>> {
+async fn project_choices(
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<Vec<TemplateProjectChoice>> {
     let mut choices = Vec::new();
-    for workspace in workspaces().await? {
+    for workspace in workspaces_with_client(client, configs).await? {
         let workspace_name = workspace.name().to_string();
         choices.extend(
             workspace
@@ -538,8 +545,12 @@ async fn fetch_template(
     Ok(response.template)
 }
 
-async fn resolve_workspace_id(workspace: &str) -> Result<String> {
-    let matches = workspaces()
+async fn resolve_workspace_id(
+    client: &reqwest::Client,
+    configs: &Configs,
+    workspace: &str,
+) -> Result<String> {
+    let matches = workspaces_with_client(client, configs)
         .await?
         .into_iter()
         .filter(|candidate| {

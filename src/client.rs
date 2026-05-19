@@ -49,6 +49,23 @@ impl GQLClient {
         Ok(Self::build_client(headers))
     }
 
+    pub fn new_user_authorized(configs: &Configs) -> Result<Client, RailwayError> {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = configs.get_railway_auth_token() {
+            headers.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {token}"))?,
+            );
+        } else {
+            return Err(RailwayError::Unauthorized);
+        }
+        headers.insert(
+            "x-source",
+            HeaderValue::from_static(consts::get_user_agent()),
+        );
+        Ok(Self::build_client(headers))
+    }
+
     fn build_client(headers: HeaderMap) -> Client {
         Client::builder()
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
