@@ -10,18 +10,16 @@ use crate::controllers::{
 use super::Args;
 
 pub struct SshConnectParams {
+    pub project_id: String,
     pub environment_id: String,
     pub service_id: String,
+    pub service_name: String,
 }
 
-pub async fn find_service_by_name(
-    client: &Client,
-    configs: &Configs,
+pub fn find_service_by_name(
     project: &RailwayProject,
     service_id_or_name: &str,
-) -> Result<String> {
-    let project = get_project(client, configs, project.id.clone()).await?;
-
+) -> Result<(String, String)> {
     let services = project.services.edges.iter().collect::<Vec<_>>();
 
     let service = services
@@ -32,10 +30,9 @@ pub async fn find_service_by_name(
         })
         .with_context(|| format!("Service '{service_id_or_name}' not found"))?
         .node
-        .id
         .to_owned();
 
-    Ok(service)
+    Ok((service.id, service.name))
 }
 
 pub async fn get_ssh_connect_params(
@@ -70,16 +67,27 @@ pub async fn get_ssh_connect_params(
     };
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service_id = if let Some(service_id_or_name) = args.service {
-        find_service_by_name(client, configs, &project, &service_id_or_name).await?
+    let (service_id, service_name) = if let Some(service_id_or_name) = args.service {
+        find_service_by_name(&project, &service_id_or_name)?
     } else {
-        get_or_prompt_service(linked_project.clone(), project, None)
+        let service_id = get_or_prompt_service(linked_project.clone(), project.clone(), None)
             .await?
-            .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?
+            .ok_or_else(|| anyhow!("No service found. Please specify a service to connect to via the `--service` flag."))?;
+        let service_name = project
+            .services
+            .edges
+            .iter()
+            .find(|service| service.node.id == service_id)
+            .map(|service| service.node.name.clone())
+            .unwrap_or_else(|| service_id.clone());
+
+        (service_id, service_name)
     };
 
     Ok(SshConnectParams {
+        project_id: project.id,
         environment_id,
         service_id,
+        service_name,
     })
 }

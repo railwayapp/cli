@@ -6,6 +6,7 @@ use clap::Parser;
 use crate::{client::GQLClient, config::Configs};
 
 mod common;
+mod config;
 mod keys;
 mod native;
 mod tel;
@@ -55,13 +56,18 @@ pub struct Args {
 
 #[derive(Parser, Clone)]
 enum Commands {
+    /// Add, preview, or remove an OpenSSH config block for a service
+    Config(config::Args),
+
     /// Manage SSH keys registered with Railway
     Keys(keys::Args),
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    if let Some(Commands::Keys(keys_args)) = args.subcommand {
-        return keys::command(keys_args).await;
+    match args.subcommand {
+        Some(Commands::Config(config_args)) => return config::command(config_args).await,
+        Some(Commands::Keys(keys_args)) => return keys::command(keys_args).await,
+        None => {}
     }
 
     if args.native {

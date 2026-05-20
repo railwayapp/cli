@@ -604,6 +604,10 @@ async fn link_command(args: LinkArgs) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn link_current_project_service(service: Option<String>) -> Result<()> {
+    link_command(LinkArgs { service }).await
+}
+
 async fn status_command(args: StatusArgs) -> Result<()> {
     if args.all {
         eprintln!(
