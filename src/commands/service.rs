@@ -8,8 +8,9 @@ use crate::{
     controllers::{
         environment::get_matched_environment,
         project::{
-            ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
-            get_project, get_service_ids_in_env, resolve_service_context, service_instances_in_env,
+            ensure_project_and_environment_exist, ensure_service_has_active_deployment,
+            find_service_instance, get_environment_instances, get_project, get_service_ids_in_env,
+            resolve_service_context, service_instances_in_env,
         },
         regions::fetch_region_locations,
     },
@@ -220,6 +221,7 @@ async fn files_command(args: FilesArgs) -> Result<()> {
     .await?;
     let service_instance = find_service_instance(&environment_instances, &ctx.service_id)
         .with_context(|| format!("No service instance found for {}", ctx.service_name))?;
+    ensure_service_has_active_deployment(service_instance, &ctx.environment_name)?;
 
     let target = crate::commands::volume::files::FileTarget {
         service_instance_id: service_instance.id.clone(),

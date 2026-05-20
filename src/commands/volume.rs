@@ -3,8 +3,8 @@ use crate::{
     controllers::environment::get_matched_environment,
     controllers::project::{
         ProjectEnvironmentInstances, ProjectVolumeInstanceNode,
-        ensure_project_and_environment_exist, find_service_instance, get_environment_instances,
-        get_project, volume_instances_in_env,
+        ensure_project_and_environment_exist, ensure_service_has_active_deployment,
+        find_service_instance, get_environment_instances, get_project, volume_instances_in_env,
     },
     errors::RailwayError,
     queries::project::ProjectProject,
@@ -476,6 +476,14 @@ fn volume_file_target(
     project: ProjectProject,
 ) -> Result<files::FileTarget> {
     let is_terminal = std::io::stdout().is_terminal();
+    let environment_name = project
+        .environments
+        .edges
+        .iter()
+        .find(|edge| edge.node.id == environment)
+        .map(|edge| edge.node.name.as_str())
+        .unwrap_or(environment)
+        .to_string();
     let volume = select_volume(
         project,
         environment_instances,
@@ -497,6 +505,7 @@ fn volume_file_target(
                 volume.0.volume.name
             )
         })?;
+    ensure_service_has_active_deployment(service_instance, &environment_name)?;
 
     Ok(files::FileTarget {
         service_instance_id: service_instance.id.clone(),
