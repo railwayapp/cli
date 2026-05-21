@@ -20,13 +20,16 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::sync::mpsc;
+use tokio::{
+    sync::mpsc,
+    time::{Duration, sleep},
+};
 
 use crate::commands::volume::sftp::{
     LocalOverwritePolicy, VolumeFileEntry, VolumeSftp, VolumeSftpError, VolumeTransferProgress,
     VolumeTransferProgressCallback,
 };
-use crate::util::editor::resolve_editor_command;
+use crate::util::{editor::resolve_editor_command, progress::create_spinner};
 
 use app::{
     BrowserAction, BrowserMode, BusyState, ConfirmAction, VolumeBrowserApp, normalize_remote_dir,
@@ -42,6 +45,7 @@ const PREFETCH_DEPTH: usize = 1;
 /// Cap on the number of children prefetched per directory level. Limits the
 /// fan-out for directories with many subfolders.
 const MAX_PREFETCH_PER_DIR: usize = 16;
+const INITIAL_LOAD_SPINNER_DELAY: Duration = Duration::from_secs(3);
 
 pub struct VolumeBrowserParams {
     pub service_instance_id: String,
@@ -107,9 +111,7 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
         params.service_instance_id.clone(),
         params.mount_path.clone(),
     );
-    let initial_entries = fetch_entries(&mut browser_sftp, &initial_remote_dir)
-        .await
-        .with_context(|| format!("Failed to load remote directory {initial_remote_dir}"))?;
+    let initial_entries = fetch_initial_entries(&mut browser_sftp, &initial_remote_dir).await?;
     app.cache
         .insert(&initial_remote_dir, initial_entries.clone());
     app.apply_remote_entries(initial_entries);
@@ -335,6 +337,30 @@ fn spawn_fetch(
         FetchKind::Revalidate | FetchKind::Prefetch => &dispatcher.background_tx,
     };
     let _ = tx.send(request);
+}
+
+async fn fetch_initial_entries(
+    sftp: &mut VolumeSftp,
+    initial_remote_dir: &str,
+) -> Result<Vec<VolumeFileEntry>> {
+    let fetch = fetch_entries(sftp, initial_remote_dir);
+    tokio::pin!(fetch);
+
+    let mut spinner = None;
+    let result = tokio::select! {
+        result = &mut fetch => result,
+        _ = sleep(INITIAL_LOAD_SPINNER_DELAY) => {
+            spinner = Some(create_spinner(format!("Loading {initial_remote_dir}...")));
+            fetch.await
+        }
+    }
+    .with_context(|| format!("Failed to load remote directory {initial_remote_dir}"));
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    result
 }
 
 fn spawn_fetch_worker(
