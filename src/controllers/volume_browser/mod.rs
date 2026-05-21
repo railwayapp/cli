@@ -56,6 +56,7 @@ struct RefreshResult {
     remote_dir: String,
     result: Result<Vec<VolumeFileEntry>>,
     kind: FetchKind,
+    select_remote_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,6 +157,7 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                     &mut refresh_request_id,
                                     &mut active_refresh_request_id,
                                     app.remote_dir.clone(),
+                                    app.selected_remote_path(),
                                 );
                                 app.mark_refreshing();
                             }
@@ -261,11 +263,18 @@ fn spawn_refresh(
     refresh_request_id: &mut u64,
     active_refresh_request_id: &mut u64,
     remote_dir: String,
+    select_remote_path: Option<String>,
 ) {
     *refresh_request_id += 1;
     *active_refresh_request_id = *refresh_request_id;
     let request_id = *refresh_request_id;
-    spawn_fetch(tx, params, remote_dir, FetchKind::Active(request_id));
+    spawn_fetch(
+        tx,
+        params,
+        remote_dir,
+        FetchKind::Active(request_id),
+        select_remote_path,
+    );
 }
 
 /// Fire a background revalidation. The result will quietly update the cache
@@ -276,7 +285,7 @@ fn spawn_revalidate(
     params: &VolumeBrowserParams,
     remote_dir: String,
 ) {
-    spawn_fetch(tx, params, remote_dir, FetchKind::Revalidate);
+    spawn_fetch(tx, params, remote_dir, FetchKind::Revalidate, None);
 }
 
 /// Fire a fan-out of prefetch fetches for the immediate child directories of
@@ -295,7 +304,7 @@ fn spawn_prefetch(
 
     let missing = cache.missing_children(remote_dir, entries, MAX_PREFETCH_PER_DIR);
     for child_dir in missing {
-        spawn_fetch(tx, params, child_dir, FetchKind::Prefetch);
+        spawn_fetch(tx, params, child_dir, FetchKind::Prefetch, None);
     }
 }
 
@@ -304,6 +313,7 @@ fn spawn_fetch(
     params: &VolumeBrowserParams,
     remote_dir: String,
     kind: FetchKind,
+    select_remote_path: Option<String>,
 ) {
     let tx = tx.clone();
     let params = clone_params(params);
@@ -314,6 +324,7 @@ fn spawn_fetch(
             remote_dir,
             result,
             kind,
+            select_remote_path,
         });
     });
 }
@@ -341,6 +352,13 @@ fn open_directory(
     active_refresh_request_id: &mut u64,
     remote_dir: String,
 ) {
+    let current_remote_dir = app.remote_dir.clone();
+    let select_remote_path = if parent_remote_dir(&current_remote_dir) == remote_dir {
+        Some(current_remote_dir.clone())
+    } else {
+        None
+    };
+
     // Look up and immediately copy out, so the cache borrow ends before we
     // mutate other parts of `app`.
     let cached = {
@@ -349,20 +367,26 @@ fn open_directory(
     };
 
     let Some((entries, kind)) = cached else {
+        if select_remote_path.is_none() {
+            app.remote_selected = 0;
+        }
         spawn_refresh(
             tx,
             params,
             refresh_request_id,
             active_refresh_request_id,
             remote_dir,
+            select_remote_path,
         );
         app.mark_loading();
         return;
     };
 
     app.remote_dir = remote_dir.clone();
-    app.remote_selected = 0;
-    app.apply_cached_entries(entries.clone());
+    if select_remote_path.is_none() {
+        app.remote_selected = 0;
+    }
+    app.apply_cached_entries_with_selection(entries.clone(), select_remote_path.as_deref());
 
     if matches!(kind, cache::Lookup::Stale) {
         app.mark_revalidating();
@@ -402,7 +426,10 @@ fn handle_refresh_result(
             app.remote_dir = refresh.remote_dir.clone();
             match refresh.result {
                 Ok(entries) => {
-                    app.apply_remote_entries(entries.clone());
+                    app.apply_remote_entries_with_selection(
+                        entries.clone(),
+                        refresh.select_remote_path.as_deref(),
+                    );
                     spawn_prefetch(
                         tx,
                         params,

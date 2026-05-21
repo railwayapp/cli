@@ -151,10 +151,17 @@ impl VolumeBrowserApp {
     /// Applies fresh entries from a user-initiated load. Clears any busy state
     /// and replaces the visible entries.
     pub fn apply_remote_entries(&mut self, entries: Vec<VolumeFileEntry>) {
+        let selected_path = self.selected_remote_path();
+        self.apply_remote_entries_with_selection(entries, selected_path.as_deref());
+    }
+
+    pub fn apply_remote_entries_with_selection(
+        &mut self,
+        entries: Vec<VolumeFileEntry>,
+        select_path: Option<&str>,
+    ) {
         self.remote_entries = entries;
-        self.remote_selected = self
-            .remote_selected
-            .min(self.remote_entries.len().saturating_sub(1));
+        self.restore_remote_selection(select_path);
         self.busy = BusyState::Idle;
         self.revalidating = false;
         self.status = None;
@@ -166,13 +173,24 @@ impl VolumeBrowserApp {
     /// messages or showing a loading state. The selection is clamped to the
     /// new length so we don't end up pointing past the end of the list.
     pub fn apply_cached_entries(&mut self, entries: Vec<VolumeFileEntry>) {
+        let selected_path = self.selected_remote_path();
+        self.apply_cached_entries_with_selection(entries, selected_path.as_deref());
+    }
+
+    pub fn apply_cached_entries_with_selection(
+        &mut self,
+        entries: Vec<VolumeFileEntry>,
+        select_path: Option<&str>,
+    ) {
         self.remote_entries = entries;
-        self.remote_selected = self
-            .remote_selected
-            .min(self.remote_entries.len().saturating_sub(1));
+        self.restore_remote_selection(select_path);
         self.busy = BusyState::Idle;
         self.error = None;
         self.transfer_progress = None;
+    }
+
+    pub fn selected_remote_path(&self) -> Option<String> {
+        self.selected_remote().map(|entry| entry.path.clone())
     }
 
     /// Marks the visible directory as being silently revalidated. Doesn't
@@ -369,14 +387,16 @@ impl VolumeBrowserApp {
             }
             KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => {
                 if let Some(parent) = self.local_cwd.parent() {
+                    let previous_cwd = self.local_cwd.clone();
                     self.local_cwd = parent.to_path_buf();
-                    self.refresh_local_entries();
+                    self.refresh_local_entries_with_selection(Some(previous_cwd.as_path()));
                 }
                 BrowserAction::Continue
             }
             KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') => self.activate_local_entry(),
             KeyCode::Char('r') | KeyCode::Char('R') => {
-                self.refresh_local_entries();
+                let selected_path = self.selected_local().map(|entry| entry.path.clone());
+                self.refresh_local_entries_with_selection(selected_path.as_deref());
                 BrowserAction::Continue
             }
             KeyCode::Char('?') => {
@@ -525,12 +545,15 @@ impl VolumeBrowserApp {
     }
 
     fn refresh_local_entries(&mut self) {
+        let selected_path = self.selected_local().map(|entry| entry.path.clone());
+        self.refresh_local_entries_with_selection(selected_path.as_deref());
+    }
+
+    fn refresh_local_entries_with_selection(&mut self, select_path: Option<&Path>) {
         match read_local_entries(&self.local_cwd) {
             Ok(entries) => {
                 self.local_entries = entries;
-                self.local_selected = self
-                    .local_selected
-                    .min(self.local_entries.len().saturating_sub(1));
+                self.restore_local_selection(select_path);
             }
             Err(err) => {
                 self.local_entries = Vec::new();
@@ -538,6 +561,40 @@ impl VolumeBrowserApp {
                 self.set_error(err.to_string());
             }
         }
+    }
+
+    fn restore_remote_selection(&mut self, select_path: Option<&str>) {
+        if let Some(select_path) = select_path {
+            if let Some(index) = self
+                .remote_entries
+                .iter()
+                .position(|entry| entry.path == select_path)
+            {
+                self.remote_selected = index;
+                return;
+            }
+        }
+
+        self.remote_selected = self
+            .remote_selected
+            .min(self.remote_entries.len().saturating_sub(1));
+    }
+
+    fn restore_local_selection(&mut self, select_path: Option<&Path>) {
+        if let Some(select_path) = select_path {
+            if let Some(index) = self
+                .local_entries
+                .iter()
+                .position(|entry| entry.path == select_path)
+            {
+                self.local_selected = index;
+                return;
+            }
+        }
+
+        self.local_selected = self
+            .local_selected
+            .min(self.local_entries.len().saturating_sub(1));
     }
 }
 
