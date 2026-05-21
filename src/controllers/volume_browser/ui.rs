@@ -299,7 +299,7 @@ fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let Some(confirm) = &app.confirm else {
         return;
     };
-    let popup = centered_rect(62, 10, area);
+    let popup = centered_rect(62, confirm_popup_height(confirm), area);
     frame.render_widget(Clear, popup);
 
     let lines = vec![
@@ -319,11 +319,27 @@ fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .padding(Padding::new(1, 1, 1, 1));
+        .padding(confirm_popup_padding(confirm));
     frame.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
         popup,
     );
+}
+
+fn confirm_popup_height(confirm: &ConfirmRequest) -> u16 {
+    if confirm.action == ConfirmAction::Delete && confirm.is_dir {
+        10
+    } else {
+        10
+    }
+}
+
+fn confirm_popup_padding(confirm: &ConfirmRequest) -> Padding {
+    if confirm.action == ConfirmAction::Delete && confirm.is_dir {
+        Padding::new(0, 0, 0, 0)
+    } else {
+        Padding::new(1, 1, 1, 1)
+    }
 }
 
 fn render_error(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
