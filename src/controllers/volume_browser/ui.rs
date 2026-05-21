@@ -247,16 +247,7 @@ fn render_local_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let help =
         match app.mode {
-            BrowserMode::Browse => vec![
-                ("Up/Down", "move"),
-                ("Enter", "open folder"),
-                ("U", "upload"),
-                ("D", "download"),
-                ("E", "edit"),
-                ("R", "refresh"),
-                ("?", "help"),
-                ("Q", "quit"),
-            ],
+            BrowserMode::Browse => browse_help_items(app),
             BrowserMode::Upload => vec![
                 ("Up/Down", "move"),
                 ("Enter", "open/upload"),
@@ -277,6 +268,25 @@ fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         };
 
     frame.render_widget(Paragraph::new(Line::from(help_spans(help))), area);
+}
+
+fn browse_help_items(app: &VolumeBrowserApp) -> Vec<(&'static str, &'static str)> {
+    let mut items = vec![
+        ("Up/Down", "move"),
+        ("Enter", "open folder"),
+        ("U", "upload"),
+        ("D", "download"),
+    ];
+
+    if app
+        .selected_remote()
+        .is_some_and(|entry| entry.kind != "directory")
+    {
+        items.push(("E", "edit"));
+    }
+
+    items.extend([("R", "refresh"), ("?", "help"), ("Q", "quit")]);
+    items
 }
 
 fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {

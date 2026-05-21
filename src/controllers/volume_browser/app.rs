@@ -283,7 +283,6 @@ impl VolumeBrowserApp {
             KeyCode::Char('e') | KeyCode::Char('E') => {
                 if let Some(entry) = self.selected_remote() {
                     if entry.kind == "directory" {
-                        self.set_error("Directory edit is not supported yet.");
                         BrowserAction::Continue
                     } else {
                         BrowserAction::Edit {
