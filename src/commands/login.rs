@@ -24,6 +24,7 @@ pub struct Args {
 
 pub async fn command(args: Args) -> Result<()> {
     let is_tty = crate::macros::is_stdout_terminal();
+    let headless = is_likely_headless();
 
     // --browserless prints a user code the human types into another
     // browser; without a terminal the code has nowhere visible to land.
@@ -62,14 +63,19 @@ pub async fn command(args: Args) -> Result<()> {
 
     let host = configs.get_host();
 
-    let token_resp = if args.browserless {
+    let token_resp = if args.browserless || headless {
+        // Browserless because the user asked for it, OR because the
+        // environment suggests no browser is available (CI, SSH, no
+        // DISPLAY). Skip the doomed `open` attempt and go straight
+        // to device-code.
         device_flow_login(host).await?
     } else if !is_tty {
-        // Non-interactive shell (agent invocation, CI, etc.): skip the
-        // "Open the browser?" prompt and go straight to browser_login.
-        // It opens a browser and waits on a local TCP listener for the
-        // OAuth callback — neither needs stdin or a TTY. If opening
-        // the browser fails, browser_login falls back to device_flow.
+        // Non-interactive shell (agent invocation, etc.) with a
+        // likely-present browser: skip the "Open the browser?"
+        // prompt and go straight to browser_login. It opens a
+        // browser and waits on a local TCP listener for the OAuth
+        // callback — neither needs stdin or a TTY. If opening the
+        // browser fails, browser_login falls back to device_flow.
         browser_login(host).await?
     } else {
         let confirm = prompt_confirm_with_default_with_cancel("Open the browser?", true)?;
@@ -97,9 +103,14 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     if let Some(name) = me.name {
-        println!("Logged in as {} ({})", name.bold(), me.email);
+        println!(
+            "  {} Signed in as {} ({})",
+            "✓".green(),
+            name.bold(),
+            me.email,
+        );
     } else {
-        println!("Logged in as {}", me.email);
+        println!("  {} Signed in as {}", "✓".green(), me.email);
     }
 
     Ok(())
@@ -115,12 +126,23 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
     let state = oauth::generate_state();
     let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
 
+    // If we can't open a browser, fall back to device-code flow
+    // (which uses a different URL that doesn't need a localhost
+    // callback, and prints its own copy of the URL).
     if ::open::that(&auth_url).is_err() {
         drop(listener);
         return device_flow_login(host).await;
     }
 
-    let spinner = create_spinner("Waiting for authentication...".into());
+    // Browser opened. Print the URL too so the user has a
+    // copy-paste fallback if the wrong browser/profile/tab opened,
+    // or for debugging when something goes wrong.
+    println!();
+    println!("  {} Opening browser to sign in", "→".cyan());
+    println!("    {}", auth_url.bold().underline());
+    println!();
+
+    let spinner = create_spinner("Waiting for sign-in...".into());
 
     let result = tokio::time::timeout(
         Duration::from_secs(300),
@@ -324,19 +346,41 @@ async fn send_response(
 async fn device_flow_login(host: &str) -> Result<oauth::TokenResponse> {
     let device_auth = oauth::request_device_code(host).await?;
 
-    println!(
-        "Your authentication code is: {}",
-        device_auth.user_code.bold().purple()
-    );
-    println!(
-        "Please visit:\n  {}",
-        device_auth.verification_uri.bold().underline()
-    );
+    println!();
+    println!("  {} Sign in at:", "→".cyan());
+    println!("    {}", device_auth.verification_uri.bold().underline());
+    println!();
+    println!("  {} Enter this code:", "→".cyan());
+    println!("    {}", device_auth.user_code.bold().purple());
+    println!();
 
-    let spinner = create_spinner("Waiting for authentication...".into());
+    let spinner = create_spinner("Waiting for sign-in...".into());
 
     let token_resp = oauth::poll_for_token(host, &device_auth).await?;
 
     spinner.finish_and_clear();
     Ok(token_resp)
+}
+
+/// Detect environments where opening a local browser will fail or
+/// be useless. Used to skip the `open` attempt and go straight to
+/// device-code flow.
+///
+/// Heuristics (intentionally conservative — false positives just
+/// route the user to device-code, which still works):
+/// - $CI is set (CI runners have no GUI)
+/// - $SSH_CONNECTION is set (remote shell, browser would open on the
+///   wrong machine)
+/// - On Linux, $DISPLAY is empty (no X11 / Wayland session)
+fn is_likely_headless() -> bool {
+    if std::env::var("CI").is_ok() {
+        return true;
+    }
+    if std::env::var("SSH_CONNECTION").is_ok() {
+        return true;
+    }
+    if cfg!(target_os = "linux") && std::env::var("DISPLAY").unwrap_or_default().is_empty() {
+        return true;
+    }
+    false
 }
