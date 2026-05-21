@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod ui;
 
 use std::{
@@ -32,6 +33,16 @@ use app::{
     parent_remote_dir,
 };
 
+/// How many directory levels below the visible directory to prefetch in the
+/// background. Each level fans out by at most `MAX_PREFETCH_PER_DIR`, so the
+/// worst-case number of background list calls is bounded by
+/// `MAX_PREFETCH_PER_DIR ^ PREFETCH_DEPTH`.
+const PREFETCH_DEPTH: usize = 1;
+
+/// Cap on the number of children prefetched per directory level. Limits the
+/// fan-out for directories with many subfolders.
+const MAX_PREFETCH_PER_DIR: usize = 16;
+
 pub struct VolumeBrowserParams {
     pub service_instance_id: String,
     pub target_name: String,
@@ -42,9 +53,22 @@ pub struct VolumeBrowserParams {
 }
 
 struct RefreshResult {
-    request_id: u64,
     remote_dir: String,
     result: Result<Vec<VolumeFileEntry>>,
+    kind: FetchKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FetchKind {
+    /// User-initiated load (open directory, R to refresh, post-mutation
+    /// reconcile). Drives the visible loading state.
+    Active(u64),
+    /// Background revalidation triggered after a stale cache hit. Updates the
+    /// cache and the visible entries (if still on the same dir) without a
+    /// loading state.
+    Revalidate,
+    /// Background prefetch of a child directory. Updates the cache only.
+    Prefetch,
 }
 
 pub async fn run(params: VolumeBrowserParams) -> Result<()> {
@@ -64,6 +88,8 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
     let initial_entries = fetch_entries(&params, &initial_remote_dir)
         .await
         .with_context(|| format!("Failed to load remote directory {initial_remote_dir}"))?;
+    app.cache
+        .insert(&initial_remote_dir, initial_entries.clone());
     app.apply_remote_entries(initial_entries);
 
     let mut terminal = setup_terminal()?;
@@ -75,6 +101,16 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
     let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<RefreshResult>();
     let mut refresh_request_id = 0u64;
     let mut active_refresh_request_id = 0u64;
+
+    // Prefetch children of the directory we landed on.
+    spawn_prefetch(
+        &refresh_tx,
+        &params,
+        &app.cache,
+        &app.remote_dir,
+        &app.remote_entries,
+        PREFETCH_DEPTH,
+    );
 
     let mut render_interval = tokio::time::interval(std::time::Duration::from_millis(16));
     render_interval.tick().await;
@@ -88,14 +124,14 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                 dirty = false;
             }
             Some(refresh) = refresh_rx.recv() => {
-                if refresh.request_id == active_refresh_request_id {
-                    app.remote_dir = refresh.remote_dir;
-                    match refresh.result {
-                        Ok(entries) => app.apply_remote_entries(entries),
-                        Err(err) => app.set_error(err.to_string()),
-                    }
-                    dirty = true;
-                }
+                handle_refresh_result(
+                    &mut app,
+                    refresh,
+                    active_refresh_request_id,
+                    &refresh_tx,
+                    &params,
+                );
+                dirty = true;
             }
             Some(Ok(event)) = events.next() => {
                 match event {
@@ -113,6 +149,7 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                             BrowserAction::Continue => {}
                             BrowserAction::Quit => break 'main,
                             BrowserAction::Refresh => {
+                                // R forces a fresh fetch and bypasses the cache.
                                 spawn_refresh(
                                     &refresh_tx,
                                     &params,
@@ -123,14 +160,14 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                 app.mark_refreshing();
                             }
                             BrowserAction::OpenRemoteDirectory(remote_dir) => {
-                                spawn_refresh(
+                                open_directory(
+                                    &mut app,
                                     &refresh_tx,
                                     &params,
                                     &mut refresh_request_id,
                                     &mut active_refresh_request_id,
                                     normalize_remote_dir(&remote_dir),
                                 );
-                                app.mark_loading();
                             }
                             BrowserAction::Download { local_path, remote_path, is_dir, overwrite_policy, progress_base } => {
                                 let message = if matches!(overwrite_policy, LocalOverwritePolicy::All) {
@@ -155,16 +192,14 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                 };
                                 app.mark_busy(BusyState::Uploading, message);
                                 terminal.draw(|frame| ui::render(&app, frame))?;
-                                let uploaded = handle_upload(&mut app, &params, local_path, remote_path, overwrite).await;
+                                let uploaded = handle_upload(&mut app, &params, local_path.clone(), remote_path.clone(), overwrite).await;
                                 if uploaded {
-                                    spawn_refresh(
+                                    apply_optimistic_upload(&mut app, &local_path, &remote_path);
+                                    spawn_revalidate(
                                         &refresh_tx,
                                         &params,
-                                        &mut refresh_request_id,
-                                        &mut active_refresh_request_id,
-                                        app.remote_dir.clone(),
+                                        parent_remote_dir(&remote_path),
                                     );
-                                    app.mark_refreshing();
                                 }
                             }
                             BrowserAction::Delete { remote_path } => {
@@ -172,15 +207,13 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                 terminal.draw(|frame| ui::render(&app, frame))?;
                                 match handle_delete(&params, &remote_path).await {
                                     Ok(()) => {
+                                        apply_optimistic_delete(&mut app, &remote_path);
                                         app.set_status(format!("Deleted {remote_path}"));
-                                        spawn_refresh(
+                                        spawn_revalidate(
                                             &refresh_tx,
                                             &params,
-                                            &mut refresh_request_id,
-                                            &mut active_refresh_request_id,
                                             app.remote_dir.clone(),
                                         );
-                                        app.mark_refreshing();
                                     }
                                     Err(err) => app.set_error(err.to_string()),
                                 }
@@ -194,14 +227,14 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                 match edit_result {
                                     Ok(()) => {
                                         app.set_status(format!("Edited and uploaded {remote_path}"));
-                                        spawn_refresh(
+                                        // The visible tree didn't change shape; we just
+                                        // need a silent re-fetch so the size column is
+                                        // up to date.
+                                        spawn_revalidate(
                                             &refresh_tx,
                                             &params,
-                                            &mut refresh_request_id,
-                                            &mut active_refresh_request_id,
                                             parent_remote_dir(&remote_path),
                                         );
-                                        app.mark_refreshing();
                                     }
                                     Err(err) => app.set_error(err.to_string()),
                                 }
@@ -232,24 +265,247 @@ fn spawn_refresh(
     *refresh_request_id += 1;
     *active_refresh_request_id = *refresh_request_id;
     let request_id = *refresh_request_id;
+    spawn_fetch(tx, params, remote_dir, FetchKind::Active(request_id));
+}
+
+/// Fire a background revalidation. The result will quietly update the cache
+/// (and the visible entries, if still on the same dir) without any loading
+/// state.
+fn spawn_revalidate(
+    tx: &mpsc::UnboundedSender<RefreshResult>,
+    params: &VolumeBrowserParams,
+    remote_dir: String,
+) {
+    spawn_fetch(tx, params, remote_dir, FetchKind::Revalidate);
+}
+
+/// Fire a fan-out of prefetch fetches for the immediate child directories of
+/// `remote_dir` that aren't already in the cache.
+fn spawn_prefetch(
+    tx: &mpsc::UnboundedSender<RefreshResult>,
+    params: &VolumeBrowserParams,
+    cache: &cache::DirCache,
+    remote_dir: &str,
+    entries: &[VolumeFileEntry],
+    depth: usize,
+) {
+    if depth == 0 {
+        return;
+    }
+
+    let missing = cache.missing_children(remote_dir, entries, MAX_PREFETCH_PER_DIR);
+    for child_dir in missing {
+        spawn_fetch(tx, params, child_dir, FetchKind::Prefetch);
+    }
+}
+
+fn spawn_fetch(
+    tx: &mpsc::UnboundedSender<RefreshResult>,
+    params: &VolumeBrowserParams,
+    remote_dir: String,
+    kind: FetchKind,
+) {
     let tx = tx.clone();
-    let params = VolumeBrowserParams {
+    let params = clone_params(params);
+
+    tokio::spawn(async move {
+        let result = fetch_entries(&params, &remote_dir).await;
+        let _ = tx.send(RefreshResult {
+            remote_dir,
+            result,
+            kind,
+        });
+    });
+}
+
+fn clone_params(params: &VolumeBrowserParams) -> VolumeBrowserParams {
+    VolumeBrowserParams {
         service_instance_id: params.service_instance_id.clone(),
         target_name: params.target_name.clone(),
         mount_path: params.mount_path.clone(),
         remote_path: params.remote_path.clone(),
         transfer_concurrency: params.transfer_concurrency,
         editor: params.editor.clone(),
+    }
+}
+
+/// Open `remote_dir`. If it's already cached, render instantly; otherwise show
+/// a loading state. In the stale case we additionally fire a silent
+/// revalidation. After serving the directory we also kick off prefetches for
+/// its children.
+fn open_directory(
+    app: &mut VolumeBrowserApp,
+    tx: &mpsc::UnboundedSender<RefreshResult>,
+    params: &VolumeBrowserParams,
+    refresh_request_id: &mut u64,
+    active_refresh_request_id: &mut u64,
+    remote_dir: String,
+) {
+    // Look up and immediately copy out, so the cache borrow ends before we
+    // mutate other parts of `app`.
+    let cached = {
+        let (entries, kind) = app.cache.get(&remote_dir);
+        entries.map(|entries| (entries.to_vec(), kind))
     };
 
-    tokio::spawn(async move {
-        let result = fetch_entries(&params, &remote_dir).await;
-        let _ = tx.send(RefreshResult {
-            request_id,
+    let Some((entries, kind)) = cached else {
+        spawn_refresh(
+            tx,
+            params,
+            refresh_request_id,
+            active_refresh_request_id,
             remote_dir,
-            result,
-        });
-    });
+        );
+        app.mark_loading();
+        return;
+    };
+
+    app.remote_dir = remote_dir.clone();
+    app.remote_selected = 0;
+    app.apply_cached_entries(entries.clone());
+
+    if matches!(kind, cache::Lookup::Stale) {
+        app.mark_revalidating();
+        spawn_revalidate(tx, params, remote_dir.clone());
+    }
+
+    spawn_prefetch(
+        tx,
+        params,
+        &app.cache,
+        &remote_dir,
+        &entries,
+        PREFETCH_DEPTH,
+    );
+}
+
+/// Update the cache (and visible entries when relevant) from a fetch result.
+/// This is the single sink for all background and foreground fetches.
+fn handle_refresh_result(
+    app: &mut VolumeBrowserApp,
+    refresh: RefreshResult,
+    active_refresh_request_id: u64,
+    tx: &mpsc::UnboundedSender<RefreshResult>,
+    params: &VolumeBrowserParams,
+) {
+    // Always update the cache on success, regardless of fetch kind.
+    if let Ok(entries) = &refresh.result {
+        app.cache.insert(&refresh.remote_dir, entries.clone());
+    }
+
+    match refresh.kind {
+        FetchKind::Active(request_id) => {
+            if request_id != active_refresh_request_id {
+                // A newer load superseded this one. Cache was still updated.
+                return;
+            }
+            app.remote_dir = refresh.remote_dir.clone();
+            match refresh.result {
+                Ok(entries) => {
+                    app.apply_remote_entries(entries.clone());
+                    spawn_prefetch(
+                        tx,
+                        params,
+                        &app.cache,
+                        &refresh.remote_dir,
+                        &entries,
+                        PREFETCH_DEPTH,
+                    );
+                }
+                Err(err) => app.set_error(err.to_string()),
+            }
+        }
+        FetchKind::Revalidate => {
+            // Only update the visible state if we're still on the dir we
+            // revalidated.
+            if refresh.remote_dir != app.remote_dir {
+                return;
+            }
+            match refresh.result {
+                Ok(entries) => {
+                    app.apply_cached_entries(entries.clone());
+                    spawn_prefetch(
+                        tx,
+                        params,
+                        &app.cache,
+                        &refresh.remote_dir,
+                        &entries,
+                        PREFETCH_DEPTH,
+                    );
+                }
+                // On revalidation failure leave the stale entries up. The
+                // user can hit R to retry explicitly.
+                Err(_) => {}
+            }
+            app.clear_revalidating();
+        }
+        FetchKind::Prefetch => {
+            // Cache was already updated above on success. Failures are silent.
+        }
+    }
+}
+
+/// Apply an optimistic delete to the cache and the visible entries. Cached
+/// listings under the deleted path are dropped because they're now bogus.
+fn apply_optimistic_delete(app: &mut VolumeBrowserApp, remote_path: &str) {
+    let parent = parent_remote_dir(remote_path);
+    let name = basename(remote_path);
+
+    app.cache.apply_delete(&parent, &name);
+    app.cache.invalidate_subtree(remote_path);
+
+    if app.remote_dir == parent {
+        app.remote_entries.retain(|entry| entry.name != name);
+        app.remote_selected = app
+            .remote_selected
+            .min(app.remote_entries.len().saturating_sub(1));
+    }
+}
+
+/// Apply an optimistic upsert to the cache and the visible entries from a
+/// successful upload. The local file's metadata is read for the size; the
+/// entry is treated as a regular file unless the local path is a directory.
+fn apply_optimistic_upload(app: &mut VolumeBrowserApp, local_path: &Path, remote_path: &str) {
+    let parent = parent_remote_dir(remote_path);
+    let name = basename(remote_path);
+    if name.is_empty() {
+        return;
+    }
+
+    let metadata = std::fs::metadata(local_path).ok();
+    let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
+    let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+
+    let entry = VolumeFileEntry {
+        name: name.clone(),
+        path: remote_path.to_string(),
+        kind: if is_dir { "directory" } else { "file" },
+        size,
+    };
+
+    app.cache.apply_upsert(&parent, entry.clone());
+
+    if app.remote_dir == parent {
+        if let Some(existing) = app
+            .remote_entries
+            .iter_mut()
+            .find(|existing| existing.name == name)
+        {
+            *existing = entry;
+        } else {
+            app.remote_entries.push(entry);
+            app.remote_entries
+                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        }
+    }
+}
+
+fn basename(remote_path: &str) -> String {
+    remote_path
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 async fn fetch_entries(

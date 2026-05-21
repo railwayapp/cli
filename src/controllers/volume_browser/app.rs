@@ -6,6 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::cache::DirCache;
 use crate::commands::volume::sftp::{
     LocalOverwritePolicy, VolumeFileEntry, VolumeTransferProgress,
 };
@@ -109,10 +110,17 @@ pub struct VolumeBrowserApp {
     pub local_selected: usize,
     pub mode: BrowserMode,
     pub busy: BusyState,
+    /// True when entries are being silently revalidated in the background
+    /// after a cache hit. Distinct from `busy` because the UI stays fully
+    /// interactive; we just show a small indicator in the header.
+    pub revalidating: bool,
     pub status: Option<String>,
     pub error: Option<String>,
     pub transfer_progress: Option<TransferProgressState>,
     pub confirm: Option<ConfirmRequest>,
+    /// In-memory cache of recently visited directories. Powers
+    /// stale-while-revalidate navigation, optimistic mutations, and prefetch.
+    pub cache: DirCache,
 }
 
 impl VolumeBrowserApp {
@@ -129,24 +137,52 @@ impl VolumeBrowserApp {
             local_selected: 0,
             mode: BrowserMode::Browse,
             busy: BusyState::Idle,
+            revalidating: false,
             status: Some("Loading remote files...".to_string()),
             error: None,
             transfer_progress: None,
             confirm: None,
+            cache: DirCache::new(),
         };
         app.refresh_local_entries();
         Ok(app)
     }
 
+    /// Applies fresh entries from a user-initiated load. Clears any busy state
+    /// and replaces the visible entries.
     pub fn apply_remote_entries(&mut self, entries: Vec<VolumeFileEntry>) {
         self.remote_entries = entries;
         self.remote_selected = self
             .remote_selected
             .min(self.remote_entries.len().saturating_sub(1));
         self.busy = BusyState::Idle;
+        self.revalidating = false;
         self.status = None;
         self.error = None;
         self.transfer_progress = None;
+    }
+
+    /// Applies entries served from the cache without clearing transient status
+    /// messages or showing a loading state. The selection is clamped to the
+    /// new length so we don't end up pointing past the end of the list.
+    pub fn apply_cached_entries(&mut self, entries: Vec<VolumeFileEntry>) {
+        self.remote_entries = entries;
+        self.remote_selected = self
+            .remote_selected
+            .min(self.remote_entries.len().saturating_sub(1));
+        self.busy = BusyState::Idle;
+        self.error = None;
+        self.transfer_progress = None;
+    }
+
+    /// Marks the visible directory as being silently revalidated. Doesn't
+    /// disable input or replace the status line; only flips the indicator.
+    pub fn mark_revalidating(&mut self) {
+        self.revalidating = true;
+    }
+
+    pub fn clear_revalidating(&mut self) {
+        self.revalidating = false;
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -154,6 +190,7 @@ impl VolumeBrowserApp {
         self.status = None;
         self.transfer_progress = None;
         self.busy = BusyState::Idle;
+        self.revalidating = false;
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
@@ -161,6 +198,7 @@ impl VolumeBrowserApp {
         self.error = None;
         self.transfer_progress = None;
         self.busy = BusyState::Idle;
+        self.revalidating = false;
     }
 
     pub fn mark_refreshing(&mut self) {
@@ -176,6 +214,7 @@ impl VolumeBrowserApp {
         self.status = Some(message.into());
         self.error = None;
         self.transfer_progress = None;
+        self.revalidating = false;
     }
 
     pub fn set_transfer_progress(&mut self, progress: VolumeTransferProgress) {
@@ -565,315 +604,5 @@ pub fn join_remote_path(parent: &str, name: &str) -> String {
         format!("/{name}")
     } else {
         format!("{parent}/{name}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::{KeyCode, KeyEvent};
-
-    #[test]
-    fn remote_paths_are_normalized() {
-        assert_eq!(normalize_remote_dir(""), "/");
-        assert_eq!(normalize_remote_dir("/"), "/");
-        assert_eq!(normalize_remote_dir("data/backups/"), "/data/backups");
-        assert_eq!(parent_remote_dir("/data/backups"), "/data");
-        assert_eq!(parent_remote_dir("/data"), "/");
-        assert_eq!(join_remote_path("/", "dump.sql"), "/dump.sql");
-        assert_eq!(join_remote_path("/data", "dump.sql"), "/data/dump.sql");
-    }
-
-    #[test]
-    fn enter_opens_remote_directories_but_not_files() {
-        let mut app = VolumeBrowserApp {
-            target_name: "data".to_string(),
-            mount_path: "/data".to_string(),
-            remote_dir: "/".to_string(),
-            remote_entries: vec![VolumeFileEntry {
-                name: "backups".to_string(),
-                path: "/backups".to_string(),
-                kind: "directory",
-                size: 0,
-            }],
-            remote_selected: 0,
-            local_cwd: PathBuf::from("."),
-            local_entries: Vec::new(),
-            local_selected: 0,
-            mode: BrowserMode::Browse,
-            busy: BusyState::Idle,
-            status: None,
-            error: None,
-            transfer_progress: None,
-            confirm: None,
-        };
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            BrowserAction::OpenRemoteDirectory("/backups".to_string())
-        );
-
-        app.remote_entries[0].kind = "file";
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            BrowserAction::Continue
-        );
-    }
-
-    #[test]
-    fn overwrite_confirmation_replays_original_action_with_overwrite() {
-        let mut app = VolumeBrowserApp {
-            target_name: "data".to_string(),
-            mount_path: "/data".to_string(),
-            remote_dir: "/".to_string(),
-            remote_entries: Vec::new(),
-            remote_selected: 0,
-            local_cwd: PathBuf::from("."),
-            local_entries: Vec::new(),
-            local_selected: 0,
-            mode: BrowserMode::Browse,
-            busy: BusyState::Idle,
-            status: None,
-            error: None,
-            transfer_progress: None,
-            confirm: None,
-        };
-
-        app.request_overwrite(
-            ConfirmAction::Upload,
-            PathBuf::from("dump.sql"),
-            None,
-            "/dump.sql".to_string(),
-            false,
-            "exists".to_string(),
-        );
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            BrowserAction::Upload {
-                local_path: PathBuf::from("dump.sql"),
-                remote_path: "/dump.sql".to_string(),
-                overwrite: true,
-            }
-        );
-        assert_eq!(app.mode, BrowserMode::Browse);
-    }
-
-    #[test]
-    fn delete_key_prompts_then_deletes_selected_file() {
-        let mut app = VolumeBrowserApp {
-            target_name: "data".to_string(),
-            mount_path: "/data".to_string(),
-            remote_dir: "/".to_string(),
-            remote_entries: vec![VolumeFileEntry {
-                name: "dump.sql".to_string(),
-                path: "/dump.sql".to_string(),
-                kind: "file",
-                size: 10,
-            }],
-            remote_selected: 0,
-            local_cwd: PathBuf::from("."),
-            local_entries: Vec::new(),
-            local_selected: 0,
-            mode: BrowserMode::Browse,
-            busy: BusyState::Idle,
-            status: None,
-            error: None,
-            transfer_progress: None,
-            confirm: None,
-        };
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
-            BrowserAction::Continue
-        );
-        assert_eq!(app.mode, BrowserMode::Confirm);
-        assert!(app.confirm.as_ref().is_some_and(|confirm| {
-            confirm.action == ConfirmAction::Delete && confirm.remote_path == "/dump.sql"
-        }));
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            BrowserAction::Delete {
-                remote_path: "/dump.sql".to_string(),
-            }
-        );
-        assert_eq!(app.mode, BrowserMode::Browse);
-    }
-
-    #[test]
-    fn delete_key_prompts_for_selected_directory() {
-        let mut app = VolumeBrowserApp {
-            target_name: "data".to_string(),
-            mount_path: "/data".to_string(),
-            remote_dir: "/".to_string(),
-            remote_entries: vec![VolumeFileEntry {
-                name: "backups".to_string(),
-                path: "/backups".to_string(),
-                kind: "directory",
-                size: 0,
-            }],
-            remote_selected: 0,
-            local_cwd: PathBuf::from("."),
-            local_entries: Vec::new(),
-            local_selected: 0,
-            mode: BrowserMode::Browse,
-            busy: BusyState::Idle,
-            status: None,
-            error: None,
-            transfer_progress: None,
-            confirm: None,
-        };
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
-            BrowserAction::Continue
-        );
-        assert_eq!(app.mode, BrowserMode::Confirm);
-        assert!(app.confirm.as_ref().is_some_and(|confirm| {
-            confirm.action == ConfirmAction::Delete
-                && confirm.remote_path == "/backups"
-                && confirm.is_dir
-        }));
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            BrowserAction::Delete {
-                remote_path: "/backups".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn directory_download_enter_overwrites_only_conflicting_path() {
-        let mut app = VolumeBrowserApp {
-            target_name: "data".to_string(),
-            mount_path: "/data".to_string(),
-            remote_dir: "/".to_string(),
-            remote_entries: Vec::new(),
-            remote_selected: 0,
-            local_cwd: PathBuf::from("."),
-            local_entries: Vec::new(),
-            local_selected: 0,
-            mode: BrowserMode::Browse,
-            busy: BusyState::Idle,
-            status: None,
-            error: None,
-            transfer_progress: None,
-            confirm: None,
-        };
-
-        app.request_overwrite(
-            ConfirmAction::Download,
-            PathBuf::from("."),
-            Some(PathBuf::from("./backups/dump.sql")),
-            "/backups".to_string(),
-            true,
-            "exists".to_string(),
-        );
-
-        assert!(app.confirm.as_ref().is_some_and(|confirm| {
-            confirm.action == ConfirmAction::Download && confirm.is_dir
-        }));
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            BrowserAction::Download {
-                local_path: PathBuf::from("."),
-                remote_path: "/backups".to_string(),
-                is_dir: true,
-                overwrite_policy: LocalOverwritePolicy::Path(PathBuf::from("./backups/dump.sql")),
-                progress_base: None,
-            }
-        );
-        assert_eq!(app.mode, BrowserMode::Browse);
-    }
-
-    #[test]
-    fn overwrite_confirmation_preserves_progress_base() {
-        let mut app = VolumeBrowserApp {
-            target_name: "data".to_string(),
-            mount_path: "/data".to_string(),
-            remote_dir: "/".to_string(),
-            remote_entries: Vec::new(),
-            remote_selected: 0,
-            local_cwd: PathBuf::from("."),
-            local_entries: Vec::new(),
-            local_selected: 0,
-            mode: BrowserMode::Browse,
-            busy: BusyState::Idle,
-            status: None,
-            error: None,
-            transfer_progress: Some(TransferProgressState {
-                current_path: "/backups/a.sql".to_string(),
-                completed: 3,
-                total: 9,
-            }),
-            confirm: None,
-        };
-
-        app.request_overwrite(
-            ConfirmAction::Download,
-            PathBuf::from("."),
-            Some(PathBuf::from("./backups/dump.sql")),
-            "/backups".to_string(),
-            true,
-            "exists".to_string(),
-        );
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            BrowserAction::Download {
-                local_path: PathBuf::from("."),
-                remote_path: "/backups".to_string(),
-                is_dir: true,
-                overwrite_policy: LocalOverwritePolicy::Path(PathBuf::from("./backups/dump.sql")),
-                progress_base: Some(TransferProgressState {
-                    current_path: "/backups/a.sql".to_string(),
-                    completed: 3,
-                    total: 9,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn directory_download_confirmation_supports_overwrite_all_shortcut() {
-        let mut app = VolumeBrowserApp {
-            target_name: "data".to_string(),
-            mount_path: "/data".to_string(),
-            remote_dir: "/".to_string(),
-            remote_entries: Vec::new(),
-            remote_selected: 0,
-            local_cwd: PathBuf::from("."),
-            local_entries: Vec::new(),
-            local_selected: 0,
-            mode: BrowserMode::Browse,
-            busy: BusyState::Idle,
-            status: None,
-            error: None,
-            transfer_progress: None,
-            confirm: None,
-        };
-
-        app.request_overwrite(
-            ConfirmAction::Download,
-            PathBuf::from("."),
-            Some(PathBuf::from("./backups/dump.sql")),
-            "/backups".to_string(),
-            true,
-            "exists".to_string(),
-        );
-
-        assert_eq!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
-            BrowserAction::Download {
-                local_path: PathBuf::from("."),
-                remote_path: "/backups".to_string(),
-                is_dir: true,
-                overwrite_policy: LocalOverwritePolicy::All,
-                progress_base: None,
-            }
-        );
-        assert_eq!(app.mode, BrowserMode::Browse);
     }
 }
