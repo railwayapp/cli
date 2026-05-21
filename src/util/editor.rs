@@ -142,12 +142,13 @@ fn candidate_names(command: &str) -> Box<dyn Iterator<Item = String> + '_> {
     }
 
     let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    Box::new(
-        pathext
-            .split(';')
-            .filter(|ext| !ext.is_empty())
-            .map(move |ext| format!("{command}{ext}")),
-    )
+    let candidates = pathext
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| format!("{command}{ext}"))
+        .collect::<Vec<_>>();
+
+    Box::new(candidates.into_iter())
 }
 
 #[cfg(not(windows))]
