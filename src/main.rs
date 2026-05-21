@@ -322,32 +322,7 @@ async fn main() -> Result<()> {
         eprintln!("{suggestion}");
     }
 
-    // Commands that do not require authentication -- skip token refresh for these.
-    const NO_AUTH_COMMANDS: &[&str] = &[
-        "login",
-        "logout",
-        "completion",
-        "docs",
-        "setup",
-        "skills",
-        "upgrade",
-        "autoupdate",
-        "telemetry_cmd",
-        "templates",
-        "check_updates",
-    ];
-
-    let is_mcp_install = matches!(
-        cli.subcommand(),
-        Some(("mcp", mcp_matches)) if mcp_matches.subcommand_name() == Some("install")
-    );
-
-    let needs_refresh = cli
-        .subcommand_name()
-        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install)
-        .unwrap_or(false);
-
-    if needs_refresh {
+    if command_needs_refresh(&cli) {
         if let Ok(mut configs) = Configs::new() {
             if let Err(e) = client::ensure_valid_token(&mut configs).await {
                 eprintln!("{}: {e}", "Warning: failed to refresh OAuth token".yellow());
@@ -395,6 +370,42 @@ async fn main() -> Result<()> {
     handle_update_task(check_updates_handle).await;
 
     Ok(())
+}
+
+fn command_needs_refresh(cli: &clap::ArgMatches) -> bool {
+    // Commands that do not require authentication -- skip token refresh for these.
+    const NO_AUTH_COMMANDS: &[&str] = &[
+        "login",
+        "logout",
+        "completion",
+        "docs",
+        "setup",
+        "skills",
+        "upgrade",
+        "autoupdate",
+        "telemetry_cmd",
+        "check_updates",
+    ];
+
+    let is_mcp_install = matches!(
+        cli.subcommand(),
+        Some(("mcp", mcp_matches)) if mcp_matches.subcommand_name() == Some("install")
+    );
+
+    let is_public_templates_command = matches!(
+        cli.subcommand(),
+        Some(("templates", template_matches))
+            if matches!(
+                template_matches.subcommand_name(),
+                Some("search" | "find" | "list" | "ls")
+            )
+    );
+
+    cli.subcommand_name()
+        .map(|cmd| {
+            !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install && !is_public_templates_command
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -645,6 +656,21 @@ mod cli_tests {
             assert_parses(&["setup", "agent", "-y"]);
             assert_parses(&["setup", "agent", "--remote"]);
             assert_parses(&["setup", "agent", "--remote", "-y"]);
+        }
+
+        #[test]
+        fn template_auth_refresh_is_subcommand_aware() {
+            let search = parse(&["templates", "search"]).unwrap();
+            let find = parse(&["template", "find", "postgres"]).unwrap();
+            let create = parse(&["templates", "create", "--environment", "production"]).unwrap();
+            let publish = parse(&["templates", "publish", "template-id"]).unwrap();
+            let unpublish = parse(&["templates", "unpublish", "template-id"]).unwrap();
+
+            assert!(!command_needs_refresh(&search));
+            assert!(!command_needs_refresh(&find));
+            assert!(command_needs_refresh(&create));
+            assert!(command_needs_refresh(&publish));
+            assert!(command_needs_refresh(&unpublish));
         }
 
         #[test]

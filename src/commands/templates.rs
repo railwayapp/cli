@@ -27,7 +27,7 @@ use tokio::{sync::mpsc, time::Instant};
 use crate::{
     client::post_graphql,
     consts::TICK_STRING,
-    controllers::project::get_project,
+    controllers::{environment::get_matched_environment, project::get_project},
     errors::RailwayError,
     util::{
         progress::create_spinner_if,
@@ -94,6 +94,7 @@ const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "avif", "gif",
 const README_SOURCE_EXISTING: &str = "Use existing README";
 const README_SOURCE_GENERATED: &str = "Use generated README";
 const README_SOURCE_FILE: &str = "Read from file";
+const OPTIONAL_FIELD_CLEAR_HINT: &str = "none";
 
 #[derive(Clone, Copy)]
 enum TerminalTheme {
@@ -156,12 +157,16 @@ struct SearchArgs {
 
 #[derive(Parser, Clone)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates create --json\n  railway templates create --project project-id --json\n\nAutomation notes:\n  This matches the dashboard Generate Template action: it clones a project into an unpublished template draft.\n  The generated template opens in the dashboard template editor for cleanup before publishing.\n  In interactive mode, an omitted project is prompted."
+    after_help = "Examples:\n\n  railway templates create --json\n  railway templates create --project project-id --environment production --json\n\nAutomation notes:\n  This matches the dashboard Generate Template action: it clones a project into an unpublished template draft.\n  The generated template opens in the dashboard template editor for cleanup before publishing.\n  In interactive mode, an omitted project is prompted."
 )]
 struct CreateArgs {
     /// Project ID or name. Defaults to the linked project.
     #[arg(short, long)]
     project: Option<String>,
+
+    /// Environment ID or name. Defaults to the linked environment when available.
+    #[arg(short, long)]
+    environment: Option<String>,
 
     /// Print the created template as JSON
     #[arg(long)]
@@ -273,13 +278,23 @@ async fn create_command(args: CreateArgs) -> Result<()> {
     let interactive = is_interactive_output(args.json);
     let configs = Configs::new()?;
     let client = GQLClient::new_user_authorized(&configs)?;
-    let project_id = resolve_template_project(&client, &configs, args.project, interactive).await?;
+    let project = resolve_template_project(
+        &client,
+        &configs,
+        args.project,
+        args.environment,
+        interactive,
+    )
+    .await?;
 
     let spinner = create_spinner_if(!args.json, "Creating template...".to_string());
     let response = post_graphql::<mutations::TemplateGenerate, _>(
         &client,
         configs.get_backboard(),
-        mutations::template_generate::Variables { project_id },
+        mutations::template_generate::Variables {
+            project_id: project.id,
+            environment_id: project.environment_id,
+        },
     )
     .await?;
 
@@ -489,6 +504,11 @@ struct TemplateProjectChoice {
     workspace_name: String,
 }
 
+struct TemplateProjectContext {
+    id: String,
+    environment_id: Option<String>,
+}
+
 impl std::fmt::Display for TemplateProjectChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.name, self.workspace_name)
@@ -499,10 +519,21 @@ async fn resolve_template_project(
     client: &reqwest::Client,
     configs: &Configs,
     project: Option<String>,
+    environment: Option<String>,
     interactive: bool,
-) -> Result<String> {
+) -> Result<TemplateProjectContext> {
     if let Some(project) = project {
-        return resolve_project_arg(client, configs, &project).await;
+        let project_id = resolve_project_arg(client, configs, &project).await?;
+        let environment_id = match environment {
+            Some(environment) => {
+                Some(resolve_project_environment(client, configs, &project_id, &environment).await?)
+            }
+            None => resolve_linked_environment_for_project(client, configs, &project_id).await?,
+        };
+        return Ok(TemplateProjectContext {
+            id: project_id,
+            environment_id,
+        });
     }
 
     if let Ok(linked_project) = configs.get_linked_project().await {
@@ -513,7 +544,17 @@ async fn resolve_template_project(
                 .as_deref()
                 .unwrap_or(linked_project.project.as_str()),
         );
-        return Ok(linked_project.project);
+        let environment_id = match environment.or(linked_project.environment) {
+            Some(environment) => Some(
+                resolve_project_environment(client, configs, &linked_project.project, &environment)
+                    .await?,
+            ),
+            None => None,
+        };
+        return Ok(TemplateProjectContext {
+            id: linked_project.project,
+            environment_id,
+        });
     }
 
     if !interactive {
@@ -526,7 +567,16 @@ async fn resolve_template_project(
     }
 
     let choice = prompt_options("Select project", choices)?;
-    Ok(choice.id)
+    let environment_id = match environment {
+        Some(environment) => {
+            Some(resolve_project_environment(client, configs, &choice.id, &environment).await?)
+        }
+        None => None,
+    };
+    Ok(TemplateProjectContext {
+        id: choice.id,
+        environment_id,
+    })
 }
 
 async fn resolve_project_arg(
@@ -547,6 +597,47 @@ async fn resolve_project_arg(
     let choice = find_project_choice(client, configs, project).await?;
     fake_select("Select project", &choice.to_string());
     Ok(choice.id)
+}
+
+async fn resolve_linked_environment_for_project(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project_id: &str,
+) -> Result<Option<String>> {
+    let Ok(linked_project) = configs.get_linked_project().await else {
+        return Ok(None);
+    };
+
+    if linked_project.project != project_id {
+        return Ok(None);
+    }
+
+    match linked_project.environment {
+        Some(environment) => Ok(Some(
+            resolve_project_environment(client, configs, project_id, &environment).await?,
+        )),
+        None => Ok(None),
+    }
+}
+
+async fn resolve_project_environment(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project_id: &str,
+    environment: &str,
+) -> Result<String> {
+    let project = get_project(client, configs, project_id.to_string()).await?;
+    if project.deleted_at.is_some() {
+        bail!(RailwayError::ProjectDeleted);
+    }
+
+    let environment = get_matched_environment(&project, environment.to_string())?;
+    if environment.deleted_at.is_some() {
+        bail!(RailwayError::EnvironmentDeleted);
+    }
+
+    fake_select("Select environment", &environment.name);
+    Ok(environment.id)
 }
 
 async fn find_project_choice(
@@ -846,7 +937,7 @@ fn resolve_optional_publish_field(
     empty_placeholder: &str,
 ) -> Result<Option<String>> {
     if let Some(value) = value {
-        return Ok(non_empty_string(value));
+        return Ok(normalize_optional_publish_value(value));
     }
 
     let existing = existing.and_then(non_empty_string);
@@ -860,8 +951,29 @@ fn resolve_optional_publish_field(
     } else {
         &default
     };
-    let value = prompt_text_with_placeholder_if_blank(message, placeholder, &default)?;
+    let prompt = if default.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message} (type {OPTIONAL_FIELD_CLEAR_HINT} to clear)")
+    };
+    let value = prompt_text_with_placeholder_if_blank(&prompt, placeholder, &default)?;
+    if is_optional_field_clear_value(&value) {
+        return Ok(None);
+    }
+
     Ok(non_empty_string(value).or_else(|| non_empty_string(default)))
+}
+
+fn normalize_optional_publish_value(value: String) -> Option<String> {
+    if is_optional_field_clear_value(&value) {
+        None
+    } else {
+        non_empty_string(value)
+    }
+}
+
+fn is_optional_field_clear_value(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "none" | "clear")
 }
 
 fn validate_publish_fields(
@@ -1941,5 +2053,87 @@ mod tests {
 
         assert!(error.contains("Template \"Hidden App\" is HIDDEN"));
         assert!(error.contains("Only published templates can be unpublished"));
+    }
+
+    #[test]
+    fn optional_publish_field_treats_explicit_empty_as_clear() {
+        assert_eq!(
+            resolve_optional_publish_field(
+                Some("".to_string()),
+                Some("https://example.com/image.png".to_string()),
+                false,
+                "Image URL",
+                "<none>",
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn optional_publish_field_treats_clear_sentinel_as_clear() {
+        assert_eq!(
+            resolve_optional_publish_field(
+                Some(" none ".to_string()),
+                Some("https://example.com/image.png".to_string()),
+                false,
+                "Image URL",
+                "<none>",
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_optional_publish_field(
+                Some("CLEAR".to_string()),
+                Some("demo-project-id".to_string()),
+                false,
+                "Public demo project ID",
+                "<none>",
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn optional_publish_field_keeps_existing_when_unspecified() {
+        assert_eq!(
+            resolve_optional_publish_field(
+                None,
+                Some("demo-project-id".to_string()),
+                false,
+                "Public demo project ID",
+                "<none>",
+            )
+            .unwrap(),
+            Some("demo-project-id".to_string())
+        );
+    }
+
+    #[test]
+    fn template_publish_variables_serialize_clearable_fields_as_null() {
+        let value = serde_json::to_value(mutations::template_publish::Variables {
+            id: "template-id".to_string(),
+            description: "Deploy and Host Test App".to_string(),
+            category: "Other".to_string(),
+            readme: default_readme("Test App"),
+            image: None,
+            demo_project_id: None,
+            workspace_id: None,
+        })
+        .unwrap();
+
+        assert!(value.get("image").is_some_and(serde_json::Value::is_null));
+        assert!(
+            value
+                .get("demoProjectId")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert!(
+            value
+                .get("workspaceId")
+                .is_some_and(serde_json::Value::is_null)
+        );
     }
 }
