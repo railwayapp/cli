@@ -33,7 +33,7 @@ use app::{
 
 pub struct VolumeBrowserParams {
     pub service_instance_id: String,
-    pub volume_name: String,
+    pub target_name: String,
     pub mount_path: String,
     pub remote_path: String,
     pub transfer_concurrency: usize,
@@ -53,7 +53,7 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
     }));
 
     let mut app = VolumeBrowserApp::new(
-        params.volume_name.clone(),
+        params.target_name.clone(),
         params.mount_path.clone(),
         params.remote_path.clone(),
     )?;
@@ -215,7 +215,7 @@ fn spawn_refresh(
     let tx = tx.clone();
     let params = VolumeBrowserParams {
         service_instance_id: params.service_instance_id.clone(),
-        volume_name: params.volume_name.clone(),
+        target_name: params.target_name.clone(),
         mount_path: params.mount_path.clone(),
         remote_path: params.remote_path.clone(),
         transfer_concurrency: params.transfer_concurrency,

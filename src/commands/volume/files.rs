@@ -266,7 +266,7 @@ pub(crate) async fn browse(target: FileTarget, args: BrowseArgs) -> Result<()> {
 
     volume_browser::run(VolumeBrowserParams {
         service_instance_id: target.service_instance_id.clone(),
-        volume_name: target.name(),
+        target_name: target.name(),
         mount_path: target.mount_path.clone(),
         remote_path: args.remote_path,
         transfer_concurrency: args.concurrency,
@@ -421,7 +421,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 impl FileTarget {
-    fn name(&self) -> String {
+    pub(crate) fn name(&self) -> String {
         match &self.label {
             FileTargetLabel::Volume { name, .. } | FileTargetLabel::Service { name, .. } => {
                 name.clone()

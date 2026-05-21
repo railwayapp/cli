@@ -58,7 +58,7 @@ fn render_header(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let line = Line::from(vec![
         Span::styled("  Browse ", Style::default().fg(LABEL_COLOR)),
         Span::styled(
-            app.volume_name.clone(),
+            app.target_name.clone(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),

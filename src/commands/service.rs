@@ -1,6 +1,7 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
 use serde::Serialize;
+use std::fmt::Display;
 
 use crate::{
     client::post_graphql,
@@ -10,7 +11,7 @@ use crate::{
         project::{
             ensure_project_and_environment_exist, ensure_service_has_active_deployment,
             find_service_instance, get_environment_instances, get_project, get_service_ids_in_env,
-            resolve_service_context, service_instances_in_env,
+            resolve_service_context, service_instances_in_env, volume_instances_in_env,
         },
         regions::fetch_region_locations,
     },
@@ -223,16 +224,81 @@ async fn files_command(args: FilesArgs) -> Result<()> {
         .with_context(|| format!("No service instance found for {}", ctx.service_name))?;
     ensure_service_has_active_deployment(service_instance, &ctx.environment_name)?;
 
-    let target = crate::commands::volume::files::FileTarget {
+    let service_target = crate::commands::volume::files::FileTarget {
         service_instance_id: service_instance.id.clone(),
         mount_path: "/".to_string(),
         label: crate::commands::volume::files::FileTargetLabel::Service {
-            id: ctx.service_id,
-            name: ctx.service_name,
+            id: ctx.service_id.clone(),
+            name: ctx.service_name.clone(),
         },
     };
 
-    crate::commands::volume::files::command_from_parts(target, args.command).await
+    let command = args.command;
+    let target = if matches!(command, crate::commands::volume::files::Commands::Browse(_)) {
+        service_file_browse_target(service_target, &environment_instances, &ctx.service_id)?
+    } else {
+        service_target
+    };
+
+    crate::commands::volume::files::command_from_parts(target, command).await
+}
+
+fn service_file_browse_target(
+    service_target: crate::commands::volume::files::FileTarget,
+    environment_instances: &crate::controllers::project::ProjectEnvironmentInstances,
+    service_id: &str,
+) -> Result<crate::commands::volume::files::FileTarget> {
+    if !std::io::stdout().is_terminal() {
+        return Ok(service_target);
+    }
+
+    let volume_targets: Vec<crate::commands::volume::files::FileTarget> =
+        volume_instances_in_env(environment_instances)
+            .iter()
+            .filter(|volume| volume.node.service_id.as_deref() == Some(service_id))
+            .map(|volume| crate::commands::volume::files::FileTarget {
+                service_instance_id: service_target.service_instance_id.clone(),
+                mount_path: volume.node.mount_path.clone(),
+                label: crate::commands::volume::files::FileTargetLabel::Volume {
+                    id: volume.node.volume.id.clone(),
+                    name: volume.node.volume.name.clone(),
+                    mount_path: volume.node.mount_path.clone(),
+                },
+            })
+            .collect();
+
+    if volume_targets.is_empty() {
+        return Ok(service_target);
+    }
+
+    if !prompt_confirm_with_default("Browse the attached volume?", true)? {
+        return Ok(service_target);
+    }
+
+    if volume_targets.len() == 1 {
+        return Ok(volume_targets[0].clone());
+    }
+
+    let choices = volume_targets
+        .into_iter()
+        .map(VolumeFileBrowseChoice)
+        .collect();
+    Ok(prompt_options("Select a volume", choices)?.0)
+}
+
+struct VolumeFileBrowseChoice(crate::commands::volume::files::FileTarget);
+
+impl Display for VolumeFileBrowseChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0.label {
+            crate::commands::volume::files::FileTargetLabel::Volume {
+                name, mount_path, ..
+            } => write!(f, "{name} ({mount_path})"),
+            crate::commands::volume::files::FileTargetLabel::Service { name, .. } => {
+                write!(f, "{name}")
+            }
+        }
+    }
 }
 
 async fn list_command(args: ListArgs) -> Result<()> {

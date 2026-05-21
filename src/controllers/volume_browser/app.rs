@@ -94,7 +94,7 @@ pub struct LocalEntry {
 
 #[derive(Debug)]
 pub struct VolumeBrowserApp {
-    pub volume_name: String,
+    pub target_name: String,
     pub mount_path: String,
     pub remote_dir: String,
     pub remote_entries: Vec<VolumeFileEntry>,
@@ -111,10 +111,10 @@ pub struct VolumeBrowserApp {
 }
 
 impl VolumeBrowserApp {
-    pub fn new(volume_name: String, mount_path: String, remote_dir: String) -> Result<Self> {
+    pub fn new(target_name: String, mount_path: String, remote_dir: String) -> Result<Self> {
         let local_cwd = std::env::current_dir().context("Failed to read current directory")?;
         let mut app = Self {
-            volume_name,
+            target_name,
             mount_path,
             remote_dir: normalize_remote_dir(&remote_dir),
             remote_entries: Vec::new(),
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn enter_opens_remote_directories_but_not_files() {
         let mut app = VolumeBrowserApp {
-            volume_name: "data".to_string(),
+            target_name: "data".to_string(),
             mount_path: "/data".to_string(),
             remote_dir: "/".to_string(),
             remote_entries: vec![VolumeFileEntry {
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn overwrite_confirmation_replays_original_action_with_overwrite() {
         let mut app = VolumeBrowserApp {
-            volume_name: "data".to_string(),
+            target_name: "data".to_string(),
             mount_path: "/data".to_string(),
             remote_dir: "/".to_string(),
             remote_entries: Vec::new(),
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn directory_download_enter_overwrites_only_conflicting_path() {
         let mut app = VolumeBrowserApp {
-            volume_name: "data".to_string(),
+            target_name: "data".to_string(),
             mount_path: "/data".to_string(),
             remote_dir: "/".to_string(),
             remote_entries: Vec::new(),
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn overwrite_confirmation_preserves_progress_base() {
         let mut app = VolumeBrowserApp {
-            volume_name: "data".to_string(),
+            target_name: "data".to_string(),
             mount_path: "/data".to_string(),
             remote_dir: "/".to_string(),
             remote_entries: Vec::new(),
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn directory_download_confirmation_supports_overwrite_all_shortcut() {
         let mut app = VolumeBrowserApp {
-            volume_name: "data".to_string(),
+            target_name: "data".to_string(),
             mount_path: "/data".to_string(),
             remote_dir: "/".to_string(),
             remote_entries: Vec::new(),
