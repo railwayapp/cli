@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Result, bail};
-
+use colored::Colorize;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use is_terminal::IsTerminal;
@@ -72,7 +72,18 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let configs = Configs::new()?;
+    let mut configs = Configs::new()?;
+
+    // If the user isn't signed in, intercept early: show a clack-style
+    // picker (Create New Account / Log In and Deploy), chain into the
+    // login flow, then reload configs and continue with `up`. This
+    // turns the previously cryptic "no token" error path into the
+    // canonical first-run experience.
+    if configs.get_railway_auth_token().is_none() {
+        prompt_unauth_and_login(&args).await?;
+        configs = Configs::new()?;
+    }
+
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
 
@@ -391,4 +402,41 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
             archive_prefix_path: project_dir,
         })
     }
+}
+
+/// Show the unauthed picker and chain into the login flow. After the
+/// login completes successfully the caller reloads `Configs` and the
+/// rest of `up` runs normally.
+async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
+    // In a non-interactive shell (JSON output, --ci, CI env, agent
+    // capture) we can't show a picker. Give a clear instruction
+    // instead of hanging.
+    if args.json || args.ci || Configs::env_is_ci() || !std::io::stdout().is_terminal() {
+        bail!(
+            "You're not signed in. Run `railway login` (or `railway create account` for a fresh account) first, then re-run `railway up`."
+        );
+    }
+
+    println!();
+    println!(
+        "  {} {}",
+        "▲".cyan(),
+        "You're not signed in to Railway.".bold(),
+    );
+    println!();
+
+    let create_choice = "Create a new account and deploy";
+    let login_choice = "Log in and deploy";
+    let options = vec![create_choice, login_choice];
+
+    let choice = inquire::Select::new("What would you like to do?", options)
+        .with_render_config(Configs::get_render_config())
+        .prompt()?;
+
+    let signup = choice == create_choice;
+    super::login::command(super::login::Args {
+        browserless: false,
+        signup,
+    })
+    .await
 }

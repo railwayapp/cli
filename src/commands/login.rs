@@ -20,6 +20,11 @@ pub struct Args {
     /// Browserless login
     #[clap(short, long)]
     pub browserless: bool,
+
+    /// Hint the landing page toward signup (for brand-new users).
+    /// Existing users can still sign in from the same page.
+    #[clap(long)]
+    pub signup: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -76,11 +81,11 @@ pub async fn command(args: Args) -> Result<()> {
         // browser and waits on a local TCP listener for the OAuth
         // callback — neither needs stdin or a TTY. If opening the
         // browser fails, browser_login falls back to device_flow.
-        browser_login(host).await?
+        browser_login(host, args.signup).await?
     } else {
         let confirm = prompt_confirm_with_default_with_cancel("Open the browser?", true)?;
         match confirm {
-            Some(true) => browser_login(host).await?,
+            Some(true) => browser_login(host, args.signup).await?,
             Some(false) => device_flow_login(host).await?,
             None => return Ok(()),
         }
@@ -117,14 +122,20 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 /// Browser flow: Authorization Code + PKCE with localhost redirect.
-async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
+async fn browser_login(host: &str, signup: bool) -> Result<oauth::TokenResponse> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
     let pkce = oauth::generate_pkce();
     let state = oauth::generate_state();
-    let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
+    let mut auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
+    if signup {
+        // Hint to the auth landing page that this is a signup flow.
+        // Backend/frontend can use this to default to the signup
+        // affordance instead of sign-in.
+        auth_url.push_str("&intent=signup");
+    }
 
     // If we can't open a browser, fall back to device-code flow
     // (which uses a different URL that doesn't need a localhost
