@@ -23,14 +23,13 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    if !crate::macros::is_stdout_terminal() {
-        if args.browserless {
-            bail!(
-                "Browserless login requires an interactive terminal. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
-            );
-        }
+    let is_tty = crate::macros::is_stdout_terminal();
+
+    // --browserless prints a user code the human types into another
+    // browser; without a terminal the code has nowhere visible to land.
+    if !is_tty && args.browserless {
         bail!(
-            "Cannot login in non-interactive mode. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
+            "Browserless login requires an interactive terminal. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
         );
     }
 
@@ -65,6 +64,13 @@ pub async fn command(args: Args) -> Result<()> {
 
     let token_resp = if args.browserless {
         device_flow_login(host).await?
+    } else if !is_tty {
+        // Non-interactive shell (agent invocation, CI, etc.): skip the
+        // "Open the browser?" prompt and go straight to browser_login.
+        // It opens a browser and waits on a local TCP listener for the
+        // OAuth callback — neither needs stdin or a TTY. If opening
+        // the browser fails, browser_login falls back to device_flow.
+        browser_login(host).await?
     } else {
         let confirm = prompt_confirm_with_default_with_cancel("Open the browser?", true)?;
         match confirm {
