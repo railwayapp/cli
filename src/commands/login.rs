@@ -74,13 +74,20 @@ pub async fn command(args: Args) -> Result<()> {
         // DISPLAY). Skip the doomed `open` attempt and go straight
         // to device-code.
         device_flow_login(host).await?
-    } else if !is_tty {
-        // Non-interactive shell (agent invocation, etc.) with a
-        // likely-present browser: skip the "Open the browser?"
-        // prompt and go straight to browser_login. It opens a
-        // browser and waits on a local TCP listener for the OAuth
-        // callback — neither needs stdin or a TTY. If opening the
-        // browser fails, browser_login falls back to device_flow.
+    } else if !is_tty || args.signup {
+        // Two cases that skip the "Open the browser?" prompt:
+        //   - Non-interactive shell (agent invocation, etc.): we
+        //     can't show a prompt anyway.
+        //   - --signup: the user (or the `railway create account`
+        //     wrapper) explicitly asked for the signup flow, which
+        //     is a browser-launch flow. Prompting "Open the
+        //     browser?" right after they typed a command whose whole
+        //     point is to open the browser is friction.
+        //
+        // browser_login opens a browser and waits on a local TCP
+        // listener for the OAuth callback — neither needs stdin or
+        // a TTY. If opening the browser fails, browser_login falls
+        // back to device_flow.
         browser_login(host, args.signup).await?
     } else {
         let confirm = prompt_confirm_with_default_with_cancel("Open the browser?", true)?;
