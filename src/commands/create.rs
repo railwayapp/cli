@@ -209,14 +209,22 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     upload_spinner.finish_and_clear();
 
     // Link the project to the current directory so future `railway
-    // up`, `railway logs`, etc. target it. Service association is
-    // resolved lazily by those commands.
+    // up`, `railway logs`, etc. target it.
     configs.link_project(
         project_create.id.clone(),
         Some(project_create.name.clone()),
         environment.id.clone(),
         Some(environment.name.clone()),
     )?;
+
+    // backboard's /up endpoint creates a service implicitly but
+    // doesn't return its id in the response on master. Extract it
+    // from the logs_url (shape: .../project/<pid>/service/<sid>?...)
+    // so `railway logs` and friends work right after `create app`.
+    if let Some(service_id) = parse_service_id_from_logs_url(&up_response.logs_url) {
+        configs.link_service(service_id)?;
+    }
+
     configs.write()?;
 
     println!("  {} Build queued", "✓".green());
@@ -263,6 +271,22 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+/// Extract the service ID from a logs URL of shape
+/// `.../project/{project_id}/service/{service_id}?...`. Returns
+/// None if the URL doesn't contain a `/service/<uuid>` segment.
+fn parse_service_id_from_logs_url(logs_url: &str) -> Option<String> {
+    let after_service = logs_url.split("/service/").nth(1)?;
+    let service_id: String = after_service
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if service_id.is_empty() {
+        None
+    } else {
+        Some(service_id)
+    }
 }
 
 /// Poll the deploy URL for up to 30s, returning the URL once it stops
