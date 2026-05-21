@@ -164,7 +164,7 @@ async fn browser_login(host: &str, signup: bool) -> Result<oauth::TokenResponse>
 
     let result = tokio::time::timeout(
         Duration::from_secs(300),
-        wait_for_callback(listener, &state, host),
+        wait_for_callback(listener, &state, host, signup),
     )
     .await;
 
@@ -179,10 +179,15 @@ async fn browser_login(host: &str, signup: bool) -> Result<oauth::TokenResponse>
 /// Wait for the OAuth callback on the local TCP listener. Returns the authorization code.
 /// Accepts connections in a loop so that browser preconnects or stray requests don't
 /// consume the single chance to receive the real callback.
+///
+/// `signup` toggles the browser-facing success page: for signup we
+/// redirect to the dashboard so a brand-new user lands somewhere
+/// useful instead of on a "close this tab" page.
 async fn wait_for_callback(
     listener: TcpListener,
     expected_state: &str,
     host: &str,
+    signup: bool,
 ) -> Result<String> {
     loop {
         let (mut stream, _) = listener.accept().await?;
@@ -232,7 +237,7 @@ async fn wait_for_callback(
                 .find(|(k, _)| k == "error_description")
                 .map(|(_, v)| v.to_string())
                 .unwrap_or_default();
-            send_response(&mut stream, "Authentication failed", false, host).await;
+            send_response(&mut stream, "Authentication failed", false, host, false).await;
             bail!("OAuth error: {err}: {desc}");
         }
 
@@ -244,7 +249,7 @@ async fn wait_for_callback(
         match received_state {
             Some(s) if s == expected_state => {}
             _ => {
-                send_response(&mut stream, "Authentication failed", false, host).await;
+                send_response(&mut stream, "Authentication failed", false, host, false).await;
                 bail!("OAuth state parameter mismatch (possible CSRF attack)");
             }
         }
@@ -255,7 +260,12 @@ async fn wait_for_callback(
             .map(|(_, v)| v.to_string())
             .context("No authorization code in callback")?;
 
-        send_response(&mut stream, "Authentication successful!", true, host).await;
+        let success_message = if signup {
+            "Welcome to Railway!"
+        } else {
+            "Authentication successful!"
+        };
+        send_response(&mut stream, success_message, true, host, signup).await;
 
         return Ok(code);
     }
@@ -266,6 +276,7 @@ async fn send_response(
     message: &str,
     success: bool,
     host: &str,
+    redirect_to_dashboard: bool,
 ) {
     let icon = if success { "&#10003;" } else { "&#10007;" };
     let accent = if success {
@@ -275,12 +286,30 @@ async fn send_response(
     };
     let dots_url = format!("https://{host}/dots-oxipng.png");
 
+    // For signup we redirect the browser to the dashboard after a
+    // short pause so a brand-new user lands somewhere useful instead
+    // of on the "close this tab" page. The CLI's localhost callback
+    // doesn't need the browser tab to stay open after this point —
+    // the token was already captured.
+    let (refresh_meta, body_copy) = if redirect_to_dashboard {
+        (
+            format!(r#"<meta http-equiv="refresh" content="2;url=https://{host}/dashboard">"#),
+            "Taking you to your dashboard…".to_string(),
+        )
+    } else {
+        (
+            String::new(),
+            "You can close this window and return to your terminal.".to_string(),
+        )
+    };
+
     let body = format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{refresh_meta}
 <title>Railway CLI</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@600&display=swap');
@@ -346,7 +375,7 @@ async fn send_response(
   <div class="card">
     <div class="icon">{icon}</div>
     <h1>{message}</h1>
-    <p>You can close this window and return to your terminal.</p>
+    <p>{body_copy}</p>
   </div>
 </body>
 </html>"#
