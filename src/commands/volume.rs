@@ -17,7 +17,7 @@ use crate::{
 use anyhow::{anyhow, bail};
 use clap::Parser;
 use is_terminal::IsTerminal;
-use std::{fmt::Display, path::PathBuf};
+use std::fmt::Display;
 
 pub(crate) mod files;
 pub(crate) mod sftp;
@@ -26,7 +26,7 @@ mod ssh_key;
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --json\n  railway volume delete --volume data --yes --json\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --json\n  railway volume delete --volume data --yes --json\n  railway volume browse /\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n  browse: browser\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -135,80 +135,8 @@ structstruck::strike! {
             command: files::Commands,
         })
 
-        /// Download a file or directory from a volume
-        #[clap(hide = true)]
-        Download(struct {
-            /// The ID/name of the volume you wish to download
-            #[clap(long, short)]
-            volume: Option<String>,
-
-            /// The path on the remote server to download from
-            #[clap(value_name = "REMOTE_PATH")]
-            remote_path: String,
-
-            /// The path to save the download
-            #[clap(value_name = "LOCAL_PATH", default_value = ".")]
-            local_path: PathBuf,
-
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-
-            /// Replace LOCAL_PATH if it already exists
-            #[clap(long, visible_alias = "override")]
-            overwrite: bool,
-
-            /// Concurrent file downloads when REMOTE_PATH is a directory
-            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
-            concurrency: usize,
-        })
-
-        /// Upload a file or directory to a volume
-        #[clap(hide = true)]
-        Upload(struct {
-            /// The ID/name of the volume you wish to upload to
-            #[clap(long, short)]
-            volume: Option<String>,
-
-            /// The local file or directory to upload
-            #[clap(value_name = "LOCAL_PATH")]
-            local_path: PathBuf,
-
-            /// The path on the remote server to upload to
-            #[clap(value_name = "REMOTE_PATH")]
-            remote_path: String,
-
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-
-            /// Replace REMOTE_PATH if it already exists
-            #[clap(long)]
-            overwrite: bool,
-
-            /// Concurrent file uploads when LOCAL_PATH is a directory
-            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
-            concurrency: usize,
-        })
-
-        /// List files in a volume directory
-        #[clap(hide = true)]
-        ListFiles(struct {
-            /// The ID/name of the volume you wish to list files from
-            #[clap(long, short)]
-            volume: Option<String>,
-
-            /// The directory path on the remote server to list
-            #[clap(value_name = "REMOTE_PATH", default_value = "/")]
-            remote_path: String,
-
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-        })
-
         /// Browse files in a volume interactively
-        #[clap(hide = true)]
+        #[clap(visible_alias = "browser")]
         Browse(struct {
             /// The ID/name of the volume you wish to browse
             #[clap(long, short)]
@@ -221,46 +149,6 @@ structstruck::strike! {
             /// Concurrent file downloads
             #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
             concurrency: usize,
-        })
-
-        /// Delete a file from a volume
-        #[clap(hide = true)]
-        DeleteFile(struct {
-            /// The ID/name of the volume you wish to delete from
-            #[clap(long, short)]
-            volume: Option<String>,
-
-            /// The path on the remote server to delete
-            #[clap(value_name = "REMOTE_PATH")]
-            remote_path: String,
-
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
-
-            /// Skip confirmation dialog
-            #[clap(short = 'y', long = "yes")]
-            yes: bool,
-        })
-
-        /// Rename a file in a volume
-        #[clap(hide = true)]
-        RenameFile(struct {
-            /// The ID/name of the volume you wish to rename within
-            #[clap(long, short)]
-            volume: Option<String>,
-
-            /// The current path on the remote server
-            #[clap(value_name = "OLD_REMOTE_PATH")]
-            old_remote_path: String,
-
-            /// The new path on the remote server
-            #[clap(value_name = "NEW_REMOTE_PATH")]
-            new_remote_path: String,
-
-            /// Output in JSON format
-            #[clap(long)]
-            json: bool,
         })
 
         /// Attach a volume to a service
@@ -325,48 +213,6 @@ pub async fn command(args: Args) -> Result<()> {
                 volume_file_target(&environment, &environment_instances, f.volume, project)?;
             files::command_from_parts(target, f.command).await?
         }
-        Commands::Download(d) => {
-            let target =
-                volume_file_target(&environment, &environment_instances, d.volume, project)?;
-            files::download(
-                target,
-                files::DownloadArgs {
-                    remote_path: d.remote_path,
-                    local_path: d.local_path,
-                    json: d.json,
-                    overwrite: d.overwrite,
-                    concurrency: d.concurrency,
-                },
-            )
-            .await?
-        }
-        Commands::Upload(u) => {
-            let target =
-                volume_file_target(&environment, &environment_instances, u.volume, project)?;
-            files::upload(
-                target,
-                files::UploadArgs {
-                    local_path: u.local_path,
-                    remote_path: u.remote_path,
-                    json: u.json,
-                    overwrite: u.overwrite,
-                    concurrency: u.concurrency,
-                },
-            )
-            .await?
-        }
-        Commands::ListFiles(l) => {
-            let target =
-                volume_file_target(&environment, &environment_instances, l.volume, project)?;
-            files::list(
-                target,
-                files::ListArgs {
-                    remote_path: l.remote_path,
-                    json: l.json,
-                },
-            )
-            .await?
-        }
         Commands::Browse(b) => {
             let target =
                 volume_file_target(&environment, &environment_instances, b.volume, project)?;
@@ -375,32 +221,6 @@ pub async fn command(args: Args) -> Result<()> {
                 files::BrowseArgs {
                     remote_path: b.remote_path,
                     concurrency: b.concurrency,
-                },
-            )
-            .await?
-        }
-        Commands::DeleteFile(d) => {
-            let target =
-                volume_file_target(&environment, &environment_instances, d.volume, project)?;
-            files::delete(
-                target,
-                files::DeleteArgs {
-                    remote_path: d.remote_path,
-                    json: d.json,
-                    yes: d.yes,
-                },
-            )
-            .await?
-        }
-        Commands::RenameFile(r) => {
-            let target =
-                volume_file_target(&environment, &environment_instances, r.volume, project)?;
-            files::rename(
-                target,
-                files::RenameArgs {
-                    old_remote_path: r.old_remote_path,
-                    new_remote_path: r.new_remote_path,
-                    json: r.json,
                 },
             )
             .await?
