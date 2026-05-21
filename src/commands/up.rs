@@ -408,10 +408,14 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
 /// login completes successfully the caller reloads `Configs` and the
 /// rest of `up` runs normally.
 async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
-    // In a non-interactive shell (JSON output, --ci, CI env, agent
-    // capture) we can't show a picker. Give a clear instruction
-    // instead of hanging.
-    if args.json || args.ci || Configs::env_is_ci() || !std::io::stdout().is_terminal() {
+    // In a non-interactive shell (JSON output, --ci, any CI env,
+    // SSH, no DISPLAY, agent capture) we can't show a picker. Give
+    // a clear instruction instead of hanging.
+    if args.json
+        || args.ci
+        || super::login::is_likely_headless()
+        || !std::io::stdout().is_terminal()
+    {
         bail!(
             "You're not signed in. Run `railway login` (or `railway create account` for a fresh account) first, then re-run `railway up`."
         );

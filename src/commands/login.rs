@@ -374,16 +374,18 @@ async fn device_flow_login(host: &str) -> Result<oauth::TokenResponse> {
 }
 
 /// Detect environments where opening a local browser will fail or
-/// be useless. Used to skip the `open` attempt and go straight to
-/// device-code flow.
+/// be useless, AND where we shouldn't try to show an interactive
+/// picker. Used to skip the `open` attempt and go straight to
+/// device-code flow, and to gate clack-style prompts in other commands.
 ///
 /// Heuristics (intentionally conservative — false positives just
-/// route the user to device-code, which still works):
-/// - $CI is set (CI runners have no GUI)
+/// route the user to a non-interactive path, which still works):
+/// - $CI is set to any non-empty value (CI runners have no GUI;
+///   handles `CI=1`, `CI=true`, `CI=yes`, etc.)
 /// - $SSH_CONNECTION is set (remote shell, browser would open on the
 ///   wrong machine)
 /// - On Linux, $DISPLAY is empty (no X11 / Wayland session)
-fn is_likely_headless() -> bool {
+pub fn is_likely_headless() -> bool {
     if std::env::var("CI").is_ok() {
         return true;
     }
