@@ -59,6 +59,11 @@ struct RefreshResult {
     select_remote_path: Option<String>,
 }
 
+enum EditOutcome {
+    Changed,
+    Unchanged,
+}
+
 struct FetchRequest {
     remote_dir: String,
     kind: FetchKind,
@@ -238,7 +243,7 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                 let edit_result = edit_remote_file(&params, &remote_path).await;
                                 terminal = setup_terminal()?;
                                 match edit_result {
-                                    Ok(()) => {
+                                    Ok(EditOutcome::Changed) => {
                                         app.set_status(format!("Edited and uploaded {remote_path}"));
                                         // The visible tree didn't change shape; we just
                                         // need a silent re-fetch so the size column is
@@ -247,6 +252,9 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                             &fetch_dispatcher,
                                             parent_remote_dir(&remote_path),
                                         );
+                                    }
+                                    Ok(EditOutcome::Unchanged) => {
+                                        app.set_status(format!("No changes made to {remote_path}"));
                                     }
                                     Err(err) => app.set_error(err.to_string()),
                                 }
@@ -722,7 +730,7 @@ async fn handle_delete(params: &VolumeBrowserParams, remote_path: &str) -> Resul
     sftp.delete(remote_path).await
 }
 
-async fn edit_remote_file(params: &VolumeBrowserParams, remote_path: &str) -> Result<()> {
+async fn edit_remote_file(params: &VolumeBrowserParams, remote_path: &str) -> Result<EditOutcome> {
     let temp_path = temp_edit_path(remote_path)?;
     let mut sftp = VolumeSftp::new(
         params.service_instance_id.clone(),
@@ -730,10 +738,18 @@ async fn edit_remote_file(params: &VolumeBrowserParams, remote_path: &str) -> Re
     );
 
     sftp.download(remote_path, &temp_path, true).await?;
+    let modified_before = modified_at(&temp_path)?;
     run_editor(&temp_path, params.editor.as_deref()).await?;
+    let modified_after = modified_at(&temp_path)?;
+
+    if modified_before == modified_after {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Ok(EditOutcome::Unchanged);
+    }
+
     sftp.upload(&temp_path, remote_path, true).await?;
     let _ = tokio::fs::remove_file(&temp_path).await;
-    Ok(())
+    Ok(EditOutcome::Changed)
 }
 
 fn temp_edit_path(remote_path: &str) -> Result<PathBuf> {
@@ -749,6 +765,12 @@ fn temp_edit_path(remote_path: &str) -> Result<PathBuf> {
         "railway-volume-edit-{}-{millis}-{filename}",
         std::process::id()
     )))
+}
+
+fn modified_at(path: &Path) -> Result<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .with_context(|| format!("Failed to read modified time for {}", path.display()))
 }
 
 async fn run_editor(path: &Path, editor_override: Option<&str>) -> Result<()> {
