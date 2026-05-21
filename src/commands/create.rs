@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Subcommand;
 use indicatif::{ProgressBar, ProgressStyle};
+use is_terminal::IsTerminal;
 
 use crate::{
     consts::TICK_STRING,
@@ -53,6 +54,13 @@ enum CreateCommands {
         /// and blocks until the container responds.
         #[clap(long)]
         no_wait: bool,
+
+        /// Accept all defaults — skip the project-name prompt and use
+        /// the current directory's name. The browser still has to
+        /// open if you need to sign in (run `railway login` first if
+        /// you want a fully unattended flow).
+        #[clap(short = 'y', long)]
+        yes: bool,
     },
 }
 
@@ -74,12 +82,14 @@ pub async fn command(args: Args) -> Result<()> {
             name,
             no_gitignore,
             no_wait,
+            yes,
         } => command_app(AppArgs {
             path,
             workspace,
             name,
             no_gitignore,
             no_wait,
+            yes,
         })
         .await,
     }
@@ -91,6 +101,7 @@ pub struct AppArgs {
     pub name: Option<String>,
     pub no_gitignore: bool,
     pub no_wait: bool,
+    pub yes: bool,
 }
 
 pub async fn command_app(args: AppArgs) -> Result<()> {
@@ -118,6 +129,45 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)?;
 
+    // Resolve the project name:
+    //   --name foo        → "foo"
+    //   -y, no --name     → current directory basename (or backboard-
+    //                       generated if there isn't one we can read)
+    //   interactive TTY   → prompt with the directory basename as
+    //                       default; user can hit Enter to accept
+    //   non-TTY, no -y    → fall back to directory basename (better
+    //                       than failing here; backend can rename
+    //                       later)
+    let default_name: Option<String> = cwd_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let project_name: Option<String> = if args.name.is_some() {
+        args.name.clone()
+    } else if args.yes || !std::io::stdout().is_terminal() {
+        default_name.clone()
+    } else {
+        let default = default_name.clone().unwrap_or_default();
+        let input = if default.is_empty() {
+            inquire::Text::new("Project name")
+                .with_render_config(Configs::get_render_config())
+                .prompt()?
+        } else {
+            inquire::Text::new("Project name")
+                .with_default(&default)
+                .with_render_config(Configs::get_render_config())
+                .prompt()?
+        };
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+
     // Show GitHub repo detection (informational for now — full GH
     // App integration is a separate piece; we deploy from local
     // tarball regardless).
@@ -144,7 +194,7 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     create_spinner.enable_steady_tick(Duration::from_millis(100));
 
     let vars = mutations::project_create::Variables {
-        name: args.name.clone(),
+        name: project_name,
         description: None,
         workspace_id: Some(workspace.id().to_owned()),
     };

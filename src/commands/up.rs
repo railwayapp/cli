@@ -30,9 +30,18 @@ use super::*;
 pub struct Args {
     path: Option<PathBuf>,
 
-    #[clap(short, long)]
-    /// Don't attach to the log stream
+    #[clap(short, long, alias = "no-wait")]
+    /// Don't attach to the log stream — start the deploy and return
+    /// immediately. Use --no-wait as the alternate name in scripted
+    /// flows. Combine with -y for fully unattended runs.
     detach: bool,
+
+    #[clap(short = 'y', long)]
+    /// Accept all defaults — skip the auth confirm prompt for unauthed
+    /// users and skip the project-name prompt when creating a new
+    /// project from this directory. The browser still has to open for
+    /// OAuth itself; -y just removes the surrounding prompts.
+    yes: bool,
 
     #[clap(short, long)]
     /// Stream build logs only, then exit (equivalent to setting $CI=true).
@@ -101,7 +110,8 @@ pub async fn command(args: Args) -> Result<()> {
             workspace: None,
             name: None,
             no_gitignore: args.no_gitignore,
-            no_wait: false,
+            no_wait: args.detach,
+            yes: args.yes,
         })
         .await;
     }
@@ -449,8 +459,22 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
     println!(
         "  {} {}",
         "▲".cyan(),
-        "You're not signed in to Railway. Opening browser to sign in or sign up…".bold(),
+        "You're not signed in to Railway.".bold(),
     );
+
+    if !args.yes {
+        // Confirm before opening a browser tab — interactive users
+        // appreciate not having tabs spawn out from under them. -y
+        // skips this for unattended flows.
+        let confirm = crate::util::prompt::prompt_confirm_with_default_with_cancel(
+            "Sign in or sign up to continue?",
+            true,
+        )?;
+        match confirm {
+            Some(true) => {}
+            _ => bail!("Aborted."),
+        }
+    }
 
     super::login::command(super::login::Args { browserless: false }).await
 }
