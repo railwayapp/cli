@@ -192,9 +192,12 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     upload_spinner.set_message("Uploading & queuing build");
     upload_spinner.enable_steady_tick(Duration::from_millis(100));
 
-    let http = reqwest::Client::new();
+    // Reuse the GQLClient::new_authorized reqwest client — it bakes
+    // the bearer token into default headers, which backboard's
+    // /project/:id/environment/:id/up endpoint requires. A fresh
+    // reqwest::Client::new() here will 401.
     let up_response = upload_deploy_tarball(
-        &http,
+        &client,
         &hostname,
         &project_create.id,
         &environment.id,
