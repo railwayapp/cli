@@ -406,6 +406,7 @@ async fn unpublish_command(args: UnpublishArgs) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_user_authorized(&configs)?;
     let template = fetch_template_by_ref(&client, &configs, &template_ref).await?;
+    ensure_template_can_unpublish(&template.status, &template.name)?;
 
     if !args.yes {
         if !interactive {
@@ -464,6 +465,21 @@ async fn unpublish_command(args: UnpublishArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn ensure_template_can_unpublish(
+    status: &queries::template::TemplateStatus,
+    name: &str,
+) -> Result<()> {
+    if matches!(status, queries::template::TemplateStatus::PUBLISHED) {
+        return Ok(());
+    }
+
+    bail!(
+        "Template \"{}\" is {}. Only published templates can be unpublished.",
+        name,
+        status_label(status)
+    )
 }
 
 #[derive(Clone)]
@@ -1888,5 +1904,42 @@ fn truncate_chars(value: &str, max: usize) -> String {
         format!("{truncated}...")
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpublish_guard_accepts_published_templates() {
+        assert!(
+            ensure_template_can_unpublish(&queries::template::TemplateStatus::PUBLISHED, "App")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn unpublish_guard_rejects_unpublished_templates() {
+        let error = ensure_template_can_unpublish(
+            &queries::template::TemplateStatus::UNPUBLISHED,
+            "Draft App",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("Template \"Draft App\" is UNPUBLISHED"));
+        assert!(error.contains("Only published templates can be unpublished"));
+    }
+
+    #[test]
+    fn unpublish_guard_rejects_hidden_templates() {
+        let error =
+            ensure_template_can_unpublish(&queries::template::TemplateStatus::HIDDEN, "Hidden App")
+                .unwrap_err()
+                .to_string();
+
+        assert!(error.contains("Template \"Hidden App\" is HIDDEN"));
+        assert!(error.contains("Only published templates can be unpublished"));
     }
 }
