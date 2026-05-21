@@ -276,7 +276,14 @@ fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 }
 
 fn browse_help_items(app: &VolumeBrowserApp) -> Vec<(&'static str, &'static str)> {
-    let mut items = vec![("Up/Down/Left", "move/parent"), ("Enter", "open folder")];
+    let mut items = vec![("Up/Down/Left", "move/parent")];
+
+    if app
+        .selected_remote()
+        .is_some_and(|entry| entry.kind == "directory")
+    {
+        items.push(("Enter", "open folder"));
+    }
 
     if app.selected_remote().is_some() {
         items.push(("X", "delete"));
