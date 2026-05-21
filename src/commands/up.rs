@@ -426,20 +426,22 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
     }
 }
 
-/// Show the unauthed picker and chain into the login flow. After the
-/// login completes successfully the caller reloads `Configs` and the
-/// rest of `up` runs normally.
+/// Drop into the login flow when the user isn't signed in. Sign-up
+/// and sign-in go through the same OAuth surface, so we don't bother
+/// prompting the user to declare which they're doing — the backend
+/// detects fresh accounts on its own (via user.createdAt) and adapts
+/// the consent screen + post-auth landing accordingly.
 async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
     // In a non-interactive shell (JSON output, --ci, any CI env,
-    // SSH, no DISPLAY, agent capture) we can't show a picker. Give
-    // a clear instruction instead of hanging.
+    // SSH, no DISPLAY, agent capture) we can't drive an interactive
+    // browser flow. Give a clear instruction instead of hanging.
     if args.json
         || args.ci
         || super::login::is_likely_headless()
         || !std::io::stdout().is_terminal()
     {
         bail!(
-            "You're not signed in. Run `railway login` (or `railway create account` for a fresh account) first, then re-run `railway up`."
+            "You're not signed in. Run `railway login` first, then re-run `railway up`."
         );
     }
 
@@ -447,22 +449,8 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
     println!(
         "  {} {}",
         "▲".cyan(),
-        "You're not signed in to Railway.".bold(),
+        "You're not signed in to Railway. Opening browser to sign in or sign up…".bold(),
     );
-    println!();
 
-    let create_choice = "Create a new account and deploy";
-    let login_choice = "Log in and deploy";
-    let options = vec![create_choice, login_choice];
-
-    let choice = inquire::Select::new("What would you like to do?", options)
-        .with_render_config(Configs::get_render_config())
-        .prompt()?;
-
-    let signup = choice == create_choice;
-    super::login::command(super::login::Args {
-        browserless: false,
-        signup,
-    })
-    .await
+    super::login::command(super::login::Args { browserless: false }).await
 }

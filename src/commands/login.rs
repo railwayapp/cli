@@ -20,11 +20,6 @@ pub struct Args {
     /// Browserless login
     #[clap(short, long)]
     pub browserless: bool,
-
-    /// Hint the landing page toward signup (for brand-new users).
-    /// Existing users can still sign in from the same page.
-    #[clap(long)]
-    pub signup: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -74,28 +69,16 @@ pub async fn command(args: Args) -> Result<()> {
         // DISPLAY). Skip the doomed `open` attempt and go straight
         // to device-code.
         device_flow_login(host).await?
-    } else if !is_tty || args.signup {
-        // Two cases that skip the "Open the browser?" prompt:
-        //   - Non-interactive shell (agent invocation, etc.): we
-        //     can't show a prompt anyway.
-        //   - --signup: the user (or the `railway create account`
-        //     wrapper) explicitly asked for the signup flow, which
-        //     is a browser-launch flow. Prompting "Open the
-        //     browser?" right after they typed a command whose whole
-        //     point is to open the browser is friction.
-        //
+    } else {
+        // Default: open the browser. We used to gate this behind a
+        // "Open the browser?" prompt, but the answer is always yes
+        // in practice — anything else routes through --browserless
+        // or the environment-based headless detection above.
         // browser_login opens a browser and waits on a local TCP
         // listener for the OAuth callback — neither needs stdin or
         // a TTY. If opening the browser fails, browser_login falls
         // back to device_flow.
-        browser_login(host, args.signup).await?
-    } else {
-        let confirm = prompt_confirm_with_default_with_cancel("Open the browser?", true)?;
-        match confirm {
-            Some(true) => browser_login(host, args.signup).await?,
-            Some(false) => device_flow_login(host).await?,
-            None => return Ok(()),
-        }
+        browser_login(host).await?
     };
 
     configs.save_oauth_tokens(
@@ -129,20 +112,18 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 /// Browser flow: Authorization Code + PKCE with localhost redirect.
-async fn browser_login(host: &str, signup: bool) -> Result<oauth::TokenResponse> {
+async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
     let pkce = oauth::generate_pkce();
     let state = oauth::generate_state();
-    let mut auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
-    if signup {
-        // Hint to the auth landing page that this is a signup flow.
-        // Backend/frontend can use this to default to the signup
-        // affordance instead of sign-in.
-        auth_url.push_str("&intent=signup");
-    }
+    let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
+    // The backend decides whether this is a signup flow (based on
+    // user.createdAt) and tags the OAuth callback URL with
+    // new_user=1 accordingly. The CLI doesn't need to declare its
+    // intent up front.
 
     // If we can't open a browser, fall back to device-code flow
     // (which uses a different URL that doesn't need a localhost
@@ -164,7 +145,7 @@ async fn browser_login(host: &str, signup: bool) -> Result<oauth::TokenResponse>
 
     let result = tokio::time::timeout(
         Duration::from_secs(300),
-        wait_for_callback(listener, &state, host, signup),
+        wait_for_callback(listener, &state, host),
     )
     .await;
 
@@ -180,14 +161,14 @@ async fn browser_login(host: &str, signup: bool) -> Result<oauth::TokenResponse>
 /// Accepts connections in a loop so that browser preconnects or stray requests don't
 /// consume the single chance to receive the real callback.
 ///
-/// `signup` toggles the browser-facing success page: for signup we
-/// redirect to the dashboard so a brand-new user lands somewhere
-/// useful instead of on a "close this tab" page.
+/// Reads `new_user=1` from the callback URL (backend appends it for
+/// brand-new accounts) and uses it to toggle the browser-facing
+/// success page: brand-new users get sent to the dashboard, existing
+/// users get the standard "close this tab" page.
 async fn wait_for_callback(
     listener: TcpListener,
     expected_state: &str,
     host: &str,
-    signup: bool,
 ) -> Result<String> {
     loop {
         let (mut stream, _) = listener.accept().await?;
@@ -260,12 +241,21 @@ async fn wait_for_callback(
             .map(|(_, v)| v.to_string())
             .context("No authorization code in callback")?;
 
-        let success_message = if signup {
+        // Backend tags brand-new accounts with new_user=1 on the
+        // callback URL. Use it to pick the post-auth landing
+        // experience for the browser tab.
+        let is_new_user = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "new_user")
+            .map(|(_, v)| v == "1")
+            .unwrap_or(false);
+
+        let success_message = if is_new_user {
             "Welcome to Railway!"
         } else {
             "Authentication successful!"
         };
-        send_response(&mut stream, success_message, true, host, signup).await;
+        send_response(&mut stream, success_message, true, host, is_new_user).await;
 
         return Ok(code);
     }

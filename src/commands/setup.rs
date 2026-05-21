@@ -333,9 +333,5 @@ async fn ensure_logged_in_interactive() -> Result<()> {
     }
 
     println!("\n{}", "Logging in to Railway...".bold());
-    login::command(login::Args {
-        browserless: false,
-        signup: false,
-    })
-    .await
+    login::command(login::Args { browserless: false }).await
 }

@@ -59,9 +59,12 @@ enum CreateCommands {
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         CreateCommands::Account => {
+            // Backed by the same OAuth flow as `railway login` — the
+            // backend detects fresh-account state via user.createdAt
+            // and adapts the consent screen + post-auth landing, so
+            // we don't need a separate signup signal here.
             super::login::command(super::login::Args {
                 browserless: false,
-                signup: true,
             })
             .await
         }
