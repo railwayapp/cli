@@ -80,7 +80,7 @@ enum Commands {
 
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Uses the linked service by default. Pass --service, --environment, or --project only when selecting a different target."
+    after_help = "Examples:\n\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files browser /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Uses the linked service by default. Pass --service, --environment, or --project only when selecting a different target."
 )]
 struct FilesArgs {
     /// Service name or ID (defaults to linked service)

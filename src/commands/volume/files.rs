@@ -47,6 +47,7 @@ pub(crate) enum Commands {
     List(ListArgs),
 
     /// Browse files interactively
+    #[clap(visible_alias = "browser")]
     Browse(BrowseArgs),
 
     /// Delete a file
