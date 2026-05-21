@@ -3,12 +3,16 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Subcommand;
+use colored::Colorize as _;
 use indicatif::{ProgressBar, ProgressStyle};
 use is_terminal::IsTerminal;
 
 use crate::{
     consts::TICK_STRING,
-    controllers::upload::{create_deploy_tarball, upload_deploy_tarball},
+    controllers::{
+        deployment::{stream_build_logs, stream_deploy_logs},
+        upload::{create_deploy_tarball, upload_deploy_tarball},
+    },
     util::git::detect_github_remote,
     workspace::{pick_workspace, workspaces},
 };
@@ -281,46 +285,63 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     configs.write()?;
 
     println!("  {} Build queued", "✓".green());
+    println!("  {} {}", "Build Logs:".green().bold(), up_response.logs_url);
 
-    // Wait for the deploy URL to respond unless --no-wait.
-    let live_url = if args.no_wait || up_response.deployment_domain.is_empty() {
-        None
-    } else {
-        let url = if up_response.deployment_domain.starts_with("http") {
-            up_response.deployment_domain.clone()
-        } else {
-            format!("https://{}", up_response.deployment_domain)
-        };
-        let http_short = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .ok();
-        match http_short {
-            Some(c) => wait_for_serving(&c, &url).await,
-            None => None,
-        }
-    };
-
-    println!();
-    match live_url.as_deref() {
-        Some(url) => {
-            println!("  {} {}", "🚀".dimmed(), "Live at".bold());
-            println!("     {}", url.bold().underline());
-        }
-        None if !up_response.deployment_domain.is_empty() => {
+    // --no-wait: surface the URL and return without streaming.
+    if args.no_wait {
+        println!();
+        if !up_response.deployment_domain.is_empty() {
             let url = if up_response.deployment_domain.starts_with("http") {
                 up_response.deployment_domain.clone()
             } else {
                 format!("https://{}", up_response.deployment_domain)
             };
-            println!("  {} {}", "⏳".dimmed(), "Still building. Your URL:".bold());
+            println!("  {} {}", "⏳".dimmed(), "Deploying — your URL:".bold());
             println!("     {}", url.bold().underline());
+            println!();
         }
-        None => {
-            println!("  {} Watch the build:", "🔧".dimmed());
-            println!("     {}", up_response.logs_url.bold().underline());
-        }
+        return Ok(());
     }
+
+    // Stream build + deploy logs the same way `railway up` does so
+    // the user sees the build happen instead of watching a static
+    // page. Small delay first to give backboard a moment to register
+    // the deployment in its log pipeline.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let build_id_for_logs = up_response.deployment_id.clone();
+    let build_task = tokio::task::spawn(async move {
+        let _ = stream_build_logs(build_id_for_logs, None, |log| {
+            println!("{}", log.message);
+        })
+        .await;
+    });
+
+    let deploy_id_for_logs = up_response.deployment_id.clone();
+    let deploy_task = tokio::task::spawn(async move {
+        let _ = stream_deploy_logs(deploy_id_for_logs, None, |log| {
+            println!("{}", log.message);
+        })
+        .await;
+    });
+
+    let _ = futures::future::join_all([build_task, deploy_task]).await;
+
+    println!();
+    if !up_response.deployment_domain.is_empty() {
+        let url = if up_response.deployment_domain.starts_with("http") {
+            up_response.deployment_domain.clone()
+        } else {
+            format!("https://{}", up_response.deployment_domain)
+        };
+        println!("  {} {}", "🚀".dimmed(), "Live at".bold());
+        println!("     {}", url.bold().underline());
+        println!();
+        return Ok(());
+    }
+
+    println!("  {} Watch the build:", "🔧".dimmed());
+    println!("     {}", up_response.logs_url.bold().underline());
     println!();
 
     Ok(())
@@ -339,23 +360,5 @@ fn parse_service_id_from_logs_url(logs_url: &str) -> Option<String> {
         None
     } else {
         Some(service_id)
-    }
-}
-
-/// Poll the deploy URL for up to 30s, returning the URL once it stops
-/// returning 5xx. Used to give the user a verified-live signal after
-/// the build queues.
-async fn wait_for_serving(client: &reqwest::Client, url: &str) -> Option<String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return None;
-        }
-        if let Ok(resp) = client.get(url).send().await {
-            if !resp.status().is_server_error() {
-                return Some(url.to_owned());
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }

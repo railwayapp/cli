@@ -276,21 +276,23 @@ async fn send_response(
     };
     let dots_url = format!("https://{host}/dots-oxipng.png");
 
-    // For signup we redirect the browser to the dashboard after a
-    // short pause so a brand-new user lands somewhere useful instead
-    // of on the "close this tab" page. The CLI's localhost callback
-    // doesn't need the browser tab to stay open after this point —
-    // the token was already captured.
-    let (refresh_meta, body_copy) = if redirect_to_dashboard {
-        (
-            format!(r#"<meta http-equiv="refresh" content="2;url=https://{host}/dashboard">"#),
-            "Taking you to your dashboard…".to_string(),
-        )
+    // Always redirect the browser to the dashboard after a short
+    // pause. Brand-new users get a "Welcome to Railway!" framing;
+    // existing users get the standard confirmation. Either way the
+    // CLI's localhost callback doesn't need the browser tab to stay
+    // open past this point — the token was captured before we
+    // serve this response.
+    let refresh_meta = if success {
+        format!(r#"<meta http-equiv="refresh" content="2;url=https://{host}/dashboard">"#)
     } else {
-        (
-            String::new(),
-            "You can close this window and return to your terminal.".to_string(),
-        )
+        String::new()
+    };
+    let body_copy = if !success {
+        "You can close this window and return to your terminal.".to_string()
+    } else if redirect_to_dashboard {
+        "Taking you to your dashboard…".to_string()
+    } else {
+        "Taking you to your dashboard…".to_string()
     };
 
     let body = format!(
