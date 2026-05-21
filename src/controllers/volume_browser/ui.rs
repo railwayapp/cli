@@ -326,7 +326,7 @@ fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .padding(confirm_popup_padding(confirm));
+        .padding(Padding::new(1, 1, 1, 1));
     frame.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -335,17 +335,9 @@ fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 
 fn confirm_popup_height(confirm: &ConfirmRequest) -> u16 {
     if confirm.action == ConfirmAction::Delete && confirm.is_dir {
-        10
+        11
     } else {
         10
-    }
-}
-
-fn confirm_popup_padding(confirm: &ConfirmRequest) -> Padding {
-    if confirm.action == ConfirmAction::Delete && confirm.is_dir {
-        Padding::new(0, 0, 0, 0)
-    } else {
-        Padding::new(1, 1, 1, 1)
     }
 }
 
