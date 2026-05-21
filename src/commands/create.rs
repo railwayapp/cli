@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Subcommand;
 use colored::Colorize as _;
+use futures::StreamExt as _;
 use indicatif::{ProgressBar, ProgressStyle};
 use is_terminal::IsTerminal;
 
@@ -13,6 +14,8 @@ use crate::{
         deployment::{stream_build_logs, stream_deploy_logs},
         upload::{create_deploy_tarball, upload_deploy_tarball},
     },
+    subscription::subscribe_graphql,
+    subscriptions::deployment::DeploymentStatus,
     util::git::detect_github_remote,
     workspace::{pick_workspace, workspaces},
 };
@@ -325,21 +328,78 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
         .await;
     });
 
+    // Watch the deployment status separately so we exit cleanly on
+    // FAILED / CRASHED instead of letting the log streams keep
+    // spinning. Mirrors the pattern in `railway up`. The
+    // subscription task is fire-and-forget — it calls process::exit
+    // on terminal states, which kills the log-stream tasks too.
+    let deploy_url = if up_response.deployment_domain.is_empty() {
+        None
+    } else if up_response.deployment_domain.starts_with("http") {
+        Some(up_response.deployment_domain.clone())
+    } else {
+        Some(format!("https://{}", up_response.deployment_domain))
+    };
+    let logs_url_for_status = up_response.logs_url.clone();
+    let mut status_stream =
+        subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
+            id: up_response.deployment_id.clone(),
+        })
+        .await?;
+    tokio::task::spawn(async move {
+        while let Some(Ok(res)) = status_stream.next().await {
+            let Some(data) = res.data else { continue };
+            match data.deployment.status {
+                DeploymentStatus::SUCCESS => {
+                    println!();
+                    match deploy_url.as_deref() {
+                        Some(url) => {
+                            println!("  {} {}", "🚀".dimmed(), "Live at".bold());
+                            println!("     {}", url.bold().underline());
+                        }
+                        None => {
+                            println!(
+                                "  {} {}",
+                                "✓".green(),
+                                "Deploy complete".bold(),
+                            );
+                        }
+                    }
+                    println!();
+                    std::process::exit(0);
+                }
+                DeploymentStatus::FAILED => {
+                    println!();
+                    println!("  {} {}", "✗".red(), "Build failed".bold());
+                    println!(
+                        "     {} {}",
+                        "Logs:".dimmed(),
+                        logs_url_for_status.bold().underline(),
+                    );
+                    println!();
+                    std::process::exit(1);
+                }
+                DeploymentStatus::CRASHED => {
+                    println!();
+                    println!("  {} {}", "✗".red(), "Deploy crashed".bold());
+                    println!(
+                        "     {} {}",
+                        "Logs:".dimmed(),
+                        logs_url_for_status.bold().underline(),
+                    );
+                    println!();
+                    std::process::exit(1);
+                }
+                _ => {}
+            }
+        }
+    });
+
     let _ = futures::future::join_all([build_task, deploy_task]).await;
-
+    // If we got here without the status task calling process::exit
+    // (e.g. both streams ended naturally with no terminal status,
+    // which is rare), fall through to the watch-the-build hint.
     println!();
-    if !up_response.deployment_domain.is_empty() {
-        let url = if up_response.deployment_domain.starts_with("http") {
-            up_response.deployment_domain.clone()
-        } else {
-            format!("https://{}", up_response.deployment_domain)
-        };
-        println!("  {} {}", "🚀".dimmed(), "Live at".bold());
-        println!("     {}", url.bold().underline());
-        println!();
-        return Ok(());
-    }
-
     println!("  {} Watch the build:", "🔧".dimmed());
     println!("     {}", up_response.logs_url.bold().underline());
     println!();
