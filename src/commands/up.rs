@@ -79,9 +79,31 @@ pub async fn command(args: Args) -> Result<()> {
     // login flow, then reload configs and continue with `up`. This
     // turns the previously cryptic "no token" error path into the
     // canonical first-run experience.
-    if configs.get_railway_auth_token().is_none() {
+    let came_from_unauth_prompt = configs.get_railway_auth_token().is_none();
+    if came_from_unauth_prompt {
         prompt_unauth_and_login(&args).await?;
         configs = Configs::new()?;
+    }
+
+    // First-run path: when we just authed via the prompt AND there's
+    // no project linked to this directory yet, fall through to
+    // `railway create app` so the user lands on a deployed app
+    // instead of bouncing off "no project specified". Existing users
+    // (already authed when they ran `up`) still see the standard
+    // "no project linked" behavior so we don't accidentally create
+    // duplicates.
+    if came_from_unauth_prompt
+        && args.project.is_none()
+        && configs.get_linked_project().await.is_err()
+    {
+        return super::create::command_app(super::create::AppArgs {
+            path: args.path.clone(),
+            workspace: None,
+            name: None,
+            no_gitignore: args.no_gitignore,
+            no_wait: false,
+        })
+        .await;
     }
 
     let hostname = configs.get_host();
