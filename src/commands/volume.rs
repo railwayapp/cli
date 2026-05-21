@@ -146,6 +146,10 @@ structstruck::strike! {
             #[clap(value_name = "REMOTE_PATH", default_value = "/")]
             remote_path: String,
 
+            /// Editor command to use when editing files
+            #[clap(long, value_name = "COMMAND")]
+            editor: Option<String>,
+
             /// Concurrent file downloads
             #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
             concurrency: usize,
@@ -220,6 +224,7 @@ pub async fn command(args: Args) -> Result<()> {
                 target,
                 files::BrowseArgs {
                     remote_path: b.remote_path,
+                    editor: b.editor,
                     concurrency: b.concurrency,
                 },
             )

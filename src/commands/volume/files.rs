@@ -121,6 +121,10 @@ pub(crate) struct BrowseArgs {
     #[clap(value_name = "REMOTE_PATH", default_value = "/")]
     pub(crate) remote_path: String,
 
+    /// Editor command to use when editing files
+    #[clap(long, value_name = "COMMAND")]
+    pub(crate) editor: Option<String>,
+
     /// Concurrent file downloads
     #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
     pub(crate) concurrency: usize,
@@ -270,6 +274,7 @@ pub(crate) async fn browse(target: FileTarget, args: BrowseArgs) -> Result<()> {
         mount_path: target.mount_path.clone(),
         remote_path: args.remote_path,
         transfer_concurrency: args.concurrency,
+        editor: args.editor,
     })
     .await
 }

@@ -25,6 +25,7 @@ use crate::commands::volume::sftp::{
     LocalOverwritePolicy, VolumeFileEntry, VolumeSftp, VolumeSftpError, VolumeTransferProgress,
     VolumeTransferProgressCallback,
 };
+use crate::util::editor::resolve_editor_command;
 
 use app::{
     BrowserAction, BrowserMode, BusyState, ConfirmAction, VolumeBrowserApp, normalize_remote_dir,
@@ -37,6 +38,7 @@ pub struct VolumeBrowserParams {
     pub mount_path: String,
     pub remote_path: String,
     pub transfer_concurrency: usize,
+    pub editor: Option<String>,
 }
 
 struct RefreshResult {
@@ -219,6 +221,7 @@ fn spawn_refresh(
         mount_path: params.mount_path.clone(),
         remote_path: params.remote_path.clone(),
         transfer_concurrency: params.transfer_concurrency,
+        editor: params.editor.clone(),
     };
 
     tokio::spawn(async move {
@@ -413,7 +416,7 @@ async fn edit_remote_file(params: &VolumeBrowserParams, remote_path: &str) -> Re
     );
 
     sftp.download(remote_path, &temp_path, true).await?;
-    run_editor(&temp_path).await?;
+    run_editor(&temp_path, params.editor.as_deref()).await?;
     sftp.upload(&temp_path, remote_path, true).await?;
     let _ = tokio::fs::remove_file(&temp_path).await;
     Ok(())
@@ -434,10 +437,8 @@ fn temp_edit_path(remote_path: &str) -> Result<PathBuf> {
     )))
 }
 
-async fn run_editor(path: &Path) -> Result<()> {
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| default_editor().to_string());
+async fn run_editor(path: &Path, editor_override: Option<&str>) -> Result<()> {
+    let editor = resolve_editor_command(editor_override)?;
     let command = format!("{} {}", editor, shell_quote(&path.display().to_string()));
 
     let (shell, args): (String, Vec<String>) = if cfg!(target_os = "windows") {
@@ -466,14 +467,6 @@ async fn run_editor(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn default_editor() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "notepad"
-    } else {
-        "vi"
-    }
 }
 
 fn shell_quote(value: &str) -> String {
