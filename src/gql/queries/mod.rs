@@ -157,6 +157,14 @@ pub struct TemplateDetail;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/WorkspaceTemplates.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct WorkspaceTemplates;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/GitHubRepos.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

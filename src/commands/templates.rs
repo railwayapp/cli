@@ -46,7 +46,9 @@ type TemplateSearchResponse = queries::template_search::ResponseData;
 type TemplateSearchConnection = queries::template_search::TemplateSearchTemplateSearch;
 type TemplateSearchEdge = queries::template_search::TemplateSearchTemplateSearchEdges;
 type TemplateSearchItem = queries::template_search::TemplateSearchTemplateSearchEdgesNode;
-type TemplateDetailItem = queries::template::TemplateTemplate;
+type RootTemplateItem = queries::template::TemplateTemplate;
+type WorkspaceTemplateItem =
+    queries::workspace_templates::WorkspaceTemplatesWorkspaceTemplatesEdgesNode;
 type GeneratedTemplate = mutations::template_generate::TemplateGenerateTemplateGenerate;
 type PublishedTemplate = mutations::template_publish::TemplatePublishTemplatePublish;
 
@@ -265,6 +267,54 @@ struct SearchMessage {
     result: Result<TemplateSearchConnection, String>,
 }
 
+#[derive(Clone)]
+struct TemplateDetailItem {
+    id: String,
+    code: String,
+    name: String,
+    description: Option<String>,
+    image: Option<String>,
+    category: Option<String>,
+    readme: Option<String>,
+    demo_project_id: Option<String>,
+    status: String,
+    workspace_id: Option<String>,
+}
+
+impl From<RootTemplateItem> for TemplateDetailItem {
+    fn from(template: RootTemplateItem) -> Self {
+        Self {
+            id: template.id,
+            code: template.code,
+            name: template.name,
+            description: template.description,
+            image: template.image,
+            category: template.category,
+            readme: template.readme,
+            demo_project_id: template.demo_project_id,
+            status: status_label(&template.status),
+            workspace_id: template.workspace_id,
+        }
+    }
+}
+
+impl From<WorkspaceTemplateItem> for TemplateDetailItem {
+    fn from(template: WorkspaceTemplateItem) -> Self {
+        Self {
+            id: template.id,
+            code: template.code,
+            name: template.name,
+            description: template.description,
+            image: template.image,
+            category: template.category,
+            readme: template.readme,
+            demo_project_id: template.demo_project_id,
+            status: status_label(&template.status),
+            workspace_id: template.workspace_id,
+        }
+    }
+}
+
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::Search(args) => search_command(args).await,
@@ -325,10 +375,7 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_user_authorized(&configs)?;
     let template = fetch_template_by_ref(&client, &configs, &template_ref).await?;
-    let is_updating = matches!(
-        &template.status,
-        queries::template::TemplateStatus::PUBLISHED
-    );
+    let is_updating = is_published_status(&template.status);
 
     let category = resolve_publish_category(args.category.clone(), &template, interactive)?;
     let description =
@@ -482,19 +529,20 @@ async fn unpublish_command(args: UnpublishArgs) -> Result<()> {
     Ok(())
 }
 
-fn ensure_template_can_unpublish(
-    status: &queries::template::TemplateStatus,
-    name: &str,
-) -> Result<()> {
-    if matches!(status, queries::template::TemplateStatus::PUBLISHED) {
+fn ensure_template_can_unpublish(status: &str, name: &str) -> Result<()> {
+    if is_published_status(status) {
         return Ok(());
     }
 
     bail!(
         "Template \"{}\" is {}. Only published templates can be unpublished.",
         name,
-        status_label(status)
+        status
     )
+}
+
+fn is_published_status(status: &str) -> bool {
+    status == "PUBLISHED"
 }
 
 #[derive(Clone)]
@@ -717,11 +765,28 @@ async fn fetch_template_by_ref(
     match fetch_template(client, configs, Some(template_ref.to_string()), None).await {
         Ok(template) => Ok(template),
         Err(RailwayError::GraphQLError(message)) if message.contains("Template not found") => {
-            fetch_template(client, configs, None, Some(template_ref.to_string()))
-                .await
-                .map_err(Into::into)
+            match fetch_template(client, configs, None, Some(template_ref.to_string())).await {
+                Ok(template) => Ok(template),
+                Err(error) if should_try_workspace_template_lookup(&error) => {
+                    fetch_workspace_template_by_ref(client, configs, template_ref).await
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+        Err(error) if should_try_workspace_template_lookup(&error) => {
+            fetch_workspace_template_by_ref(client, configs, template_ref).await
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+fn should_try_workspace_template_lookup(error: &RailwayError) -> bool {
+    match error {
+        RailwayError::Unauthorized | RailwayError::UnauthorizedLogin => true,
+        RailwayError::GraphQLError(message) => {
+            message.contains("Template not found") || message.contains("Not Authorized")
+        }
+        _ => false,
     }
 }
 
@@ -737,7 +802,47 @@ async fn fetch_template(
         queries::template::Variables { id, code },
     )
     .await?;
-    Ok(response.template)
+    Ok(response.template.into())
+}
+
+async fn fetch_workspace_template_by_ref(
+    client: &reqwest::Client,
+    configs: &Configs,
+    template_ref: &str,
+) -> Result<TemplateDetailItem> {
+    for workspace in workspaces_with_client(client, configs).await? {
+        let mut after = None;
+        loop {
+            let response = post_graphql::<queries::WorkspaceTemplates, _>(
+                client,
+                configs.get_backboard(),
+                queries::workspace_templates::Variables {
+                    workspace_id: workspace.id().to_string(),
+                    first: Some(MAX_LIMIT),
+                    after,
+                },
+            )
+            .await?;
+
+            for edge in response.workspace_templates.edges {
+                let template = edge.node;
+                if template.id.eq_ignore_ascii_case(template_ref)
+                    || template.code.eq_ignore_ascii_case(template_ref)
+                {
+                    fake_select("Select workspace", workspace.name());
+                    return Ok(template.into());
+                }
+            }
+
+            if !response.workspace_templates.page_info.has_next_page {
+                break;
+            }
+
+            after = response.workspace_templates.page_info.end_cursor;
+        }
+    }
+
+    bail!("Template \"{}\" not found", template_ref)
 }
 
 async fn resolve_workspace_id(
@@ -2025,20 +2130,14 @@ mod tests {
 
     #[test]
     fn unpublish_guard_accepts_published_templates() {
-        assert!(
-            ensure_template_can_unpublish(&queries::template::TemplateStatus::PUBLISHED, "App")
-                .is_ok()
-        );
+        assert!(ensure_template_can_unpublish("PUBLISHED", "App").is_ok());
     }
 
     #[test]
     fn unpublish_guard_rejects_unpublished_templates() {
-        let error = ensure_template_can_unpublish(
-            &queries::template::TemplateStatus::UNPUBLISHED,
-            "Draft App",
-        )
-        .unwrap_err()
-        .to_string();
+        let error = ensure_template_can_unpublish("UNPUBLISHED", "Draft App")
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("Template \"Draft App\" is UNPUBLISHED"));
         assert!(error.contains("Only published templates can be unpublished"));
@@ -2046,10 +2145,9 @@ mod tests {
 
     #[test]
     fn unpublish_guard_rejects_hidden_templates() {
-        let error =
-            ensure_template_can_unpublish(&queries::template::TemplateStatus::HIDDEN, "Hidden App")
-                .unwrap_err()
-                .to_string();
+        let error = ensure_template_can_unpublish("HIDDEN", "Hidden App")
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("Template \"Hidden App\" is HIDDEN"));
         assert!(error.contains("Only published templates can be unpublished"));
