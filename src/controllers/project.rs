@@ -212,6 +212,21 @@ pub fn find_service_instance<'a>(
         .map(|si| &si.node)
 }
 
+pub fn ensure_service_has_active_deployment(
+    service_instance: &ProjectServiceInstanceNode,
+    environment_name: &str,
+) -> Result<()> {
+    if service_instance.active_deployments.is_empty() {
+        bail!(
+            "Service {} has no active deployment in environment {}. Deploy or restart the service before using file commands.",
+            service_instance.service_name,
+            environment_name
+        );
+    }
+
+    Ok(())
+}
+
 /// Resolved context for service operations (variables, etc.)
 pub struct ServiceContext {
     pub client: Client,

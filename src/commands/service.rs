@@ -1,6 +1,7 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
 use serde::Serialize;
+use std::fmt::Display;
 
 use crate::{
     client::post_graphql,
@@ -8,8 +9,9 @@ use crate::{
     controllers::{
         environment::get_matched_environment,
         project::{
-            ensure_project_and_environment_exist, get_environment_instances, get_project,
-            get_service_ids_in_env, service_instances_in_env,
+            ensure_project_and_environment_exist, ensure_service_has_active_deployment,
+            find_service_instance, get_environment_instances, get_project, get_service_ids_in_env,
+            resolve_service_context, service_instances_in_env, volume_instances_in_env,
         },
         regions::fetch_region_locations,
     },
@@ -33,7 +35,7 @@ pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
 /// Manage services
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway service list --json\n  railway service delete --service api --environment production --yes --json\n  railway service rm --service api --yes --json\n  railway service link api\n\nAutomation notes:\n  Destructive non-interactive runs must pass exact selectors and --yes.\n  Prefer service IDs from `railway service list --json` when names may collide."
+    after_help = "Examples:\n\n  railway service list --json\n  railway service delete --service api --environment production --yes --json\n  railway service link api\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Destructive non-interactive runs must pass exact selectors and --yes.\n  Prefer service IDs from `railway service list --json` when names may collide."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -70,6 +72,31 @@ enum Commands {
 
     /// Scale a service across regions
     Scale(crate::commands::scale::Args),
+
+    /// Manage files in a service filesystem
+    #[clap(visible_alias = "file")]
+    Files(FilesArgs),
+}
+
+#[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files browser /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Uses the linked service by default. Pass --service, --environment, or --project only when selecting a different target."
+)]
+struct FilesArgs {
+    /// Service name or ID (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment to use (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    #[clap(subcommand)]
+    command: crate::commands::volume::files::Commands,
 }
 
 #[derive(Parser)]
@@ -180,7 +207,98 @@ pub async fn command(args: Args) -> Result<()> {
             crate::commands::restart::command(restart_args).await
         }
         Some(Commands::Scale(scale_args)) => crate::commands::scale::command(scale_args).await,
+        Some(Commands::Files(files_args)) => files_command(files_args).await,
         None => unreachable!(),
+    }
+}
+
+async fn files_command(args: FilesArgs) -> Result<()> {
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+    let environment_instances = get_environment_instances(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+    )
+    .await?;
+    let service_instance = find_service_instance(&environment_instances, &ctx.service_id)
+        .with_context(|| format!("No service instance found for {}", ctx.service_name))?;
+    ensure_service_has_active_deployment(service_instance, &ctx.environment_name)?;
+
+    let service_target = crate::commands::volume::files::FileTarget {
+        service_instance_id: service_instance.id.clone(),
+        mount_path: "/".to_string(),
+        label: crate::commands::volume::files::FileTargetLabel::Service {
+            id: ctx.service_id.clone(),
+            name: ctx.service_name.clone(),
+        },
+    };
+
+    let command = args.command;
+    let target = if matches!(command, crate::commands::volume::files::Commands::Browse(_)) {
+        service_file_browse_target(service_target, &environment_instances, &ctx.service_id)?
+    } else {
+        service_target
+    };
+
+    crate::commands::volume::files::command_from_parts(target, command).await
+}
+
+fn service_file_browse_target(
+    service_target: crate::commands::volume::files::FileTarget,
+    environment_instances: &crate::controllers::project::ProjectEnvironmentInstances,
+    service_id: &str,
+) -> Result<crate::commands::volume::files::FileTarget> {
+    if !std::io::stdout().is_terminal() {
+        return Ok(service_target);
+    }
+
+    let volume_targets: Vec<crate::commands::volume::files::FileTarget> =
+        volume_instances_in_env(environment_instances)
+            .iter()
+            .filter(|volume| volume.node.service_id.as_deref() == Some(service_id))
+            .map(|volume| crate::commands::volume::files::FileTarget {
+                service_instance_id: service_target.service_instance_id.clone(),
+                mount_path: volume.node.mount_path.clone(),
+                label: crate::commands::volume::files::FileTargetLabel::Volume {
+                    id: volume.node.volume.id.clone(),
+                    name: volume.node.volume.name.clone(),
+                    mount_path: volume.node.mount_path.clone(),
+                },
+            })
+            .collect();
+
+    if volume_targets.is_empty() {
+        return Ok(service_target);
+    }
+
+    if !prompt_confirm_with_default("Browse the attached volume?", true)? {
+        return Ok(service_target);
+    }
+
+    if volume_targets.len() == 1 {
+        return Ok(volume_targets[0].clone());
+    }
+
+    let choices = volume_targets
+        .into_iter()
+        .map(VolumeFileBrowseChoice)
+        .collect();
+    Ok(prompt_options("Select a volume", choices)?.0)
+}
+
+struct VolumeFileBrowseChoice(crate::commands::volume::files::FileTarget);
+
+impl Display for VolumeFileBrowseChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0.label {
+            crate::commands::volume::files::FileTargetLabel::Volume {
+                name, mount_path, ..
+            } => write!(f, "{name} ({mount_path})"),
+            crate::commands::volume::files::FileTargetLabel::Service { name, .. } => {
+                write!(f, "{name}")
+            }
+        }
     }
 }
 

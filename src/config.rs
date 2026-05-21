@@ -57,6 +57,7 @@ pub struct RailwayUser {
 pub struct RailwayConfig {
     pub projects: BTreeMap<String, LinkedProject>,
     pub user: RailwayUser,
+    pub editor: Option<String>,
     /// (path, id)
     pub linked_functions: Option<Vec<(String, String)>>,
 }
@@ -96,6 +97,7 @@ impl Configs {
                     RailwayConfig {
                         projects: BTreeMap::new(),
                         user: RailwayUser::default(),
+                        editor: None,
                         linked_functions: None,
                     }
                 });
@@ -113,6 +115,7 @@ impl Configs {
             root_config: RailwayConfig {
                 projects: BTreeMap::new(),
                 user: RailwayUser::default(),
+                editor: None,
                 linked_functions: None,
             },
         })
@@ -122,6 +125,7 @@ impl Configs {
         self.root_config = RailwayConfig {
             projects: BTreeMap::new(),
             user: RailwayUser::default(),
+            editor: None,
             linked_functions: None,
         };
         Ok(())

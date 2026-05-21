@@ -3,8 +3,8 @@ use crate::{
     controllers::environment::get_matched_environment,
     controllers::project::{
         ProjectEnvironmentInstances, ProjectVolumeInstanceNode,
-        ensure_project_and_environment_exist, get_environment_instances, get_project,
-        volume_instances_in_env,
+        ensure_project_and_environment_exist, ensure_service_has_active_deployment,
+        find_service_instance, get_environment_instances, get_project, volume_instances_in_env,
     },
     errors::RailwayError,
     queries::project::ProjectProject,
@@ -19,10 +19,14 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 use std::fmt::Display;
 
+pub(crate) mod files;
+pub(crate) mod sftp;
+mod ssh_key;
+
 /// Manage project volumes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --mount-path /data --json\n  railway volume delete --volume data --yes --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide."
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --json\n  railway volume delete --volume data --yes --json\n  railway volume browse /\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n  browse: browser\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -118,6 +122,40 @@ structstruck::strike! {
             json: bool,
         })
 
+        /// Manage files in a volume
+        #[clap(
+            visible_alias = "file",
+            after_help = "Examples:\n\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files browser /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAutomation notes:\n  Prompts for a volume by default. Pass --volume when selecting a specific target or running non-interactively."
+        )]
+        Files(struct {
+            /// The ID/name of the volume whose files you wish to manage
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            #[clap(subcommand)]
+            command: files::Commands,
+        })
+
+        /// Browse files in a volume interactively
+        #[clap(visible_alias = "browser")]
+        Browse(struct {
+            /// The ID/name of the volume you wish to browse
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The directory path on the remote server to open
+            #[clap(value_name = "REMOTE_PATH", default_value = "/")]
+            remote_path: String,
+
+            /// Editor command to use when editing files
+            #[clap(long, value_name = "COMMAND")]
+            editor: Option<String>,
+
+            /// Concurrent file downloads
+            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
+            concurrency: usize,
+        })
+
         /// Attach a volume to a service
         Attach(struct {
             /// The ID/name of the volume you wish to attach
@@ -175,6 +213,24 @@ pub async fn command(args: Args) -> Result<()> {
         get_environment_instances(&client, &configs, &project_id, &environment).await?;
 
     match args.command {
+        Commands::Files(f) => {
+            let target =
+                volume_file_target(&environment, &environment_instances, f.volume, project)?;
+            files::command_from_parts(target, f.command).await?
+        }
+        Commands::Browse(b) => {
+            let target =
+                volume_file_target(&environment, &environment_instances, b.volume, project)?;
+            files::browse(
+                target,
+                files::BrowseArgs {
+                    remote_path: b.remote_path,
+                    editor: b.editor,
+                    concurrency: b.concurrency,
+                },
+            )
+            .await?
+        }
         Commands::Add(a) => {
             add(
                 service,
@@ -237,6 +293,55 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn volume_file_target(
+    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+) -> Result<files::FileTarget> {
+    let is_terminal = std::io::stdout().is_terminal();
+    let environment_name = project
+        .environments
+        .edges
+        .iter()
+        .find(|edge| edge.node.id == environment)
+        .map(|edge| edge.node.name.as_str())
+        .unwrap_or(environment)
+        .to_string();
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment,
+        volume,
+        is_terminal,
+    )?;
+
+    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service",
+            volume.0.volume.name
+        )
+    })?;
+    let service_instance =
+        find_service_instance(environment_instances, service_id).ok_or_else(|| {
+            anyhow!(
+                "No service instance found for volume {}",
+                volume.0.volume.name
+            )
+        })?;
+    ensure_service_has_active_deployment(service_instance, &environment_name)?;
+
+    Ok(files::FileTarget {
+        service_instance_id: service_instance.id.clone(),
+        mount_path: volume.0.mount_path.clone(),
+        label: files::FileTargetLabel::Volume {
+            id: volume.0.volume.id.clone(),
+            name: volume.0.volume.name.clone(),
+            mount_path: volume.0.mount_path.clone(),
+        },
+    })
 }
 
 async fn attach(
