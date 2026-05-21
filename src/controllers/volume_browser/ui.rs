@@ -156,6 +156,7 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         vec![Row::new(vec![
             Cell::from(Span::styled("No files", Style::default().fg(LABEL_COLOR))),
             Cell::from(""),
+            Cell::from(""),
         ])]
     } else {
         app.remote_entries
@@ -164,6 +165,7 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
                 let row = Row::new(vec![
                     Cell::from(remote_name(entry, app.is_busy())),
                     Cell::from(remote_meta(entry.kind, app.is_busy())),
+                    Cell::from(remote_size(entry, app.is_busy())),
                 ]);
 
                 if app.is_busy() {
@@ -181,26 +183,35 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     }
 
     let title = " Remote files ";
-    let table = Table::new(rows, [Constraint::Min(20), Constraint::Length(12)])
-        .header(Row::new(vec!["Name", "Type"]).style(if app.is_busy() {
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(20),
+            Constraint::Length(12),
+            Constraint::Length(14),
+        ],
+    )
+    .header(
+        Row::new(vec!["Name", "Type", "Size"]).style(if app.is_busy() {
             disabled_tree_style()
         } else {
             Style::default()
                 .fg(LABEL_COLOR)
                 .add_modifier(Modifier::BOLD)
-        }))
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER_COLOR)),
-        )
-        .style(if app.is_busy() {
-            disabled_tree_style()
-        } else {
-            Style::default()
-        })
-        .row_highlight_style(SELECTED_STYLE);
+        }),
+    )
+    .block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BORDER_COLOR)),
+    )
+    .style(if app.is_busy() {
+        disabled_tree_style()
+    } else {
+        Style::default()
+    })
+    .row_highlight_style(SELECTED_STYLE);
 
     frame.render_stateful_widget(table, area, &mut state);
 }
@@ -483,6 +494,34 @@ fn remote_meta(value: impl Into<String>, refreshing: bool) -> Span<'static> {
         Span::raw(value.into())
     } else {
         Span::styled(value.into(), Style::default().fg(LABEL_COLOR))
+    }
+}
+
+fn remote_size(entry: &VolumeFileEntry, refreshing: bool) -> Span<'static> {
+    let value = if entry.kind == "directory" {
+        "--".to_string()
+    } else {
+        format_bytes(entry.size)
+    };
+
+    remote_meta(value, refreshing)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} B")
+    } else if value >= 10.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
