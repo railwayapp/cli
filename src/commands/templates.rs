@@ -27,7 +27,7 @@ use tokio::{sync::mpsc, time::Instant};
 use crate::{
     client::post_graphql,
     consts::TICK_STRING,
-    controllers::{environment::get_matched_environment, project::get_project},
+    controllers::project::get_project,
     errors::RailwayError,
     util::{
         progress::create_spinner_if,
@@ -91,8 +91,6 @@ const DEFAULT_README_TEXT: &[&str] = &[
     "[Include Github",
 ];
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "avif", "gif", "svg", "ico"];
-const GENERATE_SOURCE_PROJECT: &str = "Entire project (dashboard default)";
-const GENERATE_SOURCE_ENVIRONMENT: &str = "Specific environment";
 const README_SOURCE_EXISTING: &str = "Use existing README";
 const README_SOURCE_GENERATED: &str = "Use generated README";
 const README_SOURCE_FILE: &str = "Read from file";
@@ -158,16 +156,12 @@ struct SearchArgs {
 
 #[derive(Parser, Clone)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates create --json\n  railway templates create --project project-id --json\n  railway templates create --project project-id --environment production --json\n\nAutomation notes:\n  This matches the dashboard Generate Template action: it creates an unpublished template from a project.\n  By default generation is project-level. Pass --environment only when you intentionally want to generate from one environment.\n  In interactive mode, omitted project and source choices are prompted."
+    after_help = "Examples:\n\n  railway templates create --json\n  railway templates create --project project-id --json\n\nAutomation notes:\n  This matches the dashboard Generate Template action: it clones a project into an unpublished template draft.\n  The generated template opens in the dashboard template editor for cleanup before publishing.\n  In interactive mode, an omitted project is prompted."
 )]
 struct CreateArgs {
     /// Project ID or name. Defaults to the linked project.
     #[arg(short, long)]
     project: Option<String>,
-
-    /// Environment ID or name to generate from. Defaults to the dashboard behavior: project-level generation.
-    #[arg(short, long)]
-    environment: Option<String>,
 
     /// Print the created template as JSON
     #[arg(long)]
@@ -280,23 +274,12 @@ async fn create_command(args: CreateArgs) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_user_authorized(&configs)?;
     let project_id = resolve_template_project(&client, &configs, args.project, interactive).await?;
-    let environment_id = resolve_template_environment(
-        &client,
-        &configs,
-        &project_id,
-        args.environment,
-        interactive,
-    )
-    .await?;
 
     let spinner = create_spinner_if(!args.json, "Creating template...".to_string());
     let response = post_graphql::<mutations::TemplateGenerate, _>(
         &client,
         configs.get_backboard(),
-        mutations::template_generate::Variables {
-            project_id,
-            environment_id,
-        },
+        mutations::template_generate::Variables { project_id },
     )
     .await?;
 
@@ -496,18 +479,6 @@ impl std::fmt::Display for TemplateProjectChoice {
     }
 }
 
-#[derive(Clone)]
-struct TemplateEnvironmentChoice {
-    id: String,
-    name: String,
-}
-
-impl std::fmt::Display for TemplateEnvironmentChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
-
 async fn resolve_template_project(
     client: &reqwest::Client,
     configs: &Configs,
@@ -560,63 +531,6 @@ async fn resolve_project_arg(
     let choice = find_project_choice(client, configs, project).await?;
     fake_select("Select project", &choice.to_string());
     Ok(choice.id)
-}
-
-async fn resolve_template_environment(
-    client: &reqwest::Client,
-    configs: &Configs,
-    project_id: &str,
-    environment: Option<String>,
-    interactive: bool,
-) -> Result<Option<String>> {
-    let project = get_project(client, configs, project_id.to_string()).await?;
-    if project.deleted_at.is_some() {
-        bail!(RailwayError::ProjectDeleted);
-    }
-
-    if let Some(environment) = environment {
-        let environment = get_matched_environment(&project, environment)?;
-        fake_select("Select environment", &environment.name);
-        return Ok(Some(environment.id));
-    }
-
-    if !interactive {
-        return Ok(None);
-    }
-
-    let source = prompt_options(
-        "Generate source",
-        vec![
-            GENERATE_SOURCE_PROJECT.to_string(),
-            GENERATE_SOURCE_ENVIRONMENT.to_string(),
-        ],
-    )?;
-    if source == GENERATE_SOURCE_PROJECT {
-        return Ok(None);
-    }
-
-    Ok(Some(prompt_template_environment(&project)?))
-}
-
-fn prompt_template_environment(project: &queries::RailwayProject) -> Result<String> {
-    let all_environments = &project.environments.edges;
-    let environments = all_environments
-        .iter()
-        .filter(|environment| environment.node.can_access && environment.node.deleted_at.is_none())
-        .map(|environment| TemplateEnvironmentChoice {
-            id: environment.node.id.clone(),
-            name: environment.node.name.clone(),
-        })
-        .collect::<Vec<_>>();
-
-    if environments.is_empty() {
-        if all_environments.is_empty() {
-            bail!("Project has no environments");
-        }
-        bail!("All environments in this project are restricted or deleted");
-    }
-
-    Ok(prompt_options("Select environment", environments)?.id)
 }
 
 async fn find_project_choice(
