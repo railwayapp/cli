@@ -382,11 +382,11 @@ impl VolumeSftp {
         }
     }
 
-    pub(crate) async fn delete_file(&mut self, remote_path: &str) -> Result<()> {
-        match self.delete_file_once(remote_path).await {
+    pub(crate) async fn delete(&mut self, remote_path: &str) -> Result<()> {
+        match self.delete_once(remote_path).await {
             Ok(()) => Ok(()),
             Err(_err) if self.is_disconnected() => self
-                .delete_file_once(remote_path)
+                .delete_once(remote_path)
                 .await
                 .with_context(|| format!("Failed to delete {remote_path} after reconnect")),
             Err(err) => Err(err),
@@ -795,12 +795,58 @@ impl VolumeSftp {
         )
     }
 
+    async fn delete_once(&mut self, remote_path: &str) -> Result<()> {
+        if self.remote_path_is_dir(remote_path).await? {
+            return self.delete_dir_once(remote_path).await;
+        }
+
+        self.delete_file_once(remote_path).await
+    }
+
+    async fn delete_dir_once(&mut self, remote_path: &str) -> Result<()> {
+        let mut pending = vec![remote_path.to_string()];
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+
+        while let Some(remote_dir) = pending.pop() {
+            dirs.push(remote_dir.clone());
+
+            for entry in self.list_files_once(&remote_dir).await? {
+                if entry.kind == "directory" {
+                    pending.push(entry.path);
+                } else {
+                    files.push(entry.path);
+                }
+            }
+        }
+
+        for file in files {
+            self.delete_file_once(&file).await?;
+        }
+
+        for dir in dirs.into_iter().rev() {
+            self.remove_empty_dir_once(&dir).await?;
+        }
+
+        Ok(())
+    }
+
     async fn delete_file_once(&mut self, remote_path: &str) -> Result<()> {
         let remote_path = self.mount_prefixed_path(remote_path);
         let sftp = self.connect().await?;
         sftp.remove_file(&remote_path)
             .await
             .with_context(|| format!("Failed to delete remote file {remote_path}"))?;
+
+        Ok(())
+    }
+
+    async fn remove_empty_dir_once(&mut self, remote_path: &str) -> Result<()> {
+        let remote_path = self.mount_prefixed_path(remote_path);
+        let sftp = self.connect().await?;
+        sftp.remove_dir(&remote_path)
+            .await
+            .with_context(|| format!("Failed to delete remote directory {remote_path}"))?;
 
         Ok(())
     }

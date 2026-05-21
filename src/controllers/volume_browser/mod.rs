@@ -167,6 +167,24 @@ pub async fn run(params: VolumeBrowserParams) -> Result<()> {
                                     app.mark_refreshing();
                                 }
                             }
+                            BrowserAction::Delete { remote_path } => {
+                                app.mark_busy(BusyState::Deleting, "Deleting...");
+                                terminal.draw(|frame| ui::render(&app, frame))?;
+                                match handle_delete(&params, &remote_path).await {
+                                    Ok(()) => {
+                                        app.set_status(format!("Deleted {remote_path}"));
+                                        spawn_refresh(
+                                            &refresh_tx,
+                                            &params,
+                                            &mut refresh_request_id,
+                                            &mut active_refresh_request_id,
+                                            app.remote_dir.clone(),
+                                        );
+                                        app.mark_refreshing();
+                                    }
+                                    Err(err) => app.set_error(err.to_string()),
+                                }
+                            }
                             BrowserAction::Edit { remote_path } => {
                                 app.mark_busy(BusyState::Editing, "Opening editor...");
                                 terminal.draw(|frame| ui::render(&app, frame))?;
@@ -406,6 +424,14 @@ async fn handle_upload(
             false
         }
     }
+}
+
+async fn handle_delete(params: &VolumeBrowserParams, remote_path: &str) -> Result<()> {
+    let mut sftp = VolumeSftp::new(
+        params.service_instance_id.clone(),
+        params.mount_path.clone(),
+    );
+    sftp.delete(remote_path).await
 }
 
 async fn edit_remote_file(params: &VolumeBrowserParams, remote_path: &str) -> Result<()> {

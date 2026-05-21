@@ -249,19 +249,24 @@ fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         match app.mode {
             BrowserMode::Browse => browse_help_items(app),
             BrowserMode::Upload => vec![
-                ("Up/Down", "move"),
+                ("Up/Down/Left", "move/parent"),
                 ("Enter", "open/upload"),
-                ("Left", "parent"),
                 ("Esc", "remote files"),
                 ("R", "refresh local"),
             ],
             BrowserMode::Confirm => {
-                if app.confirm.as_ref().is_some_and(|confirm| {
+                if app
+                    .confirm
+                    .as_ref()
+                    .is_some_and(|confirm| confirm.action == ConfirmAction::Delete)
+                {
+                    vec![("Enter", "delete"), ("Esc", "cancel")]
+                } else if app.confirm.as_ref().is_some_and(|confirm| {
                     confirm.is_dir && confirm.action == ConfirmAction::Download
                 }) {
                     vec![("Enter", "overwrite"), ("A", "overwrite all")]
                 } else {
-                    vec![("Enter", "overwrite")]
+                    vec![("Enter", "overwrite"), ("Esc", "cancel")]
                 }
             }
             BrowserMode::Help => vec![("Esc", "close help")],
@@ -271,12 +276,13 @@ fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 }
 
 fn browse_help_items(app: &VolumeBrowserApp) -> Vec<(&'static str, &'static str)> {
-    let mut items = vec![
-        ("Up/Down", "move"),
-        ("Enter", "open folder"),
-        ("U", "upload"),
-        ("D", "download"),
-    ];
+    let mut items = vec![("Up/Down/Left", "move/parent"), ("Enter", "open folder")];
+
+    if app.selected_remote().is_some() {
+        items.push(("X", "delete"));
+    }
+
+    items.extend([("U", "upload"), ("D", "download")]);
 
     if app
         .selected_remote()
@@ -285,7 +291,7 @@ fn browse_help_items(app: &VolumeBrowserApp) -> Vec<(&'static str, &'static str)
         items.push(("E", "edit"));
     }
 
-    items.extend([("R", "refresh"), ("?", "help"), ("Q", "quit")]);
+    items.extend([("R", "refresh"), ("Q", "quit")]);
     items
 }
 
@@ -367,6 +373,10 @@ fn help_spans(items: Vec<(&'static str, &'static str)>) -> Vec<Span<'static>> {
 }
 
 fn confirm_help_items(confirm: &ConfirmRequest) -> Vec<(&'static str, &'static str)> {
+    if confirm.action == ConfirmAction::Delete {
+        return vec![("Enter", "delete"), ("Esc", "cancel")];
+    }
+
     if confirm.is_dir && confirm.action == ConfirmAction::Download {
         vec![("Enter", "overwrite"), ("A", "overwrite all")]
     } else {
@@ -383,6 +393,7 @@ fn confirm_target_line(confirm: &ConfirmRequest) -> Line<'static> {
             .display()
             .to_string(),
         ConfirmAction::Upload => confirm.remote_path.clone(),
+        ConfirmAction::Delete => confirm.remote_path.clone(),
     };
 
     Line::from(vec![
@@ -405,11 +416,13 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("Use arrow keys to move through remote files."),
         Line::from("Enter opens the selected remote folder."),
+        Line::from("Left, Backspace, or H goes up to the parent remote folder."),
         Line::from("U opens a local cwd sidebar for file upload."),
         Line::from("D downloads the selected file or folder into the local cwd."),
+        Line::from("X or Delete deletes the selected remote file or folder after confirmation."),
         Line::from("E opens the selected file in your editor and uploads it back."),
         Line::from("R refreshes the remote file list."),
-        Line::from("Vim movement keys are also supported."),
+        Line::from("J/K move down/up and L opens a folder."),
         Line::from(""),
         Line::from(Span::styled("Esc close", Style::default().fg(LABEL_COLOR))),
     ];

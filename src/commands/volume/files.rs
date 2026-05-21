@@ -303,7 +303,7 @@ pub(crate) async fn delete(target: FileTarget, args: DeleteArgs) -> Result<()> {
     }
 
     let mut sftp = sftp_for(&target, sftp::DEFAULT_TRANSFER_CONCURRENCY);
-    sftp.delete_file(&args.remote_path).await?;
+    sftp.delete(&args.remote_path).await?;
 
     if args.json {
         println!(

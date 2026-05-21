@@ -124,6 +124,7 @@ structstruck::strike! {
 
         /// Manage files in a volume
         #[clap(
+            visible_alias = "file",
             after_help = "Examples:\n\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAutomation notes:\n  Prompts for a volume by default. Pass --volume when selecting a specific target or running non-interactively."
         )]
         Files(struct {

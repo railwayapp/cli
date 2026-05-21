@@ -74,6 +74,7 @@ enum Commands {
     Scale(crate::commands::scale::Args),
 
     /// Manage files in a service filesystem
+    #[clap(visible_alias = "file")]
     Files(FilesArgs),
 }
 

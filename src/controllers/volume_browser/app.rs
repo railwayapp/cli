@@ -25,12 +25,14 @@ pub enum BusyState {
     Downloading,
     Uploading,
     Editing,
+    Deleting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmAction {
     Download,
     Upload,
+    Delete,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +81,9 @@ pub enum BrowserAction {
         local_path: PathBuf,
         remote_path: String,
         overwrite: bool,
+    },
+    Delete {
+        remote_path: String,
     },
     Edit {
         remote_path: String,
@@ -217,6 +222,7 @@ impl VolumeBrowserApp {
             ConfirmAction::Download if is_dir => "Overwrite local paths?",
             ConfirmAction::Download => "Overwrite local path?",
             ConfirmAction::Upload => "Overwrite remote file?",
+            ConfirmAction::Delete => "Delete remote file?",
         };
         self.confirm = Some(ConfirmRequest {
             action,
@@ -280,6 +286,9 @@ impl VolumeBrowserApp {
                 BrowserAction::Continue
             }
             KeyCode::Char('d') | KeyCode::Char('D') => self.download_selected(false),
+            KeyCode::Delete | KeyCode::Char('x') | KeyCode::Char('X') => {
+                self.confirm_delete_selected()
+            }
             KeyCode::Char('e') | KeyCode::Char('E') => {
                 if let Some(entry) = self.selected_remote() {
                     if entry.kind == "directory" {
@@ -363,6 +372,9 @@ impl VolumeBrowserApp {
                         remote_path: confirm.remote_path,
                         overwrite: true,
                     },
+                    ConfirmAction::Delete => BrowserAction::Delete {
+                        remote_path: confirm.remote_path,
+                    },
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
@@ -385,7 +397,7 @@ impl VolumeBrowserApp {
                     progress_base: confirm.progress_base,
                 }
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
                 self.confirm = None;
                 self.mode = BrowserMode::Browse;
                 BrowserAction::Continue
@@ -401,6 +413,34 @@ impl VolumeBrowserApp {
             }
             _ => {}
         }
+        BrowserAction::Continue
+    }
+
+    fn confirm_delete_selected(&mut self) -> BrowserAction {
+        let Some(entry) = self.selected_remote() else {
+            return BrowserAction::Continue;
+        };
+
+        self.confirm = Some(ConfirmRequest {
+            action: ConfirmAction::Delete,
+            title: if entry.kind == "directory" {
+                "Delete remote folder?".to_string()
+            } else {
+                "Delete remote file?".to_string()
+            },
+            message: if entry.kind == "directory" {
+                "This will permanently delete the selected remote folder and its contents."
+                    .to_string()
+            } else {
+                "This will permanently delete the selected remote file.".to_string()
+            },
+            local_path: PathBuf::new(),
+            overwrite_path: None,
+            remote_path: entry.path.clone(),
+            is_dir: entry.kind == "directory",
+            progress_base: None,
+        });
+        self.mode = BrowserMode::Confirm;
         BrowserAction::Continue
     }
 
@@ -617,6 +657,91 @@ mod tests {
             }
         );
         assert_eq!(app.mode, BrowserMode::Browse);
+    }
+
+    #[test]
+    fn delete_key_prompts_then_deletes_selected_file() {
+        let mut app = VolumeBrowserApp {
+            target_name: "data".to_string(),
+            mount_path: "/data".to_string(),
+            remote_dir: "/".to_string(),
+            remote_entries: vec![VolumeFileEntry {
+                name: "dump.sql".to_string(),
+                path: "/dump.sql".to_string(),
+                kind: "file",
+                size: 10,
+            }],
+            remote_selected: 0,
+            local_cwd: PathBuf::from("."),
+            local_entries: Vec::new(),
+            local_selected: 0,
+            mode: BrowserMode::Browse,
+            busy: BusyState::Idle,
+            status: None,
+            error: None,
+            transfer_progress: None,
+            confirm: None,
+        };
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            BrowserAction::Continue
+        );
+        assert_eq!(app.mode, BrowserMode::Confirm);
+        assert!(app.confirm.as_ref().is_some_and(|confirm| {
+            confirm.action == ConfirmAction::Delete && confirm.remote_path == "/dump.sql"
+        }));
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            BrowserAction::Delete {
+                remote_path: "/dump.sql".to_string(),
+            }
+        );
+        assert_eq!(app.mode, BrowserMode::Browse);
+    }
+
+    #[test]
+    fn delete_key_prompts_for_selected_directory() {
+        let mut app = VolumeBrowserApp {
+            target_name: "data".to_string(),
+            mount_path: "/data".to_string(),
+            remote_dir: "/".to_string(),
+            remote_entries: vec![VolumeFileEntry {
+                name: "backups".to_string(),
+                path: "/backups".to_string(),
+                kind: "directory",
+                size: 0,
+            }],
+            remote_selected: 0,
+            local_cwd: PathBuf::from("."),
+            local_entries: Vec::new(),
+            local_selected: 0,
+            mode: BrowserMode::Browse,
+            busy: BusyState::Idle,
+            status: None,
+            error: None,
+            transfer_progress: None,
+            confirm: None,
+        };
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            BrowserAction::Continue
+        );
+        assert_eq!(app.mode, BrowserMode::Confirm);
+        assert!(app.confirm.as_ref().is_some_and(|confirm| {
+            confirm.action == ConfirmAction::Delete
+                && confirm.remote_path == "/backups"
+                && confirm.is_dir
+        }));
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            BrowserAction::Delete {
+                remote_path: "/backups".to_string(),
+            }
+        );
     }
 
     #[test]
