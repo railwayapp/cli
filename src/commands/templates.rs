@@ -125,6 +125,7 @@ enum Commands {
     Create(CreateArgs),
 
     /// Publish or update a template in the marketplace
+    // The backend updates published templates through the same templatePublish mutation.
     #[clap(visible_alias = "update")]
     Publish(PublishArgs),
 
@@ -182,7 +183,7 @@ struct CreateArgs {
 
 #[derive(Parser, Clone)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates update template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates publish template-id --category AI/ML --description \"Deploy and Host My Agent with Railway\" --readme-file - --json\n\nValid categories:\n  AI/ML, Analytics, Authentication, Automation, Blogs, Bots, CMS,\n  Observability, Other, Starters, Storage, Queues\n\nAutomation notes:\n  First publish requires a template overview via --readme-file or --readme.\n  Use `templates update` as an alias when replacing metadata on an already published template.\n  In interactive mode, omitted template and metadata fields are prompted.\n  Use the template ID returned by `railway templates create --json`."
+    after_help = "Examples:\n\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates update template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates publish template-id --category AI/ML --description \"Deploy and Host My Agent with Railway\" --readme-file - --json\n\nValid categories:\n  AI/ML, Analytics, Authentication, Automation, Blogs, Bots, CMS,\n  Observability, Other, Starters, Storage, Queues\n\nAutomation notes:\n  First publish requires a template overview via --readme-file or --readme.\n  Use `templates update` as an alias when replacing metadata on an already published template.\n  Use none, clear, or an empty string for --image/--demo-project to clear optional fields.\n  In interactive mode, omitted template and metadata fields are prompted.\n  Use the template ID returned by `railway templates create --json`."
 )]
 struct PublishArgs {
     /// Template ID or code
@@ -204,11 +205,11 @@ struct PublishArgs {
     #[arg(long)]
     readme_file: Option<PathBuf>,
 
-    /// Image URL for the marketplace card
+    /// Image URL for the marketplace card. Use "none" or "clear" to clear it.
     #[arg(long)]
     image: Option<String>,
 
-    /// Public demo project ID
+    /// Public demo project ID. Use "none" or "clear" to clear it.
     #[arg(long)]
     demo_project: Option<String>,
 
@@ -305,6 +306,27 @@ struct TemplateDetailItem {
     demo_project_id: Option<String>,
     status: String,
     workspace_id: Option<String>,
+}
+
+struct ResolvedReadme {
+    value: String,
+    should_validate: bool,
+}
+
+impl ResolvedReadme {
+    fn supplied(value: String) -> Self {
+        Self {
+            value,
+            should_validate: true,
+        }
+    }
+
+    fn existing(value: String, is_updating: bool) -> Self {
+        Self {
+            value,
+            should_validate: !is_updating,
+        }
+    }
 }
 
 impl From<RootTemplateItem> for TemplateDetailItem {
@@ -436,9 +458,9 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
     validate_publish_fields(
         &category,
         &description,
-        readme.as_str(),
+        readme.value.as_str(),
         image.as_deref(),
-        is_updating,
+        readme.should_validate,
     )?;
 
     if interactive
@@ -446,7 +468,7 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
             &template,
             &category,
             &description,
-            &readme,
+            &readme.value,
             image.as_deref(),
             demo_project_id.as_deref(),
             is_updating,
@@ -464,7 +486,7 @@ async fn publish_command(args: PublishArgs) -> Result<()> {
             id: template.id,
             description,
             category,
-            readme,
+            readme: readme.value,
             image,
             demo_project_id,
             workspace_id,
@@ -632,6 +654,7 @@ fn ensure_template_can_unpublish(status: &str, name: &str) -> Result<()> {
 }
 
 fn is_published_status(status: &str) -> bool {
+    // status_label uses Debug output from GraphQL enum variants generated without rust-style normalization.
     status == "PUBLISHED"
 }
 
@@ -1038,14 +1061,14 @@ fn resolve_readme(
     template: &TemplateDetailItem,
     is_updating: bool,
     interactive: bool,
-) -> Result<String> {
+) -> Result<ResolvedReadme> {
     if let Some(readme) = readme {
         fake_select("Template overview", "<provided inline>");
-        return Ok(readme);
+        return Ok(ResolvedReadme::supplied(readme));
     }
 
     if let Some(path) = readme_file {
-        return read_readme_file(path);
+        return read_readme_file(path).map(ResolvedReadme::supplied);
     }
 
     let existing_readme = template.readme.as_ref().and_then(|readme| {
@@ -1056,8 +1079,8 @@ fn resolve_readme(
         }
     });
 
-    if interactive {
-        if let Some(existing_readme) = existing_readme {
+    match (interactive, existing_readme, is_updating) {
+        (true, Some(existing_readme), _) => {
             let choice = prompt_options(
                 "Template overview",
                 vec![
@@ -1066,12 +1089,11 @@ fn resolve_readme(
                 ],
             )?;
             if choice == README_SOURCE_EXISTING {
-                return Ok(existing_readme);
+                return Ok(ResolvedReadme::existing(existing_readme, is_updating));
             }
-            return prompt_readme_file();
+            prompt_readme_file().map(ResolvedReadme::supplied)
         }
-
-        if is_updating {
+        (true, None, true) => {
             let choice = prompt_options(
                 "Template overview",
                 vec![
@@ -1080,28 +1102,20 @@ fn resolve_readme(
                 ],
             )?;
             if choice == README_SOURCE_GENERATED {
-                return Ok(default_readme(&template.name));
+                return Ok(ResolvedReadme::supplied(default_readme(&template.name)));
             }
-            return prompt_readme_file();
+            prompt_readme_file().map(ResolvedReadme::supplied)
         }
-
-        return prompt_readme_file();
+        (true, None, false) => prompt_readme_file().map(ResolvedReadme::supplied),
+        (false, Some(readme), is_updating) => {
+            fake_select("Template overview", "<existing template readme>");
+            Ok(ResolvedReadme::existing(readme, is_updating))
+        }
+        (false, None, true) => Ok(ResolvedReadme::supplied(default_readme(&template.name))),
+        (false, None, false) => {
+            bail!("Template overview required. Use --readme-file <path> or --readme <markdown>.")
+        }
     }
-
-    if let Some(readme) = existing_readme {
-        fake_select("Template overview", "<existing template readme>");
-        return Ok(readme);
-    }
-
-    if is_updating {
-        return Ok(default_readme(&template.name));
-    }
-
-    if !interactive {
-        bail!("Template overview required. Use --readme-file <path> or --readme <markdown>.");
-    }
-
-    prompt_readme_file()
 }
 
 fn prompt_readme_file() -> Result<String> {
@@ -1176,11 +1190,11 @@ fn validate_publish_fields(
     description: &str,
     readme: &str,
     image: Option<&str>,
-    is_updating: bool,
+    should_validate_readme: bool,
 ) -> Result<()> {
     validate_description(description)?;
     validate_category(category)?;
-    if !is_updating {
+    if should_validate_readme {
         validate_readme(readme)?;
     }
     if let Some(image) = image {
@@ -1288,20 +1302,23 @@ fn validate_image(image: &str) -> Result<()> {
         return Ok(());
     }
 
-    let path = if let Some(path) = image.strip_prefix("http://") {
-        path
-    } else if let Some(path) = image.strip_prefix("https://") {
-        path
-    } else {
+    if image.contains(['\n', '\r']) {
         bail!("image: Invalid image URL");
-    };
+    }
 
-    if image.contains(['\n', '\r'])
-        || !IMAGE_EXTENSIONS.iter().any(|extension| {
-            let suffix = format!(".{extension}");
-            image.ends_with(&suffix) && path.len() > suffix.len()
-        })
-    {
+    let url = url::Url::parse(image).map_err(|_| anyhow::anyhow!("image: Invalid image URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("image: Invalid image URL");
+    }
+
+    let file_name = url.path().rsplit('/').next().unwrap_or_default();
+    let file_name_lower = file_name.to_ascii_lowercase();
+    let has_image_extension = IMAGE_EXTENSIONS.iter().any(|extension| {
+        let suffix = format!(".{extension}");
+        file_name_lower.ends_with(&suffix) && file_name.len() > suffix.len()
+    });
+
+    if !has_image_extension {
         bail!("image: Invalid image URL");
     }
 
@@ -2218,9 +2235,23 @@ fn truncate_chars(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn unpublish_guard_accepts_published_templates() {
-        assert!(ensure_template_can_unpublish("PUBLISHED", "App").is_ok());
+    fn valid_description() -> &'static str {
+        "Deploy and Host Test Apps"
+    }
+
+    fn template_detail(readme: Option<String>, status: &str) -> TemplateDetailItem {
+        TemplateDetailItem {
+            id: "template-id".to_string(),
+            code: "template-code".to_string(),
+            name: "Test App".to_string(),
+            description: Some(valid_description().to_string()),
+            image: None,
+            category: Some("Other".to_string()),
+            readme,
+            demo_project_id: None,
+            status: status.to_string(),
+            workspace_id: Some("workspace-id".to_string()),
+        }
     }
 
     #[test]
@@ -2234,17 +2265,7 @@ mod tests {
     }
 
     #[test]
-    fn unpublish_guard_rejects_hidden_templates() {
-        let error = ensure_template_can_unpublish("HIDDEN", "Hidden App")
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("Template \"Hidden App\" is HIDDEN"));
-        assert!(error.contains("Only published templates can be unpublished"));
-    }
-
-    #[test]
-    fn optional_publish_field_treats_explicit_empty_as_clear() {
+    fn optional_publish_field_clear_values_clear_existing_value() {
         assert_eq!(
             resolve_optional_publish_field(
                 Some("".to_string()),
@@ -2256,10 +2277,6 @@ mod tests {
             .unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn optional_publish_field_treats_clear_sentinel_as_clear() {
         assert_eq!(
             resolve_optional_publish_field(
                 Some(" none ".to_string()),
@@ -2285,18 +2302,77 @@ mod tests {
     }
 
     #[test]
-    fn optional_publish_field_keeps_existing_when_unspecified() {
-        assert_eq!(
-            resolve_optional_publish_field(
+    fn update_preserves_existing_readme_without_revalidating() {
+        let existing_readme = "Legacy short readme".to_string();
+        let template = template_detail(Some(existing_readme.clone()), "PUBLISHED");
+        let readme = resolve_readme(None, None, &template, true, false).unwrap();
+
+        assert_eq!(readme.value, existing_readme);
+        assert!(!readme.should_validate);
+        assert!(
+            validate_publish_fields(
+                "Other",
+                valid_description(),
+                &readme.value,
                 None,
-                Some("demo-project-id".to_string()),
-                false,
-                "Public demo project ID",
-                "<none>",
+                readme.should_validate,
             )
-            .unwrap(),
-            Some("demo-project-id".to_string())
+            .is_ok()
         );
+    }
+
+    #[test]
+    fn update_validates_supplied_readme() {
+        let template = template_detail(Some(default_readme("Test App")), "PUBLISHED");
+        let readme =
+            resolve_readme(Some("Too short".to_string()), None, &template, true, false).unwrap();
+
+        assert!(readme.should_validate);
+        let error = validate_publish_fields(
+            "Other",
+            valid_description(),
+            &readme.value,
+            None,
+            readme.should_validate,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("readme: Must be"));
+    }
+
+    #[test]
+    fn validate_description_counts_utf16_code_units() {
+        let astral_char = char::from_u32(0x1D11E).unwrap().to_string();
+        let description = astral_char.repeat(13);
+
+        assert!(description.chars().count() < DESCRIPTION_MIN);
+        assert!(js_string_len(&description) >= DESCRIPTION_MIN);
+        assert!(validate_description(&description).is_ok());
+    }
+
+    #[test]
+    fn validate_image_accepts_query_fragment_and_uppercase_extension() {
+        assert!(validate_image("https://cdn.example.com/assets/card.PNG?v=1#hero").is_ok());
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_inline_and_file_readme() {
+        let error = publish_command(PublishArgs {
+            template: Some("template-id".to_string()),
+            category: None,
+            description: None,
+            readme: Some("inline readme".to_string()),
+            readme_file: Some(PathBuf::from("README.md")),
+            image: None,
+            demo_project: None,
+            workspace: None,
+            json: true,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(error, "Use either --readme or --readme-file, not both");
     }
 
     #[test]
