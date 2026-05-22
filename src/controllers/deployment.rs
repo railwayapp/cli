@@ -1,8 +1,10 @@
 use crate::{
     commands::{
+        Configs, mutations,
         queries::{self},
         subscriptions::{self, build_logs, deployment, deployment_logs, http_logs},
     },
+    controllers::project::{find_service_instance, get_environment_instances},
     post_graphql,
     subscription::subscribe_graphql,
     util::retry::RetryConfig,
@@ -35,6 +37,90 @@ pub struct FetchLogsParams<'a> {
     pub filter: Option<String>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceDeployment {
+    pub id: String,
+    pub status: queries::deployments::DeploymentStatus,
+    pub created_at: DateTime<Utc>,
+    pub meta: Option<serde_json::Value>,
+}
+
+pub async fn fetch_service_deployments(
+    client: &Client,
+    backboard: &str,
+    project_id: &str,
+    environment_id: &str,
+    service_id: &str,
+    limit: i64,
+) -> Result<Vec<ServiceDeployment>> {
+    let vars = queries::deployments::Variables {
+        input: queries::deployments::DeploymentListInput {
+            project_id: Some(project_id.to_string()),
+            environment_id: Some(environment_id.to_string()),
+            service_id: Some(service_id.to_string()),
+            include_deleted: None,
+            status: None,
+        },
+        first: Some(limit),
+    };
+
+    let deployments = post_graphql::<queries::Deployments, _>(client, backboard, vars)
+        .await?
+        .deployments;
+    let mut all: Vec<_> = deployments
+        .edges
+        .into_iter()
+        .map(|edge| edge.node)
+        .collect();
+    all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(all
+        .into_iter()
+        .take(limit.max(1) as usize)
+        .map(|deployment| ServiceDeployment {
+            id: deployment.id,
+            status: deployment.status,
+            created_at: deployment.created_at,
+            meta: deployment.meta,
+        })
+        .collect())
+}
+
+pub async fn redeploy_latest_service_deployment(
+    client: &Client,
+    configs: &Configs,
+    project_id: &str,
+    environment_id: &str,
+    service_id: &str,
+    service_name: &str,
+) -> Result<String> {
+    let environment_instances =
+        get_environment_instances(client, configs, project_id, environment_id).await?;
+    let service_in_env = find_service_instance(&environment_instances, service_id)
+        .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
+
+    let latest = service_in_env
+        .latest_deployment
+        .as_ref()
+        .ok_or_else(|| anyhow!("No deployment found for service"))?;
+    if !latest.can_redeploy {
+        anyhow::bail!(
+            "The latest deployment for service {service_name} cannot be redeployed. This may be because it's currently building, deploying, or was removed."
+        );
+    }
+
+    let response = post_graphql::<mutations::DeploymentRedeploy, _>(
+        client,
+        configs.get_backboard(),
+        mutations::deployment_redeploy::Variables {
+            id: latest.id.clone(),
+        },
+    )
+    .await?;
+
+    Ok(response.deployment_redeploy.id)
 }
 
 // Helper to handle the API's off-by-one bug where it returns limit+1 logs

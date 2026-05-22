@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
+use reqwest::Client;
 
 use crate::{
     client::GQLClient,
@@ -125,21 +126,39 @@ pub async fn load_project_cards() -> Result<Vec<ProjectCard>> {
 pub async fn load_dashboard_project(target: ProjectLoadTarget) -> Result<DashboardProject> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let project = get_project(&client, &configs, target.project_id.clone()).await?;
+    load_dashboard_project_with_client(&configs, &client, target).await
+}
+
+pub async fn load_dashboard_project_with_client(
+    configs: &Configs,
+    client: &Client,
+    target: ProjectLoadTarget,
+) -> Result<DashboardProject> {
+    let project = get_project(client, configs, target.project_id.clone()).await?;
 
     if project.deleted_at.is_some() {
         bail!(RailwayError::ProjectDeleted);
     }
 
-    let environment = resolve_project_environment(&configs, &project, &target).await?;
+    let environment = resolve_project_environment(configs, &project, &target).await?;
     if environment.deleted_at.is_some() {
         bail!(RailwayError::EnvironmentDeleted);
     }
 
     let instances =
-        get_environment_instances(&client, &configs, &project.id, &environment.id).await?;
+        get_environment_instances(client, configs, &project.id, &environment.id).await?;
 
     Ok(map_dashboard_project(project, environment, instances))
+}
+
+pub fn find_dashboard_service<'a>(
+    project: &'a DashboardProject,
+    service_id: &str,
+) -> Option<&'a DashboardService> {
+    project
+        .services
+        .iter()
+        .find(|service| service.id == service_id)
 }
 
 fn project_card_from_project(project: Project, workspace_name: String) -> ProjectCard {

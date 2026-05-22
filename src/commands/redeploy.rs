@@ -2,14 +2,14 @@ use colored::*;
 use is_terminal::IsTerminal;
 
 use crate::{
-    controllers::project::{
-        find_service_instance, get_environment_instances, resolve_service_context,
+    controllers::{
+        deployment::redeploy_latest_service_deployment, project::resolve_service_context,
     },
     util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
 
 use super::*;
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 
 /// Redeploy the latest deployment of a service
 #[derive(Parser)]
@@ -48,27 +48,11 @@ pub async fn command(args: Args) -> Result<()> {
     let environment_name = ctx.environment_name;
     let service_id = ctx.service_id;
     let service_name = &ctx.service_name;
-    let service_node_id = service_id.clone();
-
-    let environment_instances =
-        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
-    let service_in_env = find_service_instance(&environment_instances, &service_node_id)
-        .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
 
     let latest_deployment_id = if args.from_source {
         None
     } else {
-        let latest = service_in_env
-            .latest_deployment
-            .as_ref()
-            .ok_or_else(|| anyhow!("No deployment found for service"))?;
-        if !latest.can_redeploy {
-            bail!(
-                "The latest deployment for service {service_name} cannot be redeployed. \
-                This may be because it's currently building, deploying, or was removed."
-            );
-        }
-        Some(latest.id.clone())
+        Some(String::new())
     };
 
     let (prompt_msg, spinner_msg, finish_msg) = if args.from_source {
@@ -124,14 +108,17 @@ pub async fn command(args: Args) -> Result<()> {
             .await?;
             serde_json::json!({ "success": true })
         }
-        Some(id) => {
-            let response = post_graphql::<mutations::DeploymentRedeploy, _>(
+        Some(_) => {
+            let redeployed_id = redeploy_latest_service_deployment(
                 &client,
-                configs.get_backboard(),
-                mutations::deployment_redeploy::Variables { id },
+                &configs,
+                &project_id,
+                &environment_id,
+                &service_id,
+                service_name,
             )
             .await?;
-            serde_json::json!({ "id": response.deployment_redeploy.id })
+            serde_json::json!({ "id": redeployed_id })
         }
     };
 

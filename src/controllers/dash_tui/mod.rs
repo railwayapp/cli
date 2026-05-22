@@ -31,7 +31,10 @@ use self::data::{
 use self::project::{
     EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
-use self::service::{ServiceScreenState, handle_service_screen_key};
+use self::service::{
+    ServiceScreenLoadedData, ServiceScreenState, handle_service_screen_key,
+    load_service_screen_data, redeploy_service,
+};
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const RAILWAY_VIOLET: Color = Color::Rgb(127, 86, 217);
@@ -93,6 +96,13 @@ enum LoaderEvent {
         request_id: u64,
         result: std::result::Result<DashboardProject, String>,
     },
+    ServiceLoaded {
+        request_id: u64,
+        result: std::result::Result<ServiceScreenLoadedData, String>,
+    },
+    ServiceRedeployed {
+        result: std::result::Result<String, String>,
+    },
 }
 
 enum HandleKeyAction {
@@ -104,6 +114,8 @@ enum HandleKeyAction {
     OpenSelectedService,
     RefreshProjects,
     RefreshProject,
+    RefreshService,
+    RedeployService,
     BackToProjects,
     BackToProject,
     OpenEnvironmentSelector,
@@ -147,7 +159,7 @@ impl DashApp {
         match self.screen {
             DashboardScreen::Projects(_) => self.refresh_projects(tx),
             DashboardScreen::Project(_) => self.refresh_project(tx),
-            DashboardScreen::Service(_) => {}
+            DashboardScreen::Service(_) => self.refresh_service(tx),
         }
     }
 
@@ -207,7 +219,7 @@ impl DashApp {
         self.refresh_project(tx);
     }
 
-    fn open_selected_service(&mut self) {
+    fn open_selected_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
         let DashboardScreen::Project(state) = &self.screen else {
             return;
         };
@@ -217,6 +229,46 @@ impl DashApp {
         };
 
         self.screen = DashboardScreen::Service(service_screen);
+        self.refresh_service(tx);
+    }
+
+    fn refresh_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        let DashboardScreen::Service(state) = &mut self.screen else {
+            return;
+        };
+
+        state.start_loading();
+        let request_id = state.current_request_id;
+        let target = state.refresh_target();
+        let service_id = state.service_id();
+        let return_to_projects = state.return_to_projects_nav();
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+            let result = load_service_screen_data(target, service_id, return_to_projects)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(LoaderEvent::ServiceLoaded { request_id, result });
+        });
+    }
+
+    fn redeploy_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        let DashboardScreen::Service(state) = &mut self.screen else {
+            return;
+        };
+
+        state.loading = true;
+        state.error = None;
+        state.clear_toast();
+        let detail = state.detail.clone();
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+            let result = redeploy_service(&detail)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(LoaderEvent::ServiceRedeployed { result });
+        });
     }
 
     fn open_environment_selector(&mut self) {
@@ -301,7 +353,7 @@ impl DashApp {
         }
     }
 
-    fn handle_loader_event(&mut self, event: LoaderEvent) {
+    fn handle_loader_event(&mut self, event: LoaderEvent, tx: &mpsc::UnboundedSender<LoaderEvent>) {
         match event {
             LoaderEvent::ProjectsLoaded { request_id, result } => {
                 let DashboardScreen::Projects(state) = &mut self.screen else {
@@ -329,6 +381,39 @@ impl DashApp {
                 match result {
                     Ok(project) => state.apply_loaded_project(project),
                     Err(error) => state.set_error(error),
+                }
+            }
+            LoaderEvent::ServiceLoaded { request_id, result } => {
+                let DashboardScreen::Service(state) = &mut self.screen else {
+                    return;
+                };
+
+                if request_id != state.current_request_id {
+                    return;
+                }
+
+                match result {
+                    Ok(data) => state.apply_loaded_data(data),
+                    Err(error) => state.set_error(error),
+                }
+            }
+            LoaderEvent::ServiceRedeployed { result } => {
+                let DashboardScreen::Service(state) = &mut self.screen else {
+                    return;
+                };
+
+                state.loading = false;
+                match result {
+                    Ok(deployment_id) => {
+                        state.set_toast(
+                            format!("Redeploy triggered for deployment {deployment_id}"),
+                            false,
+                        );
+                        self.refresh_service(tx);
+                    }
+                    Err(error) => {
+                        state.set_toast(error, true);
+                    }
                 }
             }
         }
@@ -389,7 +474,7 @@ impl DashApp {
                 handle_projects_screen_key(state, key, terminal_area)
             }
             DashboardScreen::Project(state) => handle_project_screen_key(state, key, terminal_area),
-            DashboardScreen::Service(_) => handle_service_screen_key(key),
+            DashboardScreen::Service(state) => handle_service_screen_key(state, key),
         };
 
         match action {
@@ -398,9 +483,11 @@ impl DashApp {
                 project_id,
                 return_to_projects,
             } => self.open_project(project_id, Some(return_to_projects), tx),
-            HandleKeyAction::OpenSelectedService => self.open_selected_service(),
+            HandleKeyAction::OpenSelectedService => self.open_selected_service(tx),
             HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
             HandleKeyAction::RefreshProject => self.refresh_project(tx),
+            HandleKeyAction::RefreshService => self.refresh_service(tx),
+            HandleKeyAction::RedeployService => self.redeploy_service(tx),
             HandleKeyAction::BackToProjects => self.back_to_projects(tx),
             HandleKeyAction::BackToProject => self.back_to_project(),
             HandleKeyAction::OpenEnvironmentSelector => self.open_environment_selector(),
@@ -601,7 +688,7 @@ pub async fn run(params: DashTuiParams) -> Result<()> {
                 }
             }
             Some(loader_event) = loader_rx.recv() => {
-                app.handle_loader_event(loader_event);
+                app.handle_loader_event(loader_event, &loader_tx);
             }
             _ = tick.tick() => {
                 app.on_tick();
@@ -835,7 +922,10 @@ mod tests {
             spinner_tick: 0,
         };
 
-        app.open_selected_service();
+        app.screen = DashboardScreen::Service(
+            ServiceScreenState::from_project(&project_state)
+                .expect("expected selected service to exist"),
+        );
 
         match &app.screen {
             DashboardScreen::Service(state) => {
