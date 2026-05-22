@@ -63,6 +63,39 @@ pub type SerializedTemplateConfig = serde_json::Value;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateGenerate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateGenerate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplatePublish.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplatePublish;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateUnpublish.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateUnpublish;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/TemplateDeploy.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none

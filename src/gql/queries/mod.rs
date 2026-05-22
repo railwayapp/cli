@@ -141,10 +141,26 @@ pub type EnvironmentConfig = serde_json::Value;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Template.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct Template;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/TemplateDetail.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct TemplateDetail;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/WorkspaceTemplates.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct WorkspaceTemplates;
 
 #[derive(GraphQLQuery)]
 #[graphql(

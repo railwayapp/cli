@@ -13,10 +13,17 @@ use super::{
 
 pub async fn workspaces() -> Result<Vec<Workspace>> {
     let configs = Configs::new()?;
-    let vars = queries::user_projects::Variables {};
     let client = GQLClient::new_authorized(&configs)?;
+    workspaces_with_client(&client, &configs).await
+}
+
+pub async fn workspaces_with_client(
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<Vec<Workspace>> {
+    let vars = queries::user_projects::Variables {};
     let response =
-        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
+        post_graphql::<queries::UserProjects, _>(client, configs.get_backboard(), vars).await?;
 
     // Member variants are yielded first so that a workspace the user both owns
     // and is an external member of keeps the richer Member representation.
