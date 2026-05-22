@@ -78,8 +78,16 @@ struct ProjectScreenState {
     loading: bool,
     error: Option<String>,
     current_request_id: u64,
-    return_to_projects: Option<Box<ProjectsScreenState>>,
+    return_to_projects: Option<ProjectsBackNavigation>,
     environment_selector: Option<EnvironmentSelectorState>,
+}
+
+#[derive(Clone, Debug)]
+enum ProjectsBackNavigation {
+    Restore(Box<ProjectsScreenState>),
+    Reload {
+        initial_selection_hint: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -107,7 +115,9 @@ impl DashApp {
                         project_id: project_id.clone(),
                         environment_hint: params.environment.clone(),
                     },
-                    Some(Box::new(ProjectsScreenState::new(Some(project_id.clone())))),
+                    Some(ProjectsBackNavigation::Reload {
+                        initial_selection_hint: Some(project_id.clone()),
+                    }),
                 )),
                 None => DashboardScreen::Projects(ProjectsScreenState::new(None)),
             },
@@ -179,7 +189,7 @@ impl DashApp {
     fn open_project(
         &mut self,
         project_id: String,
-        return_to_projects: Option<Box<ProjectsScreenState>>,
+        return_to_projects: Option<ProjectsBackNavigation>,
         tx: &mpsc::UnboundedSender<LoaderEvent>,
     ) {
         let environment_hint = self.params.environment.clone();
@@ -242,20 +252,28 @@ impl DashApp {
             return;
         };
 
-        let restored = state
+        let navigation = state
             .return_to_projects
-            .as_ref()
-            .map(|projects| (**projects).clone())
+            .clone()
             .or_else(|| match self.params.auth_mode {
-                DashboardAuthMode::Workspace => Some(ProjectsScreenState::new(Some(
-                    state.target.project_id.clone(),
-                ))),
+                DashboardAuthMode::Workspace => Some(ProjectsBackNavigation::Reload {
+                    initial_selection_hint: Some(state.target.project_id.clone()),
+                }),
                 DashboardAuthMode::LinkedProject { .. } => None,
             });
 
-        if let Some(restored) = restored {
-            self.screen = DashboardScreen::Projects(restored);
-            self.refresh_projects(tx);
+        match navigation {
+            Some(ProjectsBackNavigation::Restore(restored)) => {
+                self.screen = DashboardScreen::Projects(*restored);
+            }
+            Some(ProjectsBackNavigation::Reload {
+                initial_selection_hint,
+            }) => {
+                self.screen =
+                    DashboardScreen::Projects(ProjectsScreenState::new(initial_selection_hint));
+                self.refresh_projects(tx);
+            }
+            None => {}
         }
     }
 
@@ -342,7 +360,7 @@ impl DashApp {
             return self.handle_environment_selector_key(key, tx);
         }
 
-        let mut project_to_open: Option<(String, Box<ProjectsScreenState>)> = None;
+        let mut project_to_open: Option<(String, ProjectsBackNavigation)> = None;
         let mut should_refresh_projects = false;
         let mut should_refresh_project = false;
         let mut should_back_to_projects = false;
@@ -358,7 +376,10 @@ impl DashApp {
                     KeyCode::Right | KeyCode::Char('l') => state.move_right(),
                     KeyCode::Enter => {
                         if let Some(card) = state.selected_card().cloned() {
-                            project_to_open = Some((card.id, Box::new(state.clone())));
+                            project_to_open = Some((
+                                card.id,
+                                ProjectsBackNavigation::Restore(Box::new(state.clone())),
+                            ));
                         }
                     }
                     KeyCode::Char('/') => state.filter_mode = true,
@@ -537,10 +558,7 @@ impl ProjectsScreenState {
 }
 
 impl ProjectScreenState {
-    fn new(
-        target: ProjectLoadTarget,
-        return_to_projects: Option<Box<ProjectsScreenState>>,
-    ) -> Self {
+    fn new(target: ProjectLoadTarget, return_to_projects: Option<ProjectsBackNavigation>) -> Self {
         Self {
             target,
             project: None,
@@ -826,5 +844,46 @@ mod tests {
             state.selected_service().map(|service| service.id.as_str()),
             Some("svc_2")
         );
+    }
+
+    #[test]
+    fn back_to_projects_restores_cached_screen_without_reloading() {
+        let mut restored = ProjectsScreenState::new(Some("proj_two".to_string()));
+        restored.cards = vec![card("proj_one", "one"), card("proj_two", "two")];
+        restored.selected = 0;
+        restored.filter = "tw".to_string();
+        restored.current_request_id = 7;
+
+        let mut app = DashApp {
+            params: DashTuiParams {
+                project: None,
+                environment: None,
+                auth_mode: DashboardAuthMode::Workspace,
+            },
+            screen: DashboardScreen::Project(ProjectScreenState::new(
+                ProjectLoadTarget {
+                    project_id: "proj_two".to_string(),
+                    environment_hint: Some("production".to_string()),
+                },
+                Some(ProjectsBackNavigation::Restore(Box::new(restored.clone()))),
+            )),
+            spinner_tick: 0,
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.back_to_projects(&tx);
+
+        match app.screen {
+            DashboardScreen::Projects(state) => {
+                assert_eq!(
+                    state.selected_card().map(|card| card.id.as_str()),
+                    Some("proj_two")
+                );
+                assert_eq!(state.filter, "tw");
+                assert_eq!(state.current_request_id, 7);
+                assert!(!state.loading);
+            }
+            DashboardScreen::Project(_) => panic!("expected projects screen after backing out"),
+        }
     }
 }
