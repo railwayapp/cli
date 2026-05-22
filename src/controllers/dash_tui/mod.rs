@@ -27,8 +27,6 @@ use self::data::{
     load_project_cards,
 };
 
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DashboardAuthMode {
     Workspace,
@@ -433,7 +431,7 @@ impl DashApp {
     }
 
     fn on_tick(&mut self) {
-        self.spinner_tick = (self.spinner_tick + 1) % SPINNER_FRAMES.len();
+        self.spinner_tick = (self.spinner_tick + 1) % ui::SPINNER_FRAMES.len();
     }
 }
 

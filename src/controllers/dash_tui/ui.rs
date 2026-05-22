@@ -13,6 +13,7 @@ pub(super) const PROJECT_CARD_GAP: u16 = 1;
 pub(super) const SERVICE_CARD_MIN_WIDTH: u16 = 26;
 pub(super) const SERVICE_CARD_HEIGHT: u16 = 7;
 pub(super) const SERVICE_CARD_GAP: u16 = 1;
+pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const RAILWAY_VIOLET: Color = Color::Rgb(127, 86, 217);
 const RAILWAY_PURPLE: Color = Color::Rgb(155, 107, 255);
@@ -225,7 +226,7 @@ fn render_projects_status(
         .map(|card| card.name.as_str())
         .unwrap_or("none");
     let visible_count = state.visible_indices().len();
-    let spinner = super::SPINNER_FRAMES[app.spinner_tick % super::SPINNER_FRAMES.len()];
+    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
 
     let filter_line = if state.filter_mode {
         Line::from(vec![
@@ -422,7 +423,7 @@ fn render_project_screen(
             main_area,
             &format!(
                 "{} Loading project overview...",
-                super::SPINNER_FRAMES[app.spinner_tick % super::SPINNER_FRAMES.len()]
+                SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()]
             ),
             RAILWAY_VIOLET,
             "project overview",
@@ -459,7 +460,7 @@ fn render_project_status(
     app: &DashApp,
     state: &ProjectScreenState,
 ) {
-    let spinner = super::SPINNER_FRAMES[app.spinner_tick % super::SPINNER_FRAMES.len()];
+    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
 
     let title_line = if let Some(project) = &state.project {
         Line::from(vec![
