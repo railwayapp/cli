@@ -19,10 +19,20 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DashboardAuthMode {
+    Workspace,
+    LinkedProject {
+        project_id: String,
+        environment_id: String,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct DashTuiParams {
     pub project: Option<String>,
     pub environment: Option<String>,
+    pub auth_mode: DashboardAuthMode,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +157,23 @@ fn render_placeholder(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
         .as_deref()
         .unwrap_or("(linked/default environment)");
 
+    let auth_mode_label = match &app.params.auth_mode {
+        DashboardAuthMode::Workspace => "workspace-capable auth → project cards entry",
+        DashboardAuthMode::LinkedProject {
+            project_id,
+            environment_id,
+        } => {
+            return render_linked_project_placeholder(
+                frame,
+                area,
+                requested_project,
+                requested_environment,
+                project_id,
+                environment_id,
+            );
+        }
+    };
+
     let content = vec![
         Line::from(Span::styled(
             "Dashboard shell is wired up.",
@@ -158,6 +185,13 @@ fn render_placeholder(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
             "It validates auth before opening the alternate screen and restores the terminal on exit.",
         ),
         Line::default(),
+        Line::from(vec![
+            Span::styled(
+                "entry mode: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(auth_mode_label),
+        ]),
         Line::from(vec![
             Span::styled(
                 "requested project: ",
@@ -178,6 +212,69 @@ fn render_placeholder(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
         Line::from("• project overview with service cards"),
         Line::from("• handoff into existing metrics and volume-browser TUIs"),
         Line::from("• logs and deployment flows"),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(Block::default().borders(Borders::ALL).title("placeholder"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_linked_project_placeholder(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    requested_project: &str,
+    requested_environment: &str,
+    project_id: &str,
+    environment_id: &str,
+) {
+    let content = vec![
+        Line::from(Span::styled(
+            "Dashboard shell is wired up.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from("This placeholder was opened through project-scoped auth preflight."),
+        Line::from("Later phases will route straight into the linked project overview."),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(
+                "entry mode: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("project-scoped auth → linked project overview"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "validated project id: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(project_id),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "validated environment id: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(environment_id),
+        ]),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(
+                "requested project: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(requested_project),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "requested environment: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(requested_environment),
+        ]),
     ];
 
     frame.render_widget(
