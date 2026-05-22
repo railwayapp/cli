@@ -61,7 +61,7 @@ Configure Railway agent support for AI coding tools:
 railway setup agent -y
 ```
 
-This installs Railway skills and configures the Railway MCP server for detected tools such as Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, and Factory Droid.
+This installs Railway skills and configures the Railway MCP server for detected tools such as Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and Pi.
 
 Use the focused commands when you only need one part of the setup:
 
