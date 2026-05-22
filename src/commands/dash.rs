@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use reqwest::Client;
 
 use super::*;
@@ -13,6 +13,12 @@ use crate::{
 };
 
 const DASHBOARD_LOGIN_ERROR: &str = "Not logged in. Run railway login first.";
+
+#[derive(Debug)]
+enum LinkedProjectAuthPreflightError {
+    MissingProjectScopedContext,
+    Other(anyhow::Error),
+}
 
 /// Open the Railway dashboard TUI
 #[derive(Parser)]
@@ -31,7 +37,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs).map_err(map_dashboard_client_auth_error)?;
-    let auth_mode = ensure_dashboard_login(&configs, &client).await?;
+    let auth_mode = ensure_dashboard_login(&configs, &client, &args).await?;
 
     crate::controllers::dash_tui::run(DashTuiParams {
         project: args.project,
@@ -44,11 +50,19 @@ pub async fn command(args: Args) -> Result<()> {
 async fn ensure_dashboard_login(
     configs: &Configs,
     client: &reqwest::Client,
+    args: &Args,
 ) -> Result<DashboardAuthMode> {
     match validate_workspace_auth(configs, client).await {
         Ok(()) => Ok(DashboardAuthMode::Workspace),
-        Err(error) if should_try_linked_project_auth(&error) => {
-            resolve_linked_project_auth(configs, client).await
+        Err(workspace_error) if should_try_linked_project_auth(&workspace_error) => {
+            match resolve_linked_project_auth(configs, client, args).await {
+                Ok(auth_mode) => Ok(auth_mode),
+                Err(linked_error) => Err(select_dashboard_auth_preflight_error(
+                    &workspace_error,
+                    linked_error,
+                    Configs::get_railway_token().is_some(),
+                )),
+            }
         }
         Err(error) => Err(error.into()),
     }
@@ -72,31 +86,43 @@ async fn validate_workspace_auth(
 async fn resolve_linked_project_auth(
     configs: &Configs,
     client: &Client,
-) -> Result<DashboardAuthMode> {
+    args: &Args,
+) -> std::result::Result<DashboardAuthMode, LinkedProjectAuthPreflightError> {
+    if has_incomplete_env_var_project_scope() {
+        return Err(LinkedProjectAuthPreflightError::MissingProjectScopedContext);
+    }
+
     let linked_project = configs
         .get_linked_project()
         .await
-        .map_err(map_linked_project_auth_error)?;
+        .map_err(classify_linked_project_lookup_error)?;
 
     let environment_input = linked_project
         .environment_name
         .clone()
         .or_else(|| linked_project.environment.clone())
-        .ok_or_else(dashboard_login_error)?;
+        .ok_or(LinkedProjectAuthPreflightError::MissingProjectScopedContext)?;
 
     let project = get_project(client, configs, linked_project.project.clone())
         .await
-        .map_err(map_linked_project_railway_error)?;
+        .map_err(LinkedProjectAuthPreflightError::from)?;
 
     if project.deleted_at.is_some() {
-        return Err(dashboard_login_error());
+        return Err(LinkedProjectAuthPreflightError::from(
+            RailwayError::ProjectDeleted,
+        ));
     }
 
     let environment = get_matched_environment(&project, environment_input)
-        .map_err(map_linked_project_auth_error)?;
+        .map_err(LinkedProjectAuthPreflightError::from)?;
+
+    validate_requested_linked_project_target(args, &project.id, &environment.id, &environment.name)
+        .map_err(LinkedProjectAuthPreflightError::from)?;
 
     if environment.deleted_at.is_some() {
-        return Err(dashboard_login_error());
+        return Err(LinkedProjectAuthPreflightError::from(
+            RailwayError::EnvironmentDeleted,
+        ));
     }
 
     Ok(DashboardAuthMode::LinkedProject {
@@ -105,39 +131,96 @@ async fn resolve_linked_project_auth(
     })
 }
 
+fn validate_requested_linked_project_target(
+    args: &Args,
+    validated_project_id: &str,
+    validated_environment_id: &str,
+    validated_environment_name: &str,
+) -> Result<()> {
+    if let Some(requested_project_id) = args.project.as_deref()
+        && requested_project_id != validated_project_id
+    {
+        bail!(
+            "`--project {requested_project_id}` does not match the authenticated project scope `{validated_project_id}`"
+        );
+    }
+
+    if let Some(requested_environment) = args.environment.as_deref()
+        && requested_environment != validated_environment_id
+        && requested_environment != validated_environment_name
+    {
+        bail!(
+            "`--environment {requested_environment}` does not match the authenticated environment scope `{validated_environment_name}` ({validated_environment_id})"
+        );
+    }
+
+    Ok(())
+}
+
 fn dashboard_login_error() -> anyhow::Error {
     anyhow!(DASHBOARD_LOGIN_ERROR)
 }
 
+fn project_token_requires_link_error() -> anyhow::Error {
+    anyhow!(
+        "`railway dash` is running with RAILWAY_TOKEN, which cannot open the workspace project picker. Link a project and environment first with `railway link` and `railway environment`, or unset RAILWAY_TOKEN and use `railway login`."
+    )
+}
+
+fn select_dashboard_auth_preflight_error(
+    workspace_error: &RailwayError,
+    linked_error: LinkedProjectAuthPreflightError,
+    is_project_token_auth: bool,
+) -> anyhow::Error {
+    match linked_error {
+        LinkedProjectAuthPreflightError::MissingProjectScopedContext => {
+            if is_project_token_auth {
+                project_token_requires_link_error()
+            } else {
+                anyhow!(workspace_error.to_string())
+            }
+        }
+        LinkedProjectAuthPreflightError::Other(error) => error,
+    }
+}
+
 fn map_dashboard_client_auth_error(error: RailwayError) -> anyhow::Error {
-    if should_map_auth_error_to_login(&error) {
-        dashboard_login_error()
-    } else {
-        error.into()
-    }
-}
-
-fn map_linked_project_railway_error(error: RailwayError) -> anyhow::Error {
-    if should_map_linked_project_railway_error_to_login(&error) {
-        dashboard_login_error()
-    } else {
-        error.into()
-    }
-}
-
-fn map_linked_project_auth_error(error: anyhow::Error) -> anyhow::Error {
-    if should_map_linked_project_anyhow_error_to_login(&error) {
-        dashboard_login_error()
-    } else {
-        error
+    match error {
+        RailwayError::Unauthorized => dashboard_login_error(),
+        other => other.into(),
     }
 }
 
 fn should_try_linked_project_auth(error: &RailwayError) -> bool {
-    should_map_auth_error_to_login(error)
+    should_map_auth_error_to_fallback(error)
 }
 
-fn should_map_auth_error_to_login(error: &RailwayError) -> bool {
+fn classify_linked_project_lookup_error(error: anyhow::Error) -> LinkedProjectAuthPreflightError {
+    if error
+        .downcast_ref::<RailwayError>()
+        .is_some_and(|error| matches!(error, RailwayError::NoLinkedProject))
+    {
+        LinkedProjectAuthPreflightError::MissingProjectScopedContext
+    } else {
+        LinkedProjectAuthPreflightError::Other(error)
+    }
+}
+
+fn has_incomplete_env_var_project_scope() -> bool {
+    has_incomplete_env_var_project_scope_from(
+        Configs::get_railway_project_id(),
+        Configs::get_railway_environment_id(),
+    )
+}
+
+fn has_incomplete_env_var_project_scope_from(
+    project_id: Option<String>,
+    environment_id: Option<String>,
+) -> bool {
+    project_id.is_none() && environment_id.is_some()
+}
+
+fn should_map_auth_error_to_fallback(error: &RailwayError) -> bool {
     matches!(
         error,
         RailwayError::Unauthorized
@@ -147,27 +230,16 @@ fn should_map_auth_error_to_login(error: &RailwayError) -> bool {
     )
 }
 
-fn should_map_linked_project_railway_error_to_login(error: &RailwayError) -> bool {
-    should_map_auth_error_to_login(error)
-        || matches!(
-            error,
-            RailwayError::NoLinkedProject
-                | RailwayError::ProjectNotFound
-                | RailwayError::ProjectDeleted
-                | RailwayError::EnvironmentDeleted
-                | RailwayError::EnvironmentNotFound(_)
-                | RailwayError::EnvironmentRestricted(_)
-        )
+impl From<anyhow::Error> for LinkedProjectAuthPreflightError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
+    }
 }
 
-fn should_map_linked_project_anyhow_error_to_login(error: &anyhow::Error) -> bool {
-    if let Some(error) = error.downcast_ref::<RailwayError>() {
-        return should_map_linked_project_railway_error_to_login(error);
+impl From<RailwayError> for LinkedProjectAuthPreflightError {
+    fn from(error: RailwayError) -> Self {
+        Self::Other(error.into())
     }
-
-    let message = error.to_string();
-    message.contains("No environment specified")
-        || message.contains("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID")
 }
 
 #[cfg(test)]
@@ -177,6 +249,15 @@ mod tests {
     #[test]
     fn dashboard_login_error_text_is_stable() {
         assert_eq!(dashboard_login_error().to_string(), DASHBOARD_LOGIN_ERROR);
+    }
+
+    #[test]
+    fn project_token_requires_link_error_is_explicit() {
+        assert!(
+            project_token_requires_link_error()
+                .to_string()
+                .contains("RAILWAY_TOKEN")
+        );
     }
 
     #[test]
@@ -202,15 +283,148 @@ mod tests {
     }
 
     #[test]
-    fn linked_project_context_failures_map_to_login_error() {
-        assert!(should_map_linked_project_anyhow_error_to_login(
-            &RailwayError::NoLinkedProject.into()
+    fn only_missing_auth_maps_to_generic_login_message() {
+        assert_eq!(
+            map_dashboard_client_auth_error(RailwayError::Unauthorized).to_string(),
+            DASHBOARD_LOGIN_ERROR
+        );
+        assert!(
+            map_dashboard_client_auth_error(RailwayError::UnauthorizedLogin)
+                .to_string()
+                .contains("railway login")
+        );
+        assert!(
+            map_dashboard_client_auth_error(RailwayError::InvalidRailwayToken(
+                "RAILWAY_TOKEN".to_string()
+            ))
+            .to_string()
+            .contains("Invalid RAILWAY_TOKEN")
+        );
+    }
+
+    #[test]
+    fn missing_link_context_uses_workspace_auth_error_for_login_sessions() {
+        let error = select_dashboard_auth_preflight_error(
+            &RailwayError::UnauthorizedLogin,
+            LinkedProjectAuthPreflightError::MissingProjectScopedContext,
+            false,
+        );
+
+        assert_eq!(
+            error.to_string(),
+            RailwayError::UnauthorizedLogin.to_string()
+        );
+    }
+
+    #[test]
+    fn missing_link_context_is_explicit_for_project_token_auth() {
+        let error = select_dashboard_auth_preflight_error(
+            &RailwayError::UnauthorizedToken("RAILWAY_TOKEN".to_string()),
+            LinkedProjectAuthPreflightError::MissingProjectScopedContext,
+            true,
+        );
+
+        assert!(error.to_string().contains("RAILWAY_TOKEN"));
+        assert!(error.to_string().contains("railway link"));
+    }
+
+    #[test]
+    fn resource_errors_are_not_collapsed_into_login_message() {
+        let error = select_dashboard_auth_preflight_error(
+            &RailwayError::UnauthorizedToken("RAILWAY_TOKEN".to_string()),
+            LinkedProjectAuthPreflightError::from(RailwayError::EnvironmentRestricted(
+                "prod".to_string(),
+            )),
+            true,
+        );
+
+        assert_eq!(
+            error.to_string(),
+            RailwayError::EnvironmentRestricted("prod".to_string()).to_string()
+        );
+    }
+
+    #[test]
+    fn linked_project_lookup_classification_is_precise() {
+        assert!(matches!(
+            classify_linked_project_lookup_error(RailwayError::NoLinkedProject.into()),
+            LinkedProjectAuthPreflightError::MissingProjectScopedContext
         ));
-        assert!(should_map_linked_project_anyhow_error_to_login(
-            &RailwayError::ProjectDeleted.into()
+        assert!(matches!(
+            classify_linked_project_lookup_error(RailwayError::ProjectDeleted.into()),
+            LinkedProjectAuthPreflightError::Other(_)
         ));
-        assert!(should_map_linked_project_anyhow_error_to_login(&anyhow!(
-            "No environment specified. Set RAILWAY_ENVIRONMENT_ID"
-        )));
+    }
+
+    #[test]
+    fn incomplete_env_var_project_scope_is_missing_context() {
+        assert!(has_incomplete_env_var_project_scope_from(
+            None,
+            Some("env_123".to_string())
+        ));
+        assert!(!has_incomplete_env_var_project_scope_from(
+            Some("proj_123".to_string()),
+            Some("env_123".to_string())
+        ));
+        assert!(!has_incomplete_env_var_project_scope_from(None, None));
+    }
+
+    #[test]
+    fn linked_project_target_validation_accepts_matching_inputs() {
+        let args = Args {
+            project: Some("proj_123".to_string()),
+            environment: Some("production".to_string()),
+        };
+
+        validate_requested_linked_project_target(&args, "proj_123", "env_123", "production")
+            .unwrap();
+
+        let args = Args {
+            project: Some("proj_123".to_string()),
+            environment: Some("env_123".to_string()),
+        };
+
+        validate_requested_linked_project_target(&args, "proj_123", "env_123", "production")
+            .unwrap();
+    }
+
+    #[test]
+    fn linked_project_target_validation_rejects_project_mismatch() {
+        let args = Args {
+            project: Some("proj_requested".to_string()),
+            environment: None,
+        };
+
+        let error = validate_requested_linked_project_target(
+            &args,
+            "proj_validated",
+            "env_123",
+            "production",
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the authenticated project scope")
+        );
+    }
+
+    #[test]
+    fn linked_project_target_validation_rejects_environment_mismatch() {
+        let args = Args {
+            project: None,
+            environment: Some("staging".to_string()),
+        };
+
+        let error =
+            validate_requested_linked_project_target(&args, "proj_123", "env_123", "production")
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the authenticated environment scope")
+        );
     }
 }
