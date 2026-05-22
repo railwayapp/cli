@@ -63,6 +63,7 @@ pub struct DashboardService {
     pub source_repo: Option<String>,
     pub source_image: Option<String>,
     pub cron_schedule: Option<String>,
+    pub next_cron_run_at: Option<DateTime<Utc>>,
     pub start_command: Option<String>,
     pub volume_mounts: Vec<String>,
 }
@@ -258,6 +259,7 @@ fn map_dashboard_project(
                         .filter(|image| !image.is_empty())
                 }),
                 cron_schedule: instance.and_then(|instance| instance.cron_schedule.clone()),
+                next_cron_run_at: instance.and_then(|instance| instance.next_cron_run_at),
                 start_command: instance.and_then(|instance| instance.start_command.clone()),
                 volume_mounts,
             }

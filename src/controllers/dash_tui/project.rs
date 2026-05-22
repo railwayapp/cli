@@ -146,6 +146,7 @@ pub(in crate::controllers::dash_tui) fn handle_project_screen_key(
         KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
         KeyCode::Left | KeyCode::Char('j') => state.move_left(),
         KeyCode::Right | KeyCode::Char('l') => state.move_right(),
+        KeyCode::Enter => return HandleKeyAction::OpenSelectedService,
         KeyCode::Char('e') => return HandleKeyAction::OpenEnvironmentSelector,
         KeyCode::Char('r') => return HandleKeyAction::RefreshProject,
         _ => {}

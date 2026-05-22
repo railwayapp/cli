@@ -1,5 +1,6 @@
 mod data;
 mod project;
+mod service;
 mod ui;
 
 use std::io::stdout;
@@ -29,6 +30,7 @@ use self::data::{
 use self::project::{
     EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
+use self::service::{ServiceScreenState, handle_service_screen_key};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DashboardAuthMode {
@@ -57,6 +59,7 @@ struct DashApp {
 enum DashboardScreen {
     Projects(ProjectsScreenState),
     Project(ProjectScreenState),
+    Service(ServiceScreenState),
 }
 
 #[derive(Clone, Debug)]
@@ -88,9 +91,11 @@ enum HandleKeyAction {
         project_id: String,
         return_to_projects: ProjectsBackNavigation,
     },
+    OpenSelectedService,
     RefreshProjects,
     RefreshProject,
     BackToProjects,
+    BackToProject,
     OpenEnvironmentSelector,
 }
 
@@ -132,6 +137,7 @@ impl DashApp {
         match self.screen {
             DashboardScreen::Projects(_) => self.refresh_projects(tx),
             DashboardScreen::Project(_) => self.refresh_project(tx),
+            DashboardScreen::Service(_) => {}
         }
     }
 
@@ -191,6 +197,18 @@ impl DashApp {
         self.refresh_project(tx);
     }
 
+    fn open_selected_service(&mut self) {
+        let DashboardScreen::Project(state) = &self.screen else {
+            return;
+        };
+
+        let Some(service_screen) = ServiceScreenState::from_project(state) else {
+            return;
+        };
+
+        self.screen = DashboardScreen::Service(service_screen);
+    }
+
     fn open_environment_selector(&mut self) {
         let DashboardScreen::Project(state) = &mut self.screen else {
             return;
@@ -233,6 +251,14 @@ impl DashApp {
         state.target.environment_hint = Some(environment.id.clone());
         state.environment_selector = None;
         self.refresh_project(tx);
+    }
+
+    fn back_to_project(&mut self) {
+        let DashboardScreen::Service(state) = &self.screen else {
+            return;
+        };
+
+        self.screen = DashboardScreen::Project((*state.return_to_project).clone());
     }
 
     fn back_to_projects(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
@@ -353,6 +379,7 @@ impl DashApp {
                 handle_projects_screen_key(state, key, terminal_area)
             }
             DashboardScreen::Project(state) => handle_project_screen_key(state, key, terminal_area),
+            DashboardScreen::Service(_) => handle_service_screen_key(key),
         };
 
         match action {
@@ -361,9 +388,11 @@ impl DashApp {
                 project_id,
                 return_to_projects,
             } => self.open_project(project_id, Some(return_to_projects), tx),
+            HandleKeyAction::OpenSelectedService => self.open_selected_service(),
             HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
             HandleKeyAction::RefreshProject => self.refresh_project(tx),
             HandleKeyAction::BackToProjects => self.back_to_projects(tx),
+            HandleKeyAction::BackToProject => self.back_to_project(),
             HandleKeyAction::OpenEnvironmentSelector => self.open_environment_selector(),
         }
 
@@ -654,6 +683,7 @@ mod tests {
             source_repo: None,
             source_image: None,
             cron_schedule: None,
+            next_cron_run_at: None,
             start_command: None,
             volume_mounts: Vec::new(),
         }
@@ -767,7 +797,59 @@ mod tests {
                 assert_eq!(state.current_request_id, 7);
                 assert!(!state.loading);
             }
-            DashboardScreen::Project(_) => panic!("expected projects screen after backing out"),
+            DashboardScreen::Project(_) | DashboardScreen::Service(_) => {
+                panic!("expected projects screen after backing out")
+            }
+        }
+    }
+
+    #[test]
+    fn open_service_and_back_restores_project_screen_state() {
+        let mut project_state = ProjectScreenState::new(
+            ProjectLoadTarget {
+                project_id: "proj_123".to_string(),
+                environment_hint: Some("production".to_string()),
+            },
+            None,
+        );
+        project_state.project = Some(project());
+        project_state.selected_service = 1;
+
+        let mut app = DashApp {
+            params: DashTuiParams {
+                project: None,
+                environment: None,
+                auth_mode: DashboardAuthMode::Workspace,
+            },
+            screen: DashboardScreen::Project(project_state.clone()),
+            spinner_tick: 0,
+        };
+
+        app.open_selected_service();
+
+        match &app.screen {
+            DashboardScreen::Service(state) => {
+                assert_eq!(state.detail.service.id, "svc_2");
+                assert_eq!(state.detail.project_name, "api");
+                assert_eq!(state.detail.environment_name, "production");
+            }
+            DashboardScreen::Projects(_) | DashboardScreen::Project(_) => {
+                panic!("expected service screen after opening selected service")
+            }
+        }
+
+        app.back_to_project();
+
+        match app.screen {
+            DashboardScreen::Project(state) => {
+                assert_eq!(
+                    state.selected_service().map(|service| service.id.as_str()),
+                    Some("svc_2")
+                );
+            }
+            DashboardScreen::Projects(_) | DashboardScreen::Service(_) => {
+                panic!("expected project screen after backing out of service detail")
+            }
         }
     }
 }
