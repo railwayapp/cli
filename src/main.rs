@@ -665,12 +665,14 @@ mod cli_tests {
             let create = parse(&["templates", "create", "--environment", "production"]).unwrap();
             let publish = parse(&["templates", "publish", "template-id"]).unwrap();
             let unpublish = parse(&["templates", "unpublish", "template-id"]).unwrap();
+            let delete = parse(&["templates", "delete", "template-id"]).unwrap();
 
             assert!(!command_needs_refresh(&search));
             assert!(!command_needs_refresh(&find));
             assert!(command_needs_refresh(&create));
             assert!(command_needs_refresh(&publish));
             assert!(command_needs_refresh(&unpublish));
+            assert!(command_needs_refresh(&delete));
         }
 
         #[test]

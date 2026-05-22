@@ -107,7 +107,7 @@ enum TerminalTheme {
 /// Discover Railway templates
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates unpublish template-code --yes --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
+    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates unpublish template-code --yes --json\n  railway templates delete template-id --yes --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -129,6 +129,10 @@ enum Commands {
 
     /// Unpublish a published template from the marketplace
     Unpublish(UnpublishArgs),
+
+    /// Delete a template
+    #[clap(visible_alias = "remove", visible_alias = "rm")]
+    Delete(DeleteArgs),
 }
 
 #[derive(Parser, Clone)]
@@ -237,6 +241,27 @@ struct UnpublishArgs {
     json: bool,
 }
 
+#[derive(Parser, Clone)]
+#[clap(
+    after_help = "Examples:\n\n  railway templates delete template-code --yes --json\n  railway templates delete template-id --yes\n\nAliases:\n  delete: remove, rm\n\nAutomation notes:\n  Non-interactive delete requires --yes.\n  Deleting a template removes the template draft or marketplace template from the workspace."
+)]
+struct DeleteArgs {
+    /// Template ID or code
+    template: Option<String>,
+
+    /// Skip confirmation dialog
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
+
+    /// 2FA code for verification when required by the current auth session
+    #[arg(long = "2fa-code")]
+    two_factor_code: Option<String>,
+
+    /// Print the deleted template result as JSON
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Clone)]
 struct TemplateSearchRequest {
     query: String,
@@ -321,6 +346,7 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Create(args) => create_command(args).await,
         Commands::Publish(args) => publish_command(args).await,
         Commands::Unpublish(args) => unpublish_command(args).await,
+        Commands::Delete(args) => delete_command(args).await,
     }
 }
 
@@ -521,6 +547,69 @@ async fn unpublish_command(args: UnpublishArgs) -> Result<()> {
         println!(
             "{} {} ({})",
             "Unpublished template".green().bold(),
+            template.name.bold(),
+            template.code
+        );
+    }
+
+    Ok(())
+}
+
+async fn delete_command(args: DeleteArgs) -> Result<()> {
+    let interactive = is_interactive_output(args.json);
+    let template_ref = resolve_template_ref(args.template.clone(), interactive, "delete")?;
+    let configs = Configs::new()?;
+    let client = GQLClient::new_user_authorized(&configs)?;
+    let template = fetch_template_by_ref(&client, &configs, &template_ref).await?;
+
+    if !args.yes {
+        if !interactive {
+            bail!(
+                "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+            );
+        }
+
+        let confirmed = prompt_confirm_with_default(
+            format!(r#"Delete template "{}"?"#, template.name.red()).as_str(),
+            false,
+        )?;
+        if !confirmed {
+            println!("Delete cancelled.");
+            return Ok(());
+        }
+    }
+
+    validate_two_factor_if_enabled(&client, &configs, interactive, args.two_factor_code).await?;
+
+    let spinner = create_spinner_if(!args.json, "Deleting template...".to_string());
+    let response = post_graphql::<mutations::TemplateDelete, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::template_delete::Variables {
+            id: template.id.clone(),
+            workspace_id: template.workspace_id.clone(),
+        },
+    )
+    .await?;
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": template.id,
+                "code": template.code,
+                "name": template.name,
+                "deleted": response.template_delete,
+            }))?
+        );
+    } else {
+        println!(
+            "{} {} ({})",
+            "Deleted template".green().bold(),
             template.name.bold(),
             template.code
         );
@@ -2232,6 +2321,24 @@ mod tests {
             value
                 .get("workspaceId")
                 .is_some_and(serde_json::Value::is_null)
+        );
+    }
+
+    #[test]
+    fn template_delete_variables_include_workspace_id() {
+        let value = serde_json::to_value(mutations::template_delete::Variables {
+            id: "template-id".to_string(),
+            workspace_id: Some("workspace-id".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value.get("id").and_then(|v| v.as_str()),
+            Some("template-id")
+        );
+        assert_eq!(
+            value.get("workspaceId").and_then(|v| v.as_str()),
+            Some("workspace-id")
         );
     }
 }
