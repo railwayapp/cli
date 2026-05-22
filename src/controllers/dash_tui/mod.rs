@@ -106,6 +106,18 @@ enum LoaderEvent {
     },
 }
 
+enum HandleKeyAction {
+    None,
+    OpenProject {
+        project_id: String,
+        return_to_projects: ProjectsBackNavigation,
+    },
+    RefreshProjects,
+    RefreshProject,
+    BackToProjects,
+    OpenEnvironmentSelector,
+}
+
 impl DashApp {
     fn new(params: DashTuiParams) -> Self {
         let screen = match &params.auth_mode {
@@ -360,58 +372,23 @@ impl DashApp {
             return self.handle_environment_selector_key(key, tx);
         }
 
-        let mut project_to_open: Option<(String, ProjectsBackNavigation)> = None;
-        let mut should_refresh_projects = false;
-        let mut should_refresh_project = false;
-        let mut should_back_to_projects = false;
-        let mut should_open_environment_selector = false;
-
-        match &mut self.screen {
+        let action = match &mut self.screen {
             DashboardScreen::Projects(state) => {
-                let columns = ui::project_navigation_columns(terminal_area);
-                match key.code {
-                    KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
-                    KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
-                    KeyCode::Left | KeyCode::Char('j') => state.move_left(),
-                    KeyCode::Right | KeyCode::Char('l') => state.move_right(),
-                    KeyCode::Enter => {
-                        if let Some(card) = state.selected_card().cloned() {
-                            project_to_open = Some((
-                                card.id,
-                                ProjectsBackNavigation::Restore(Box::new(state.clone())),
-                            ));
-                        }
-                    }
-                    KeyCode::Char('/') => state.filter_mode = true,
-                    KeyCode::Char('r') => should_refresh_projects = true,
-                    _ => {}
-                }
+                handle_projects_screen_key(state, key, terminal_area)
             }
-            DashboardScreen::Project(state) => {
-                let columns = ui::service_navigation_columns(terminal_area);
-                match key.code {
-                    KeyCode::Esc | KeyCode::Backspace => should_back_to_projects = true,
-                    KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
-                    KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
-                    KeyCode::Left | KeyCode::Char('j') => state.move_left(),
-                    KeyCode::Right | KeyCode::Char('l') => state.move_right(),
-                    KeyCode::Char('e') => should_open_environment_selector = true,
-                    KeyCode::Char('r') => should_refresh_project = true,
-                    _ => {}
-                }
-            }
-        }
+            DashboardScreen::Project(state) => handle_project_screen_key(state, key, terminal_area),
+        };
 
-        if let Some((project_id, return_to_projects)) = project_to_open {
-            self.open_project(project_id, Some(return_to_projects), tx);
-        } else if should_refresh_projects {
-            self.refresh_projects(tx);
-        } else if should_back_to_projects {
-            self.back_to_projects(tx);
-        } else if should_open_environment_selector {
-            self.open_environment_selector();
-        } else if should_refresh_project {
-            self.refresh_project(tx);
+        match action {
+            HandleKeyAction::None => {}
+            HandleKeyAction::OpenProject {
+                project_id,
+                return_to_projects,
+            } => self.open_project(project_id, Some(return_to_projects), tx),
+            HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
+            HandleKeyAction::RefreshProject => self.refresh_project(tx),
+            HandleKeyAction::BackToProjects => self.back_to_projects(tx),
+            HandleKeyAction::OpenEnvironmentSelector => self.open_environment_selector(),
         }
 
         false
@@ -719,6 +696,55 @@ pub async fn run(params: DashTuiParams) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_projects_screen_key(
+    state: &mut ProjectsScreenState,
+    key: KeyEvent,
+    terminal_area: Rect,
+) -> HandleKeyAction {
+    let columns = ui::project_navigation_columns(terminal_area);
+
+    match key.code {
+        KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
+        KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
+        KeyCode::Left | KeyCode::Char('j') => state.move_left(),
+        KeyCode::Right | KeyCode::Char('l') => state.move_right(),
+        KeyCode::Enter => {
+            if let Some(card) = state.selected_card().cloned() {
+                return HandleKeyAction::OpenProject {
+                    project_id: card.id,
+                    return_to_projects: ProjectsBackNavigation::Restore(Box::new(state.clone())),
+                };
+            }
+        }
+        KeyCode::Char('/') => state.filter_mode = true,
+        KeyCode::Char('r') => return HandleKeyAction::RefreshProjects,
+        _ => {}
+    }
+
+    HandleKeyAction::None
+}
+
+fn handle_project_screen_key(
+    state: &mut ProjectScreenState,
+    key: KeyEvent,
+    terminal_area: Rect,
+) -> HandleKeyAction {
+    let columns = ui::service_navigation_columns(terminal_area);
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Backspace => return HandleKeyAction::BackToProjects,
+        KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
+        KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
+        KeyCode::Left | KeyCode::Char('j') => state.move_left(),
+        KeyCode::Right | KeyCode::Char('l') => state.move_right(),
+        KeyCode::Char('e') => return HandleKeyAction::OpenEnvironmentSelector,
+        KeyCode::Char('r') => return HandleKeyAction::RefreshProject,
+        _ => {}
+    }
+
+    HandleKeyAction::None
 }
 
 fn handle_projects_filter_input(state: &mut ProjectsScreenState, key: KeyEvent) {
