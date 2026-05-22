@@ -36,6 +36,7 @@ commands!(
     bucket,
     completion,
     connect,
+    dash,
     delete,
     deploy,
     deployment,
