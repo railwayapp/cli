@@ -1,4 +1,5 @@
 mod data;
+mod project;
 mod ui;
 
 use std::io::stdout;
@@ -23,8 +24,10 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use self::data::{
-    DashboardProject, DashboardService, ProjectCard, ProjectLoadTarget, load_dashboard_project,
-    load_project_cards,
+    DashboardProject, ProjectCard, ProjectLoadTarget, load_dashboard_project, load_project_cards,
+};
+use self::project::{
+    EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,31 +69,6 @@ struct ProjectsScreenState {
     error: Option<String>,
     current_request_id: u64,
     initial_selection_hint: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct ProjectScreenState {
-    target: ProjectLoadTarget,
-    project: Option<DashboardProject>,
-    selected_service: usize,
-    loading: bool,
-    error: Option<String>,
-    current_request_id: u64,
-    return_to_projects: Option<ProjectsBackNavigation>,
-    environment_selector: Option<EnvironmentSelectorState>,
-}
-
-#[derive(Clone, Debug)]
-enum ProjectsBackNavigation {
-    Restore(Box<ProjectsScreenState>),
-    Reload {
-        initial_selection_hint: Option<String>,
-    },
-}
-
-#[derive(Clone, Debug)]
-struct EnvironmentSelectorState {
-    selected: usize,
 }
 
 enum LoaderEvent {
@@ -532,104 +510,6 @@ impl ProjectsScreenState {
     }
 }
 
-impl ProjectScreenState {
-    fn new(target: ProjectLoadTarget, return_to_projects: Option<ProjectsBackNavigation>) -> Self {
-        Self {
-            target,
-            project: None,
-            selected_service: 0,
-            loading: false,
-            error: None,
-            current_request_id: 0,
-            return_to_projects,
-            environment_selector: None,
-        }
-    }
-
-    fn selected_service(&self) -> Option<&DashboardService> {
-        self.project
-            .as_ref()
-            .and_then(|project| project.services.get(self.selected_service))
-    }
-
-    fn apply_loaded_project(&mut self, project: DashboardProject) {
-        let preferred_service_id = self.selected_service().map(|service| service.id.clone());
-        self.loading = false;
-        self.error = None;
-        self.project = Some(project);
-        self.environment_selector = None;
-        self.clamp_selection();
-
-        if let Some(preferred_service_id) = preferred_service_id {
-            self.select_service_by_id(&preferred_service_id);
-        }
-    }
-
-    fn set_error(&mut self, error: String) {
-        self.loading = false;
-        self.error = Some(error);
-        self.environment_selector = None;
-        self.clamp_selection();
-    }
-
-    fn move_left(&mut self) {
-        self.selected_service = self.selected_service.saturating_sub(1);
-    }
-
-    fn move_right(&mut self) {
-        let len = self
-            .project
-            .as_ref()
-            .map(|project| project.services.len())
-            .unwrap_or(0);
-        if len > 0 {
-            self.selected_service = (self.selected_service + 1).min(len - 1);
-        }
-    }
-
-    fn move_up(&mut self, columns: usize) {
-        self.selected_service = self.selected_service.saturating_sub(columns.max(1));
-    }
-
-    fn move_down(&mut self, columns: usize) {
-        let len = self
-            .project
-            .as_ref()
-            .map(|project| project.services.len())
-            .unwrap_or(0);
-        if len > 0 {
-            self.selected_service = (self.selected_service + columns.max(1)).min(len - 1);
-        }
-    }
-
-    fn select_service_by_id(&mut self, service_id: &str) {
-        if let Some(project) = &self.project {
-            if let Some(index) = project
-                .services
-                .iter()
-                .position(|service| service.id == service_id)
-            {
-                self.selected_service = index;
-            } else {
-                self.clamp_selection();
-            }
-        }
-    }
-
-    fn clamp_selection(&mut self) {
-        let len = self
-            .project
-            .as_ref()
-            .map(|project| project.services.len())
-            .unwrap_or(0);
-        if len == 0 {
-            self.selected_service = 0;
-        } else {
-            self.selected_service = self.selected_service.min(len - 1);
-        }
-    }
-}
-
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
 
@@ -724,27 +604,6 @@ fn handle_projects_screen_key(
     HandleKeyAction::None
 }
 
-fn handle_project_screen_key(
-    state: &mut ProjectScreenState,
-    key: KeyEvent,
-    terminal_area: Rect,
-) -> HandleKeyAction {
-    let columns = ui::service_navigation_columns(terminal_area);
-
-    match key.code {
-        KeyCode::Esc | KeyCode::Backspace => return HandleKeyAction::BackToProjects,
-        KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
-        KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
-        KeyCode::Left | KeyCode::Char('j') => state.move_left(),
-        KeyCode::Right | KeyCode::Char('l') => state.move_right(),
-        KeyCode::Char('e') => return HandleKeyAction::OpenEnvironmentSelector,
-        KeyCode::Char('r') => return HandleKeyAction::RefreshProject,
-        _ => {}
-    }
-
-    HandleKeyAction::None
-}
-
 fn handle_projects_filter_input(state: &mut ProjectsScreenState, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => state.filter_mode = false,
@@ -772,6 +631,7 @@ fn handle_projects_filter_input(state: &mut ProjectsScreenState, key: KeyEvent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controllers::dash_tui::data::DashboardService;
 
     fn card(id: &str, name: &str) -> ProjectCard {
         ProjectCard {

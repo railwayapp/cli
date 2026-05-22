@@ -4,7 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use super::{DashApp, DashboardAuthMode, DashboardScreen, ProjectScreenState, ProjectsScreenState};
+use super::project::ProjectScreenState;
+use super::{DashApp, DashboardAuthMode, DashboardScreen, ProjectsScreenState};
 use crate::controllers::dash_tui::data::{DashboardService, ProjectCard};
 
 pub(super) const PROJECT_CARD_MIN_WIDTH: u16 = 30;
