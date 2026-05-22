@@ -21,6 +21,7 @@ use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
@@ -31,6 +32,15 @@ use self::project::{
     EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
 use self::service::{ServiceScreenState, handle_service_screen_key};
+
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const RAILWAY_VIOLET: Color = Color::Rgb(127, 86, 217);
+const RAILWAY_PURPLE: Color = Color::Rgb(155, 107, 255);
+const RAILWAY_PINK: Color = Color::Rgb(236, 72, 153);
+const RAILWAY_LAVENDER: Color = Color::Rgb(221, 214, 254);
+const RAILWAY_MUTED: Color = Color::Rgb(161, 152, 190);
+const RAILWAY_PANEL: Color = Color::Rgb(91, 78, 129);
+const RAILWAY_ERROR: Color = Color::Rgb(248, 113, 113);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DashboardAuthMode {
@@ -438,7 +448,7 @@ impl DashApp {
     }
 
     fn on_tick(&mut self) {
-        self.spinner_tick = (self.spinner_tick + 1) % ui::SPINNER_FRAMES.len();
+        self.spinner_tick = (self.spinner_tick + 1) % SPINNER_FRAMES.len();
     }
 }
 
