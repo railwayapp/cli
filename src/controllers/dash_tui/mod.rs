@@ -1,4 +1,5 @@
 mod data;
+mod ui;
 
 use std::io::stdout;
 use std::panic;
@@ -15,20 +16,17 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::{Frame, Terminal};
+use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
-use self::data::{ProjectCard, load_project_cards};
+use self::data::{
+    DashboardProject, DashboardService, ProjectCard, ProjectLoadTarget, load_dashboard_project,
+    load_project_cards,
+};
 
-const PROJECT_CARD_MIN_WIDTH: u16 = 30;
-const PROJECT_CARD_HEIGHT: u16 = 7;
-const PROJECT_CARD_GAP: u16 = 1;
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,14 +49,13 @@ pub struct DashTuiParams {
 struct DashApp {
     params: DashTuiParams,
     screen: DashboardScreen,
-    project_preview: Option<ProjectCard>,
     spinner_tick: usize,
 }
 
 #[derive(Clone, Debug)]
 enum DashboardScreen {
     Projects(ProjectsScreenState),
-    LinkedProjectPlaceholder,
+    Project(ProjectScreenState),
 }
 
 #[derive(Clone, Debug)]
@@ -73,33 +70,70 @@ struct ProjectsScreenState {
     initial_selection_hint: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct ProjectScreenState {
+    target: ProjectLoadTarget,
+    project: Option<DashboardProject>,
+    selected_service: usize,
+    loading: bool,
+    error: Option<String>,
+    current_request_id: u64,
+    return_to_projects: Option<Box<ProjectsScreenState>>,
+    environment_selector: Option<EnvironmentSelectorState>,
+}
+
+#[derive(Clone, Debug)]
+struct EnvironmentSelectorState {
+    selected: usize,
+}
+
 enum LoaderEvent {
     ProjectsLoaded {
         request_id: u64,
         result: std::result::Result<Vec<ProjectCard>, String>,
     },
+    ProjectLoaded {
+        request_id: u64,
+        result: std::result::Result<DashboardProject, String>,
+    },
 }
 
 impl DashApp {
     fn new(params: DashTuiParams) -> Self {
-        let screen = match params.auth_mode {
-            DashboardAuthMode::Workspace => {
-                DashboardScreen::Projects(ProjectsScreenState::new(params.project.clone()))
-            }
-            DashboardAuthMode::LinkedProject { .. } => DashboardScreen::LinkedProjectPlaceholder,
+        let screen = match &params.auth_mode {
+            DashboardAuthMode::Workspace => match &params.project {
+                Some(project_id) => DashboardScreen::Project(ProjectScreenState::new(
+                    ProjectLoadTarget {
+                        project_id: project_id.clone(),
+                        environment_hint: params.environment.clone(),
+                    },
+                    Some(Box::new(ProjectsScreenState::new(Some(project_id.clone())))),
+                )),
+                None => DashboardScreen::Projects(ProjectsScreenState::new(None)),
+            },
+            DashboardAuthMode::LinkedProject {
+                project_id,
+                environment_id,
+            } => DashboardScreen::Project(ProjectScreenState::new(
+                ProjectLoadTarget {
+                    project_id: project_id.clone(),
+                    environment_hint: Some(environment_id.clone()),
+                },
+                None,
+            )),
         };
 
         Self {
             params,
             screen,
-            project_preview: None,
             spinner_tick: 0,
         }
     }
 
     fn start_initial_load(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
-        if matches!(self.screen, DashboardScreen::Projects(_)) {
-            self.refresh_projects(tx);
+        match self.screen {
+            DashboardScreen::Projects(_) => self.refresh_projects(tx),
+            DashboardScreen::Project(_) => self.refresh_project(tx),
         }
     }
 
@@ -122,6 +156,109 @@ impl DashApp {
         });
     }
 
+    fn refresh_project(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        let DashboardScreen::Project(state) = &mut self.screen else {
+            return;
+        };
+
+        state.loading = true;
+        state.error = None;
+        state.current_request_id += 1;
+        let request_id = state.current_request_id;
+        let target = state.target.clone();
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+            let result = load_dashboard_project(target)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(LoaderEvent::ProjectLoaded { request_id, result });
+        });
+    }
+
+    fn open_project(
+        &mut self,
+        project_id: String,
+        return_to_projects: Option<Box<ProjectsScreenState>>,
+        tx: &mpsc::UnboundedSender<LoaderEvent>,
+    ) {
+        let environment_hint = self.params.environment.clone();
+        self.screen = DashboardScreen::Project(ProjectScreenState::new(
+            ProjectLoadTarget {
+                project_id,
+                environment_hint,
+            },
+            return_to_projects,
+        ));
+        self.refresh_project(tx);
+    }
+
+    fn open_environment_selector(&mut self) {
+        let DashboardScreen::Project(state) = &mut self.screen else {
+            return;
+        };
+
+        let Some(project) = &state.project else {
+            return;
+        };
+
+        let environments = project.accessible_environments();
+        if environments.is_empty() {
+            return;
+        }
+
+        let selected = environments
+            .iter()
+            .position(|environment| environment.id == project.selected_environment_id)
+            .unwrap_or(0);
+        state.environment_selector = Some(EnvironmentSelectorState { selected });
+    }
+
+    fn switch_environment(
+        &mut self,
+        selected_index: usize,
+        tx: &mpsc::UnboundedSender<LoaderEvent>,
+    ) {
+        let DashboardScreen::Project(state) = &mut self.screen else {
+            return;
+        };
+
+        let Some(project) = &state.project else {
+            return;
+        };
+
+        let accessible_environments = project.accessible_environments();
+        let Some(environment) = accessible_environments.get(selected_index) else {
+            return;
+        };
+
+        state.target.environment_hint = Some(environment.id.clone());
+        state.environment_selector = None;
+        self.refresh_project(tx);
+    }
+
+    fn back_to_projects(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        let DashboardScreen::Project(state) = &self.screen else {
+            return;
+        };
+
+        let restored = state
+            .return_to_projects
+            .as_ref()
+            .map(|projects| (**projects).clone())
+            .or_else(|| match self.params.auth_mode {
+                DashboardAuthMode::Workspace => Some(ProjectsScreenState::new(Some(
+                    state.target.project_id.clone(),
+                ))),
+                DashboardAuthMode::LinkedProject { .. } => None,
+            });
+
+        if let Some(restored) = restored {
+            self.screen = DashboardScreen::Projects(restored);
+            self.refresh_projects(tx);
+        }
+    }
+
     fn handle_loader_event(&mut self, event: LoaderEvent) {
         match event {
             LoaderEvent::ProjectsLoaded { request_id, result } => {
@@ -138,6 +275,20 @@ impl DashApp {
                     Err(error) => state.set_error(error),
                 }
             }
+            LoaderEvent::ProjectLoaded { request_id, result } => {
+                let DashboardScreen::Project(state) = &mut self.screen else {
+                    return;
+                };
+
+                if request_id != state.current_request_id {
+                    return;
+                }
+
+                match result {
+                    Ok(project) => state.apply_loaded_project(project),
+                    Err(error) => state.set_error(error),
+                }
+            }
         }
     }
 
@@ -149,7 +300,8 @@ impl DashApp {
     ) -> bool {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                self.handle_key(key, terminal.size().unwrap_or_default().width, tx)
+                let size = terminal.size().unwrap_or_default();
+                self.handle_key(key, Rect::new(0, 0, size.width, size.height), tx)
             }
             Event::Resize(_, _) => {
                 let _ = terminal.clear();
@@ -162,7 +314,7 @@ impl DashApp {
     fn handle_key(
         &mut self,
         key: KeyEvent,
-        terminal_width: u16,
+        terminal_area: Rect,
         tx: &mpsc::UnboundedSender<LoaderEvent>,
     ) -> bool {
         if matches!(key.code, KeyCode::Char('q'))
@@ -172,35 +324,111 @@ impl DashApp {
             return true;
         }
 
-        if self.project_preview.is_some() {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
-                self.project_preview = None;
-            }
+        if matches!(
+            self.screen,
+            DashboardScreen::Projects(ProjectsScreenState {
+                filter_mode: true,
+                ..
+            })
+        ) && let DashboardScreen::Projects(state) = &mut self.screen
+        {
+            handle_projects_filter_input(state, key);
             return false;
         }
 
+        if let DashboardScreen::Project(state) = &mut self.screen
+            && state.environment_selector.is_some()
+        {
+            return self.handle_environment_selector_key(key, tx);
+        }
+
+        let mut project_to_open: Option<(String, Box<ProjectsScreenState>)> = None;
+        let mut should_refresh_projects = false;
+        let mut should_refresh_project = false;
+        let mut should_back_to_projects = false;
+        let mut should_open_environment_selector = false;
+
         match &mut self.screen {
             DashboardScreen::Projects(state) => {
-                if state.filter_mode {
-                    handle_projects_filter_input(state, key);
-                    return false;
-                }
-
-                let columns = project_grid_columns(terminal_width.saturating_sub(4));
+                let columns = ui::project_navigation_columns(terminal_area);
                 match key.code {
                     KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
                     KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
                     KeyCode::Left | KeyCode::Char('j') => state.move_left(),
                     KeyCode::Right | KeyCode::Char('l') => state.move_right(),
                     KeyCode::Enter => {
-                        self.project_preview = state.selected_card().cloned();
+                        if let Some(card) = state.selected_card().cloned() {
+                            project_to_open = Some((card.id, Box::new(state.clone())));
+                        }
                     }
                     KeyCode::Char('/') => state.filter_mode = true,
-                    KeyCode::Char('r') => self.refresh_projects(tx),
+                    KeyCode::Char('r') => should_refresh_projects = true,
                     _ => {}
                 }
             }
-            DashboardScreen::LinkedProjectPlaceholder => {}
+            DashboardScreen::Project(state) => {
+                let columns = ui::service_navigation_columns(terminal_area);
+                match key.code {
+                    KeyCode::Esc | KeyCode::Backspace => should_back_to_projects = true,
+                    KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
+                    KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
+                    KeyCode::Left | KeyCode::Char('j') => state.move_left(),
+                    KeyCode::Right | KeyCode::Char('l') => state.move_right(),
+                    KeyCode::Char('e') => should_open_environment_selector = true,
+                    KeyCode::Char('r') => should_refresh_project = true,
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some((project_id, return_to_projects)) = project_to_open {
+            self.open_project(project_id, Some(return_to_projects), tx);
+        } else if should_refresh_projects {
+            self.refresh_projects(tx);
+        } else if should_back_to_projects {
+            self.back_to_projects(tx);
+        } else if should_open_environment_selector {
+            self.open_environment_selector();
+        } else if should_refresh_project {
+            self.refresh_project(tx);
+        }
+
+        false
+    }
+
+    fn handle_environment_selector_key(
+        &mut self,
+        key: KeyEvent,
+        tx: &mpsc::UnboundedSender<LoaderEvent>,
+    ) -> bool {
+        let DashboardScreen::Project(state) = &mut self.screen else {
+            return false;
+        };
+        let Some(selector) = &mut state.environment_selector else {
+            return false;
+        };
+
+        let environment_count = state
+            .project
+            .as_ref()
+            .map(|project| project.accessible_environments().len())
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Backspace => state.environment_selector = None,
+            KeyCode::Up | KeyCode::Char('i') => {
+                selector.selected = selector.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('k') => {
+                if environment_count > 0 {
+                    selector.selected = (selector.selected + 1).min(environment_count - 1);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = selector.selected;
+                self.switch_environment(selected, tx);
+            }
+            _ => {}
         }
 
         false
@@ -308,6 +536,107 @@ impl ProjectsScreenState {
     }
 }
 
+impl ProjectScreenState {
+    fn new(
+        target: ProjectLoadTarget,
+        return_to_projects: Option<Box<ProjectsScreenState>>,
+    ) -> Self {
+        Self {
+            target,
+            project: None,
+            selected_service: 0,
+            loading: false,
+            error: None,
+            current_request_id: 0,
+            return_to_projects,
+            environment_selector: None,
+        }
+    }
+
+    fn selected_service(&self) -> Option<&DashboardService> {
+        self.project
+            .as_ref()
+            .and_then(|project| project.services.get(self.selected_service))
+    }
+
+    fn apply_loaded_project(&mut self, project: DashboardProject) {
+        let preferred_service_id = self.selected_service().map(|service| service.id.clone());
+        self.loading = false;
+        self.error = None;
+        self.project = Some(project);
+        self.environment_selector = None;
+        self.clamp_selection();
+
+        if let Some(preferred_service_id) = preferred_service_id {
+            self.select_service_by_id(&preferred_service_id);
+        }
+    }
+
+    fn set_error(&mut self, error: String) {
+        self.loading = false;
+        self.error = Some(error);
+        self.environment_selector = None;
+        self.clamp_selection();
+    }
+
+    fn move_left(&mut self) {
+        self.selected_service = self.selected_service.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        let len = self
+            .project
+            .as_ref()
+            .map(|project| project.services.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.selected_service = (self.selected_service + 1).min(len - 1);
+        }
+    }
+
+    fn move_up(&mut self, columns: usize) {
+        self.selected_service = self.selected_service.saturating_sub(columns.max(1));
+    }
+
+    fn move_down(&mut self, columns: usize) {
+        let len = self
+            .project
+            .as_ref()
+            .map(|project| project.services.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.selected_service = (self.selected_service + columns.max(1)).min(len - 1);
+        }
+    }
+
+    fn select_service_by_id(&mut self, service_id: &str) {
+        if let Some(project) = &self.project {
+            if let Some(index) = project
+                .services
+                .iter()
+                .position(|service| service.id == service_id)
+            {
+                self.selected_service = index;
+            } else {
+                self.clamp_selection();
+            }
+        }
+    }
+
+    fn clamp_selection(&mut self) {
+        let len = self
+            .project
+            .as_ref()
+            .map(|project| project.services.len())
+            .unwrap_or(0);
+        if len == 0 {
+            self.selected_service = 0;
+        } else {
+            self.selected_service = self.selected_service.min(len - 1);
+        }
+    }
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
 
@@ -351,7 +680,7 @@ pub async fn run(params: DashTuiParams) -> Result<()> {
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        terminal.draw(|frame| render(frame, &app))?;
+        terminal.draw(|frame| ui::render(frame, &app))?;
 
         tokio::select! {
             Some(Ok(event)) = events.next() => {
@@ -398,471 +727,6 @@ fn handle_projects_filter_input(state: &mut ProjectsScreenState, key: KeyEvent) 
     }
 }
 
-fn render(frame: &mut Frame<'_>, app: &DashApp) {
-    let area = frame.area();
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(12),
-        Constraint::Length(3),
-    ])
-    .areas(area);
-
-    render_header(frame, header, app);
-
-    match &app.screen {
-        DashboardScreen::Projects(state) => {
-            render_projects_screen(frame, body, app, state);
-            if let Some(card) = &app.project_preview {
-                render_project_preview(frame, centered_rect(body, 70, 65), card);
-            }
-        }
-        DashboardScreen::LinkedProjectPlaceholder => render_linked_project_placeholder(
-            frame,
-            body,
-            app.params.project.as_deref().unwrap_or("(linked project)"),
-            app.params
-                .environment
-                .as_deref()
-                .unwrap_or("(linked/default environment)"),
-            match &app.params.auth_mode {
-                DashboardAuthMode::LinkedProject {
-                    project_id,
-                    environment_id: _,
-                } => project_id,
-                DashboardAuthMode::Workspace => unreachable!(),
-            },
-            match &app.params.auth_mode {
-                DashboardAuthMode::LinkedProject {
-                    project_id: _,
-                    environment_id,
-                } => environment_id,
-                DashboardAuthMode::Workspace => unreachable!(),
-            },
-        ),
-    }
-
-    render_footer(frame, footer, app);
-}
-
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
-    let subtitle = if app.project_preview.is_some() {
-        "project preview placeholder"
-    } else {
-        match &app.screen {
-            DashboardScreen::Projects(_) => "project cards",
-            DashboardScreen::LinkedProjectPlaceholder => "linked project placeholder",
-        }
-    };
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " Railway Dashboard ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(subtitle),
-        ]))
-        .block(Block::default().borders(Borders::ALL).title("railway dash")),
-        area,
-    );
-}
-
-fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
-    let text = if app.project_preview.is_some() {
-        "Esc back • q quit"
-    } else {
-        match &app.screen {
-            DashboardScreen::Projects(state) if state.filter_mode => {
-                "type to filter • Enter apply • Esc close • Backspace delete • q quit"
-            }
-            DashboardScreen::Projects(_) => {
-                "Enter open • arrows/ijkl move • / filter • r reload • q quit"
-            }
-            DashboardScreen::LinkedProjectPlaceholder => {
-                "q quit • Ctrl-C quit • linked project overview coming next"
-            }
-        }
-    };
-
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("controls"))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn render_projects_screen(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &DashApp,
-    state: &ProjectsScreenState,
-) {
-    frame.render_widget(Clear, area);
-
-    let [status_area, grid_area] =
-        Layout::vertical([Constraint::Length(4), Constraint::Min(8)]).areas(area);
-
-    render_projects_status(frame, status_area, app, state);
-    render_projects_grid(frame, grid_area, state);
-}
-
-fn render_projects_status(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &DashApp,
-    state: &ProjectsScreenState,
-) {
-    let selected = state
-        .selected_card()
-        .map(|card| card.name.as_str())
-        .unwrap_or("none");
-    let visible_count = state.visible_indices().len();
-    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-
-    let filter_line = if state.filter_mode {
-        Line::from(vec![
-            Span::styled("filter: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!("{}█", state.filter),
-                Style::default().fg(Color::Yellow),
-            ),
-        ])
-    } else if state.filter.is_empty() {
-        Line::from(vec![
-            Span::styled("filter: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw("/ to search projects"),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("filter: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(state.filter.as_str(), Style::default().fg(Color::Yellow)),
-        ])
-    };
-
-    let status_line = if let Some(error) = &state.error {
-        Line::from(vec![
-            Span::styled(
-                "error: ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(error),
-        ])
-    } else if state.loading {
-        let label = if state.cards.is_empty() {
-            "Loading projects..."
-        } else {
-            "Refreshing projects..."
-        };
-        Line::from(vec![
-            Span::styled(format!("{spinner} "), Style::default().fg(Color::Cyan)),
-            Span::raw(label),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("selected: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(selected),
-            Span::raw("  •  "),
-            Span::styled(
-                format!("{visible_count} visible / {} total", state.cards.len()),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ])
-    };
-
-    frame.render_widget(
-        Paragraph::new(vec![filter_line, Line::default(), status_line])
-            .block(Block::default().borders(Borders::ALL).title("projects"))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn render_projects_grid(frame: &mut Frame<'_>, area: Rect, state: &ProjectsScreenState) {
-    let block = Block::default().borders(Borders::ALL).title("cards");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width < PROJECT_CARD_MIN_WIDTH || inner.height < PROJECT_CARD_HEIGHT {
-        frame.render_widget(
-            Paragraph::new("Terminal too small for project cards. Resize to continue.")
-                .style(Style::default().fg(Color::Yellow))
-                .wrap(Wrap { trim: true }),
-            inner,
-        );
-        return;
-    }
-
-    let visible = state.visible_indices();
-    if state.loading && state.cards.is_empty() {
-        frame.render_widget(
-            Paragraph::new("Loading projects...")
-                .style(Style::default().fg(Color::Cyan))
-                .wrap(Wrap { trim: true }),
-            inner,
-        );
-        return;
-    }
-
-    if let Some(error) = &state.error
-        && state.cards.is_empty()
-    {
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Unable to load projects.\n\n{error}\n\nPress r to retry."
-            ))
-            .style(Style::default().fg(Color::Red))
-            .wrap(Wrap { trim: true }),
-            inner,
-        );
-        return;
-    }
-
-    if visible.is_empty() {
-        let message = if state.filter.is_empty() {
-            "No projects found for this account."
-        } else {
-            "No projects match the current filter."
-        };
-        frame.render_widget(
-            Paragraph::new(message)
-                .style(Style::default().fg(Color::DarkGray))
-                .wrap(Wrap { trim: true }),
-            inner,
-        );
-        return;
-    }
-
-    let columns = project_grid_columns(inner.width).max(1);
-    let card_width = project_card_width(inner.width, columns);
-    let rows_per_page = project_rows_per_page(inner.height).max(1);
-    let selected_row = state.selected / columns;
-    let start_row = selected_row.saturating_sub(rows_per_page.saturating_sub(1));
-    let start_index = start_row * columns;
-    let end_index = (start_index + (rows_per_page * columns)).min(visible.len());
-
-    for (visible_index, card_index) in visible[start_index..end_index].iter().enumerate() {
-        let absolute_visible_index = start_index + visible_index;
-        let card = &state.cards[*card_index];
-        let row = visible_index / columns;
-        let col = visible_index % columns;
-        let x = inner.x + (col as u16 * (card_width + PROJECT_CARD_GAP));
-        let y = inner.y + (row as u16 * (PROJECT_CARD_HEIGHT + PROJECT_CARD_GAP));
-        let rect = Rect {
-            x,
-            y,
-            width: card_width,
-            height: PROJECT_CARD_HEIGHT,
-        };
-        render_project_card(frame, rect, card, absolute_visible_index == state.selected);
-    }
-}
-
-fn render_project_card(frame: &mut Frame<'_>, area: Rect, card: &ProjectCard, selected: bool) {
-    let border_style = if selected {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let title_style = if selected {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    };
-
-    let workspace_name = card.workspace_name.as_deref().unwrap_or("personal");
-    let service_label = pluralize(card.service_count, "service");
-    let environment_label = pluralize(card.environment_count, "environment");
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(card.name.as_str(), title_style)),
-            Line::default(),
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", card.service_count),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(service_label),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", card.environment_count),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(environment_label),
-            ]),
-            Line::from(vec![
-                Span::styled("workspace: ", Style::default().fg(Color::DarkGray)),
-                Span::raw(workspace_name),
-            ]),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(card.id.as_str()),
-        )
-        .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn render_project_preview(frame: &mut Frame<'_>, area: Rect, card: &ProjectCard) {
-    let workspace_name = card.workspace_name.as_deref().unwrap_or("personal");
-
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Project overview is the next phase.",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::default(),
-            Line::from(vec![
-                Span::styled("project: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(card.name.as_str()),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "project id: ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(card.id.as_str()),
-            ]),
-            Line::from(vec![
-                Span::styled("workspace: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(workspace_name),
-            ]),
-            Line::from(vec![
-                Span::styled("services: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(card.service_count.to_string()),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "environments: ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(card.environment_count.to_string()),
-            ]),
-            Line::default(),
-            Line::from("Phase 4 will open this project and resolve its selected environment."),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("project preview"),
-        )
-        .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn render_linked_project_placeholder(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    requested_project: &str,
-    requested_environment: &str,
-    project_id: &str,
-    environment_id: &str,
-) {
-    let content = vec![
-        Line::from(Span::styled(
-            "Dashboard shell is wired up.",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-        Line::from("This placeholder was opened through project-scoped auth preflight."),
-        Line::from("Later phases will route straight into the linked project overview."),
-        Line::default(),
-        Line::from(vec![
-            Span::styled(
-                "entry mode: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("project-scoped auth → linked project overview"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "validated project id: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(project_id),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "validated environment id: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(environment_id),
-        ]),
-        Line::default(),
-        Line::from(vec![
-            Span::styled(
-                "requested project: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(requested_project),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "requested environment: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(requested_environment),
-        ]),
-    ];
-
-    frame.render_widget(
-        Paragraph::new(content)
-            .block(Block::default().borders(Borders::ALL).title("placeholder"))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn project_grid_columns(width: u16) -> usize {
-    let stride = PROJECT_CARD_MIN_WIDTH + PROJECT_CARD_GAP;
-    ((width + PROJECT_CARD_GAP) / stride).max(1) as usize
-}
-
-fn project_card_width(width: u16, columns: usize) -> u16 {
-    let columns = columns.max(1) as u16;
-    let total_gaps = PROJECT_CARD_GAP.saturating_mul(columns.saturating_sub(1));
-    width.saturating_sub(total_gaps) / columns
-}
-
-fn project_rows_per_page(height: u16) -> usize {
-    let stride = PROJECT_CARD_HEIGHT + PROJECT_CARD_GAP;
-    ((height + PROJECT_CARD_GAP) / stride).max(1) as usize
-}
-
-fn pluralize(count: usize, singular: &str) -> String {
-    if count == 1 {
-        singular.to_string()
-    } else {
-        format!("{singular}s")
-    }
-}
-
-fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
-    let vertical = Layout::vertical([
-        Constraint::Percentage((100 - height_percent) / 2),
-        Constraint::Percentage(height_percent),
-        Constraint::Percentage((100 - height_percent) / 2),
-    ])
-    .split(area);
-
-    Layout::horizontal([
-        Constraint::Percentage((100 - width_percent) / 2),
-        Constraint::Percentage(width_percent),
-        Constraint::Percentage((100 - width_percent) / 2),
-    ])
-    .split(vertical[1])[1]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,6 +738,34 @@ mod tests {
             workspace_name: Some("workspace".to_string()),
             service_count: 2,
             environment_count: 3,
+        }
+    }
+
+    fn service(id: &str, name: &str) -> DashboardService {
+        DashboardService {
+            id: id.to_string(),
+            name: name.to_string(),
+            active_in_environment: true,
+            num_replicas: Some(1),
+            latest_deployment: None,
+            domains: Vec::new(),
+            source_repo: None,
+            source_image: None,
+            cron_schedule: None,
+            start_command: None,
+            volume_mounts: Vec::new(),
+        }
+    }
+
+    fn project() -> DashboardProject {
+        DashboardProject {
+            id: "proj_123".to_string(),
+            name: "api".to_string(),
+            workspace_name: Some("workspace".to_string()),
+            selected_environment_id: "env_123".to_string(),
+            selected_environment_name: "production".to_string(),
+            environments: Vec::new(),
+            services: vec![service("svc_1", "one"), service("svc_2", "two")],
         }
     }
 
@@ -904,7 +796,35 @@ mod tests {
 
     #[test]
     fn project_grid_has_at_least_one_column() {
-        assert_eq!(project_grid_columns(10), 1);
-        assert!(project_grid_columns(120) >= 1);
+        assert_eq!(ui::project_grid_columns(10), 1);
+        assert!(ui::project_grid_columns(120) >= 1);
+    }
+
+    #[test]
+    fn service_grid_has_at_least_one_column() {
+        assert_eq!(ui::service_grid_columns(10), 1);
+        assert!(ui::service_grid_columns(120) >= 1);
+    }
+
+    #[test]
+    fn project_refresh_preserves_selected_service_by_id() {
+        let mut state = ProjectScreenState::new(
+            ProjectLoadTarget {
+                project_id: "proj_123".to_string(),
+                environment_hint: Some("production".to_string()),
+            },
+            None,
+        );
+        state.project = Some(project());
+        state.selected_service = 1;
+
+        let mut refreshed = project();
+        refreshed.services = vec![service("svc_0", "zero"), service("svc_2", "two")];
+        state.apply_loaded_project(refreshed);
+
+        assert_eq!(
+            state.selected_service().map(|service| service.id.as_str()),
+            Some("svc_2")
+        );
     }
 }
