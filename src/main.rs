@@ -664,6 +664,7 @@ mod cli_tests {
             let find = parse(&["template", "find", "postgres"]).unwrap();
             let create = parse(&["templates", "create", "--environment", "production"]).unwrap();
             let publish = parse(&["templates", "publish", "template-id"]).unwrap();
+            let update = parse(&["templates", "update", "template-id"]).unwrap();
             let unpublish = parse(&["templates", "unpublish", "template-id"]).unwrap();
             let delete = parse(&["templates", "delete", "template-id"]).unwrap();
 
@@ -671,6 +672,7 @@ mod cli_tests {
             assert!(!command_needs_refresh(&find));
             assert!(command_needs_refresh(&create));
             assert!(command_needs_refresh(&publish));
+            assert!(command_needs_refresh(&update));
             assert!(command_needs_refresh(&unpublish));
             assert!(command_needs_refresh(&delete));
         }

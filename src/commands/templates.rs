@@ -107,7 +107,7 @@ enum TerminalTheme {
 /// Discover Railway templates
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates unpublish template-code --yes --json\n  railway templates delete template-id --yes --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
+    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates update template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates unpublish template-code --yes --json\n  railway templates delete template-id --yes --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -124,7 +124,8 @@ enum Commands {
     #[clap(visible_alias = "generate")]
     Create(CreateArgs),
 
-    /// Publish an unpublished template to the marketplace
+    /// Publish or update a template in the marketplace
+    #[clap(visible_alias = "update")]
     Publish(PublishArgs),
 
     /// Unpublish a published template from the marketplace
@@ -181,7 +182,7 @@ struct CreateArgs {
 
 #[derive(Parser, Clone)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates publish template-id --category AI/ML --description \"Deploy and Host My Agent with Railway\" --readme-file - --json\n\nValid categories:\n  AI/ML, Analytics, Authentication, Automation, Blogs, Bots, CMS,\n  Observability, Other, Starters, Storage, Queues\n\nAutomation notes:\n  First publish requires a template overview via --readme-file or --readme.\n  In interactive mode, omitted template and metadata fields are prompted.\n  Use the template ID returned by `railway templates create --json`."
+    after_help = "Examples:\n\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates update template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates publish template-id --category AI/ML --description \"Deploy and Host My Agent with Railway\" --readme-file - --json\n\nValid categories:\n  AI/ML, Analytics, Authentication, Automation, Blogs, Bots, CMS,\n  Observability, Other, Starters, Storage, Queues\n\nAutomation notes:\n  First publish requires a template overview via --readme-file or --readme.\n  Use `templates update` as an alias when replacing metadata on an already published template.\n  In interactive mode, omitted template and metadata fields are prompted.\n  Use the template ID returned by `railway templates create --json`."
 )]
 struct PublishArgs {
     /// Template ID or code
