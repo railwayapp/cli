@@ -40,14 +40,32 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &DashApp) {
     render_footer(frame, footer, app);
 }
 
-pub(super) fn project_grid_columns(width: u16) -> usize {
-    let stride = PROJECT_CARD_MIN_WIDTH + PROJECT_CARD_GAP;
-    ((width + PROJECT_CARD_GAP) / stride).max(1) as usize
+fn grid_metrics(area: Rect, min_width: u16, card_height: u16, gap: u16) -> (usize, usize, u16) {
+    let columns = ((area.width + gap) / (min_width + gap)).max(1) as usize;
+    let rows_per_page = ((area.height + gap) / (card_height + gap)).max(1) as usize;
+    let card_width = area
+        .width
+        .saturating_sub(gap.saturating_mul(columns.saturating_sub(1) as u16))
+        / columns as u16;
+    (columns, rows_per_page, card_width)
 }
 
-pub(super) fn service_grid_columns(width: u16) -> usize {
-    let stride = SERVICE_CARD_MIN_WIDTH + SERVICE_CARD_GAP;
-    ((width + SERVICE_CARD_GAP) / stride).max(1) as usize
+pub(super) fn project_grid_metrics(area: Rect) -> (usize, usize, u16) {
+    grid_metrics(
+        area,
+        PROJECT_CARD_MIN_WIDTH,
+        PROJECT_CARD_HEIGHT,
+        PROJECT_CARD_GAP,
+    )
+}
+
+pub(super) fn service_grid_metrics(area: Rect) -> (usize, usize, u16) {
+    grid_metrics(
+        area,
+        SERVICE_CARD_MIN_WIDTH,
+        SERVICE_CARD_HEIGHT,
+        SERVICE_CARD_GAP,
+    )
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
@@ -190,28 +208,6 @@ pub(super) fn render_centered_message(
             .wrap(Wrap { trim: true }),
         area,
     );
-}
-
-pub(super) fn project_card_width(width: u16, columns: usize) -> u16 {
-    let columns = columns.max(1) as u16;
-    let total_gaps = PROJECT_CARD_GAP.saturating_mul(columns.saturating_sub(1));
-    width.saturating_sub(total_gaps) / columns
-}
-
-pub(super) fn project_rows_per_page(height: u16) -> usize {
-    let stride = PROJECT_CARD_HEIGHT + PROJECT_CARD_GAP;
-    ((height + PROJECT_CARD_GAP) / stride).max(1) as usize
-}
-
-pub(super) fn service_card_width(width: u16, columns: usize) -> u16 {
-    let columns = columns.max(1) as u16;
-    let total_gaps = SERVICE_CARD_GAP.saturating_mul(columns.saturating_sub(1));
-    width.saturating_sub(total_gaps) / columns
-}
-
-pub(super) fn service_rows_per_page(height: u16) -> usize {
-    let stride = SERVICE_CARD_HEIGHT + SERVICE_CARD_GAP;
-    ((height + SERVICE_CARD_GAP) / stride).max(1) as usize
 }
 
 pub(super) fn pluralize(count: usize, singular: &str) -> String {

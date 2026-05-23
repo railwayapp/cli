@@ -977,7 +977,7 @@ fn handle_projects_screen_key(
 ) -> HandleKeyAction {
     let [_, body, _] = ui::dashboard_sections(terminal_area);
     let [_, grid_area] = ui::screen_sections(body);
-    let columns = ui::project_grid_columns(ui::panel_block("cards").inner(grid_area).width);
+    let (columns, _, _) = ui::project_grid_metrics(ui::panel_block("cards").inner(grid_area));
 
     match key.code {
         KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
@@ -1094,14 +1094,14 @@ mod tests {
 
     #[test]
     fn project_grid_has_at_least_one_column() {
-        assert_eq!(ui::project_grid_columns(10), 1);
-        assert!(ui::project_grid_columns(120) >= 1);
+        assert_eq!(ui::project_grid_metrics(Rect::new(0, 0, 10, 10)).0, 1);
+        assert!(ui::project_grid_metrics(Rect::new(0, 0, 120, 10)).0 >= 1);
     }
 
     #[test]
     fn service_grid_has_at_least_one_column() {
-        assert_eq!(ui::service_grid_columns(10), 1);
-        assert!(ui::service_grid_columns(120) >= 1);
+        assert_eq!(ui::service_grid_metrics(Rect::new(0, 0, 10, 10)).0, 1);
+        assert!(ui::service_grid_metrics(Rect::new(0, 0, 120, 10)).0 >= 1);
     }
 
     #[test]
