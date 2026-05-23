@@ -138,7 +138,10 @@ pub(in crate::controllers::dash_tui) fn handle_project_screen_key(
     key: KeyEvent,
     terminal_area: Rect,
 ) -> HandleKeyAction {
-    let columns = ui::service_navigation_columns(terminal_area);
+    let [_, body, _] = ui::dashboard_sections(terminal_area);
+    let [_, main_area] = ui::screen_sections(body);
+    let [diagram_area, _] = ui::project_overview_sections(main_area);
+    let columns = ui::service_grid_columns(ui::panel_block("services").inner(diagram_area).width);
 
     match key.code {
         KeyCode::Esc | KeyCode::Backspace => return HandleKeyAction::BackToProjects,

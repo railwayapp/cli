@@ -7,7 +7,7 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use super::{
     centered_rect, error_style, hero_style, loading_style, muted_style, panel_block,
-    panel_title_style, project_sections, selected_border_style, selected_title_style,
+    panel_title_style, screen_sections, selected_border_style, selected_title_style,
 };
 use crate::{
     commands::queries::deployments::DeploymentStatus,
@@ -20,7 +20,7 @@ use crate::{
 pub(super) fn render_service_screen(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {
     frame.render_widget(Clear, area);
 
-    let [status_area, main_area] = project_sections(area);
+    let [status_area, main_area] = screen_sections(area);
     let [content_area, sidebar_area] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
             .areas(main_area);

@@ -809,7 +809,9 @@ fn handle_projects_screen_key(
     key: KeyEvent,
     terminal_area: Rect,
 ) -> HandleKeyAction {
-    let columns = ui::project_navigation_columns(terminal_area);
+    let [_, body, _] = ui::dashboard_sections(terminal_area);
+    let [_, grid_area] = ui::screen_sections(body);
+    let columns = ui::project_grid_columns(ui::panel_block("cards").inner(grid_area).width);
 
     match key.code {
         KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),

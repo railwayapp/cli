@@ -37,14 +37,6 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &DashApp) {
     render_footer(frame, footer, app);
 }
 
-pub(super) fn project_navigation_columns(frame_area: Rect) -> usize {
-    project_grid_columns_for_area(projects_grid_area(frame_area))
-}
-
-pub(super) fn service_navigation_columns(frame_area: Rect) -> usize {
-    service_grid_columns_for_area(project_services_area(frame_area))
-}
-
 pub(super) fn project_grid_columns(width: u16) -> usize {
     let stride = PROJECT_CARD_MIN_WIDTH + PROJECT_CARD_GAP;
     ((width + PROJECT_CARD_GAP) / stride).max(1) as usize
@@ -53,14 +45,6 @@ pub(super) fn project_grid_columns(width: u16) -> usize {
 pub(super) fn service_grid_columns(width: u16) -> usize {
     let stride = SERVICE_CARD_MIN_WIDTH + SERVICE_CARD_GAP;
     ((width + SERVICE_CARD_GAP) / stride).max(1) as usize
-}
-
-fn project_grid_columns_for_area(area: Rect) -> usize {
-    project_grid_columns(panel_inner_area(area).width).max(1)
-}
-
-fn service_grid_columns_for_area(area: Rect) -> usize {
-    service_grid_columns(panel_inner_area(area).width).max(1)
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
@@ -126,29 +110,12 @@ pub(super) fn dashboard_sections(area: Rect) -> [Rect; 3] {
     .areas(area)
 }
 
-pub(super) fn projects_sections(area: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Length(4), Constraint::Min(8)]).areas(area)
-}
-
-pub(super) fn project_sections(area: Rect) -> [Rect; 2] {
+pub(super) fn screen_sections(area: Rect) -> [Rect; 2] {
     Layout::vertical([Constraint::Length(4), Constraint::Min(8)]).areas(area)
 }
 
 pub(super) fn project_overview_sections(area: Rect) -> [Rect; 2] {
     Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(area)
-}
-
-fn projects_grid_area(frame_area: Rect) -> Rect {
-    let [_, body, _] = dashboard_sections(frame_area);
-    let [_, grid_area] = projects_sections(body);
-    grid_area
-}
-
-fn project_services_area(frame_area: Rect) -> Rect {
-    let [_, body, _] = dashboard_sections(frame_area);
-    let [_, main_area] = project_sections(body);
-    let [diagram_area, _] = project_overview_sections(main_area);
-    diagram_area
 }
 
 pub(super) fn panel_block<'a>(title: &'a str) -> Block<'a> {
@@ -200,10 +167,6 @@ pub(super) fn error_style() -> Style {
     Style::default()
         .fg(RAILWAY_ERROR)
         .add_modifier(Modifier::BOLD)
-}
-
-pub(super) fn panel_inner_area(area: Rect) -> Rect {
-    panel_block("").inner(area)
 }
 
 pub(super) fn render_centered_message(

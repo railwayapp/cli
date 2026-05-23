@@ -8,9 +8,8 @@ use super::super::{DashApp, RAILWAY_ERROR, RAILWAY_LAVENDER, RAILWAY_VIOLET, SPI
 use super::{
     SERVICE_CARD_GAP, SERVICE_CARD_HEIGHT, SERVICE_CARD_MIN_WIDTH, accent_style, centered_rect,
     error_style, hero_style, loading_style, muted_style, panel_block, panel_border_style,
-    panel_title_style, project_overview_sections, project_sections, render_centered_message,
-    selected_border_style, selected_title_style, service_card_width, service_grid_columns,
-    service_rows_per_page,
+    project_overview_sections, render_centered_message, screen_sections, selected_border_style,
+    selected_title_style, service_card_width, service_grid_columns, service_rows_per_page,
 };
 use crate::controllers::dash_tui::data::DashboardService;
 use crate::controllers::dash_tui::project::ProjectScreenState;
@@ -23,7 +22,7 @@ pub(super) fn render_project_screen(
 ) {
     frame.render_widget(Clear, area);
 
-    let [status_area, main_area] = project_sections(area);
+    let [status_area, main_area] = screen_sections(area);
 
     render_project_status(frame, status_area, app, state);
 
@@ -170,9 +169,9 @@ fn render_project_diagram(frame: &mut Frame<'_>, area: Rect, state: &ProjectScre
         return;
     }
 
-    let columns = service_grid_columns(super::panel_inner_area(area).width).max(1);
+    let columns = service_grid_columns(inner.width);
     let card_width = service_card_width(inner.width, columns);
-    let rows_per_page = service_rows_per_page(inner.height).max(1);
+    let rows_per_page = service_rows_per_page(inner.height);
     let selected_row = state.selected_service / columns;
     let start_row = selected_row.saturating_sub(rows_per_page.saturating_sub(1));
     let start_index = start_row * columns;
@@ -259,7 +258,7 @@ fn render_service_card(
 }
 
 fn render_project_summary(frame: &mut Frame<'_>, area: Rect, state: &ProjectScreenState) {
-    let Some(project) = &state.project else {
+    if state.project.is_none() {
         frame.render_widget(
             Paragraph::new("Project summary will appear once the overview loads.")
                 .style(muted_style())
@@ -268,7 +267,7 @@ fn render_project_summary(frame: &mut Frame<'_>, area: Rect, state: &ProjectScre
             area,
         );
         return;
-    };
+    }
 
     let Some(service) = state.selected_service() else {
         frame.render_widget(
@@ -281,96 +280,59 @@ fn render_project_summary(frame: &mut Frame<'_>, area: Rect, state: &ProjectScre
         return;
     };
 
-    let workspace_name = project.workspace_name.as_deref().unwrap_or("personal");
-    let deployment_status = service
+    let label_style = Style::default().add_modifier(Modifier::BOLD);
+    let status = service
         .latest_deployment
         .as_ref()
         .map(|deployment| deployment.status.as_str())
-        .unwrap_or("no deployment");
-    let deployment_id = service
+        .unwrap_or(if service.active_in_environment {
+            "no latest deployment"
+        } else {
+            "no instance in env"
+        });
+    let deployment = service
         .latest_deployment
         .as_ref()
         .map(|deployment| deployment.id.as_str())
-        .unwrap_or("-");
-    let domains = if service.domains.is_empty() {
-        "none".to_string()
-    } else {
-        service.domains.join("\n")
-    };
-    let volumes = if service.volume_mounts.is_empty() {
-        "none".to_string()
-    } else {
-        service.volume_mounts.join("\n")
-    };
-    let source = service
-        .source_repo
-        .as_deref()
-        .or(service.source_image.as_deref())
         .unwrap_or("none");
-
-    let lines = vec![
-        Line::from(Span::styled(service.name.as_str(), hero_style())),
-        Line::default(),
-        Line::from(vec![
-            Span::styled("project: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(project.name.as_str()),
-        ]),
-        Line::from(vec![
-            Span::styled("workspace: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(workspace_name),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "environment: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(project.selected_environment_name.as_str()),
-        ]),
-        Line::default(),
-        Line::from(vec![
-            Span::styled("status: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(deployment_status),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "deployment: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(deployment_id),
-        ]),
-        Line::from(vec![
-            Span::styled("replicas: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(
-                service
-                    .num_replicas
-                    .map(|replicas| replicas.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("source: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(source),
-        ]),
-        Line::from(vec![
-            Span::styled("cron: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(service.cron_schedule.as_deref().unwrap_or("none")),
-        ]),
-        Line::from(vec![
-            Span::styled("command: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(service.start_command.as_deref().unwrap_or("none")),
-        ]),
-        Line::default(),
-        Line::from(Span::styled("domains", panel_title_style())),
-        Line::from(domains),
-        Line::default(),
-        Line::from(Span::styled("volumes", panel_title_style())),
-        Line::from(volumes),
-    ];
+    let replicas = service
+        .num_replicas
+        .map(|replicas| replicas.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let domains = match service.domains.len() {
+        0 => "no domains".to_string(),
+        1 => "1 domain".to_string(),
+        count => format!("{count} domains"),
+    };
 
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel_block("selected service").border_style(selected_border_style()))
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(vec![
+            Line::from(Span::styled(service.name.as_str(), hero_style())),
+            Line::default(),
+            Line::from(vec![
+                Span::styled("status: ", label_style),
+                Span::raw(status),
+            ]),
+            Line::from(vec![
+                Span::styled("deployment: ", label_style),
+                Span::raw(deployment),
+            ]),
+            Line::from(vec![
+                Span::styled("replicas: ", label_style),
+                Span::raw(replicas),
+            ]),
+            Line::from(vec![
+                Span::styled("domains: ", label_style),
+                Span::raw(domains),
+            ]),
+            Line::default(),
+            Line::from(Span::styled(
+                "Press Enter for full service details.",
+                muted_style(),
+            )),
+        ])
+        .block(panel_block("selected service").border_style(selected_border_style()))
+        .wrap(Wrap { trim: true }),
         area,
     );
 }

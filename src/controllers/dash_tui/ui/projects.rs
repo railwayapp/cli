@@ -8,7 +8,7 @@ use super::super::{DashApp, ProjectsScreenState, RAILWAY_LAVENDER, SPINNER_FRAME
 use super::{
     PROJECT_CARD_GAP, PROJECT_CARD_HEIGHT, PROJECT_CARD_MIN_WIDTH, accent_style, error_style,
     hero_style, loading_style, muted_style, panel_block, panel_border_style, pluralize,
-    project_card_width, project_grid_columns, project_rows_per_page, projects_sections,
+    project_card_width, project_grid_columns, project_rows_per_page, screen_sections,
     selected_border_style, selected_title_style,
 };
 use crate::controllers::dash_tui::data::ProjectCard;
@@ -21,7 +21,7 @@ pub(super) fn render_projects_screen(
 ) {
     frame.render_widget(Clear, area);
 
-    let [status_area, grid_area] = projects_sections(area);
+    let [status_area, grid_area] = screen_sections(area);
 
     render_projects_status(frame, status_area, app, state);
     render_projects_grid(frame, grid_area, state);
@@ -147,9 +147,9 @@ fn render_projects_grid(frame: &mut Frame<'_>, area: Rect, state: &ProjectsScree
         return;
     }
 
-    let columns = project_grid_columns(super::panel_inner_area(area).width).max(1);
+    let columns = project_grid_columns(inner.width);
     let card_width = project_card_width(inner.width, columns);
-    let rows_per_page = project_rows_per_page(inner.height).max(1);
+    let rows_per_page = project_rows_per_page(inner.height);
     let selected_row = state.selected / columns;
     let start_row = selected_row.saturating_sub(rows_per_page.saturating_sub(1));
     let start_index = start_row * columns;
