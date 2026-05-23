@@ -26,7 +26,10 @@ impl LocalSshKey {
     pub fn key_name(&self) -> Cow<'_, str> {
         match (self.key_comment.as_ref(), self.path.as_ref()) {
             (Some(comment), _) => comment.into(),
-            (_, Some(path)) => path.file_stem().unwrap().to_string_lossy(),
+            (_, Some(path)) => path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy())
+                .unwrap_or_else(|| (&self.fingerprint).into()),
             (None, None) => (&self.fingerprint).into(),
         }
     }
@@ -104,20 +107,10 @@ pub fn find_ssh_key_files() -> Result<Vec<LocalSshKey>> {
 
 // Pull SSH keys from the agent directly.
 pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
-    let output = Command::new("ssh-add")
-        .arg("-L")
-        .output()
-        .context("Failed to run ssh-add -L")?;
-
-    if output.status.code().unwrap_or(0) == 1 {
-        return Ok(vec![]);
-    } else if !output.status.success() {
-        eprintln!(
-            "Could not read from SSH agent: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(vec![]);
-    }
+    let output = match Command::new("ssh-add").arg("-L").output() {
+        Ok(output) => output,
+        Err(_) => return Ok(vec![]),
+    };
 
     String::from_utf8_lossy(&output.stdout)
         .split("\n")
@@ -125,13 +118,17 @@ pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
         .map(|s| {
             let parts: Vec<_> = s.split_whitespace().collect();
             let fingerprint = compute_fingerprint_from_pubkey(s)?;
+            let key_comment = parts
+                .get(2..)
+                .map(|p| p.join(" "))
+                .filter(|s| !s.is_empty());
 
             Ok(LocalSshKey {
                 path: None,
                 public_key: s.trim().to_string(),
                 fingerprint,
                 key_type: parts[0].to_string(),
-                key_comment: parts.get(2..).map(|p| p.join(" ")),
+                key_comment,
             })
         })
         .collect()
@@ -148,7 +145,10 @@ fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
 
     let key_type = parts[0].to_string();
     let public_key = content.trim().to_string();
-    let key_comment = parts.get(2..).map(|p| p.join(" "));
+    let key_comment = parts
+        .get(2..)
+        .map(|p| p.join(" "))
+        .filter(|s| !s.is_empty());
 
     // Compute fingerprint using ssh-keygen
     let fingerprint = compute_fingerprint(path)?;
