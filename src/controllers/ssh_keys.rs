@@ -112,6 +112,13 @@ pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
         Err(_) => return Ok(vec![]),
     };
 
+    if !output.status.success() {
+        // If we successfully run but can't find keys, it's probably best to just pretend like the
+        // SSH agent doesn't exist at all.
+        
+        return Ok(vec![]);
+    }
+
     String::from_utf8_lossy(&output.stdout)
         .split("\n")
         .filter(|s| !s.is_empty())

@@ -251,7 +251,7 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     if !unregistered.is_empty() {
         println!("Local Keys (not registered):");
         for key in unregistered {
-            let comment = key.key_comment.as_deref().unwrap_or(&"");
+            let comment = key.key_comment.as_deref().unwrap_or_default();
 
             println!("  {}", key.key_name());
             println!("    Fingerprint: {}", key.fingerprint);
