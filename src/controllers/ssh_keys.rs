@@ -25,10 +25,9 @@ pub struct LocalSshKey {
 impl LocalSshKey {
     pub fn key_name(&self) -> Cow<'_, str> {
         match (self.key_comment.as_ref(), self.path.as_ref()) {
-            (Some(comment), _) if !comment.is_empty() => comment.into(),
-            (Some(_), None) => "SSH Agent Key".into(),
+            (Some(comment), _) => comment.into(),
             (_, Some(path)) => path.file_stem().unwrap().to_string_lossy(),
-            _ => (&self.fingerprint).into(),
+            (None, None) => (&self.fingerprint).into(),
         }
     }
 
@@ -132,7 +131,7 @@ pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
                 public_key: s.trim().to_string(),
                 fingerprint,
                 key_type: parts[0].to_string(),
-                key_comment: parts[2..].join(" ").into(),
+                key_comment: parts.get(2..).map(|p| p.join(" ")),
             })
         })
         .collect()
@@ -149,7 +148,7 @@ fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
 
     let key_type = parts[0].to_string();
     let public_key = content.trim().to_string();
-    let key_comment = parts[2..].join(" ").into();
+    let key_comment = parts.get(2..).map(|p| p.join(" "));
 
     // Compute fingerprint using ssh-keygen
     let fingerprint = compute_fingerprint(path)?;

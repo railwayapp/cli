@@ -71,7 +71,7 @@ enum Commands {
     /// Add/register a local SSH key with Railway
     #[clap(visible_alias = "create", visible_alias = "register")]
     Add {
-        /// Path to the public key file (defaults to auto-detect)
+        /// Path, fingerprint, or comment of the key to add (defaults to auto-detect)
         #[clap(long, short)]
         key: Option<String>,
 
@@ -251,7 +251,7 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     if !unregistered.is_empty() {
         println!("Local Keys (not registered):");
         for key in unregistered {
-            let comment = key.key_comment.as_deref().unwrap_or_default();
+            let comment = key.key_comment.as_deref().unwrap_or(&"");
 
             println!("  {}", key.key_name());
             println!("    Fingerprint: {}", key.fingerprint);
@@ -303,16 +303,18 @@ async fn add_key(
     }
 
     // Select key to add
-    let key_to_add = if let Some(path) = key_path {
+    let key_to_add = if let Some(arg) = key_path {
         // Find by path
         local_keys
             .iter()
             .find(|k| {
                 k.path
                     .as_ref()
-                    .is_some_and(|p| p.to_string_lossy().contains(&path))
+                    .is_some_and(|p| p.to_string_lossy().contains(&arg))
+                    || k.fingerprint.contains(&arg)
+                    || k.key_comment.as_ref().is_some_and(|c| c.contains(&arg))
             })
-            .ok_or_else(|| anyhow::anyhow!("Key not found: {}", path))?
+            .ok_or_else(|| anyhow::anyhow!("Key not found: {}", arg))?
             .clone()
     } else if unregistered.len() == 1 {
         unregistered[0].clone()
