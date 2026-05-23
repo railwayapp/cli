@@ -7,11 +7,17 @@ use super::{
 };
 use crate::{
     client::GQLClient,
-    commands::Configs,
-    controllers::deployment::{
-        ServiceDeployment, fetch_service_deployments, redeploy_deployment,
-        restart_latest_service_deployment, rollback_deployment,
+    commands::{Configs, metrics::Sections},
+    controllers::{
+        db_stats,
+        deployment::{
+            ServiceDeployment, fetch_service_deployments, redeploy_deployment,
+            restart_latest_service_deployment, rollback_deployment,
+        },
+        metrics::get_volume_metrics,
+        project::{find_service_instance, get_environment_instances},
     },
+    resources::{detect_database_type, is_database_service},
 };
 
 const SERVICE_DEPLOYMENTS_LIMIT: i64 = 20;
@@ -302,6 +308,65 @@ async fn load_service_deployments_with_client(
         SERVICE_DEPLOYMENTS_LIMIT,
     )
     .await
+}
+
+pub(in crate::controllers::dash_tui) async fn build_metrics_tui_params(
+    detail: &ServiceDetail,
+) -> Result<crate::controllers::metrics_tui::ServiceTuiParams> {
+    if !detail.service.active_in_environment {
+        return Err(anyhow!(
+            "Service `{}` is not active in environment `{}`.",
+            detail.service.name,
+            detail.environment_name
+        ));
+    }
+
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let backboard = configs.get_backboard();
+    let environment_instances = get_environment_instances(
+        &client,
+        &configs,
+        &detail.project_id,
+        &detail.environment_id,
+    )
+    .await?;
+    let service_instance = find_service_instance(&environment_instances, &detail.service.id);
+    let source_image = service_instance
+        .and_then(|instance| instance.source.as_ref())
+        .and_then(|source| source.image.as_deref())
+        .or(detail.service.source_image.as_deref());
+    let db_type = detect_database_type(source_image);
+
+    Ok(crate::controllers::metrics_tui::ServiceTuiParams {
+        client,
+        backboard,
+        service_id: detail.service.id.clone(),
+        service_name: detail.service.name.clone(),
+        environment_id: detail.environment_id.clone(),
+        environment_name: detail.environment_name.clone(),
+        since_label: "1h".to_string(),
+        sections: Sections {
+            cpu: true,
+            memory: true,
+            network: true,
+            volume: true,
+            http: true,
+            has_explicit_filter: false,
+        },
+        is_db: is_database_service(source_image),
+        db_stats_supported: db_type.is_some(),
+        method: None,
+        path: None,
+        volumes: get_volume_metrics(&environment_instances, &detail.service.id),
+        db_type: db_type.clone(),
+        service_instance_id: db_type
+            .as_ref()
+            .and_then(|_| service_instance.map(|instance| instance.id.clone())),
+        db_stats_preflight_error: db_type
+            .as_ref()
+            .and_then(|_| db_stats::preflight_db_stats_ssh().err()),
+    })
 }
 
 pub(in crate::controllers::dash_tui) async fn run_service_action(

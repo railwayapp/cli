@@ -1,5 +1,5 @@
 use crate::{
-    controllers::project::ProjectServiceInstanceEdge,
+    controllers::{database::DatabaseType, project::ProjectServiceInstanceEdge},
     gql::queries::{self},
 };
 
@@ -53,6 +53,21 @@ pub(crate) fn is_database_service(source_image: Option<&str>) -> bool {
                 || img.contains("memcached")
                 || img.contains("valkey")
         })
+}
+
+pub(crate) fn detect_database_type(source_image: Option<&str>) -> Option<DatabaseType> {
+    let image = source_image?.to_ascii_lowercase();
+    if image.contains("postgres") || image.contains("postgis") || image.contains("timescale") {
+        Some(DatabaseType::PostgreSQL)
+    } else if image.contains("redis") || image.contains("valkey") {
+        Some(DatabaseType::Redis)
+    } else if image.contains("mongo") {
+        Some(DatabaseType::MongoDB)
+    } else if image.contains("mysql") || image.contains("mariadb") {
+        Some(DatabaseType::MySQL)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn database_label(

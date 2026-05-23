@@ -8,7 +8,7 @@ use std::io::stdout;
 use std::panic;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
@@ -32,19 +32,13 @@ use self::data::{
 use self::logs::{LoadedLogs, LogsScreenState, handle_logs_screen_key};
 use self::project::{EnvironmentSelectorState, ProjectScreenState, handle_project_screen_key};
 use self::service::{
-    ServiceAction, ServiceDetail, ServiceScreenState, handle_service_screen_key,
+    ServiceAction, ServiceScreenState, build_metrics_tui_params, handle_service_screen_key,
     load_service_deployments, run_service_action,
 };
 use crate::{
     client::GQLClient,
+    commands::Configs,
     commands::logs::{fetch_environment_deploy_log_lines, stream_environment_deploy_log_lines},
-    commands::{Configs, metrics::Sections},
-    controllers::{
-        db_stats,
-        metrics::get_volume_metrics,
-        project::{find_service_instance, get_environment_instances},
-    },
-    resources::is_database_service,
 };
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -287,7 +281,7 @@ impl DashApp {
             return Ok(());
         };
 
-        let params = match build_service_metrics_tui_params(&state.detail).await {
+        let params = match build_metrics_tui_params(&state.detail).await {
             Ok(params) => params,
             Err(error) => {
                 if let DashboardScreen::Service(state) = &mut self.screen {
@@ -818,88 +812,6 @@ impl ProjectsScreenState {
         } else {
             self.selected = self.selected.min(visible_len - 1);
         }
-    }
-}
-
-async fn build_service_metrics_tui_params(
-    detail: &ServiceDetail,
-) -> Result<crate::controllers::metrics_tui::ServiceTuiParams> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let backboard = configs.get_backboard();
-    let environment_instances = get_environment_instances(
-        &client,
-        &configs,
-        &detail.project_id,
-        &detail.environment_id,
-    )
-    .await?;
-    let service_instance = find_service_instance(&environment_instances, &detail.service.id);
-    let source_image = service_instance
-        .and_then(|instance| instance.source.as_ref())
-        .and_then(|source| source.image.as_deref())
-        .or(detail.service.source_image.as_deref());
-    let is_db = is_database_service(source_image);
-    let db_type = detect_database_type(source_image);
-    let sections = Sections {
-        cpu: true,
-        memory: true,
-        network: true,
-        volume: true,
-        http: true,
-        has_explicit_filter: false,
-    };
-
-    if !detail.service.active_in_environment {
-        return Err(anyhow!(
-            "Service `{}` is not active in environment `{}`.",
-            detail.service.name,
-            detail.environment_name
-        ));
-    }
-
-    Ok(crate::controllers::metrics_tui::ServiceTuiParams {
-        client,
-        backboard,
-        service_id: detail.service.id.clone(),
-        service_name: detail.service.name.clone(),
-        environment_id: detail.environment_id.clone(),
-        environment_name: detail.environment_name.clone(),
-        since_label: "1h".to_string(),
-        sections: sections.clone(),
-        is_db,
-        db_stats_supported: db_type.is_some(),
-        method: None,
-        path: None,
-        volumes: get_volume_metrics(&environment_instances, &detail.service.id),
-        db_type: db_type.clone(),
-        service_instance_id: if db_type.is_some() {
-            service_instance.map(|instance| instance.id.clone())
-        } else {
-            None
-        },
-        db_stats_preflight_error: if db_type.is_some() {
-            db_stats::preflight_db_stats_ssh().err()
-        } else {
-            None
-        },
-    })
-}
-
-fn detect_database_type(
-    source_image: Option<&str>,
-) -> Option<crate::controllers::database::DatabaseType> {
-    let img = source_image?.to_ascii_lowercase();
-    if img.contains("postgres") || img.contains("postgis") || img.contains("timescale") {
-        Some(crate::controllers::database::DatabaseType::PostgreSQL)
-    } else if img.contains("redis") || img.contains("valkey") {
-        Some(crate::controllers::database::DatabaseType::Redis)
-    } else if img.contains("mongo") {
-        Some(crate::controllers::database::DatabaseType::MongoDB)
-    } else if img.contains("mysql") || img.contains("mariadb") {
-        Some(crate::controllers::database::DatabaseType::MySQL)
-    } else {
-        None
     }
 }
 
