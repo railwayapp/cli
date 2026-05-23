@@ -32,8 +32,9 @@ use self::project::{
     EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
 use self::service::{
-    ServiceScreenLoadedData, ServiceScreenState, handle_service_screen_key,
-    load_service_screen_data, redeploy_service,
+    ServiceConfirmationState, ServiceScreenState, handle_service_screen_key,
+    load_service_deployments, redeploy_service as run_service_redeploy,
+    restart_service as run_service_restart, rollback_service_deployment as run_service_rollback,
 };
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -96,11 +97,17 @@ enum LoaderEvent {
         request_id: u64,
         result: std::result::Result<DashboardProject, String>,
     },
-    ServiceLoaded {
+    ServiceDeploymentsLoaded {
         request_id: u64,
-        result: std::result::Result<ServiceScreenLoadedData, String>,
+        result: std::result::Result<Vec<crate::controllers::deployment::ServiceDeployment>, String>,
     },
     ServiceRedeployed {
+        result: std::result::Result<String, String>,
+    },
+    ServiceRestarted {
+        result: std::result::Result<String, String>,
+    },
+    ServiceRolledBack {
         result: std::result::Result<String, String>,
     },
 }
@@ -114,8 +121,9 @@ enum HandleKeyAction {
     OpenSelectedService,
     RefreshProjects,
     RefreshProject,
-    RefreshService,
     RedeployService,
+    RestartService,
+    RollbackDeployment,
     BackToProjects,
     BackToProject,
     OpenEnvironmentSelector,
@@ -159,7 +167,7 @@ impl DashApp {
         match self.screen {
             DashboardScreen::Projects(_) => self.refresh_projects(tx),
             DashboardScreen::Project(_) => self.refresh_project(tx),
-            DashboardScreen::Service(_) => self.refresh_service(tx),
+            DashboardScreen::Service(_) => self.refresh_service_deployments(tx),
         }
     }
 
@@ -229,26 +237,24 @@ impl DashApp {
         };
 
         self.screen = DashboardScreen::Service(service_screen);
-        self.refresh_service(tx);
+        self.refresh_service_deployments(tx);
     }
 
-    fn refresh_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+    fn refresh_service_deployments(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
         let DashboardScreen::Service(state) = &mut self.screen else {
             return;
         };
 
         state.start_loading();
         let request_id = state.current_request_id;
-        let target = state.refresh_target();
-        let service_id = state.service_id();
-        let return_to_projects = state.return_to_projects_nav();
+        let detail = state.detail.clone();
         let tx = tx.clone();
 
         tokio::spawn(async move {
-            let result = load_service_screen_data(target, service_id, return_to_projects)
+            let result = load_service_deployments(&detail)
                 .await
                 .map_err(|error| error.to_string());
-            let _ = tx.send(LoaderEvent::ServiceLoaded { request_id, result });
+            let _ = tx.send(LoaderEvent::ServiceDeploymentsLoaded { request_id, result });
         });
     }
 
@@ -257,6 +263,12 @@ impl DashApp {
             return;
         };
 
+        let deployment_id = match state.selected_confirmation().cloned() {
+            Some(ServiceConfirmationState::Redeploy { deployment_id }) => deployment_id,
+            _ => return,
+        };
+
+        state.confirmation = None;
         state.loading = true;
         state.error = None;
         state.clear_toast();
@@ -264,10 +276,61 @@ impl DashApp {
         let tx = tx.clone();
 
         tokio::spawn(async move {
-            let result = redeploy_service(&detail)
+            let result = run_service_redeploy(&detail, &deployment_id)
                 .await
                 .map_err(|error| error.to_string());
             let _ = tx.send(LoaderEvent::ServiceRedeployed { result });
+        });
+    }
+
+    fn restart_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        let DashboardScreen::Service(state) = &mut self.screen else {
+            return;
+        };
+
+        if !matches!(
+            state.selected_confirmation(),
+            Some(ServiceConfirmationState::Restart { .. })
+        ) {
+            return;
+        }
+
+        state.confirmation = None;
+        state.loading = true;
+        state.error = None;
+        state.clear_toast();
+        let detail = state.detail.clone();
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+            let result = run_service_restart(&detail)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(LoaderEvent::ServiceRestarted { result });
+        });
+    }
+
+    fn rollback_service_deployment(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        let DashboardScreen::Service(state) = &mut self.screen else {
+            return;
+        };
+
+        let deployment_id = match state.selected_confirmation().cloned() {
+            Some(ServiceConfirmationState::Rollback { deployment_id }) => deployment_id,
+            _ => return,
+        };
+
+        state.confirmation = None;
+        state.loading = true;
+        state.error = None;
+        state.clear_toast();
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+            let result = run_service_rollback(&deployment_id)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(LoaderEvent::ServiceRolledBack { result });
         });
     }
 
@@ -383,7 +446,7 @@ impl DashApp {
                     Err(error) => state.set_error(error),
                 }
             }
-            LoaderEvent::ServiceLoaded { request_id, result } => {
+            LoaderEvent::ServiceDeploymentsLoaded { request_id, result } => {
                 let DashboardScreen::Service(state) = &mut self.screen else {
                     return;
                 };
@@ -393,7 +456,7 @@ impl DashApp {
                 }
 
                 match result {
-                    Ok(data) => state.apply_loaded_data(data),
+                    Ok(deployments) => state.apply_loaded_deployments(deployments),
                     Err(error) => state.set_error(error),
                 }
             }
@@ -409,7 +472,45 @@ impl DashApp {
                             format!("Redeploy triggered for deployment {deployment_id}"),
                             false,
                         );
-                        self.refresh_service(tx);
+                        self.refresh_service_deployments(tx);
+                    }
+                    Err(error) => {
+                        state.set_toast(error, true);
+                    }
+                }
+            }
+            LoaderEvent::ServiceRestarted { result } => {
+                let DashboardScreen::Service(state) = &mut self.screen else {
+                    return;
+                };
+
+                state.loading = false;
+                match result {
+                    Ok(deployment_id) => {
+                        state.set_toast(
+                            format!("Restart triggered for deployment {deployment_id}"),
+                            false,
+                        );
+                        self.refresh_service_deployments(tx);
+                    }
+                    Err(error) => {
+                        state.set_toast(error, true);
+                    }
+                }
+            }
+            LoaderEvent::ServiceRolledBack { result } => {
+                let DashboardScreen::Service(state) = &mut self.screen else {
+                    return;
+                };
+
+                state.loading = false;
+                match result {
+                    Ok(deployment_id) => {
+                        state.set_toast(
+                            format!("Rollback triggered to deployment {deployment_id}"),
+                            false,
+                        );
+                        self.refresh_service_deployments(tx);
                     }
                     Err(error) => {
                         state.set_toast(error, true);
@@ -486,8 +587,9 @@ impl DashApp {
             HandleKeyAction::OpenSelectedService => self.open_selected_service(tx),
             HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
             HandleKeyAction::RefreshProject => self.refresh_project(tx),
-            HandleKeyAction::RefreshService => self.refresh_service(tx),
             HandleKeyAction::RedeployService => self.redeploy_service(tx),
+            HandleKeyAction::RestartService => self.restart_service(tx),
+            HandleKeyAction::RollbackDeployment => self.rollback_service_deployment(tx),
             HandleKeyAction::BackToProjects => self.back_to_projects(tx),
             HandleKeyAction::BackToProject => self.back_to_project(),
             HandleKeyAction::OpenEnvironmentSelector => self.open_environment_selector(),

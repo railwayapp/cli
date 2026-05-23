@@ -151,16 +151,6 @@ pub async fn load_dashboard_project_with_client(
     Ok(map_dashboard_project(project, environment, instances))
 }
 
-pub fn find_dashboard_service<'a>(
-    project: &'a DashboardProject,
-    service_id: &str,
-) -> Option<&'a DashboardService> {
-    project
-        .services
-        .iter()
-        .find(|service| service.id == service_id)
-}
-
 fn project_card_from_project(project: Project, workspace_name: String) -> ProjectCard {
     match project {
         Project::External(project) => ProjectCard {

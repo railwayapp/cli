@@ -7,11 +7,14 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use super::{
     centered_rect, error_style, hero_style, loading_style, muted_style, panel_block,
-    panel_title_style, project_sections, selected_border_style,
+    panel_title_style, project_sections, selected_border_style, selected_title_style,
 };
 use crate::{
     commands::queries::deployments::DeploymentStatus,
-    controllers::{dash_tui::service::ServiceScreenState, deployment::ServiceDeployment},
+    controllers::{
+        dash_tui::service::{ServiceConfirmationState, ServiceFocus, ServiceScreenState},
+        deployment::ServiceDeployment,
+    },
 };
 
 pub(super) fn render_service_screen(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {
@@ -30,8 +33,8 @@ pub(super) fn render_service_screen(frame: &mut Frame<'_>, area: Rect, state: &S
     render_service_resources(frame, resources_area, state);
     render_service_deployments(frame, sidebar_area, state);
 
-    if state.redeploy_confirmation.is_some() {
-        render_redeploy_confirmation(frame, centered_rect(main_area, 60, 42), state);
+    if state.confirmation.is_some() {
+        render_service_confirmation(frame, centered_rect(main_area, 60, 42), state);
     }
 }
 
@@ -257,10 +260,16 @@ fn render_service_resources(frame: &mut Frame<'_>, area: Rect, state: &ServiceSc
             Line::from(volumes),
             Line::default(),
             Line::from(Span::styled("actions", panel_title_style())),
-            Line::from(Span::styled("r refresh service", muted_style())),
-            Line::from(Span::styled("R redeploy latest", muted_style())),
-            Line::from(Span::styled("m metrics", muted_style())),
-            Line::from(Span::styled("l logs", muted_style())),
+            Line::from(Span::styled("d focus deployments", muted_style())),
+            Line::from(Span::styled("r restart current service", muted_style())),
+            Line::from(Span::styled(
+                "D redeploy selected deployment",
+                muted_style(),
+            )),
+            Line::from(Span::styled(
+                "R rollback to selected deployment",
+                muted_style(),
+            )),
         ])
         .block(panel_block("resources"))
         .wrap(Wrap { trim: true }),
@@ -269,7 +278,12 @@ fn render_service_resources(frame: &mut Frame<'_>, area: Rect, state: &ServiceSc
 }
 
 fn render_service_deployments(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {
-    let block = panel_block("deployments");
+    let is_focused = matches!(state.focus, ServiceFocus::Deployments);
+    let block = if is_focused {
+        panel_block("deployments").border_style(selected_border_style())
+    } else {
+        panel_block("deployments")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -313,24 +327,50 @@ fn render_service_deployments(frame: &mut Frame<'_>, area: Rect, state: &Service
         .map(|deployment| deployment.id.as_str());
 
     let mut lines = vec![Line::from(vec![Span::styled(
-        "latest shown first",
+        if is_focused {
+            "deployments focused"
+        } else {
+            "press d to focus"
+        },
         muted_style(),
     )])];
     lines.push(Line::default());
 
-    for deployment in &state.deployments {
+    let entries_per_page = ((inner.height.saturating_sub(2)) / 4).max(1) as usize;
+    let selected = state
+        .selected_deployment
+        .min(state.deployments.len().saturating_sub(1));
+    let start = selected.saturating_sub(entries_per_page.saturating_sub(1));
+    let end = (start + entries_per_page).min(state.deployments.len());
+
+    for (index, deployment) in state.deployments[start..end].iter().enumerate() {
+        let absolute_index = start + index;
         let is_current = current_deployment_id == Some(deployment.id.as_str());
-        let status_style = deployment_style(deployment, is_current);
+        let is_selected = absolute_index == selected;
+        let status_style = deployment_style(deployment, is_current, is_selected, is_focused);
         let age = HumanTime::from(deployment.created_at).to_string();
+        let prefix = if is_selected { ">" } else { " " };
 
         lines.push(Line::from(vec![
+            Span::styled(
+                format!("{prefix} "),
+                if is_selected {
+                    selected_border_style()
+                } else {
+                    muted_style()
+                },
+            ),
             Span::styled(status_glyph(deployment, is_current), status_style),
             Span::raw(" "),
             Span::styled(format_status(&deployment.status), status_style),
         ]));
         lines.push(Line::from(vec![Span::styled(
             deployment.id.as_str(),
-            Style::default().add_modifier(Modifier::BOLD),
+            if is_selected {
+                selected_title_style()
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            },
         )]));
         lines.push(Line::from(vec![Span::styled(age, muted_style())]));
         lines.push(Line::default());
@@ -339,8 +379,13 @@ fn render_service_deployments(frame: &mut Frame<'_>, area: Rect, state: &Service
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-fn deployment_style(deployment: &ServiceDeployment, is_current: bool) -> Style {
-    if is_current {
+fn deployment_style(
+    deployment: &ServiceDeployment,
+    is_current: bool,
+    is_selected: bool,
+    is_focused: bool,
+) -> Style {
+    let base = if is_current {
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD)
@@ -353,6 +398,12 @@ fn deployment_style(deployment: &ServiceDeployment, is_current: bool) -> Style {
             DeploymentStatus::SUCCESS => hero_style(),
             _ => loading_style(),
         }
+    };
+
+    if is_selected && is_focused {
+        base.add_modifier(Modifier::UNDERLINED)
+    } else {
+        base
     }
 }
 
@@ -375,18 +426,25 @@ fn format_status(status: &DeploymentStatus) -> String {
     format!("{status:?}")
 }
 
-fn render_redeploy_confirmation(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {
+fn render_service_confirmation(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {
     frame.render_widget(Clear, area);
 
-    let deployment_id = state
-        .redeploy_confirmation
-        .as_ref()
-        .map(|confirmation| confirmation.deployment_id.as_str())
-        .unwrap_or("unknown");
+    let (title, deployment_id) = match state.selected_confirmation() {
+        Some(ServiceConfirmationState::Redeploy { deployment_id }) => {
+            ("Confirm redeploy", deployment_id.as_str())
+        }
+        Some(ServiceConfirmationState::Restart { deployment_id }) => {
+            ("Confirm restart", deployment_id.as_str())
+        }
+        Some(ServiceConfirmationState::Rollback { deployment_id }) => {
+            ("Confirm rollback", deployment_id.as_str())
+        }
+        None => return,
+    };
 
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::styled("Confirm redeploy", hero_style())),
+            Line::from(Span::styled(title, hero_style())),
             Line::default(),
             Line::from(vec![
                 Span::styled("service: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -409,7 +467,7 @@ fn render_redeploy_confirmation(frame: &mut Frame<'_>, area: Rect, state: &Servi
             Line::default(),
             Line::from(Span::styled("Enter confirm • Esc cancel", muted_style())),
         ])
-        .block(panel_block("redeploy").border_style(selected_border_style()))
+        .block(panel_block("confirmation").border_style(selected_border_style()))
         .wrap(Wrap { trim: true }),
         area,
     );

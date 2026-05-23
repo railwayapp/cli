@@ -104,7 +104,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
             }
         },
         DashboardScreen::Service(_) => {
-            "Esc back • q quit • deployments/metrics/logs/files/redeploy coming next"
+            "d/right/l focus deployments • Tab switch panes • arrows/ik scroll • r restart service • D redeploy selected • R rollback selected • Esc back • q quit"
         }
     };
 

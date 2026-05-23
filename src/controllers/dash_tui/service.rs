@@ -1,19 +1,17 @@
 use anyhow::{Result, anyhow};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     HandleKeyAction,
-    data::{
-        DashboardProject, DashboardService, ProjectLoadTarget, find_dashboard_service,
-        load_dashboard_project_with_client,
-    },
-    project::{ProjectScreenState, ProjectsBackNavigation},
+    data::{DashboardProject, DashboardService},
+    project::ProjectScreenState,
 };
 use crate::{
     client::GQLClient,
     commands::Configs,
     controllers::deployment::{
-        ServiceDeployment, fetch_service_deployments, redeploy_latest_service_deployment,
+        ServiceDeployment, fetch_service_deployments, redeploy_deployment,
+        restart_latest_service_deployment, rollback_deployment,
     },
 };
 
@@ -24,10 +22,12 @@ pub(in crate::controllers::dash_tui) struct ServiceScreenState {
     pub(in crate::controllers::dash_tui) detail: ServiceDetail,
     pub(in crate::controllers::dash_tui) return_to_project: Box<ProjectScreenState>,
     pub(in crate::controllers::dash_tui) deployments: Vec<ServiceDeployment>,
+    pub(in crate::controllers::dash_tui) selected_deployment: usize,
+    pub(in crate::controllers::dash_tui) focus: ServiceFocus,
     pub(in crate::controllers::dash_tui) loading: bool,
     pub(in crate::controllers::dash_tui) error: Option<String>,
     pub(in crate::controllers::dash_tui) current_request_id: u64,
-    pub(in crate::controllers::dash_tui) redeploy_confirmation: Option<RedeployConfirmationState>,
+    pub(in crate::controllers::dash_tui) confirmation: Option<ServiceConfirmationState>,
     pub(in crate::controllers::dash_tui) toast: Option<ServiceToast>,
 }
 
@@ -42,21 +42,22 @@ pub(in crate::controllers::dash_tui) struct ServiceDetail {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::controllers::dash_tui) struct RedeployConfirmationState {
-    pub(in crate::controllers::dash_tui) deployment_id: String,
+pub(in crate::controllers::dash_tui) enum ServiceFocus {
+    Overview,
+    Deployments,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::controllers::dash_tui) enum ServiceConfirmationState {
+    Redeploy { deployment_id: String },
+    Restart { deployment_id: String },
+    Rollback { deployment_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::controllers::dash_tui) struct ServiceToast {
     pub(in crate::controllers::dash_tui) message: String,
     pub(in crate::controllers::dash_tui) is_error: bool,
-}
-
-#[derive(Clone, Debug)]
-pub(in crate::controllers::dash_tui) struct ServiceScreenLoadedData {
-    pub(in crate::controllers::dash_tui) detail: ServiceDetail,
-    pub(in crate::controllers::dash_tui) return_to_project: Box<ProjectScreenState>,
-    pub(in crate::controllers::dash_tui) deployments: Vec<ServiceDeployment>,
 }
 
 impl ServiceScreenState {
@@ -70,10 +71,12 @@ impl ServiceScreenState {
             detail: service_detail_from_project(project, service),
             return_to_project: Box::new(state.clone()),
             deployments: Vec::new(),
+            selected_deployment: 0,
+            focus: ServiceFocus::Overview,
             loading: false,
             error: None,
             current_request_id: 0,
-            redeploy_confirmation: None,
+            confirmation: None,
             toast: None,
         })
     }
@@ -84,15 +87,21 @@ impl ServiceScreenState {
         self.current_request_id += 1;
     }
 
-    pub(in crate::controllers::dash_tui) fn apply_loaded_data(
+    pub(in crate::controllers::dash_tui) fn apply_loaded_deployments(
         &mut self,
-        data: ServiceScreenLoadedData,
+        deployments: Vec<ServiceDeployment>,
     ) {
-        self.detail = data.detail;
-        self.return_to_project = data.return_to_project;
-        self.deployments = data.deployments;
+        let selected_deployment_id = self
+            .selected_deployment()
+            .map(|deployment| deployment.id.clone());
+        self.deployments = deployments;
         self.loading = false;
         self.error = None;
+        self.clamp_selected_deployment();
+
+        if let Some(selected_deployment_id) = selected_deployment_id {
+            self.select_deployment_by_id(&selected_deployment_id);
+        }
     }
 
     pub(in crate::controllers::dash_tui) fn set_error(&mut self, error: String) {
@@ -115,124 +124,239 @@ impl ServiceScreenState {
         self.toast = None;
     }
 
-    fn latest_redeployable_deployment_id(&self) -> Result<String> {
-        let latest = self
-            .detail
+    pub(in crate::controllers::dash_tui) fn selected_deployment(
+        &self,
+    ) -> Option<&ServiceDeployment> {
+        self.deployments.get(self.selected_deployment)
+    }
+
+    pub(in crate::controllers::dash_tui) fn move_deployment_up(&mut self) {
+        self.selected_deployment = self.selected_deployment.saturating_sub(1);
+    }
+
+    pub(in crate::controllers::dash_tui) fn move_deployment_down(&mut self) {
+        if !self.deployments.is_empty() {
+            self.selected_deployment =
+                (self.selected_deployment + 1).min(self.deployments.len() - 1);
+        }
+    }
+
+    pub(in crate::controllers::dash_tui) fn focus_deployments(&mut self) {
+        self.focus = ServiceFocus::Deployments;
+    }
+
+    pub(in crate::controllers::dash_tui) fn focus_overview(&mut self) {
+        self.focus = ServiceFocus::Overview;
+    }
+
+    pub(in crate::controllers::dash_tui) fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            ServiceFocus::Overview => ServiceFocus::Deployments,
+            ServiceFocus::Deployments => ServiceFocus::Overview,
+        };
+    }
+
+    fn latest_restartable_deployment_id(&self) -> Result<String> {
+        self.detail
             .service
             .latest_deployment
             .as_ref()
-            .ok_or_else(|| anyhow!("No deployment found for service"))?;
-
-        if !latest.can_redeploy {
-            return Err(anyhow!(
-                "The latest deployment for service {} cannot be redeployed.",
-                self.detail.service.name
-            ));
-        }
-
-        Ok(latest.id.clone())
+            .map(|deployment| deployment.id.clone())
+            .ok_or_else(|| anyhow!("No deployment found for service"))
     }
 
     pub(in crate::controllers::dash_tui) fn open_redeploy_confirmation(&mut self) {
-        match self.latest_redeployable_deployment_id() {
-            Ok(deployment_id) => {
-                self.redeploy_confirmation = Some(RedeployConfirmationState { deployment_id });
+        match self.selected_deployment() {
+            Some(deployment) => {
+                self.confirmation = Some(ServiceConfirmationState::Redeploy {
+                    deployment_id: deployment.id.clone(),
+                });
                 self.clear_toast();
             }
-            Err(error) => {
-                self.set_toast(error.to_string(), true);
-            }
+            None => self.set_toast("No deployment selected.", true),
         }
     }
 
-    pub(in crate::controllers::dash_tui) fn service_id(&self) -> String {
-        self.detail.service.id.clone()
+    pub(in crate::controllers::dash_tui) fn open_restart_confirmation(&mut self) {
+        match self.latest_restartable_deployment_id() {
+            Ok(deployment_id) => {
+                self.confirmation = Some(ServiceConfirmationState::Restart { deployment_id });
+                self.clear_toast();
+            }
+            Err(error) => self.set_toast(error.to_string(), true),
+        }
     }
 
-    pub(in crate::controllers::dash_tui) fn refresh_target(&self) -> ProjectLoadTarget {
-        self.return_to_project.target.clone()
+    pub(in crate::controllers::dash_tui) fn open_rollback_confirmation(&mut self) {
+        match self.selected_deployment() {
+            Some(deployment) => {
+                self.confirmation = Some(ServiceConfirmationState::Rollback {
+                    deployment_id: deployment.id.clone(),
+                });
+                self.clear_toast();
+            }
+            None => self.set_toast("No deployment selected.", true),
+        }
     }
 
-    pub(in crate::controllers::dash_tui) fn return_to_projects_nav(
+    pub(in crate::controllers::dash_tui) fn select_deployment_by_id(
+        &mut self,
+        deployment_id: &str,
+    ) {
+        if let Some(index) = self
+            .deployments
+            .iter()
+            .position(|deployment| deployment.id == deployment_id)
+        {
+            self.selected_deployment = index;
+        } else {
+            self.clamp_selected_deployment();
+        }
+    }
+
+    pub(in crate::controllers::dash_tui) fn clamp_selected_deployment(&mut self) {
+        if self.deployments.is_empty() {
+            self.selected_deployment = 0;
+        } else {
+            self.selected_deployment = self.selected_deployment.min(self.deployments.len() - 1);
+        }
+    }
+
+    pub(in crate::controllers::dash_tui) fn selected_confirmation(
         &self,
-    ) -> Option<ProjectsBackNavigation> {
-        self.return_to_project.return_to_projects.clone()
+    ) -> Option<&ServiceConfirmationState> {
+        self.confirmation.as_ref()
     }
 }
 
-pub(in crate::controllers::dash_tui) async fn load_service_screen_data(
-    target: ProjectLoadTarget,
-    service_id: String,
-    return_to_projects: Option<ProjectsBackNavigation>,
-) -> Result<ServiceScreenLoadedData> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let project = load_dashboard_project_with_client(&configs, &client, target.clone()).await?;
-    let service = find_dashboard_service(&project, &service_id)
-        .cloned()
-        .ok_or_else(|| anyhow!("Service does not exist in the selected environment"))?;
-
-    let deployments = fetch_service_deployments(
-        &client,
-        &configs.get_backboard(),
-        &project.id,
-        &project.selected_environment_id,
-        &service_id,
-        SERVICE_DEPLOYMENTS_LIMIT,
-    )
-    .await?;
-
-    let mut project_state = ProjectScreenState::new(target, return_to_projects);
-    project_state.apply_loaded_project(project.clone());
-    project_state.select_service_by_id(&service_id);
-
-    Ok(ServiceScreenLoadedData {
-        detail: service_detail_from_project(&project, service),
-        return_to_project: Box::new(project_state),
-        deployments,
-    })
-}
-
-pub(in crate::controllers::dash_tui) async fn redeploy_service(
+pub(in crate::controllers::dash_tui) async fn load_service_deployments(
     detail: &ServiceDetail,
-) -> Result<String> {
+) -> Result<Vec<ServiceDeployment>> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    redeploy_latest_service_deployment(
+    load_service_deployments_with_client(
         &client,
         &configs,
         &detail.project_id,
         &detail.environment_id,
         &detail.service.id,
-        &detail.service.name,
     )
     .await
+}
+
+async fn load_service_deployments_with_client(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project_id: &str,
+    environment_id: &str,
+    service_id: &str,
+) -> Result<Vec<ServiceDeployment>> {
+    fetch_service_deployments(
+        client,
+        &configs.get_backboard(),
+        project_id,
+        environment_id,
+        service_id,
+        SERVICE_DEPLOYMENTS_LIMIT,
+    )
+    .await
+}
+
+pub(in crate::controllers::dash_tui) async fn redeploy_service(
+    _detail: &ServiceDetail,
+    deployment_id: &str,
+) -> Result<String> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    redeploy_deployment(&client, &configs.get_backboard(), deployment_id).await
+}
+
+pub(in crate::controllers::dash_tui) async fn restart_service(
+    detail: &ServiceDetail,
+) -> Result<String> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    restart_latest_service_deployment(
+        &client,
+        &configs,
+        &detail.project_id,
+        &detail.environment_id,
+        &detail.service.id,
+    )
+    .await
+}
+
+pub(in crate::controllers::dash_tui) async fn rollback_service_deployment(
+    deployment_id: &str,
+) -> Result<String> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    rollback_deployment(&client, &configs.get_backboard(), deployment_id).await
 }
 
 pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
     state: &mut ServiceScreenState,
     key: KeyEvent,
 ) -> HandleKeyAction {
-    if state.redeploy_confirmation.is_some() {
+    if let Some(confirmation) = state.selected_confirmation().cloned() {
         return match key.code {
             KeyCode::Esc | KeyCode::Backspace => {
-                state.redeploy_confirmation = None;
+                state.confirmation = None;
                 HandleKeyAction::None
             }
-            KeyCode::Enter => {
-                state.redeploy_confirmation = None;
-                HandleKeyAction::RedeployService
-            }
+            KeyCode::Enter => match confirmation {
+                ServiceConfirmationState::Redeploy { .. } => HandleKeyAction::RedeployService,
+                ServiceConfirmationState::Restart { .. } => HandleKeyAction::RestartService,
+                ServiceConfirmationState::Rollback { .. } => HandleKeyAction::RollbackDeployment,
+            },
             _ => HandleKeyAction::None,
         };
     }
 
     match key.code {
         KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::BackToProject,
-        KeyCode::Char('r') => HandleKeyAction::RefreshService,
-        KeyCode::Char('R') => {
+        KeyCode::Up | KeyCode::Char('i') if matches!(state.focus, ServiceFocus::Deployments) => {
+            state.move_deployment_up();
+            HandleKeyAction::None
+        }
+        KeyCode::Down | KeyCode::Char('k') if matches!(state.focus, ServiceFocus::Deployments) => {
+            state.move_deployment_down();
+            HandleKeyAction::None
+        }
+        KeyCode::BackTab => {
+            state.focus_overview();
+            HandleKeyAction::None
+        }
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            state.focus_overview();
+            HandleKeyAction::None
+        }
+        KeyCode::Tab => {
+            state.toggle_focus();
+            HandleKeyAction::None
+        }
+        KeyCode::Left | KeyCode::Char('j') => {
+            state.focus_overview();
+            HandleKeyAction::None
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('d') => {
+            state.focus_deployments();
+            HandleKeyAction::None
+        }
+        KeyCode::Char('r') => {
+            state.open_restart_confirmation();
+            HandleKeyAction::None
+        }
+        KeyCode::Char('D') => {
             state.open_redeploy_confirmation();
+            HandleKeyAction::None
+        }
+        KeyCode::Char('R') => {
+            state.open_rollback_confirmation();
             HandleKeyAction::None
         }
         _ => HandleKeyAction::None,
@@ -256,7 +380,10 @@ fn service_detail_from_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controllers::dash_tui::data::DeploymentSummary;
+    use crate::{
+        commands::queries::deployments::DeploymentStatus,
+        controllers::dash_tui::data::{DeploymentSummary, ProjectLoadTarget},
+    };
     use chrono::Utc;
 
     fn detail(can_redeploy: bool) -> ServiceDetail {
@@ -289,9 +416,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn uppercase_r_opens_confirmation_for_redeployable_latest_deployment() {
-        let mut state = ServiceScreenState {
+    fn service_state() -> ServiceScreenState {
+        ServiceScreenState {
             detail: detail(true),
             return_to_project: Box::new(ProjectScreenState::new(
                 ProjectLoadTarget {
@@ -300,23 +426,102 @@ mod tests {
                 },
                 None,
             )),
-            deployments: Vec::new(),
+            deployments: vec![
+                ServiceDeployment {
+                    id: "dep_123".to_string(),
+                    status: DeploymentStatus::SUCCESS,
+                    created_at: Utc::now(),
+                    meta: None,
+                },
+                ServiceDeployment {
+                    id: "dep_122".to_string(),
+                    status: DeploymentStatus::FAILED,
+                    created_at: Utc::now(),
+                    meta: None,
+                },
+            ],
+            selected_deployment: 0,
+            focus: ServiceFocus::Overview,
             loading: false,
             error: None,
             current_request_id: 0,
-            redeploy_confirmation: None,
+            confirmation: None,
             toast: None,
-        };
+        }
+    }
+
+    #[test]
+    fn d_focuses_deployments_and_down_moves_selection() {
+        let mut state = service_state();
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('d')));
+        assert!(matches!(action, HandleKeyAction::None));
+        assert!(matches!(state.focus, ServiceFocus::Deployments));
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Down));
+        assert!(matches!(action, HandleKeyAction::None));
+        assert_eq!(state.selected_deployment, 1);
+    }
+
+    #[test]
+    fn tab_toggles_focus_between_overview_and_deployments() {
+        let mut state = service_state();
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Tab));
+        assert!(matches!(action, HandleKeyAction::None));
+        assert!(matches!(state.focus, ServiceFocus::Deployments));
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Tab));
+        assert!(matches!(action, HandleKeyAction::None));
+        assert!(matches!(state.focus, ServiceFocus::Overview));
+    }
+
+    #[test]
+    fn uppercase_d_opens_confirmation_for_selected_deployment() {
+        let mut state = service_state();
+        state.focus_deployments();
+        state.selected_deployment = 1;
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('D')));
+
+        assert!(matches!(action, HandleKeyAction::None));
+        assert_eq!(
+            state.selected_confirmation(),
+            Some(&ServiceConfirmationState::Redeploy {
+                deployment_id: "dep_122".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn lowercase_r_opens_restart_confirmation_for_latest_deployment() {
+        let mut state = service_state();
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('r')));
+
+        assert!(matches!(action, HandleKeyAction::None));
+        assert_eq!(
+            state.selected_confirmation(),
+            Some(&ServiceConfirmationState::Restart {
+                deployment_id: "dep_123".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn uppercase_r_opens_rollback_confirmation_for_selected_deployment() {
+        let mut state = service_state();
+        state.focus_deployments();
+        state.selected_deployment = 1;
 
         let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('R')));
 
         assert!(matches!(action, HandleKeyAction::None));
         assert_eq!(
-            state
-                .redeploy_confirmation
-                .as_ref()
-                .map(|c| c.deployment_id.as_str()),
-            Some("dep_123")
+            state.selected_confirmation(),
+            Some(&ServiceConfirmationState::Rollback {
+                deployment_id: "dep_122".to_string()
+            })
         );
     }
 }

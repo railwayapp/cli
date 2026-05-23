@@ -3,8 +3,9 @@ use futures::StreamExt;
 use is_terminal::IsTerminal;
 
 use crate::{
-    controllers::project::{
-        find_service_instance, get_environment_instances, resolve_service_context,
+    controllers::{
+        deployment::restart_latest_service_deployment,
+        project::{find_service_instance, get_environment_instances, resolve_service_context},
     },
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
@@ -85,12 +86,12 @@ pub async fn command(args: Args) -> Result<()> {
         ),
     );
 
-    post_graphql::<mutations::DeploymentRestart, _>(
+    restart_latest_service_deployment(
         &client,
-        configs.get_backboard(),
-        mutations::deployment_restart::Variables {
-            id: latest.id.clone(),
-        },
+        &configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+        &service_id,
     )
     .await?;
 

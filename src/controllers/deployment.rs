@@ -88,6 +88,23 @@ pub async fn fetch_service_deployments(
         .collect())
 }
 
+pub async fn redeploy_deployment(
+    client: &Client,
+    backboard: &str,
+    deployment_id: &str,
+) -> Result<String> {
+    let response = post_graphql::<mutations::DeploymentRedeploy, _>(
+        client,
+        backboard,
+        mutations::deployment_redeploy::Variables {
+            id: deployment_id.to_string(),
+        },
+    )
+    .await?;
+
+    Ok(response.deployment_redeploy.id)
+}
+
 pub async fn redeploy_latest_service_deployment(
     client: &Client,
     configs: &Configs,
@@ -111,16 +128,61 @@ pub async fn redeploy_latest_service_deployment(
         );
     }
 
-    let response = post_graphql::<mutations::DeploymentRedeploy, _>(
+    redeploy_deployment(client, &configs.get_backboard(), &latest.id).await
+}
+
+pub async fn restart_deployment(
+    client: &Client,
+    backboard: &str,
+    deployment_id: &str,
+) -> Result<String> {
+    post_graphql::<mutations::DeploymentRestart, _>(
         client,
-        configs.get_backboard(),
-        mutations::deployment_redeploy::Variables {
-            id: latest.id.clone(),
+        backboard,
+        mutations::deployment_restart::Variables {
+            id: deployment_id.to_string(),
         },
     )
     .await?;
 
-    Ok(response.deployment_redeploy.id)
+    Ok(deployment_id.to_string())
+}
+
+pub async fn rollback_deployment(
+    client: &Client,
+    backboard: &str,
+    deployment_id: &str,
+) -> Result<String> {
+    post_graphql::<mutations::DeploymentRollback, _>(
+        client,
+        backboard,
+        mutations::deployment_rollback::Variables {
+            id: deployment_id.to_string(),
+        },
+    )
+    .await?;
+
+    Ok(deployment_id.to_string())
+}
+
+pub async fn restart_latest_service_deployment(
+    client: &Client,
+    configs: &Configs,
+    project_id: &str,
+    environment_id: &str,
+    service_id: &str,
+) -> Result<String> {
+    let environment_instances =
+        get_environment_instances(client, configs, project_id, environment_id).await?;
+    let service_in_env = find_service_instance(&environment_instances, service_id)
+        .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
+
+    let latest = service_in_env
+        .latest_deployment
+        .as_ref()
+        .ok_or_else(|| anyhow!("No deployment found for service"))?;
+
+    restart_deployment(client, &configs.get_backboard(), &latest.id).await
 }
 
 // Helper to handle the API's off-by-one bug where it returns limit+1 logs
