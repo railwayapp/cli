@@ -13,7 +13,7 @@ use super::{
 use crate::{
     commands::queries::deployments::DeploymentStatus,
     controllers::{
-        dash_tui::service::{ServiceConfirmationState, ServiceFocus, ServiceScreenState},
+        dash_tui::service::{ServiceAction, ServiceFocus, ServiceScreenState},
         deployment::ServiceDeployment,
     },
 };
@@ -550,16 +550,10 @@ fn truncate_multiline(text: &str, max_lines: usize, max_chars: usize) -> String 
 fn render_service_confirmation(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {
     frame.render_widget(Clear, area);
 
-    let (title, deployment_id) = match state.selected_confirmation() {
-        Some(ServiceConfirmationState::Redeploy { deployment_id }) => {
-            ("Confirm redeploy", deployment_id.as_str())
-        }
-        Some(ServiceConfirmationState::Restart { deployment_id }) => {
-            ("Confirm restart", deployment_id.as_str())
-        }
-        Some(ServiceConfirmationState::Rollback { deployment_id }) => {
-            ("Confirm rollback", deployment_id.as_str())
-        }
+    let (title, deployment_id) = match state.confirmation.as_ref() {
+        Some(ServiceAction::Redeploy { deployment_id }) => ("Confirm redeploy", deployment_id),
+        Some(ServiceAction::Restart { deployment_id }) => ("Confirm restart", deployment_id),
+        Some(ServiceAction::Rollback { deployment_id }) => ("Confirm rollback", deployment_id),
         None => return,
     };
 

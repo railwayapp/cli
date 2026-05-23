@@ -26,7 +26,7 @@ pub(in crate::controllers::dash_tui) struct ServiceScreenState {
     pub(in crate::controllers::dash_tui) error: Option<String>,
     pub(in crate::controllers::dash_tui) current_request_id: u64,
     pub(in crate::controllers::dash_tui) deployment_dialog: Option<String>,
-    pub(in crate::controllers::dash_tui) confirmation: Option<ServiceConfirmationState>,
+    pub(in crate::controllers::dash_tui) confirmation: Option<ServiceAction>,
     pub(in crate::controllers::dash_tui) toast: Option<ServiceToast>,
 }
 
@@ -47,16 +47,9 @@ pub(in crate::controllers::dash_tui) enum ServiceFocus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::controllers::dash_tui) enum ServiceConfirmationState {
-    Redeploy { deployment_id: String },
-    Restart { deployment_id: String },
-    Rollback { deployment_id: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::controllers::dash_tui) enum ServiceAction {
     Redeploy { deployment_id: String },
-    Restart,
+    Restart { deployment_id: String },
     Rollback { deployment_id: String },
 }
 
@@ -67,24 +60,10 @@ pub(in crate::controllers::dash_tui) struct ServiceToast {
 }
 
 impl ServiceAction {
-    pub(in crate::controllers::dash_tui) fn from_confirmation(
-        confirmation: &ServiceConfirmationState,
-    ) -> Self {
-        match confirmation {
-            ServiceConfirmationState::Redeploy { deployment_id } => Self::Redeploy {
-                deployment_id: deployment_id.clone(),
-            },
-            ServiceConfirmationState::Restart { .. } => Self::Restart,
-            ServiceConfirmationState::Rollback { deployment_id } => Self::Rollback {
-                deployment_id: deployment_id.clone(),
-            },
-        }
-    }
-
     pub(in crate::controllers::dash_tui) fn success_message(&self, deployment_id: &str) -> String {
         match self {
             Self::Redeploy { .. } => format!("Redeploy triggered for deployment {deployment_id}"),
-            Self::Restart => format!("Restart triggered for deployment {deployment_id}"),
+            Self::Restart { .. } => format!("Restart triggered for deployment {deployment_id}"),
             Self::Rollback { .. } => {
                 format!("Rollback triggered to deployment {deployment_id}")
             }
@@ -217,7 +196,7 @@ impl ServiceScreenState {
     pub(in crate::controllers::dash_tui) fn open_redeploy_confirmation(&mut self) {
         match self.active_deployment() {
             Some(deployment) => {
-                self.confirmation = Some(ServiceConfirmationState::Redeploy {
+                self.confirmation = Some(ServiceAction::Redeploy {
                     deployment_id: deployment.id.clone(),
                 });
                 self.clear_toast();
@@ -229,7 +208,7 @@ impl ServiceScreenState {
     pub(in crate::controllers::dash_tui) fn open_restart_confirmation(&mut self) {
         match self.latest_restartable_deployment_id() {
             Ok(deployment_id) => {
-                self.confirmation = Some(ServiceConfirmationState::Restart { deployment_id });
+                self.confirmation = Some(ServiceAction::Restart { deployment_id });
                 self.clear_toast();
             }
             Err(error) => self.set_toast(error.to_string(), true),
@@ -239,7 +218,7 @@ impl ServiceScreenState {
     pub(in crate::controllers::dash_tui) fn open_rollback_confirmation(&mut self) {
         match self.active_deployment() {
             Some(deployment) => {
-                self.confirmation = Some(ServiceConfirmationState::Rollback {
+                self.confirmation = Some(ServiceAction::Rollback {
                     deployment_id: deployment.id.clone(),
                 });
                 self.clear_toast();
@@ -283,12 +262,6 @@ impl ServiceScreenState {
         } else {
             self.selected_deployment = self.selected_deployment.min(self.deployments.len() - 1);
         }
-    }
-
-    pub(in crate::controllers::dash_tui) fn selected_confirmation(
-        &self,
-    ) -> Option<&ServiceConfirmationState> {
-        self.confirmation.as_ref()
     }
 
     fn active_deployment(&self) -> Option<&ServiceDeployment> {
@@ -342,7 +315,7 @@ pub(in crate::controllers::dash_tui) async fn run_service_action(
         ServiceAction::Redeploy { deployment_id } => {
             redeploy_deployment(&client, &configs.get_backboard(), deployment_id).await
         }
-        ServiceAction::Restart => {
+        ServiceAction::Restart { .. } => {
             restart_latest_service_deployment(
                 &client,
                 &configs,
@@ -362,15 +335,13 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
     state: &mut ServiceScreenState,
     key: KeyEvent,
 ) -> HandleKeyAction {
-    if let Some(confirmation) = state.selected_confirmation().cloned() {
+    if let Some(confirmation) = state.confirmation.clone() {
         return match key.code {
             KeyCode::Esc | KeyCode::Backspace => {
                 state.confirmation = None;
                 HandleKeyAction::None
             }
-            KeyCode::Enter => {
-                HandleKeyAction::RunServiceAction(ServiceAction::from_confirmation(&confirmation))
-            }
+            KeyCode::Enter => HandleKeyAction::RunServiceAction(confirmation),
             _ => HandleKeyAction::None,
         };
     }
@@ -562,8 +533,8 @@ mod tests {
 
         assert!(matches!(action, HandleKeyAction::None));
         assert_eq!(
-            state.selected_confirmation(),
-            Some(&ServiceConfirmationState::Redeploy {
+            state.confirmation.as_ref(),
+            Some(&ServiceAction::Redeploy {
                 deployment_id: "dep_122".to_string()
             })
         );
@@ -592,8 +563,8 @@ mod tests {
 
         assert!(matches!(action, HandleKeyAction::None));
         assert_eq!(
-            state.selected_confirmation(),
-            Some(&ServiceConfirmationState::Rollback {
+            state.confirmation.as_ref(),
+            Some(&ServiceAction::Rollback {
                 deployment_id: "dep_122".to_string()
             })
         );
@@ -607,8 +578,8 @@ mod tests {
 
         assert!(matches!(action, HandleKeyAction::None));
         assert_eq!(
-            state.selected_confirmation(),
-            Some(&ServiceConfirmationState::Restart {
+            state.confirmation.as_ref(),
+            Some(&ServiceAction::Restart {
                 deployment_id: "dep_123".to_string()
             })
         );
@@ -624,8 +595,8 @@ mod tests {
 
         assert!(matches!(action, HandleKeyAction::None));
         assert_eq!(
-            state.selected_confirmation(),
-            Some(&ServiceConfirmationState::Rollback {
+            state.confirmation.as_ref(),
+            Some(&ServiceAction::Rollback {
                 deployment_id: "dep_122".to_string()
             })
         );
@@ -640,7 +611,7 @@ mod tests {
 
         assert!(matches!(
             action,
-            HandleKeyAction::RunServiceAction(ServiceAction::Restart)
+            HandleKeyAction::RunServiceAction(ServiceAction::Restart { .. })
         ));
     }
 
@@ -652,7 +623,7 @@ mod tests {
         let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('r')));
 
         assert!(matches!(action, HandleKeyAction::None));
-        assert_eq!(state.selected_confirmation(), None);
+        assert_eq!(state.confirmation.as_ref(), None);
     }
 
     #[test]

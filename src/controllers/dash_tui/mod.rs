@@ -406,14 +406,7 @@ impl DashApp {
             return;
         };
 
-        let Some(confirmed_action) = state
-            .selected_confirmation()
-            .map(ServiceAction::from_confirmation)
-        else {
-            return;
-        };
-
-        if state.loading || confirmed_action != action {
+        if state.loading || state.confirmation.as_ref() != Some(&action) {
             return;
         }
 
