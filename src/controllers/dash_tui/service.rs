@@ -27,6 +27,7 @@ pub(in crate::controllers::dash_tui) struct ServiceScreenState {
     pub(in crate::controllers::dash_tui) loading: bool,
     pub(in crate::controllers::dash_tui) error: Option<String>,
     pub(in crate::controllers::dash_tui) current_request_id: u64,
+    pub(in crate::controllers::dash_tui) deployment_dialog: Option<String>,
     pub(in crate::controllers::dash_tui) confirmation: Option<ServiceConfirmationState>,
     pub(in crate::controllers::dash_tui) toast: Option<ServiceToast>,
 }
@@ -109,6 +110,7 @@ impl ServiceScreenState {
             loading: false,
             error: None,
             current_request_id: 0,
+            deployment_dialog: None,
             confirmation: None,
             toast: None,
         })
@@ -127,6 +129,7 @@ impl ServiceScreenState {
         let selected_deployment_id = self
             .selected_deployment()
             .map(|deployment| deployment.id.clone());
+        let dialog_deployment_id = self.deployment_dialog.clone();
         self.deployments = deployments;
         self.loading = false;
         self.error = None;
@@ -134,6 +137,15 @@ impl ServiceScreenState {
 
         if let Some(selected_deployment_id) = selected_deployment_id {
             self.select_deployment_by_id(&selected_deployment_id);
+        }
+
+        if let Some(dialog_deployment_id) = dialog_deployment_id
+            && self
+                .deployments
+                .iter()
+                .all(|deployment| deployment.id != dialog_deployment_id)
+        {
+            self.deployment_dialog = None;
         }
     }
 
@@ -161,6 +173,13 @@ impl ServiceScreenState {
         &self,
     ) -> Option<&ServiceDeployment> {
         self.deployments.get(self.selected_deployment)
+    }
+
+    pub(in crate::controllers::dash_tui) fn dialog_deployment(&self) -> Option<&ServiceDeployment> {
+        let deployment_id = self.deployment_dialog.as_deref()?;
+        self.deployments
+            .iter()
+            .find(|deployment| deployment.id == deployment_id)
     }
 
     pub(in crate::controllers::dash_tui) fn move_deployment_up(&mut self) {
@@ -199,7 +218,7 @@ impl ServiceScreenState {
     }
 
     pub(in crate::controllers::dash_tui) fn open_redeploy_confirmation(&mut self) {
-        match self.selected_deployment() {
+        match self.active_deployment() {
             Some(deployment) => {
                 self.confirmation = Some(ServiceConfirmationState::Redeploy {
                     deployment_id: deployment.id.clone(),
@@ -221,7 +240,7 @@ impl ServiceScreenState {
     }
 
     pub(in crate::controllers::dash_tui) fn open_rollback_confirmation(&mut self) {
-        match self.selected_deployment() {
+        match self.active_deployment() {
             Some(deployment) => {
                 self.confirmation = Some(ServiceConfirmationState::Rollback {
                     deployment_id: deployment.id.clone(),
@@ -230,6 +249,20 @@ impl ServiceScreenState {
             }
             None => self.set_toast("No deployment selected.", true),
         }
+    }
+
+    pub(in crate::controllers::dash_tui) fn open_selected_deployment_dialog(&mut self) {
+        match self.selected_deployment() {
+            Some(deployment) => {
+                self.deployment_dialog = Some(deployment.id.clone());
+                self.clear_toast();
+            }
+            None => self.set_toast("No deployment selected.", true),
+        }
+    }
+
+    pub(in crate::controllers::dash_tui) fn close_deployment_dialog(&mut self) {
+        self.deployment_dialog = None;
     }
 
     pub(in crate::controllers::dash_tui) fn select_deployment_by_id(
@@ -259,6 +292,11 @@ impl ServiceScreenState {
         &self,
     ) -> Option<&ServiceConfirmationState> {
         self.confirmation.as_ref()
+    }
+
+    fn active_deployment(&self) -> Option<&ServiceDeployment> {
+        self.dialog_deployment()
+            .or_else(|| self.selected_deployment())
     }
 }
 
@@ -340,6 +378,24 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
         };
     }
 
+    if state.deployment_dialog.is_some() {
+        return match key.code {
+            KeyCode::Esc | KeyCode::Backspace => {
+                state.close_deployment_dialog();
+                HandleKeyAction::None
+            }
+            KeyCode::Char('D') if !state.loading => {
+                state.open_redeploy_confirmation();
+                HandleKeyAction::None
+            }
+            KeyCode::Char('R') if !state.loading => {
+                state.open_rollback_confirmation();
+                HandleKeyAction::None
+            }
+            _ => HandleKeyAction::None,
+        };
+    }
+
     match key.code {
         KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::BackToProject,
         KeyCode::Up | KeyCode::Char('i') if matches!(state.focus, ServiceFocus::Deployments) => {
@@ -370,6 +426,10 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
             state.focus_deployments();
             HandleKeyAction::None
         }
+        KeyCode::Enter if matches!(state.focus, ServiceFocus::Deployments) => {
+            state.open_selected_deployment_dialog();
+            HandleKeyAction::None
+        }
         KeyCode::Char('r') if !state.loading => {
             state.open_restart_confirmation();
             HandleKeyAction::None
@@ -383,6 +443,7 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
             HandleKeyAction::None
         }
         KeyCode::Char('L') => HandleKeyAction::OpenServiceLogs,
+        KeyCode::Char('m') => HandleKeyAction::OpenServiceMetrics,
         _ => HandleKeyAction::None,
     }
 }
@@ -469,6 +530,7 @@ mod tests {
             loading: false,
             error: None,
             current_request_id: 0,
+            deployment_dialog: None,
             confirmation: None,
             toast: None,
         }
@@ -512,6 +574,36 @@ mod tests {
         assert_eq!(
             state.selected_confirmation(),
             Some(&ServiceConfirmationState::Redeploy {
+                deployment_id: "dep_122".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn enter_opens_selected_deployment_dialog_when_deployments_are_focused() {
+        let mut state = service_state();
+        state.focus_deployments();
+        state.selected_deployment = 1;
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Enter));
+
+        assert!(matches!(action, HandleKeyAction::None));
+        assert_eq!(state.deployment_dialog.as_deref(), Some("dep_122"));
+    }
+
+    #[test]
+    fn rollback_from_deployment_dialog_targets_dialog_deployment() {
+        let mut state = service_state();
+        state.focus_deployments();
+        state.selected_deployment = 0;
+        state.deployment_dialog = Some("dep_122".to_string());
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('R')));
+
+        assert!(matches!(action, HandleKeyAction::None));
+        assert_eq!(
+            state.selected_confirmation(),
+            Some(&ServiceConfirmationState::Rollback {
                 deployment_id: "dep_122".to_string()
             })
         );
@@ -580,5 +672,14 @@ mod tests {
         let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('L')));
 
         assert!(matches!(action, HandleKeyAction::OpenServiceLogs));
+    }
+
+    #[test]
+    fn lowercase_m_opens_service_metrics() {
+        let mut state = service_state();
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('m')));
+
+        assert!(matches!(action, HandleKeyAction::OpenServiceMetrics));
     }
 }

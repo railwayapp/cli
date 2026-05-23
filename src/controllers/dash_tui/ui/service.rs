@@ -4,6 +4,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
+use serde_json::to_string_pretty;
 
 use super::{
     centered_rect, error_style, hero_style, loading_style, muted_style, panel_block,
@@ -32,6 +33,10 @@ pub(super) fn render_service_screen(frame: &mut Frame<'_>, area: Rect, state: &S
     render_service_overview(frame, details_area, state);
     render_service_resources(frame, resources_area, state);
     render_service_deployments(frame, sidebar_area, state);
+
+    if state.deployment_dialog.is_some() {
+        render_service_deployment_dialog(frame, centered_rect(main_area, 70, 62), state);
+    }
 
     if state.confirmation.is_some() {
         render_service_confirmation(frame, centered_rect(main_area, 60, 42), state);
@@ -260,8 +265,13 @@ fn render_service_resources(frame: &mut Frame<'_>, area: Rect, state: &ServiceSc
             Line::from(volumes),
             Line::default(),
             Line::from(Span::styled("actions", panel_title_style())),
+            Line::from(Span::styled("m open metrics dashboard", muted_style())),
             Line::from(Span::styled("L open filtered logs", muted_style())),
             Line::from(Span::styled("d focus deployments", muted_style())),
+            Line::from(Span::styled(
+                "Enter inspect selected deployment",
+                muted_style(),
+            )),
             Line::from(Span::styled("r restart current service", muted_style())),
             Line::from(Span::styled(
                 "D redeploy selected deployment",
@@ -329,7 +339,7 @@ fn render_service_deployments(frame: &mut Frame<'_>, area: Rect, state: &Service
 
     let mut lines = vec![Line::from(vec![Span::styled(
         if is_focused {
-            "deployments focused"
+            "deployments focused • Enter view details"
         } else {
             "press d to focus"
         },
@@ -425,6 +435,116 @@ fn status_glyph(deployment: &ServiceDeployment, is_current: bool) -> &'static st
 
 fn format_status(status: &DeploymentStatus) -> String {
     format!("{status:?}")
+}
+
+fn render_service_deployment_dialog(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {
+    frame.render_widget(Clear, area);
+
+    let Some(deployment) = state.dialog_deployment() else {
+        return;
+    };
+
+    let is_current = state
+        .detail
+        .service
+        .latest_deployment
+        .as_ref()
+        .map(|latest| latest.id.as_str())
+        == Some(deployment.id.as_str());
+    let created_at = deployment
+        .created_at
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
+    let age = HumanTime::from(deployment.created_at).to_string();
+    let meta = deployment
+        .meta
+        .as_ref()
+        .map(|meta| to_string_pretty(meta).unwrap_or_else(|_| meta.to_string()))
+        .unwrap_or_else(|| "none".to_string());
+    let meta_preview = truncate_multiline(&meta, 12, 1000);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("deployment details", hero_style())),
+            Line::default(),
+            Line::from(vec![
+                Span::styled("service: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(state.detail.service.name.as_str()),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "environment: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(state.detail.environment_name.as_str()),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "deployment: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(deployment.id.as_str()),
+            ]),
+            Line::from(vec![
+                Span::styled("status: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format_status(&deployment.status)),
+                Span::raw("  •  "),
+                Span::styled("current: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(if is_current { "yes" } else { "no" }),
+            ]),
+            Line::from(vec![
+                Span::styled("created: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(created_at),
+            ]),
+            Line::from(vec![
+                Span::styled("age: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(age),
+            ]),
+            Line::default(),
+            Line::from(Span::styled("meta", panel_title_style())),
+            Line::from(meta_preview),
+            Line::default(),
+            Line::from(Span::styled(
+                "D redeploy • R rollback • Esc close",
+                muted_style(),
+            )),
+        ])
+        .block(panel_block("deployment").border_style(selected_border_style()))
+        .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn truncate_multiline(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut truncated = String::new();
+    let mut line_count = 0usize;
+
+    for line in text.lines() {
+        if line_count == max_lines || truncated.len() >= max_chars {
+            break;
+        }
+
+        if !truncated.is_empty() {
+            truncated.push('\n');
+        }
+
+        let remaining = max_chars.saturating_sub(truncated.len());
+        if line.len() > remaining {
+            truncated.push_str(&line[..remaining]);
+            break;
+        }
+
+        truncated.push_str(line);
+        line_count += 1;
+    }
+
+    if truncated.is_empty() {
+        text.chars().take(max_chars).collect()
+    } else if truncated.len() < text.len() {
+        format!("{truncated}\n…")
+    } else {
+        truncated
+    }
 }
 
 fn render_service_confirmation(frame: &mut Frame<'_>, area: Rect, state: &ServiceScreenState) {

@@ -8,7 +8,7 @@ use std::io::stdout;
 use std::panic;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
@@ -34,13 +34,19 @@ use self::project::{
     EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
 use self::service::{
-    ServiceAction, ServiceScreenState, handle_service_screen_key, load_service_deployments,
-    run_service_action,
+    ServiceAction, ServiceDetail, ServiceScreenState, handle_service_screen_key,
+    load_service_deployments, run_service_action,
 };
 use crate::{
     client::GQLClient,
-    commands::Configs,
     commands::logs::{fetch_environment_deploy_log_lines, stream_environment_deploy_log_lines},
+    commands::{Configs, metrics::Sections},
+    controllers::{
+        db_stats,
+        metrics::get_volume_metrics,
+        project::{find_service_instance, get_environment_instances},
+    },
+    resources::is_database_service,
 };
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -136,6 +142,7 @@ enum HandleKeyAction {
     OpenSelectedService,
     OpenProjectLogs,
     OpenServiceLogs,
+    OpenServiceMetrics,
     RefreshProjects,
     RefreshProject,
     RunServiceAction(ServiceAction),
@@ -284,6 +291,37 @@ impl DashApp {
         self.start_logs_stream(tx);
     }
 
+    async fn open_service_metrics(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        let DashboardScreen::Service(state) = &self.screen else {
+            return Ok(());
+        };
+
+        let params = match build_service_metrics_tui_params(&state.detail).await {
+            Ok(params) => params,
+            Err(error) => {
+                if let DashboardScreen::Service(state) = &mut self.screen {
+                    state.set_toast(format!("Unable to open metrics: {error}"), true);
+                }
+                return Ok(());
+            }
+        };
+
+        restore_terminal();
+        let metrics_result = crate::controllers::metrics_tui::run(params).await;
+        *terminal = setup_terminal()?;
+
+        if let Err(error) = metrics_result
+            && let DashboardScreen::Service(state) = &mut self.screen
+        {
+            state.set_toast(format!("Unable to open metrics: {error}"), true);
+        }
+
+        Ok(())
+    }
+
     fn refresh_service_deployments(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
         let DashboardScreen::Service(state) = &mut self.screen else {
             return;
@@ -392,6 +430,7 @@ impl DashApp {
         }
 
         state.confirmation = None;
+        state.close_deployment_dialog();
         state.loading = true;
         state.error = None;
         state.clear_toast();
@@ -626,37 +665,39 @@ impl DashApp {
         }
     }
 
-    fn handle_event(
+    async fn handle_event(
         &mut self,
         event: Event,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
         tx: &mpsc::UnboundedSender<LoaderEvent>,
-    ) -> bool {
+    ) -> Result<bool> {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 let size = terminal.size().unwrap_or_default();
-                self.handle_key(key, Rect::new(0, 0, size.width, size.height), tx)
+                self.handle_key(key, Rect::new(0, 0, size.width, size.height), terminal, tx)
+                    .await
             }
             Event::Resize(_, _) => {
                 let _ = terminal.clear();
-                false
+                Ok(false)
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 
-    fn handle_key(
+    async fn handle_key(
         &mut self,
         key: KeyEvent,
         terminal_area: Rect,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
         tx: &mpsc::UnboundedSender<LoaderEvent>,
-    ) -> bool {
+    ) -> Result<bool> {
         if matches!(key.code, KeyCode::Char('q'))
             || (matches!(key.code, KeyCode::Char('c'))
                 && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             self.stop_logs_stream();
-            return true;
+            return Ok(true);
         }
 
         if matches!(
@@ -668,13 +709,13 @@ impl DashApp {
         ) && let DashboardScreen::Projects(state) = &mut self.screen
         {
             handle_projects_filter_input(state, key);
-            return false;
+            return Ok(false);
         }
 
         if let DashboardScreen::Project(state) = &mut self.screen
             && state.environment_selector.is_some()
         {
-            return self.handle_environment_selector_key(key, tx);
+            return Ok(self.handle_environment_selector_key(key, tx));
         }
 
         let action = match &mut self.screen {
@@ -695,6 +736,7 @@ impl DashApp {
             HandleKeyAction::OpenSelectedService => self.open_selected_service(tx),
             HandleKeyAction::OpenProjectLogs => self.open_project_logs(tx),
             HandleKeyAction::OpenServiceLogs => self.open_service_logs(tx),
+            HandleKeyAction::OpenServiceMetrics => self.open_service_metrics(terminal).await?,
             HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
             HandleKeyAction::RefreshProject => self.refresh_project(tx),
             HandleKeyAction::RunServiceAction(action) => self.start_service_action(action, tx),
@@ -704,7 +746,7 @@ impl DashApp {
             HandleKeyAction::OpenEnvironmentSelector => self.open_environment_selector(),
         }
 
-        false
+        Ok(false)
     }
 
     fn handle_environment_selector_key(
@@ -847,6 +889,88 @@ impl ProjectsScreenState {
     }
 }
 
+async fn build_service_metrics_tui_params(
+    detail: &ServiceDetail,
+) -> Result<crate::controllers::metrics_tui::ServiceTuiParams> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let backboard = configs.get_backboard();
+    let environment_instances = get_environment_instances(
+        &client,
+        &configs,
+        &detail.project_id,
+        &detail.environment_id,
+    )
+    .await?;
+    let service_instance = find_service_instance(&environment_instances, &detail.service.id);
+    let source_image = service_instance
+        .and_then(|instance| instance.source.as_ref())
+        .and_then(|source| source.image.as_deref())
+        .or(detail.service.source_image.as_deref());
+    let is_db = is_database_service(source_image);
+    let db_type = detect_database_type(source_image);
+    let sections = Sections {
+        cpu: true,
+        memory: true,
+        network: true,
+        volume: true,
+        http: true,
+        has_explicit_filter: false,
+    };
+
+    if !detail.service.active_in_environment {
+        return Err(anyhow!(
+            "Service `{}` is not active in environment `{}`.",
+            detail.service.name,
+            detail.environment_name
+        ));
+    }
+
+    Ok(crate::controllers::metrics_tui::ServiceTuiParams {
+        client,
+        backboard,
+        service_id: detail.service.id.clone(),
+        service_name: detail.service.name.clone(),
+        environment_id: detail.environment_id.clone(),
+        environment_name: detail.environment_name.clone(),
+        since_label: "1h".to_string(),
+        sections: sections.clone(),
+        is_db,
+        db_stats_supported: db_type.is_some(),
+        method: None,
+        path: None,
+        volumes: get_volume_metrics(&environment_instances, &detail.service.id),
+        db_type: db_type.clone(),
+        service_instance_id: if db_type.is_some() {
+            service_instance.map(|instance| instance.id.clone())
+        } else {
+            None
+        },
+        db_stats_preflight_error: if db_type.is_some() {
+            db_stats::preflight_db_stats_ssh().err()
+        } else {
+            None
+        },
+    })
+}
+
+fn detect_database_type(
+    source_image: Option<&str>,
+) -> Option<crate::controllers::database::DatabaseType> {
+    let img = source_image?.to_ascii_lowercase();
+    if img.contains("postgres") || img.contains("postgis") || img.contains("timescale") {
+        Some(crate::controllers::database::DatabaseType::PostgreSQL)
+    } else if img.contains("redis") || img.contains("valkey") {
+        Some(crate::controllers::database::DatabaseType::Redis)
+    } else if img.contains("mongo") {
+        Some(crate::controllers::database::DatabaseType::MongoDB)
+    } else if img.contains("mysql") || img.contains("mariadb") {
+        Some(crate::controllers::database::DatabaseType::MySQL)
+    } else {
+        None
+    }
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
 
@@ -894,7 +1018,7 @@ pub async fn run(params: DashTuiParams) -> Result<()> {
 
         tokio::select! {
             Some(Ok(event)) = events.next() => {
-                if app.handle_event(event, &mut terminal, &loader_tx) {
+                if app.handle_event(event, &mut terminal, &loader_tx).await? {
                     break;
                 }
             }

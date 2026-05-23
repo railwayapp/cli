@@ -92,7 +92,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
             }
         },
         DashboardScreen::Service(_) => {
-            "L logs • d/right/l focus deployments • Tab switch panes • arrows/ik scroll • r restart service • D redeploy selected • R rollback selected • Esc back • q quit"
+            "Tab switch panes • arrows/ik scroll • r restart service • Esc back • q quit"
         }
         DashboardScreen::Logs(_) => {
             "Esc back • p pause/resume • g/G top/bottom • arrows/ik scroll • q quit"
