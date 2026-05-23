@@ -34,9 +34,8 @@ use self::project::{
     EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
 use self::service::{
-    ServiceConfirmationState, ServiceScreenState, handle_service_screen_key,
-    load_service_deployments, redeploy_service as run_service_redeploy,
-    restart_service as run_service_restart, rollback_service_deployment as run_service_rollback,
+    ServiceAction, ServiceScreenState, handle_service_screen_key, load_service_deployments,
+    run_service_action,
 };
 use crate::{
     client::GQLClient,
@@ -110,13 +109,8 @@ enum LoaderEvent {
         request_id: u64,
         result: std::result::Result<Vec<crate::controllers::deployment::ServiceDeployment>, String>,
     },
-    ServiceRedeployed {
-        result: std::result::Result<String, String>,
-    },
-    ServiceRestarted {
-        result: std::result::Result<String, String>,
-    },
-    ServiceRolledBack {
+    ServiceActionFinished {
+        action: ServiceAction,
         result: std::result::Result<String, String>,
     },
     LogsLoaded {
@@ -143,9 +137,7 @@ enum HandleKeyAction {
     OpenProjectLogs,
     RefreshProjects,
     RefreshProject,
-    RedeployService,
-    RestartService,
-    RollbackDeployment,
+    RunServiceAction(ServiceAction),
     BackToProjects,
     BackToProject,
     OpenEnvironmentSelector,
@@ -365,40 +357,23 @@ impl DashApp {
         }
     }
 
-    fn redeploy_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+    fn start_service_action(
+        &mut self,
+        action: ServiceAction,
+        tx: &mpsc::UnboundedSender<LoaderEvent>,
+    ) {
         let DashboardScreen::Service(state) = &mut self.screen else {
             return;
         };
 
-        let deployment_id = match state.selected_confirmation().cloned() {
-            Some(ServiceConfirmationState::Redeploy { deployment_id }) => deployment_id,
-            _ => return,
-        };
-
-        state.confirmation = None;
-        state.loading = true;
-        state.error = None;
-        state.clear_toast();
-        let detail = state.detail.clone();
-        let tx = tx.clone();
-
-        tokio::spawn(async move {
-            let result = run_service_redeploy(&detail, &deployment_id)
-                .await
-                .map_err(|error| error.to_string());
-            let _ = tx.send(LoaderEvent::ServiceRedeployed { result });
-        });
-    }
-
-    fn restart_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
-        let DashboardScreen::Service(state) = &mut self.screen else {
+        let Some(confirmed_action) = state
+            .selected_confirmation()
+            .map(ServiceAction::from_confirmation)
+        else {
             return;
         };
 
-        if !matches!(
-            state.selected_confirmation(),
-            Some(ServiceConfirmationState::Restart { .. })
-        ) {
+        if state.loading || confirmed_action != action {
             return;
         }
 
@@ -410,35 +385,33 @@ impl DashApp {
         let tx = tx.clone();
 
         tokio::spawn(async move {
-            let result = run_service_restart(&detail)
+            let result = run_service_action(&detail, &action)
                 .await
                 .map_err(|error| error.to_string());
-            let _ = tx.send(LoaderEvent::ServiceRestarted { result });
+            let _ = tx.send(LoaderEvent::ServiceActionFinished { action, result });
         });
     }
 
-    fn rollback_service_deployment(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+    fn handle_service_action_result(
+        &mut self,
+        action: ServiceAction,
+        result: std::result::Result<String, String>,
+        tx: &mpsc::UnboundedSender<LoaderEvent>,
+    ) {
         let DashboardScreen::Service(state) = &mut self.screen else {
             return;
         };
 
-        let deployment_id = match state.selected_confirmation().cloned() {
-            Some(ServiceConfirmationState::Rollback { deployment_id }) => deployment_id,
-            _ => return,
-        };
-
-        state.confirmation = None;
-        state.loading = true;
-        state.error = None;
-        state.clear_toast();
-        let tx = tx.clone();
-
-        tokio::spawn(async move {
-            let result = run_service_rollback(&deployment_id)
-                .await
-                .map_err(|error| error.to_string());
-            let _ = tx.send(LoaderEvent::ServiceRolledBack { result });
-        });
+        state.loading = false;
+        match result {
+            Ok(deployment_id) => {
+                state.set_toast(action.success_message(&deployment_id), false);
+                self.refresh_service_deployments(tx);
+            }
+            Err(error) => {
+                state.set_toast(error, true);
+            }
+        }
     }
 
     fn open_environment_selector(&mut self) {
@@ -572,62 +545,8 @@ impl DashApp {
                     Err(error) => state.set_error(error),
                 }
             }
-            LoaderEvent::ServiceRedeployed { result } => {
-                let DashboardScreen::Service(state) = &mut self.screen else {
-                    return;
-                };
-
-                state.loading = false;
-                match result {
-                    Ok(deployment_id) => {
-                        state.set_toast(
-                            format!("Redeploy triggered for deployment {deployment_id}"),
-                            false,
-                        );
-                        self.refresh_service_deployments(tx);
-                    }
-                    Err(error) => {
-                        state.set_toast(error, true);
-                    }
-                }
-            }
-            LoaderEvent::ServiceRestarted { result } => {
-                let DashboardScreen::Service(state) = &mut self.screen else {
-                    return;
-                };
-
-                state.loading = false;
-                match result {
-                    Ok(deployment_id) => {
-                        state.set_toast(
-                            format!("Restart triggered for deployment {deployment_id}"),
-                            false,
-                        );
-                        self.refresh_service_deployments(tx);
-                    }
-                    Err(error) => {
-                        state.set_toast(error, true);
-                    }
-                }
-            }
-            LoaderEvent::ServiceRolledBack { result } => {
-                let DashboardScreen::Service(state) = &mut self.screen else {
-                    return;
-                };
-
-                state.loading = false;
-                match result {
-                    Ok(deployment_id) => {
-                        state.set_toast(
-                            format!("Rollback triggered to deployment {deployment_id}"),
-                            false,
-                        );
-                        self.refresh_service_deployments(tx);
-                    }
-                    Err(error) => {
-                        state.set_toast(error, true);
-                    }
-                }
+            LoaderEvent::ServiceActionFinished { action, result } => {
+                self.handle_service_action_result(action, result, tx);
             }
             LoaderEvent::LogsLoaded { request_id, result } => {
                 let DashboardScreen::Logs(state) = &mut self.screen else {
@@ -741,9 +660,7 @@ impl DashApp {
             HandleKeyAction::OpenProjectLogs => self.open_project_logs(tx),
             HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
             HandleKeyAction::RefreshProject => self.refresh_project(tx),
-            HandleKeyAction::RedeployService => self.redeploy_service(tx),
-            HandleKeyAction::RestartService => self.restart_service(tx),
-            HandleKeyAction::RollbackDeployment => self.rollback_service_deployment(tx),
+            HandleKeyAction::RunServiceAction(action) => self.start_service_action(action, tx),
             HandleKeyAction::BackToProjects => self.back_to_projects(tx),
             HandleKeyAction::BackToProject => self.back_to_project(),
             HandleKeyAction::OpenEnvironmentSelector => self.open_environment_selector(),

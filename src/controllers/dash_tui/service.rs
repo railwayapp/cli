@@ -55,9 +55,42 @@ pub(in crate::controllers::dash_tui) enum ServiceConfirmationState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::controllers::dash_tui) enum ServiceAction {
+    Redeploy { deployment_id: String },
+    Restart,
+    Rollback { deployment_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::controllers::dash_tui) struct ServiceToast {
     pub(in crate::controllers::dash_tui) message: String,
     pub(in crate::controllers::dash_tui) is_error: bool,
+}
+
+impl ServiceAction {
+    pub(in crate::controllers::dash_tui) fn from_confirmation(
+        confirmation: &ServiceConfirmationState,
+    ) -> Self {
+        match confirmation {
+            ServiceConfirmationState::Redeploy { deployment_id } => Self::Redeploy {
+                deployment_id: deployment_id.clone(),
+            },
+            ServiceConfirmationState::Restart { .. } => Self::Restart,
+            ServiceConfirmationState::Rollback { deployment_id } => Self::Rollback {
+                deployment_id: deployment_id.clone(),
+            },
+        }
+    }
+
+    pub(in crate::controllers::dash_tui) fn success_message(&self, deployment_id: &str) -> String {
+        match self {
+            Self::Redeploy { .. } => format!("Redeploy triggered for deployment {deployment_id}"),
+            Self::Restart => format!("Restart triggered for deployment {deployment_id}"),
+            Self::Rollback { .. } => {
+                format!("Rollback triggered to deployment {deployment_id}")
+            }
+        }
+    }
 }
 
 impl ServiceScreenState {
@@ -263,39 +296,31 @@ async fn load_service_deployments_with_client(
     .await
 }
 
-pub(in crate::controllers::dash_tui) async fn redeploy_service(
-    _detail: &ServiceDetail,
-    deployment_id: &str,
-) -> Result<String> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-
-    redeploy_deployment(&client, &configs.get_backboard(), deployment_id).await
-}
-
-pub(in crate::controllers::dash_tui) async fn restart_service(
+pub(in crate::controllers::dash_tui) async fn run_service_action(
     detail: &ServiceDetail,
+    action: &ServiceAction,
 ) -> Result<String> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    restart_latest_service_deployment(
-        &client,
-        &configs,
-        &detail.project_id,
-        &detail.environment_id,
-        &detail.service.id,
-    )
-    .await
-}
-
-pub(in crate::controllers::dash_tui) async fn rollback_service_deployment(
-    deployment_id: &str,
-) -> Result<String> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-
-    rollback_deployment(&client, &configs.get_backboard(), deployment_id).await
+    match action {
+        ServiceAction::Redeploy { deployment_id } => {
+            redeploy_deployment(&client, &configs.get_backboard(), deployment_id).await
+        }
+        ServiceAction::Restart => {
+            restart_latest_service_deployment(
+                &client,
+                &configs,
+                &detail.project_id,
+                &detail.environment_id,
+                &detail.service.id,
+            )
+            .await
+        }
+        ServiceAction::Rollback { deployment_id } => {
+            rollback_deployment(&client, &configs.get_backboard(), deployment_id).await
+        }
+    }
 }
 
 pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
@@ -308,11 +333,9 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
                 state.confirmation = None;
                 HandleKeyAction::None
             }
-            KeyCode::Enter => match confirmation {
-                ServiceConfirmationState::Redeploy { .. } => HandleKeyAction::RedeployService,
-                ServiceConfirmationState::Restart { .. } => HandleKeyAction::RestartService,
-                ServiceConfirmationState::Rollback { .. } => HandleKeyAction::RollbackDeployment,
-            },
+            KeyCode::Enter => {
+                HandleKeyAction::RunServiceAction(ServiceAction::from_confirmation(&confirmation))
+            }
             _ => HandleKeyAction::None,
         };
     }
@@ -347,15 +370,15 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
             state.focus_deployments();
             HandleKeyAction::None
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('r') if !state.loading => {
             state.open_restart_confirmation();
             HandleKeyAction::None
         }
-        KeyCode::Char('D') => {
+        KeyCode::Char('D') if !state.loading => {
             state.open_redeploy_confirmation();
             HandleKeyAction::None
         }
-        KeyCode::Char('R') => {
+        KeyCode::Char('R') if !state.loading => {
             state.open_rollback_confirmation();
             HandleKeyAction::None
         }
@@ -523,5 +546,29 @@ mod tests {
                 deployment_id: "dep_122".to_string()
             })
         );
+    }
+
+    #[test]
+    fn enter_runs_confirmed_service_action() {
+        let mut state = service_state();
+        state.open_restart_confirmation();
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Enter));
+
+        assert!(matches!(
+            action,
+            HandleKeyAction::RunServiceAction(ServiceAction::Restart)
+        ));
+    }
+
+    #[test]
+    fn mutation_shortcuts_are_ignored_while_loading() {
+        let mut state = service_state();
+        state.loading = true;
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('r')));
+
+        assert!(matches!(action, HandleKeyAction::None));
+        assert_eq!(state.selected_confirmation(), None);
     }
 }
