@@ -122,6 +122,7 @@ pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
     String::from_utf8_lossy(&output.stdout)
         .split("\n")
         .filter(|s| !s.is_empty())
+        .filter(|s| SUPPORTED_KEY_TYPES.iter().any(|kt| s.starts_with(kt)))
         .map(|s| {
             let parts: Vec<_> = s.split_whitespace().collect();
             let fingerprint = compute_fingerprint_from_pubkey(s)?;

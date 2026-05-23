@@ -90,13 +90,11 @@ fn discover_private_key_paths() -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
     for public_key in find_ssh_key_files()? {
-        if public_key.path.is_none() {
-            continue;
-        }
-
-        if let Some(private_key_path) = private_key_path_for_public_key(&public_key.path.unwrap()) {
-            if private_key_path.is_file() {
-                paths.push(private_key_path);
+        if let Some(public_key_path) = public_key.path {
+            if let Some(private_key_path) = private_key_path_for_public_key(&public_key_path) {
+                if private_key_path.is_file() {
+                    paths.push(private_key_path);
+                }
             }
         }
     }
