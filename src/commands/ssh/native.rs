@@ -44,7 +44,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     if local_keys.is_empty() {
         bail!(
-            "No SSH keys found in ~/.ssh/\n\n\
+            "No SSH keys found in your SSH agent or ~/.ssh/\n\n\
             Generate one with:\n  ssh-keygen -t ed25519\n\n\
             Then run this command again."
         );

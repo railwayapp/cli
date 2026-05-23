@@ -110,11 +110,14 @@ pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
         .output()
         .context("Failed to run ssh-add -L")?;
 
-    if !output.status.success() {
-        bail!(
-            "ssh-add -L failed: {}",
+    if output.status.code().unwrap_or(0) == 1 {
+        return Ok(vec![]);
+    } else if !output.status.success() {
+        eprintln!(
+            "Could not read from SSH agent: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        return Ok(vec![]);
     }
 
     String::from_utf8_lossy(&output.stdout)
