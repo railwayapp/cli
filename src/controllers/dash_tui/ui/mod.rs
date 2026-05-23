@@ -1,3 +1,4 @@
+mod logs;
 mod project;
 mod projects;
 mod service;
@@ -8,6 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use self::logs::render_logs_screen;
 use self::project::render_project_screen;
 use self::projects::render_projects_screen;
 use self::service::render_service_screen;
@@ -32,6 +34,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &DashApp) {
         DashboardScreen::Projects(state) => render_projects_screen(frame, body, app, state),
         DashboardScreen::Project(state) => render_project_screen(frame, body, app, state),
         DashboardScreen::Service(state) => render_service_screen(frame, body, state),
+        DashboardScreen::Logs(state) => render_logs_screen(frame, body, state),
     }
 
     render_footer(frame, footer, app);
@@ -56,6 +59,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
         }
         DashboardScreen::Project(_) => "project overview",
         DashboardScreen::Service(_) => "service detail",
+        DashboardScreen::Logs(_) => "logs",
     };
 
     frame.render_widget(
@@ -81,14 +85,17 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &DashApp) {
         }
         DashboardScreen::Project(_) => match app.params.auth_mode {
             DashboardAuthMode::Workspace => {
-                "Enter service • Esc back • e environments • arrows/ijkl move • r reload • q quit"
+                "Enter service • L logs • Esc back • e environments • arrows/ijkl move • r reload • q quit"
             }
             DashboardAuthMode::LinkedProject { .. } => {
-                "Enter service • e environments • arrows/ijkl move • r reload • q quit"
+                "Enter service • L logs • e environments • arrows/ijkl move • r reload • q quit"
             }
         },
         DashboardScreen::Service(_) => {
             "d/right/l focus deployments • Tab switch panes • arrows/ik scroll • r restart service • D redeploy selected • R rollback selected • Esc back • q quit"
+        }
+        DashboardScreen::Logs(_) => {
+            "Esc back • p pause/resume • g/G top/bottom • arrows/ik scroll • q quit"
         }
     };
 

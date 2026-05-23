@@ -1,4 +1,5 @@
 mod data;
+mod logs;
 mod project;
 mod service;
 mod ui;
@@ -28,6 +29,7 @@ use tokio::time::MissedTickBehavior;
 use self::data::{
     DashboardProject, ProjectCard, ProjectLoadTarget, load_dashboard_project, load_project_cards,
 };
+use self::logs::{LoadedLogs, LogsScreenState, handle_logs_screen_key};
 use self::project::{
     EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
 };
@@ -35,6 +37,11 @@ use self::service::{
     ServiceConfirmationState, ServiceScreenState, handle_service_screen_key,
     load_service_deployments, redeploy_service as run_service_redeploy,
     restart_service as run_service_restart, rollback_service_deployment as run_service_rollback,
+};
+use crate::{
+    client::GQLClient,
+    commands::Configs,
+    commands::logs::{fetch_environment_deploy_log_lines, stream_environment_deploy_log_lines},
 };
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -62,11 +69,12 @@ pub struct DashTuiParams {
     pub auth_mode: DashboardAuthMode,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct DashApp {
     params: DashTuiParams,
     screen: DashboardScreen,
     spinner_tick: usize,
+    log_stream_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +82,7 @@ enum DashboardScreen {
     Projects(ProjectsScreenState),
     Project(ProjectScreenState),
     Service(ServiceScreenState),
+    Logs(LogsScreenState),
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +119,18 @@ enum LoaderEvent {
     ServiceRolledBack {
         result: std::result::Result<String, String>,
     },
+    LogsLoaded {
+        request_id: u64,
+        result: std::result::Result<LoadedLogs, String>,
+    },
+    LogLine {
+        request_id: u64,
+        line: String,
+    },
+    LogStreamEnded {
+        request_id: u64,
+        error: Option<String>,
+    },
 }
 
 enum HandleKeyAction {
@@ -119,6 +140,7 @@ enum HandleKeyAction {
         return_to_projects: ProjectsBackNavigation,
     },
     OpenSelectedService,
+    OpenProjectLogs,
     RefreshProjects,
     RefreshProject,
     RedeployService,
@@ -160,6 +182,7 @@ impl DashApp {
             params,
             screen,
             spinner_tick: 0,
+            log_stream_task: None,
         }
     }
 
@@ -168,6 +191,7 @@ impl DashApp {
             DashboardScreen::Projects(_) => self.refresh_projects(tx),
             DashboardScreen::Project(_) => self.refresh_project(tx),
             DashboardScreen::Service(_) => self.refresh_service_deployments(tx),
+            DashboardScreen::Logs(_) => self.start_logs_stream(tx),
         }
     }
 
@@ -240,6 +264,20 @@ impl DashApp {
         self.refresh_service_deployments(tx);
     }
 
+    fn open_project_logs(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        let DashboardScreen::Project(state) = &self.screen else {
+            return;
+        };
+
+        let Some(logs_screen) = LogsScreenState::from_project(state) else {
+            return;
+        };
+
+        self.stop_logs_stream();
+        self.screen = DashboardScreen::Logs(logs_screen);
+        self.start_logs_stream(tx);
+    }
+
     fn refresh_service_deployments(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
         let DashboardScreen::Service(state) = &mut self.screen else {
             return;
@@ -256,6 +294,75 @@ impl DashApp {
                 .map_err(|error| error.to_string());
             let _ = tx.send(LoaderEvent::ServiceDeploymentsLoaded { request_id, result });
         });
+    }
+
+    fn start_logs_stream(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        self.stop_logs_stream();
+
+        let DashboardScreen::Logs(state) = &mut self.screen else {
+            return;
+        };
+
+        state.start_loading();
+        let request_id = state.current_request_id;
+        let targets = state.targets.clone();
+        let tx = tx.clone();
+
+        self.log_stream_task = Some(tokio::spawn(async move {
+            let result = async {
+                if targets.is_empty() {
+                    return Ok::<LoadedLogs, anyhow::Error>(LoadedLogs { lines: Vec::new() });
+                }
+
+                let configs = Configs::new()?;
+                let client = GQLClient::new_authorized(&configs)?;
+                let backboard = configs.get_backboard();
+                let lines = fetch_environment_deploy_log_lines(
+                    &client,
+                    &backboard,
+                    &targets,
+                    Some(80),
+                    None,
+                )
+                .await?;
+
+                Ok::<LoadedLogs, anyhow::Error>(LoadedLogs { lines })
+            }
+            .await;
+
+            if let Err(error) = result.as_ref() {
+                let _ = tx.send(LoaderEvent::LogsLoaded {
+                    request_id,
+                    result: Err(error.to_string()),
+                });
+                return;
+            }
+
+            let _ = tx.send(LoaderEvent::LogsLoaded {
+                request_id,
+                result: result.map_err(|error| error.to_string()),
+            });
+
+            if targets.is_empty() {
+                return;
+            }
+
+            let line_tx = tx.clone();
+            let stream_result = stream_environment_deploy_log_lines(targets, None, move |line| {
+                let _ = line_tx.send(LoaderEvent::LogLine { request_id, line });
+            })
+            .await;
+            let _ = tx.send(LoaderEvent::LogStreamEnded {
+                request_id,
+                error: stream_result.err().map(|error| error.to_string()),
+            });
+        }));
+    }
+
+    fn stop_logs_stream(&mut self) {
+        if let Some(task) = self.log_stream_task.take() {
+            task.abort();
+        }
     }
 
     fn redeploy_service(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
@@ -379,11 +486,16 @@ impl DashApp {
     }
 
     fn back_to_project(&mut self) {
-        let DashboardScreen::Service(state) = &self.screen else {
-            return;
+        let project_state = match &self.screen {
+            DashboardScreen::Service(state) => Some((*state.return_to_project).clone()),
+            DashboardScreen::Logs(state) => Some((*state.return_to_project).clone()),
+            DashboardScreen::Projects(_) | DashboardScreen::Project(_) => None,
         };
 
-        self.screen = DashboardScreen::Project((*state.return_to_project).clone());
+        if let Some(project_state) = project_state {
+            self.stop_logs_stream();
+            self.screen = DashboardScreen::Project(project_state);
+        }
     }
 
     fn back_to_projects(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
@@ -517,6 +629,45 @@ impl DashApp {
                     }
                 }
             }
+            LoaderEvent::LogsLoaded { request_id, result } => {
+                let DashboardScreen::Logs(state) = &mut self.screen else {
+                    return;
+                };
+
+                if request_id != state.current_request_id {
+                    return;
+                }
+
+                match result {
+                    Ok(loaded) => state.apply_loaded_logs(loaded),
+                    Err(error) => state.set_error(error),
+                }
+            }
+            LoaderEvent::LogLine { request_id, line } => {
+                let DashboardScreen::Logs(state) = &mut self.screen else {
+                    return;
+                };
+
+                if request_id != state.current_request_id {
+                    return;
+                }
+
+                state.push_line(line);
+            }
+            LoaderEvent::LogStreamEnded { request_id, error } => {
+                let DashboardScreen::Logs(state) = &mut self.screen else {
+                    return;
+                };
+
+                if request_id != state.current_request_id {
+                    return;
+                }
+
+                state.loading = false;
+                if let Some(error) = error {
+                    state.set_error(error);
+                }
+            }
         }
     }
 
@@ -549,6 +700,7 @@ impl DashApp {
             || (matches!(key.code, KeyCode::Char('c'))
                 && key.modifiers.contains(KeyModifiers::CONTROL))
         {
+            self.stop_logs_stream();
             return true;
         }
 
@@ -576,6 +728,7 @@ impl DashApp {
             }
             DashboardScreen::Project(state) => handle_project_screen_key(state, key, terminal_area),
             DashboardScreen::Service(state) => handle_service_screen_key(state, key),
+            DashboardScreen::Logs(state) => handle_logs_screen_key(state, key),
         };
 
         match action {
@@ -585,6 +738,7 @@ impl DashApp {
                 return_to_projects,
             } => self.open_project(project_id, Some(return_to_projects), tx),
             HandleKeyAction::OpenSelectedService => self.open_selected_service(tx),
+            HandleKeyAction::OpenProjectLogs => self.open_project_logs(tx),
             HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
             HandleKeyAction::RefreshProject => self.refresh_project(tx),
             HandleKeyAction::RedeployService => self.redeploy_service(tx),
@@ -801,6 +955,7 @@ pub async fn run(params: DashTuiParams) -> Result<()> {
         }
     }
 
+    app.stop_logs_stream();
     Ok(())
 }
 
@@ -983,6 +1138,7 @@ mod tests {
                 Some(ProjectsBackNavigation::Restore(Box::new(restored.clone()))),
             )),
             spinner_tick: 0,
+            log_stream_task: None,
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -998,7 +1154,9 @@ mod tests {
                 assert_eq!(state.current_request_id, 7);
                 assert!(!state.loading);
             }
-            DashboardScreen::Project(_) | DashboardScreen::Service(_) => {
+            DashboardScreen::Project(_)
+            | DashboardScreen::Service(_)
+            | DashboardScreen::Logs(_) => {
                 panic!("expected projects screen after backing out")
             }
         }
@@ -1024,6 +1182,7 @@ mod tests {
             },
             screen: DashboardScreen::Project(project_state.clone()),
             spinner_tick: 0,
+            log_stream_task: None,
         };
 
         app.screen = DashboardScreen::Service(
@@ -1037,7 +1196,9 @@ mod tests {
                 assert_eq!(state.detail.project_name, "api");
                 assert_eq!(state.detail.environment_name, "production");
             }
-            DashboardScreen::Projects(_) | DashboardScreen::Project(_) => {
+            DashboardScreen::Projects(_)
+            | DashboardScreen::Project(_)
+            | DashboardScreen::Logs(_) => {
                 panic!("expected service screen after opening selected service")
             }
         }
@@ -1051,7 +1212,9 @@ mod tests {
                     Some("svc_2")
                 );
             }
-            DashboardScreen::Projects(_) | DashboardScreen::Service(_) => {
+            DashboardScreen::Projects(_)
+            | DashboardScreen::Service(_)
+            | DashboardScreen::Logs(_) => {
                 panic!("expected project screen after backing out of service detail")
             }
         }

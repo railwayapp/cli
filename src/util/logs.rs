@@ -118,6 +118,35 @@ where
     }
 }
 
+pub fn format_log_string_plain<T: LogLike>(log: &T, format: LogFormat) -> String {
+    let timestamp = log.timestamp().trim_matches('"');
+    let mut level = None;
+    let mut others = Vec::new();
+
+    for (key, value) in log.attributes() {
+        let value = value.trim_matches('"');
+        match key.to_lowercase().as_str() {
+            "level" | "lvl" | "severity" => level = Some(value.to_uppercase()),
+            _ if matches!(format, LogFormat::Full) => others.push(format!("{key}={value}")),
+            _ => {}
+        }
+    }
+
+    let mut parts = Vec::new();
+    if !timestamp.is_empty() {
+        parts.push(timestamp.to_string());
+    }
+    if let Some(level) = level {
+        parts.push(format!("[{level}]"));
+    }
+    parts.push(log.message().to_string());
+    if !others.is_empty() {
+        parts.push(others.join(" "));
+    }
+
+    parts.join(" ")
+}
+
 /// Format a log entry as a string based and print it
 pub fn print_log<T>(log: T, json: bool, format: LogFormat)
 where

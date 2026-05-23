@@ -2,6 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use is_terminal::IsTerminal;
+use tokio::task::JoinSet;
 
 use crate::{
     controllers::{
@@ -12,7 +13,7 @@ use crate::{
         project::resolve_service_context,
     },
     util::{
-        logs::{LogFormat, print_http_log, print_log},
+        logs::{LogFormat, format_log_string_plain, print_http_log, print_log},
         time::parse_time,
     },
 };
@@ -156,6 +157,161 @@ pub fn compose_http_filter(
         None
     } else {
         Some(parts.join(" "))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedLogsDeployment {
+    pub deployment_id: String,
+    pub default_deployment_id: String,
+    pub default_deployment_status: DeploymentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeployLogTarget {
+    pub service_name: String,
+    pub deployment_id: String,
+}
+
+pub(crate) async fn resolve_logs_deployment(
+    client: &reqwest::Client,
+    backboard: &str,
+    project_id: &str,
+    environment_id: &str,
+    service_id: &str,
+    deployment_id: Option<String>,
+    latest: bool,
+) -> Result<ResolvedLogsDeployment> {
+    let vars = queries::deployments::Variables {
+        input: DeploymentListInput {
+            project_id: Some(project_id.to_string()),
+            environment_id: Some(environment_id.to_string()),
+            service_id: Some(service_id.to_string()),
+            include_deleted: None,
+            status: None,
+        },
+        first: None,
+    };
+    let deployments = post_graphql::<queries::Deployments, _>(client, backboard, vars)
+        .await?
+        .deployments;
+    let mut all_deployments: Vec<_> = deployments
+        .edges
+        .into_iter()
+        .map(|deployment| deployment.node)
+        .collect();
+    all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let default_deployment = if latest {
+        all_deployments.first()
+    } else {
+        all_deployments
+            .iter()
+            .find(|deployment| deployment.status == DeploymentStatus::SUCCESS)
+            .or_else(|| all_deployments.first())
+    }
+    .context("No deployments found")?;
+
+    Ok(ResolvedLogsDeployment {
+        deployment_id: deployment_id.unwrap_or_else(|| default_deployment.id.clone()),
+        default_deployment_id: default_deployment.id.clone(),
+        default_deployment_status: default_deployment.status.clone(),
+    })
+}
+
+pub(crate) async fn fetch_environment_deploy_log_lines(
+    client: &reqwest::Client,
+    backboard: &str,
+    targets: &[DeployLogTarget],
+    limit_per_target: Option<i64>,
+    filter: Option<String>,
+) -> Result<Vec<String>> {
+    let mut merged_lines = Vec::new();
+
+    for target in targets {
+        let service_name = target.service_name.clone();
+        let mut target_lines = Vec::new();
+        fetch_deploy_logs(
+            FetchLogsParams {
+                client,
+                backboard,
+                deployment_id: target.deployment_id.clone(),
+                limit: limit_per_target,
+                filter: filter.clone(),
+                start_date: None,
+                end_date: None,
+            },
+            |log| {
+                target_lines.push((
+                    log.timestamp.clone(),
+                    format!(
+                        "[{}] {}",
+                        service_name,
+                        format_log_string_plain(&log, LogFormat::Full)
+                    ),
+                ));
+            },
+        )
+        .await?;
+        merged_lines.extend(target_lines);
+    }
+
+    merged_lines.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(merged_lines.into_iter().map(|(_, line)| line).collect())
+}
+
+pub(crate) async fn stream_environment_deploy_log_lines(
+    targets: Vec<DeployLogTarget>,
+    filter: Option<String>,
+    mut on_line: impl FnMut(String) + Send + 'static,
+) -> Result<()> {
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut streams = JoinSet::new();
+
+    for target in targets {
+        let line_tx = line_tx.clone();
+        let filter = filter.clone();
+        streams.spawn(async move {
+            let service_name = target.service_name;
+            stream_deploy_logs(target.deployment_id, filter, move |log| {
+                let _ = line_tx.send(format!(
+                    "[{}] {}",
+                    service_name,
+                    format_log_string_plain(&log, LogFormat::Full)
+                ));
+            })
+            .await
+        });
+    }
+    drop(line_tx);
+
+    let mut first_error = None;
+    let mut streams_done = streams.is_empty();
+    let mut channel_open = true;
+
+    while !streams_done || channel_open {
+        tokio::select! {
+            maybe_line = line_rx.recv(), if channel_open => {
+                match maybe_line {
+                    Some(line) => on_line(line),
+                    None => channel_open = false,
+                }
+            }
+            maybe_result = streams.join_next(), if !streams_done => {
+                match maybe_result {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(error))) if first_error.is_none() => first_error = Some(error),
+                    Some(Err(error)) if first_error.is_none() => first_error = Some(error.into()),
+                    Some(_) => {}
+                    None => streams_done = true,
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(())
     }
 }
 
@@ -314,50 +470,24 @@ pub async fn command(args: Args) -> Result<()> {
     let environment_id = ctx.environment_id;
     let service = ctx.service_id;
 
-    // Fetch all deployments so we can find a sensible default deployment id if
-    // none is provided
-    let vars = queries::deployments::Variables {
-        input: DeploymentListInput {
-            project_id: Some(project_id.clone()),
-            environment_id: Some(environment_id),
-            service_id: Some(service),
-            include_deleted: None,
-            status: None,
-        },
-        first: None,
-    };
-    let deployments = post_graphql::<queries::Deployments, _>(&client, &backboard, vars)
-        .await?
-        .deployments;
-    let mut all_deployments: Vec<_> = deployments
-        .edges
-        .into_iter()
-        .map(|deployment| deployment.node)
-        .collect();
-    all_deployments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let default_deployment = if args.latest {
-        all_deployments.first()
-    } else {
-        all_deployments
-            .iter()
-            .find(|d| d.status == DeploymentStatus::SUCCESS)
-            .or_else(|| all_deployments.first())
-    }
-    .context("No deployments found")?;
-
-    let deployment_id = if let Some(deployment_id) = args.deployment_id {
-        // Use the provided deployment ID directly
-        deployment_id
-    } else {
-        default_deployment.id.clone()
-    };
+    let resolved_deployment = resolve_logs_deployment(
+        &client,
+        &backboard,
+        &project_id,
+        &environment_id,
+        &service,
+        args.deployment_id.clone(),
+        args.latest,
+    )
+    .await?;
+    let deployment_id = resolved_deployment.deployment_id.clone();
 
     let show_http_logs = args.http;
     let show_build_logs = !show_http_logs
         && !args.deployment
         && (args.build
-            || (default_deployment.status == DeploymentStatus::FAILED
-                && deployment_id == default_deployment.id));
+            || (resolved_deployment.default_deployment_status == DeploymentStatus::FAILED
+                && deployment_id == resolved_deployment.default_deployment_id));
 
     if show_http_logs {
         if should_stream {
