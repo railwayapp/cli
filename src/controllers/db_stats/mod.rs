@@ -22,7 +22,7 @@ const SSH_HOST: &str = "ssh.railway.com";
 pub fn preflight_db_stats_ssh() -> Result<(), String> {
     match find_local_ssh_keys() {
         Ok(keys) if keys.is_empty() => Err(
-            "no local SSH key found in ~/.ssh\n  \
+            "no SSH keys found in your SSH agent or ~/.ssh/\n\n\
              generate one with `ssh-keygen -t ed25519`, then register it with `railway ssh keys add`"
                 .to_string(),
         ),

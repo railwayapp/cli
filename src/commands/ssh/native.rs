@@ -62,7 +62,11 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     if let Some(key) = registered_local {
         match key.path.as_ref() {
-            Some(path) => eprintln!("Using SSH key from file {}: {}", path.display(), key.key_name()),
+            Some(path) => eprintln!(
+                "Using SSH key from file {}: {}",
+                path.display(),
+                key.key_name()
+            ),
             None => eprintln!("Using SSH key from agent: {}", key.key_name()),
         }
         return Ok(());
@@ -94,7 +98,11 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         selected.0
     };
 
-    println!("Key: {} ({})", key_to_register.key_name(), key_to_register.fingerprint);
+    println!(
+        "Key: {} ({})",
+        key_to_register.key_name(),
+        key_to_register.fingerprint
+    );
     println!();
 
     let should_register = prompt_confirm_with_default("Register this SSH key with Railway?", true)?;
