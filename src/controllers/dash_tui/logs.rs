@@ -14,19 +14,12 @@ pub(in crate::controllers::dash_tui) struct LogsScreenState {
     pub(in crate::controllers::dash_tui) environment_name: String,
     pub(in crate::controllers::dash_tui) service_name: Option<String>,
     pub(in crate::controllers::dash_tui) targets: Vec<DeployLogTarget>,
-    pub(in crate::controllers::dash_tui) return_to: LogsBackNavigation,
     pub(in crate::controllers::dash_tui) lines: VecDeque<String>,
     pub(in crate::controllers::dash_tui) loading: bool,
     pub(in crate::controllers::dash_tui) error: Option<String>,
     pub(in crate::controllers::dash_tui) paused: bool,
     pub(in crate::controllers::dash_tui) scroll_offset_from_bottom: usize,
     pub(in crate::controllers::dash_tui) current_request_id: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(in crate::controllers::dash_tui) enum LogsBackNavigation {
-    Project(Box<ProjectScreenState>),
-    Service(Box<ServiceScreenState>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,7 +52,6 @@ impl LogsScreenState {
             project.selected_environment_name.clone(),
             None,
             targets,
-            LogsBackNavigation::Project(Box::new(state.clone())),
         ))
     }
 
@@ -82,7 +74,6 @@ impl LogsScreenState {
             state.detail.environment_name.clone(),
             Some(state.detail.service.name.clone()),
             targets,
-            LogsBackNavigation::Service(Box::new(state.clone())),
         )
     }
 
@@ -91,14 +82,12 @@ impl LogsScreenState {
         environment_name: String,
         service_name: Option<String>,
         targets: Vec<DeployLogTarget>,
-        return_to: LogsBackNavigation,
     ) -> Self {
         Self {
             project_name,
             environment_name,
             service_name,
             targets,
-            return_to,
             lines: VecDeque::new(),
             loading: false,
             error: None,
@@ -197,7 +186,7 @@ pub(in crate::controllers::dash_tui) fn handle_logs_screen_key(
     key: KeyEvent,
 ) -> HandleKeyAction {
     match key.code {
-        KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::BackFromLogs,
+        KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::Back,
         KeyCode::Up | KeyCode::Char('i') => {
             state.scroll_up(1);
             HandleKeyAction::None
@@ -241,13 +230,10 @@ mod tests {
     };
 
     fn project_state() -> ProjectScreenState {
-        let mut state = ProjectScreenState::new(
-            ProjectLoadTarget {
-                project_id: "proj_123".to_string(),
-                environment_hint: Some("production".to_string()),
-            },
-            None,
-        );
+        let mut state = ProjectScreenState::new(ProjectLoadTarget {
+            project_id: "proj_123".to_string(),
+            environment_hint: Some("production".to_string()),
+        });
         state.project = Some(DashboardProject {
             id: "proj_123".to_string(),
             name: "api".to_string(),

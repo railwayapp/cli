@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 
-use super::{HandleKeyAction, ProjectsScreenState, ui};
+use super::{HandleKeyAction, ui};
 use crate::controllers::dash_tui::data::{DashboardProject, DashboardService, ProjectLoadTarget};
 
 #[derive(Clone, Debug)]
@@ -12,16 +12,7 @@ pub(in crate::controllers::dash_tui) struct ProjectScreenState {
     pub(in crate::controllers::dash_tui) loading: bool,
     pub(in crate::controllers::dash_tui) error: Option<String>,
     pub(in crate::controllers::dash_tui) current_request_id: u64,
-    pub(in crate::controllers::dash_tui) return_to_projects: Option<ProjectsBackNavigation>,
     pub(in crate::controllers::dash_tui) environment_selector: Option<EnvironmentSelectorState>,
-}
-
-#[derive(Clone, Debug)]
-pub(in crate::controllers::dash_tui) enum ProjectsBackNavigation {
-    Restore(Box<ProjectsScreenState>),
-    Reload {
-        initial_selection_hint: Option<String>,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -30,10 +21,7 @@ pub(in crate::controllers::dash_tui) struct EnvironmentSelectorState {
 }
 
 impl ProjectScreenState {
-    pub(in crate::controllers::dash_tui) fn new(
-        target: ProjectLoadTarget,
-        return_to_projects: Option<ProjectsBackNavigation>,
-    ) -> Self {
+    pub(in crate::controllers::dash_tui) fn new(target: ProjectLoadTarget) -> Self {
         Self {
             target,
             project: None,
@@ -41,7 +29,6 @@ impl ProjectScreenState {
             loading: false,
             error: None,
             current_request_id: 0,
-            return_to_projects,
             environment_selector: None,
         }
     }
@@ -144,7 +131,7 @@ pub(in crate::controllers::dash_tui) fn handle_project_screen_key(
     let columns = ui::service_grid_columns(ui::panel_block("services").inner(diagram_area).width);
 
     match key.code {
-        KeyCode::Esc | KeyCode::Backspace => return HandleKeyAction::BackToProjects,
+        KeyCode::Esc | KeyCode::Backspace => return HandleKeyAction::Back,
         KeyCode::Up | KeyCode::Char('i') => state.move_up(columns),
         KeyCode::Down | KeyCode::Char('k') => state.move_down(columns),
         KeyCode::Left | KeyCode::Char('j') => state.move_left(),

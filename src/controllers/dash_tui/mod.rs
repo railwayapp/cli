@@ -29,10 +29,8 @@ use tokio::time::MissedTickBehavior;
 use self::data::{
     DashboardProject, ProjectCard, ProjectLoadTarget, load_dashboard_project, load_project_cards,
 };
-use self::logs::{LoadedLogs, LogsBackNavigation, LogsScreenState, handle_logs_screen_key};
-use self::project::{
-    EnvironmentSelectorState, ProjectScreenState, ProjectsBackNavigation, handle_project_screen_key,
-};
+use self::logs::{LoadedLogs, LogsScreenState, handle_logs_screen_key};
+use self::project::{EnvironmentSelectorState, ProjectScreenState, handle_project_screen_key};
 use self::service::{
     ServiceAction, ServiceDetail, ServiceScreenState, handle_service_screen_key,
     load_service_deployments, run_service_action,
@@ -78,6 +76,7 @@ pub struct DashTuiParams {
 struct DashApp {
     params: DashTuiParams,
     screen: DashboardScreen,
+    history: Vec<DashboardScreen>,
     spinner_tick: usize,
     log_stream_task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -135,10 +134,7 @@ enum LoaderEvent {
 
 enum HandleKeyAction {
     None,
-    OpenProject {
-        project_id: String,
-        return_to_projects: ProjectsBackNavigation,
-    },
+    OpenProject { project_id: String },
     OpenSelectedService,
     OpenProjectLogs,
     OpenServiceLogs,
@@ -146,9 +142,7 @@ enum HandleKeyAction {
     RefreshProjects,
     RefreshProject,
     RunServiceAction(ServiceAction),
-    BackToProjects,
-    BackToProject,
-    BackFromLogs,
+    Back,
     OpenEnvironmentSelector,
 }
 
@@ -156,32 +150,27 @@ impl DashApp {
     fn new(params: DashTuiParams) -> Self {
         let screen = match &params.auth_mode {
             DashboardAuthMode::Workspace => match &params.project {
-                Some(project_id) => DashboardScreen::Project(ProjectScreenState::new(
-                    ProjectLoadTarget {
+                Some(project_id) => {
+                    DashboardScreen::Project(ProjectScreenState::new(ProjectLoadTarget {
                         project_id: project_id.clone(),
                         environment_hint: params.environment.clone(),
-                    },
-                    Some(ProjectsBackNavigation::Reload {
-                        initial_selection_hint: Some(project_id.clone()),
-                    }),
-                )),
+                    }))
+                }
                 None => DashboardScreen::Projects(ProjectsScreenState::new(None)),
             },
             DashboardAuthMode::LinkedProject {
                 project_id,
                 environment_id,
-            } => DashboardScreen::Project(ProjectScreenState::new(
-                ProjectLoadTarget {
-                    project_id: project_id.clone(),
-                    environment_hint: Some(environment_id.clone()),
-                },
-                None,
-            )),
+            } => DashboardScreen::Project(ProjectScreenState::new(ProjectLoadTarget {
+                project_id: project_id.clone(),
+                environment_hint: Some(environment_id.clone()),
+            })),
         };
 
         Self {
             params,
             screen,
+            history: Vec::new(),
             spinner_tick: 0,
             log_stream_task: None,
         }
@@ -235,20 +224,19 @@ impl DashApp {
         });
     }
 
-    fn open_project(
-        &mut self,
-        project_id: String,
-        return_to_projects: Option<ProjectsBackNavigation>,
-        tx: &mpsc::UnboundedSender<LoaderEvent>,
-    ) {
+    fn push_screen(&mut self, screen: DashboardScreen) {
+        self.history.push(self.screen.clone());
+        self.screen = screen;
+    }
+
+    fn open_project(&mut self, project_id: String, tx: &mpsc::UnboundedSender<LoaderEvent>) {
         let environment_hint = self.params.environment.clone();
-        self.screen = DashboardScreen::Project(ProjectScreenState::new(
+        self.push_screen(DashboardScreen::Project(ProjectScreenState::new(
             ProjectLoadTarget {
                 project_id,
                 environment_hint,
             },
-            return_to_projects,
-        ));
+        )));
         self.refresh_project(tx);
     }
 
@@ -261,7 +249,7 @@ impl DashApp {
             return;
         };
 
-        self.screen = DashboardScreen::Service(service_screen);
+        self.push_screen(DashboardScreen::Service(service_screen));
         self.refresh_service_deployments(tx);
     }
 
@@ -275,7 +263,7 @@ impl DashApp {
         };
 
         self.stop_logs_stream();
-        self.screen = DashboardScreen::Logs(logs_screen);
+        self.push_screen(DashboardScreen::Logs(logs_screen));
         self.start_logs_stream(tx);
     }
 
@@ -287,7 +275,7 @@ impl DashApp {
         let logs_screen = LogsScreenState::from_service(state);
 
         self.stop_logs_stream();
-        self.screen = DashboardScreen::Logs(logs_screen);
+        self.push_screen(DashboardScreen::Logs(logs_screen));
         self.start_logs_stream(tx);
     }
 
@@ -511,69 +499,25 @@ impl DashApp {
         self.refresh_project(tx);
     }
 
-    fn back_to_project(&mut self) {
-        let project_state = match &self.screen {
-            DashboardScreen::Service(state) => Some((*state.return_to_project).clone()),
-            DashboardScreen::Projects(_)
-            | DashboardScreen::Project(_)
-            | DashboardScreen::Logs(_) => None,
-        };
-
-        if let Some(project_state) = project_state {
+    fn back(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
+        if let Some(screen) = self.history.pop() {
             self.stop_logs_stream();
-            self.screen = DashboardScreen::Project(project_state);
+            self.screen = screen;
+            return;
         }
-    }
 
-    fn back_from_logs(&mut self) {
-        let previous_screen = match &self.screen {
-            DashboardScreen::Logs(state) => match &state.return_to {
-                LogsBackNavigation::Project(project_state) => {
-                    Some(DashboardScreen::Project((**project_state).clone()))
-                }
-                LogsBackNavigation::Service(service_state) => {
-                    Some(DashboardScreen::Service((**service_state).clone()))
-                }
-            },
-            DashboardScreen::Projects(_)
-            | DashboardScreen::Project(_)
-            | DashboardScreen::Service(_) => None,
-        };
-
-        if let Some(previous_screen) = previous_screen {
-            self.stop_logs_stream();
-            self.screen = previous_screen;
-        }
-    }
-
-    fn back_to_projects(&mut self, tx: &mpsc::UnboundedSender<LoaderEvent>) {
         let DashboardScreen::Project(state) = &self.screen else {
             return;
         };
+        let project_id = state.target.project_id.clone();
 
-        let navigation = state
-            .return_to_projects
-            .clone()
-            .or_else(|| match self.params.auth_mode {
-                DashboardAuthMode::Workspace => Some(ProjectsBackNavigation::Reload {
-                    initial_selection_hint: Some(state.target.project_id.clone()),
-                }),
-                DashboardAuthMode::LinkedProject { .. } => None,
-            });
-
-        match navigation {
-            Some(ProjectsBackNavigation::Restore(restored)) => {
-                self.screen = DashboardScreen::Projects(*restored);
-            }
-            Some(ProjectsBackNavigation::Reload {
-                initial_selection_hint,
-            }) => {
-                self.screen =
-                    DashboardScreen::Projects(ProjectsScreenState::new(initial_selection_hint));
-                self.refresh_projects(tx);
-            }
-            None => {}
+        if !matches!(self.params.auth_mode, DashboardAuthMode::Workspace) {
+            return;
         }
+
+        self.stop_logs_stream();
+        self.screen = DashboardScreen::Projects(ProjectsScreenState::new(Some(project_id)));
+        self.refresh_projects(tx);
     }
 
     fn handle_loader_event(&mut self, event: LoaderEvent, tx: &mpsc::UnboundedSender<LoaderEvent>) {
@@ -729,10 +673,7 @@ impl DashApp {
 
         match action {
             HandleKeyAction::None => {}
-            HandleKeyAction::OpenProject {
-                project_id,
-                return_to_projects,
-            } => self.open_project(project_id, Some(return_to_projects), tx),
+            HandleKeyAction::OpenProject { project_id } => self.open_project(project_id, tx),
             HandleKeyAction::OpenSelectedService => self.open_selected_service(tx),
             HandleKeyAction::OpenProjectLogs => self.open_project_logs(tx),
             HandleKeyAction::OpenServiceLogs => self.open_service_logs(tx),
@@ -740,9 +681,7 @@ impl DashApp {
             HandleKeyAction::RefreshProjects => self.refresh_projects(tx),
             HandleKeyAction::RefreshProject => self.refresh_project(tx),
             HandleKeyAction::RunServiceAction(action) => self.start_service_action(action, tx),
-            HandleKeyAction::BackToProjects => self.back_to_projects(tx),
-            HandleKeyAction::BackToProject => self.back_to_project(),
-            HandleKeyAction::BackFromLogs => self.back_from_logs(),
+            HandleKeyAction::Back => self.back(tx),
             HandleKeyAction::OpenEnvironmentSelector => self.open_environment_selector(),
         }
 
@@ -1053,10 +992,9 @@ fn handle_projects_screen_key(
         KeyCode::Left | KeyCode::Char('j') => state.move_left(),
         KeyCode::Right | KeyCode::Char('l') => state.move_right(),
         KeyCode::Enter => {
-            if let Some(card) = state.selected_card().cloned() {
+            if let Some(card) = state.selected_card() {
                 return HandleKeyAction::OpenProject {
-                    project_id: card.id,
-                    return_to_projects: ProjectsBackNavigation::Restore(Box::new(state.clone())),
+                    project_id: card.id.clone(),
                 };
             }
         }
@@ -1175,13 +1113,10 @@ mod tests {
 
     #[test]
     fn project_refresh_preserves_selected_service_by_id() {
-        let mut state = ProjectScreenState::new(
-            ProjectLoadTarget {
-                project_id: "proj_123".to_string(),
-                environment_hint: Some("production".to_string()),
-            },
-            None,
-        );
+        let mut state = ProjectScreenState::new(ProjectLoadTarget {
+            project_id: "proj_123".to_string(),
+            environment_hint: Some("production".to_string()),
+        });
         state.project = Some(project());
         state.selected_service = 1;
 
@@ -1209,19 +1144,17 @@ mod tests {
                 environment: None,
                 auth_mode: DashboardAuthMode::Workspace,
             },
-            screen: DashboardScreen::Project(ProjectScreenState::new(
-                ProjectLoadTarget {
-                    project_id: "proj_two".to_string(),
-                    environment_hint: Some("production".to_string()),
-                },
-                Some(ProjectsBackNavigation::Restore(Box::new(restored.clone()))),
-            )),
+            screen: DashboardScreen::Project(ProjectScreenState::new(ProjectLoadTarget {
+                project_id: "proj_two".to_string(),
+                environment_hint: Some("production".to_string()),
+            })),
+            history: vec![DashboardScreen::Projects(restored.clone())],
             spinner_tick: 0,
             log_stream_task: None,
         };
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        app.back_to_projects(&tx);
+        app.back(&tx);
 
         match app.screen {
             DashboardScreen::Projects(state) => {
@@ -1243,13 +1176,10 @@ mod tests {
 
     #[test]
     fn open_service_and_back_restores_project_screen_state() {
-        let mut project_state = ProjectScreenState::new(
-            ProjectLoadTarget {
-                project_id: "proj_123".to_string(),
-                environment_hint: Some("production".to_string()),
-            },
-            None,
-        );
+        let mut project_state = ProjectScreenState::new(ProjectLoadTarget {
+            project_id: "proj_123".to_string(),
+            environment_hint: Some("production".to_string()),
+        });
         project_state.project = Some(project());
         project_state.selected_service = 1;
 
@@ -1260,10 +1190,13 @@ mod tests {
                 auth_mode: DashboardAuthMode::Workspace,
             },
             screen: DashboardScreen::Project(project_state.clone()),
+            history: Vec::new(),
             spinner_tick: 0,
             log_stream_task: None,
         };
 
+        app.history
+            .push(DashboardScreen::Project(project_state.clone()));
         app.screen = DashboardScreen::Service(
             ServiceScreenState::from_project(&project_state)
                 .expect("expected selected service to exist"),
@@ -1282,7 +1215,8 @@ mod tests {
             }
         }
 
-        app.back_to_project();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.back(&tx);
 
         match app.screen {
             DashboardScreen::Project(state) => {
@@ -1301,13 +1235,10 @@ mod tests {
 
     #[test]
     fn service_logs_back_restores_service_screen_state() {
-        let mut project_state = ProjectScreenState::new(
-            ProjectLoadTarget {
-                project_id: "proj_123".to_string(),
-                environment_hint: Some("production".to_string()),
-            },
-            None,
-        );
+        let mut project_state = ProjectScreenState::new(ProjectLoadTarget {
+            project_id: "proj_123".to_string(),
+            environment_hint: Some("production".to_string()),
+        });
         project_state.project = Some(project());
         project_state.selected_service = 1;
 
@@ -1321,10 +1252,13 @@ mod tests {
                 auth_mode: DashboardAuthMode::Workspace,
             },
             screen: DashboardScreen::Service(service_state.clone()),
+            history: Vec::new(),
             spinner_tick: 0,
             log_stream_task: None,
         };
 
+        app.history
+            .push(DashboardScreen::Service(service_state.clone()));
         app.screen = DashboardScreen::Logs(LogsScreenState::from_service(&service_state));
 
         match &app.screen {
@@ -1337,7 +1271,8 @@ mod tests {
             | DashboardScreen::Service(_) => panic!("expected logs screen"),
         }
 
-        app.back_from_logs();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.back(&tx);
 
         match app.screen {
             DashboardScreen::Service(state) => {

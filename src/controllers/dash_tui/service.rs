@@ -4,7 +4,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{
     HandleKeyAction,
     data::{DashboardProject, DashboardService},
-    project::ProjectScreenState,
 };
 use crate::{
     client::GQLClient,
@@ -20,7 +19,6 @@ const SERVICE_DEPLOYMENTS_LIMIT: i64 = 20;
 #[derive(Clone, Debug)]
 pub(in crate::controllers::dash_tui) struct ServiceScreenState {
     pub(in crate::controllers::dash_tui) detail: ServiceDetail,
-    pub(in crate::controllers::dash_tui) return_to_project: Box<ProjectScreenState>,
     pub(in crate::controllers::dash_tui) deployments: Vec<ServiceDeployment>,
     pub(in crate::controllers::dash_tui) selected_deployment: usize,
     pub(in crate::controllers::dash_tui) focus: ServiceFocus,
@@ -96,14 +94,13 @@ impl ServiceAction {
 
 impl ServiceScreenState {
     pub(in crate::controllers::dash_tui) fn from_project(
-        state: &ProjectScreenState,
+        state: &super::project::ProjectScreenState,
     ) -> Option<Self> {
         let project = state.project.as_ref()?;
         let service = state.selected_service()?.clone();
 
         Some(Self {
             detail: service_detail_from_project(project, service),
-            return_to_project: Box::new(state.clone()),
             deployments: Vec::new(),
             selected_deployment: 0,
             focus: ServiceFocus::Overview,
@@ -397,7 +394,7 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
     }
 
     match key.code {
-        KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::BackToProject,
+        KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::Back,
         KeyCode::Up | KeyCode::Char('i') if matches!(state.focus, ServiceFocus::Deployments) => {
             state.move_deployment_up();
             HandleKeyAction::None
@@ -467,7 +464,7 @@ mod tests {
     use super::*;
     use crate::{
         commands::queries::deployments::DeploymentStatus,
-        controllers::dash_tui::data::{DeploymentSummary, ProjectLoadTarget},
+        controllers::dash_tui::data::DeploymentSummary,
     };
     use chrono::Utc;
 
@@ -504,13 +501,6 @@ mod tests {
     fn service_state() -> ServiceScreenState {
         ServiceScreenState {
             detail: detail(true),
-            return_to_project: Box::new(ProjectScreenState::new(
-                ProjectLoadTarget {
-                    project_id: "proj_123".to_string(),
-                    environment_hint: Some("production".to_string()),
-                },
-                None,
-            )),
             deployments: vec![
                 ServiceDeployment {
                     id: "dep_123".to_string(),
