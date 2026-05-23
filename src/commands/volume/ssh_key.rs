@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg};
 
-use crate::{controllers::ssh_keys::find_local_ssh_keys, telemetry};
+use crate::{controllers::ssh_keys::find_ssh_key_files, telemetry};
 
 pub(super) async fn authenticate<H>(
     session: &mut russh::client::Handle<H>,
@@ -89,8 +89,12 @@ fn load_secret_key(path: &Path) -> Result<Result<russh::keys::PrivateKey, anyhow
 fn discover_private_key_paths() -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
-    for public_key in find_local_ssh_keys()? {
-        if let Some(private_key_path) = private_key_path_for_public_key(&public_key.path) {
+    for public_key in find_ssh_key_files()? {
+        if public_key.path.is_none() {
+            continue;
+        }
+
+        if let Some(private_key_path) = private_key_path_for_public_key(&public_key.path.unwrap()) {
             if private_key_path.is_file() {
                 paths.push(private_key_path);
             }
