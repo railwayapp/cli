@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+  # russh uses rsa for RSA SSH key authentication, and upstream has no fixed release yet.
+  # Keep this scoped to the SFTP auth path and remove it when russh moves off the vulnerable rsa release.
+  "RUSTSEC-2023-0071",
+]
