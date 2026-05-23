@@ -260,6 +260,7 @@ fn render_service_resources(frame: &mut Frame<'_>, area: Rect, state: &ServiceSc
             Line::from(volumes),
             Line::default(),
             Line::from(Span::styled("actions", panel_title_style())),
+            Line::from(Span::styled("L open filtered logs", muted_style())),
             Line::from(Span::styled("d focus deployments", muted_style())),
             Line::from(Span::styled("r restart current service", muted_style())),
             Line::from(Span::styled(

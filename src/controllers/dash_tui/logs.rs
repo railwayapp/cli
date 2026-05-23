@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{HandleKeyAction, project::ProjectScreenState};
+use super::{HandleKeyAction, project::ProjectScreenState, service::ServiceScreenState};
 use crate::commands::logs::DeployLogTarget;
 
 const LOG_BUFFER_LIMIT: usize = 2_000;
@@ -12,14 +12,21 @@ const LOG_SCROLL_STEP: usize = 8;
 pub(in crate::controllers::dash_tui) struct LogsScreenState {
     pub(in crate::controllers::dash_tui) project_name: String,
     pub(in crate::controllers::dash_tui) environment_name: String,
+    pub(in crate::controllers::dash_tui) service_name: Option<String>,
     pub(in crate::controllers::dash_tui) targets: Vec<DeployLogTarget>,
-    pub(in crate::controllers::dash_tui) return_to_project: Box<ProjectScreenState>,
+    pub(in crate::controllers::dash_tui) return_to: LogsBackNavigation,
     pub(in crate::controllers::dash_tui) lines: VecDeque<String>,
     pub(in crate::controllers::dash_tui) loading: bool,
     pub(in crate::controllers::dash_tui) error: Option<String>,
     pub(in crate::controllers::dash_tui) paused: bool,
     pub(in crate::controllers::dash_tui) scroll_offset_from_bottom: usize,
     pub(in crate::controllers::dash_tui) current_request_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::controllers::dash_tui) enum LogsBackNavigation {
+    Project(Box<ProjectScreenState>),
+    Service(Box<ServiceScreenState>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,18 +54,58 @@ impl LogsScreenState {
             .collect();
         targets.sort_by(|a, b| a.service_name.cmp(&b.service_name));
 
-        Some(Self {
-            project_name: project.name.clone(),
-            environment_name: project.selected_environment_name.clone(),
+        Some(Self::new(
+            project.name.clone(),
+            project.selected_environment_name.clone(),
+            None,
             targets,
-            return_to_project: Box::new(state.clone()),
+            LogsBackNavigation::Project(Box::new(state.clone())),
+        ))
+    }
+
+    pub(in crate::controllers::dash_tui) fn from_service(state: &ServiceScreenState) -> Self {
+        let targets = state
+            .detail
+            .service
+            .latest_deployment
+            .as_ref()
+            .map(|deployment| {
+                vec![DeployLogTarget {
+                    service_name: state.detail.service.name.clone(),
+                    deployment_id: deployment.id.clone(),
+                }]
+            })
+            .unwrap_or_default();
+
+        Self::new(
+            state.detail.project_name.clone(),
+            state.detail.environment_name.clone(),
+            Some(state.detail.service.name.clone()),
+            targets,
+            LogsBackNavigation::Service(Box::new(state.clone())),
+        )
+    }
+
+    fn new(
+        project_name: String,
+        environment_name: String,
+        service_name: Option<String>,
+        targets: Vec<DeployLogTarget>,
+        return_to: LogsBackNavigation,
+    ) -> Self {
+        Self {
+            project_name,
+            environment_name,
+            service_name,
+            targets,
+            return_to,
             lines: VecDeque::new(),
             loading: false,
             error: None,
             paused: false,
             scroll_offset_from_bottom: 0,
             current_request_id: 0,
-        })
+        }
     }
 
     pub(in crate::controllers::dash_tui) fn start_loading(&mut self) {
@@ -131,6 +178,10 @@ impl LogsScreenState {
         self.targets.len()
     }
 
+    pub(in crate::controllers::dash_tui) fn is_service_scoped(&self) -> bool {
+        self.service_name.is_some()
+    }
+
     fn trim_lines(&mut self) {
         while self.lines.len() > LOG_BUFFER_LIMIT {
             self.lines.pop_front();
@@ -146,7 +197,7 @@ pub(in crate::controllers::dash_tui) fn handle_logs_screen_key(
     key: KeyEvent,
 ) -> HandleKeyAction {
     match key.code {
-        KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::BackToProject,
+        KeyCode::Esc | KeyCode::Backspace => HandleKeyAction::BackFromLogs,
         KeyCode::Up | KeyCode::Char('i') => {
             state.scroll_up(1);
             HandleKeyAction::None
@@ -256,9 +307,26 @@ mod tests {
 
         assert_eq!(state.project_name, "api");
         assert_eq!(state.environment_name, "production");
+        assert_eq!(state.service_name, None);
+        assert!(!state.is_service_scoped());
         assert_eq!(state.targets.len(), 2);
         assert_eq!(state.targets[0].service_name, "web");
         assert_eq!(state.targets[1].service_name, "worker");
+    }
+
+    #[test]
+    fn logs_state_can_be_scoped_to_a_single_service() {
+        let project_state = project_state();
+        let service_state = ServiceScreenState::from_project(&project_state).expect("service");
+        let state = LogsScreenState::from_service(&service_state);
+
+        assert_eq!(state.project_name, "api");
+        assert_eq!(state.environment_name, "production");
+        assert_eq!(state.service_name.as_deref(), Some("web"));
+        assert!(state.is_service_scoped());
+        assert_eq!(state.targets.len(), 1);
+        assert_eq!(state.targets[0].service_name, "web");
+        assert_eq!(state.targets[0].deployment_id, "dep_web");
     }
 
     #[test]

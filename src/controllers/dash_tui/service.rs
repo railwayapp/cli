@@ -382,6 +382,7 @@ pub(in crate::controllers::dash_tui) fn handle_service_screen_key(
             state.open_rollback_confirmation();
             HandleKeyAction::None
         }
+        KeyCode::Char('L') => HandleKeyAction::OpenServiceLogs,
         _ => HandleKeyAction::None,
     }
 }
@@ -570,5 +571,14 @@ mod tests {
 
         assert!(matches!(action, HandleKeyAction::None));
         assert_eq!(state.selected_confirmation(), None);
+    }
+
+    #[test]
+    fn uppercase_l_opens_service_logs() {
+        let mut state = service_state();
+
+        let action = handle_service_screen_key(&mut state, KeyEvent::from(KeyCode::Char('L')));
+
+        assert!(matches!(action, HandleKeyAction::OpenServiceLogs));
     }
 }

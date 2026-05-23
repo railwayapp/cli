@@ -23,6 +23,11 @@ fn render_logs_status(frame: &mut Frame<'_>, area: Rect, state: &LogsScreenState
         1 => "1 service".to_string(),
         count => format!("{count} services"),
     };
+    let scope = if state.is_service_scoped() {
+        "service logs"
+    } else {
+        "environment logs"
+    };
     let activity_line = if let Some(error) = &state.error {
         Line::from(vec![
             Span::styled("error: ", Style::default().fg(ratatui::style::Color::Red)),
@@ -31,7 +36,14 @@ fn render_logs_status(frame: &mut Frame<'_>, area: Rect, state: &LogsScreenState
     } else if state.loading && state.lines.is_empty() {
         Line::from(vec![
             Span::styled("⠿ ", loading_style()),
-            Span::styled("Loading environment logs...", hero_style()),
+            Span::styled(
+                if state.is_service_scoped() {
+                    "Loading service logs..."
+                } else {
+                    "Loading environment logs..."
+                },
+                hero_style(),
+            ),
         ])
     } else if state.paused {
         Line::from(vec![
@@ -41,32 +53,51 @@ fn render_logs_status(frame: &mut Frame<'_>, area: Rect, state: &LogsScreenState
     } else {
         Line::from(vec![
             Span::styled("streaming", hero_style()),
-            Span::raw(" • following latest log lines across the environment"),
+            Span::raw(if state.is_service_scoped() {
+                " • following latest log lines for the selected service"
+            } else {
+                " • following latest log lines across the environment"
+            }),
         ])
     };
+
+    let mut detail_spans = vec![
+        Span::styled("project: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(state.project_name.as_str()),
+        Span::raw("  •  "),
+        Span::styled(
+            "environment: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(state.environment_name.as_str()),
+    ];
+
+    if let Some(service_name) = state.service_name.as_deref() {
+        detail_spans.push(Span::raw("  •  "));
+        detail_spans.push(Span::styled(
+            "service: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        detail_spans.push(Span::raw(service_name));
+    }
+
+    detail_spans.push(Span::raw("  •  "));
+    detail_spans.push(Span::styled(
+        "buffer: ",
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    detail_spans.push(Span::styled(state.lines.len().to_string(), muted_style()));
 
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("scope: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled("environment logs", hero_style()),
+                Span::styled(scope, hero_style()),
                 Span::raw("  •  "),
                 Span::styled("services: ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(services),
             ]),
-            Line::from(vec![
-                Span::styled("project: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(state.project_name.as_str()),
-                Span::raw("  •  "),
-                Span::styled(
-                    "environment: ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(state.environment_name.as_str()),
-                Span::raw("  •  "),
-                Span::styled("buffer: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(state.lines.len().to_string(), muted_style()),
-            ]),
+            Line::from(detail_spans),
             activity_line,
         ])
         .block(panel_block("logs"))
@@ -76,15 +107,22 @@ fn render_logs_status(frame: &mut Frame<'_>, area: Rect, state: &LogsScreenState
 }
 
 fn render_logs_output(frame: &mut Frame<'_>, area: Rect, state: &LogsScreenState) {
-    let block = panel_block("environment deploy logs").border_style(selected_border_style());
+    let block = panel_block(if state.is_service_scoped() {
+        "service deploy logs"
+    } else {
+        "environment deploy logs"
+    })
+    .border_style(selected_border_style());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if state.loading && state.lines.is_empty() {
         frame.render_widget(
-            Paragraph::new(
-                "Loading recent logs from the latest deployments in this environment...",
-            )
+            Paragraph::new(if state.is_service_scoped() {
+                "Loading recent logs from the latest deployment for this service..."
+            } else {
+                "Loading recent logs from the latest deployments in this environment..."
+            })
             .style(loading_style())
             .wrap(Wrap { trim: true }),
             inner,
@@ -95,6 +133,8 @@ fn render_logs_output(frame: &mut Frame<'_>, area: Rect, state: &LogsScreenState
     if state.lines.is_empty() {
         let message = if state.error.is_some() {
             "No logs loaded."
+        } else if state.is_service_scoped() {
+            "No deploy logs are available for this service yet."
         } else {
             "No deploy logs are available in this environment yet."
         };
