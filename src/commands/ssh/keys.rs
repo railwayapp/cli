@@ -6,7 +6,7 @@ use is_terminal::IsTerminal;
 
 use crate::client::GQLClient;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{
+use crate::controllers::ssh::keys::{
     LocalSshKey, SshKeySource, compute_fingerprint_from_pubkey, delete_ssh_key,
     find_local_ssh_keys, get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
 };

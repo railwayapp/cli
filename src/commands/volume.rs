@@ -21,7 +21,6 @@ use std::fmt::Display;
 
 pub(crate) mod files;
 pub(crate) mod sftp;
-mod ssh_key;
 
 /// Manage project volumes
 #[derive(Parser)]

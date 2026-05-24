@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use tokio::io::AsyncWriteExt;
 
 use crate::controllers::database::DatabaseType;
-use crate::controllers::ssh_keys::find_local_ssh_keys;
+use crate::controllers::ssh::keys::find_local_ssh_keys;
 
 pub use types::DatabaseStats;
 

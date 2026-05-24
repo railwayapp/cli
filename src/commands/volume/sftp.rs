@@ -205,7 +205,7 @@ impl VolumeSftp {
             .await
             .with_context(|| format!("Failed to connect to Railway SFTP at {ADDR}"))?;
 
-            super::ssh_key::authenticate(&mut session, &self.service_instance_id).await?;
+            crate::controllers::ssh::authenticate(&mut session, &self.service_instance_id).await?;
 
             let channel = session
                 .channel_open_session()

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{SshKeySource, find_local_ssh_keys, register_ssh_key};
+use crate::controllers::ssh::keys::{SshKeySource, find_local_ssh_keys, register_ssh_key};
 use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
@@ -51,7 +51,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     }
 
     let registered_keys =
-        crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs, None).await?;
+        crate::controllers::ssh::keys::get_registered_ssh_keys(client, configs, None).await?;
 
     // Find a local key that's already registered
     let registered_local = local_keys.iter().find(|local| {
@@ -87,7 +87,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     } else {
         // Let the user pick which key to register
         use std::fmt;
-        struct KeyOption<'a>(&'a crate::controllers::ssh_keys::LocalSshKey);
+        struct KeyOption<'a>(&'a crate::controllers::ssh::keys::LocalSshKey);
         impl fmt::Display for KeyOption<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{} ({})", self.0.key_name(), self.0.fingerprint)

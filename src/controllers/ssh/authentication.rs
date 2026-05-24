@@ -3,13 +3,10 @@ use std::{io::IsTerminal, path::Path, sync::Arc};
 use anyhow::{Context, Result, bail};
 use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg};
 
-use crate::controllers::ssh_keys::{SshKeySource, find_local_ssh_keys, get_ssh_agent};
+use crate::controllers::ssh::keys::{SshKeySource, find_local_ssh_keys, get_ssh_agent};
 use crate::telemetry;
 
-pub(super) async fn authenticate<H>(
-    session: &mut russh::client::Handle<H>,
-    username: &str,
-) -> Result<()>
+pub async fn authenticate<H>(session: &mut russh::client::Handle<H>, username: &str) -> Result<()>
 where
     H: russh::client::Handler,
 {
@@ -99,7 +96,7 @@ fn load_secret_key(path: &Path) -> Result<Result<russh::keys::PrivateKey, anyhow
             let passphrase =
                 inquire::Password::new(&format!("Enter passphrase for SSH key {}", path.display()))
                     .without_confirmation()
-                    .with_render_config(crate::commands::Configs::get_render_config())
+                    .with_render_config(crate::config::Configs::get_render_config())
                     .prompt()
                     .context("Failed to prompt for SSH key passphrase")?;
 
