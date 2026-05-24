@@ -7,8 +7,8 @@ use is_terminal::IsTerminal;
 use crate::client::GQLClient;
 use crate::config::Configs;
 use crate::controllers::ssh_keys::{
-    LocalSshKey, compute_fingerprint_from_pubkey, delete_ssh_key, find_local_ssh_keys,
-    get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
+    LocalSshKey, SshKeySource, compute_fingerprint_from_pubkey, delete_ssh_key,
+    find_local_ssh_keys, get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
 };
 use crate::gql::queries::git_hub_ssh_keys::GitHubSshKeysGitHubSshKeys;
 use crate::gql::queries::ssh_public_keys::SshPublicKeysSshPublicKeysEdgesNode;
@@ -141,7 +141,7 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     let registered_keys = get_registered_ssh_keys(&client, &configs, workspace_id.clone()).await?;
-    let local_keys = find_local_ssh_keys()?;
+    let local_keys = find_local_ssh_keys().await?;
     // GitHub import is a user-only concept; skip when listing workspace keys.
     let github_keys = if workspace_id.is_none() {
         get_github_ssh_keys(&client, &configs)
@@ -276,7 +276,7 @@ async fn add_key(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let local_keys = find_local_ssh_keys()?;
+    let local_keys = find_local_ssh_keys().await?;
     if local_keys.is_empty() {
         bail!(
             "No SSH keys found in your SSH agent or ~/.ssh/\n\n\
@@ -308,9 +308,7 @@ async fn add_key(
         local_keys
             .iter()
             .find(|k| {
-                k.path
-                    .as_ref()
-                    .is_some_and(|p| p.to_string_lossy().contains(&arg))
+                matches!(&k.source, SshKeySource::File(p) if p.to_string_lossy().contains(&arg))
                     || k.fingerprint.contains(&arg)
                     || k.key_comment.as_ref().is_some_and(|c| c.contains(&arg))
             })
@@ -344,7 +342,7 @@ async fn add_key(
         &client,
         &configs,
         &key_name,
-        &key_to_add.public_key,
+        &key_to_add.public_key.to_string(),
         workspace_id.clone(),
     )
     .await?;

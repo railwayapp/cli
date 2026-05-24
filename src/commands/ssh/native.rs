@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
+use crate::controllers::ssh_keys::{SshKeySource, find_local_ssh_keys, register_ssh_key};
 use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
@@ -40,7 +40,7 @@ pub async fn get_service_instance_id(
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
 pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
-    let local_keys = find_local_ssh_keys()?;
+    let local_keys = find_local_ssh_keys().await?;
 
     if local_keys.is_empty() {
         bail!(
@@ -61,13 +61,13 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     });
 
     if let Some(key) = registered_local {
-        match key.path.as_ref() {
-            Some(path) => eprintln!(
+        match &key.source {
+            SshKeySource::File(path) => eprintln!(
                 "Using SSH key from file {}: {}",
                 path.display(),
                 key.key_name()
             ),
-            None => eprintln!("Using SSH key from agent: {}", key.key_name()),
+            SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
         }
         return Ok(());
     }
@@ -118,7 +118,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         client,
         configs,
         &key_to_register.key_name(),
-        &key_to_register.public_key,
+        &key_to_register.public_key.to_string(),
         None,
     )
     .await?;

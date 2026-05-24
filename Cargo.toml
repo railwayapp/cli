@@ -114,6 +114,9 @@ russh = { version = "0.60.2", default-features = false, features = [
 ] }
 tempfile = "3.23.0"
 
+[target.'cfg(windows)'.dependencies]
+pageant = "0.2.0"
+
 [profile.release]
 lto = "fat"
 opt-level = "z"

@@ -1,9 +1,3 @@
-use anyhow::{Context, Result, bail};
-use reqwest::Client;
-use std::borrow::Cow;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
 use crate::client::post_graphql;
 use crate::config::Configs;
 use crate::gql::mutations::{
@@ -11,12 +5,27 @@ use crate::gql::mutations::{
     ssh_public_key_delete, validate_two_factor,
 };
 use crate::gql::queries::{GitHubSshKeys, SshPublicKeys, git_hub_ssh_keys, ssh_public_keys};
+use anyhow::{Context, Result, bail};
+use reqwest::Client;
+use russh::keys::HashAlg::Sha256;
+use russh::keys::agent::client::AgentClient;
+use russh::keys::{PublicKey, parse_public_key_base64};
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+pub enum SshKeySource {
+    Agent,
+    File(PathBuf),
+}
 
 /// Local SSH key info
 #[derive(Debug, Clone)]
 pub struct LocalSshKey {
-    pub path: Option<PathBuf>,
-    pub public_key: String,
+    pub source: SshKeySource,
+    pub public_key: PublicKey,
+
+    // metadata - mostly rederived?
     pub fingerprint: String,
     pub key_type: String,
     pub key_comment: Option<String>,
@@ -24,21 +33,22 @@ pub struct LocalSshKey {
 
 impl LocalSshKey {
     pub fn key_name(&self) -> Cow<'_, str> {
-        match (self.key_comment.as_ref(), self.path.as_ref()) {
-            (Some(comment), _) => comment.into(),
-            (_, Some(path)) => path
-                .file_stem()
+        if let Some(comment) = &self.key_comment {
+            comment.into()
+        } else if let SshKeySource::File(ref path) = self.source {
+            path.file_stem()
                 .map(|stem| stem.to_string_lossy())
-                .unwrap_or_else(|| (&self.fingerprint).into()),
-            (None, None) => (&self.fingerprint).into(),
+                .unwrap_or_else(|| (&self.fingerprint).into())
+        } else {
+            (&self.fingerprint).into()
         }
     }
 
     pub fn key_source(&self) -> Cow<'_, str> {
-        self.path
-            .as_ref()
-            .map(|p| p.to_string_lossy())
-            .unwrap_or_else(|| "SSH Agent".into())
+        match self.source {
+            SshKeySource::Agent => "SSH Agent".into(),
+            SshKeySource::File(ref path) => path.to_string_lossy(),
+        }
     }
 }
 
@@ -52,9 +62,10 @@ const SUPPORTED_KEY_TYPES: &[&str] = &[
     "ssh-dss",
 ];
 
-pub fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
+pub async fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
     let mut seen = std::collections::HashMap::new();
-    for key in fetch_keys_from_ssh_agent()? {
+
+    for key in fetch_keys_from_agent().await.unwrap_or_default() {
         seen.entry(key.fingerprint.clone()).or_insert(key);
     }
 
@@ -105,44 +116,46 @@ pub fn find_ssh_key_files() -> Result<Vec<LocalSshKey>> {
     Ok(keys)
 }
 
-// Pull SSH keys from the agent directly.
-pub fn fetch_keys_from_ssh_agent() -> Result<Vec<LocalSshKey>> {
-    let output = match Command::new("ssh-add").arg("-L").output() {
-        Ok(output) => output,
-        Err(_) => return Ok(vec![]),
-    };
+#[cfg(unix)]
+pub async fn get_ssh_agent() -> Result<AgentClient<tokio::net::UnixStream>, russh::keys::Error> {
+    AgentClient::connect_env().await
+}
 
-    if !output.status.success() {
-        // If we successfully run but can't find keys, it's probably best to just pretend like the
-        // SSH agent doesn't exist at all.
+#[cfg(windows)]
+pub async fn get_ssh_agent() -> Result<AgentClient<pageant::PageantStream>, russh::keys::Error> {
+    AgentClient::connect_pageant().await
+}
 
-        return Ok(vec![]);
-    }
+pub async fn fetch_keys_from_agent() -> Result<Vec<LocalSshKey>> {
+    let mut agent: AgentClient<_> = get_ssh_agent().await?;
+    let mut keys = Vec::new();
 
-    String::from_utf8_lossy(&output.stdout)
-        .split("\n")
-        .filter(|s| !s.is_empty())
-        .filter(|s| SUPPORTED_KEY_TYPES.iter().any(|kt| s.starts_with(kt)))
-        .map(|s| {
-            let parts: Vec<_> = s.split_whitespace().collect();
-            let fingerprint = compute_fingerprint_from_pubkey(s)?;
-            let key_comment = parts
-                .get(2..)
-                .map(|p| p.join(" "))
-                .filter(|s| !s.is_empty());
+    agent
+        .request_identities()
+        .await?
+        .into_iter()
+        .for_each(|identity| {
+            let public_key = identity.public_key();
+            let key_type = public_key.algorithm().to_string();
+            let key_comment = Some(identity.comment().to_string()).filter(|s| !s.is_empty());
 
-            Ok(LocalSshKey {
-                path: None,
-                public_key: s.trim().to_string(),
-                fingerprint,
-                key_type: parts[0].to_string(),
-                key_comment,
-            })
-        })
-        .collect()
+            if SUPPORTED_KEY_TYPES.iter().any(|t| key_type.starts_with(t)) {
+                keys.push(LocalSshKey {
+                    source: SshKeySource::Agent,
+                    public_key: (*public_key).clone(),
+                    fingerprint: public_key.fingerprint(Sha256).to_string(),
+                    key_type,
+                    key_comment,
+                });
+            }
+        });
+
+    Ok(keys)
 }
 
 /// Read and parse an SSH public key file
+/// FIXME: Not fully replaced with a russh call due to a lack of key comments.
+///        See https://github.com/Eugeny/russh/issues/713.
 fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
     let content = std::fs::read_to_string(path)?;
     let parts: Vec<&str> = content.split_whitespace().collect();
@@ -151,83 +164,27 @@ fn read_ssh_key(path: &Path) -> Result<LocalSshKey> {
         bail!("Invalid SSH key format");
     }
 
-    let key_type = parts[0].to_string();
-    let public_key = content.trim().to_string();
+    let russh_key = parse_public_key_base64(parts[1])?;
     let key_comment = parts
         .get(2..)
         .map(|p| p.join(" "))
         .filter(|s| !s.is_empty());
 
-    // Compute fingerprint using ssh-keygen
-    let fingerprint = compute_fingerprint(path)?;
+    let fingerprint = russh_key.fingerprint(Sha256).to_string();
 
     Ok(LocalSshKey {
-        path: Some(path.into()),
-        public_key,
+        source: SshKeySource::File(path.to_path_buf()),
+        public_key: russh_key.clone(),
         fingerprint,
-        key_type,
+        key_type: russh_key.algorithm().to_string(),
         key_comment,
     })
 }
 
-/// Compute SHA256 fingerprint of an SSH key file
-pub fn compute_fingerprint(key_path: &Path) -> Result<String> {
-    let output = Command::new("ssh-keygen")
-        .args(["-lf", key_path.to_str().unwrap(), "-E", "sha256"])
-        .output()
-        .context("Failed to run ssh-keygen")?;
-
-    if !output.status.success() {
-        bail!(
-            "ssh-keygen failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    // Format: "256 SHA256:xxxxx comment (TYPE)"
-    // We want "SHA256:xxxxx"
-    let parts: Vec<&str> = output_str.split_whitespace().collect();
-    if parts.len() >= 2 {
-        Ok(parts[1].to_string())
-    } else {
-        bail!("Could not parse fingerprint from ssh-keygen output");
-    }
-}
-
 /// Compute SHA256 fingerprint from a public key string
 pub fn compute_fingerprint_from_pubkey(pubkey: &str) -> Result<String> {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    let mut child = Command::new("ssh-keygen")
-        .args(["-lf", "-", "-E", "sha256"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to run ssh-keygen")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(pubkey.as_bytes())?;
-    }
-
-    let output = child.wait_with_output()?;
-
-    if !output.status.success() {
-        bail!(
-            "ssh-keygen failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = output_str.split_whitespace().collect();
-    if parts.len() >= 2 {
-        Ok(parts[1].to_string())
-    } else {
-        bail!("Could not parse fingerprint from ssh-keygen output");
-    }
+    let key = parse_public_key_base64(pubkey)?;
+    Ok(key.fingerprint(Sha256).to_string())
 }
 
 /// Get registered SSH public keys. When `workspace_id` is `Some`, returns
