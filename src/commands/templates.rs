@@ -451,22 +451,58 @@ async fn list_command(args: ListArgs) -> Result<()> {
 
     let spinner = create_spinner_if(!args.json, "Loading workspace templates...".to_string());
 
-    let mut groups: Vec<WorkspaceTemplateGroup> = Vec::new();
-    for workspace in workspaces_with_client(&client, &configs).await? {
-        if let Some(filter) = filter_id.as_deref() {
-            if workspace.id() != filter {
-                continue;
-            }
+    let workspaces: Vec<_> = workspaces_with_client(&client, &configs)
+        .await?
+        .into_iter()
+        .filter(|workspace| {
+            filter_id
+                .as_deref()
+                .is_none_or(|filter| workspace.id() == filter)
+        })
+        .collect();
+
+    let fetches = workspaces.iter().map(|workspace| {
+        let workspace_id = workspace.id().to_string();
+        let workspace_name = workspace.name().to_string();
+        let client = &client;
+        let configs = &configs;
+        async move {
+            let result = fetch_all_workspace_templates(client, configs, &workspace_id).await;
+            (workspace_name, result)
         }
-        let templates = fetch_all_workspace_templates(&client, &configs, workspace.id()).await?;
-        groups.push(WorkspaceTemplateGroup {
-            workspace_name: workspace.name().to_string(),
-            templates,
-        });
-    }
+    });
+    let results = futures::future::join_all(fetches).await;
 
     if let Some(spinner) = spinner {
         spinner.finish_and_clear();
+    }
+
+    let mut groups: Vec<WorkspaceTemplateGroup> = Vec::new();
+    let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
+    for (workspace_name, result) in results {
+        match result {
+            Ok(templates) => groups.push(WorkspaceTemplateGroup {
+                workspace_name,
+                templates,
+            }),
+            Err(error) => failures.push((workspace_name, error)),
+        }
+    }
+
+    // A user that explicitly targeted one workspace and got nothing back deserves
+    // a hard failure, not a silent warning.
+    if filter_id.is_some() && groups.is_empty() && !failures.is_empty() {
+        let (workspace_name, error) = failures.into_iter().next().unwrap();
+        return Err(error.context(format!("Failed to load templates for {workspace_name}")));
+    }
+
+    for (workspace_name, error) in &failures {
+        eprintln!(
+            "{}: unable to load templates for {}: {:#}",
+            "Warning".yellow(),
+            workspace_name,
+            error
+        );
     }
 
     if args.json {
