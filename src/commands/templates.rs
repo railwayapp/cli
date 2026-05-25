@@ -494,32 +494,127 @@ async fn list_command(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut printed_any = false;
-    for group in &groups {
-        if group.templates.is_empty() {
-            continue;
-        }
-        if printed_any {
-            println!();
-        }
-        println!("{}", group.workspace_name.bold());
-        for template in &group.templates {
-            let category = template.category.as_deref().unwrap_or("Uncategorized");
-            println!("  {} ({})", template.name.bold(), template.code);
-            println!("    status {} | category {}", template.status, category);
-        }
-        printed_any = true;
-    }
-
-    if !printed_any {
-        if filter_id.is_some() {
-            println!("No templates found in workspace.");
-        } else {
-            println!("No templates found across your workspaces.");
-        }
-    }
+    print_workspace_template_groups(&groups, filter_id.is_some(), &configs);
 
     Ok(())
+}
+
+fn print_workspace_template_groups(
+    groups: &[WorkspaceTemplateGroup],
+    filtered: bool,
+    configs: &Configs,
+) {
+    let total: usize = groups.iter().map(|group| group.templates.len()).sum();
+    let populated_workspaces = groups
+        .iter()
+        .filter(|group| !group.templates.is_empty())
+        .count();
+
+    if total == 0 {
+        let message = if filtered {
+            "No templates found in workspace."
+        } else {
+            "No templates found across your workspaces."
+        };
+        println!();
+        println!("{}", message.dimmed());
+        return;
+    }
+
+    println!();
+    for (idx, group) in groups
+        .iter()
+        .filter(|group| !group.templates.is_empty())
+        .enumerate()
+    {
+        if idx > 0 {
+            println!();
+        }
+        print_workspace_template_section(group, configs);
+    }
+
+    println!();
+    println!(
+        "{}",
+        format!(
+            "{} {} across {} {}",
+            total,
+            pluralize("template", total),
+            populated_workspaces,
+            pluralize("workspace", populated_workspaces),
+        )
+        .dimmed()
+    );
+}
+
+fn print_workspace_template_section(group: &WorkspaceTemplateGroup, configs: &Configs) {
+    println!(
+        "{}  {}",
+        group.workspace_name.bold(),
+        format!(
+            "{} {}",
+            group.templates.len(),
+            pluralize("template", group.templates.len())
+        )
+        .dimmed()
+    );
+
+    for template in &group.templates {
+        println!();
+        println!(
+            "  {}  {}",
+            template.name.bold(),
+            format!("({})", template.code).dimmed()
+        );
+
+        if let Some(description) = template
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+        {
+            println!("    {}", truncate_chars(description, 92).dimmed());
+        }
+
+        let details = workspace_template_detail_spans(template);
+        println!("    {}", details.join(&format!(" {} ", "·".dimmed())));
+
+        let url = if is_published_status(&template.status) {
+            template_url(configs, &template.code)
+        } else {
+            template_editor_url(configs, &template.id)
+        };
+        println!("    {}", url.dimmed().underline());
+    }
+}
+
+fn workspace_template_detail_spans(template: &TemplateDetailItem) -> Vec<String> {
+    let mut details = vec![colorize_template_status(&template.status)];
+    if let Some(category) = template
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        details.push(category.to_string());
+    }
+    details
+}
+
+fn colorize_template_status(status: &str) -> String {
+    match status {
+        "PUBLISHED" => status.green().bold().to_string(),
+        "UNPUBLISHED" => status.yellow().to_string(),
+        _ => status.dimmed().to_string(),
+    }
+}
+
+fn pluralize(word: &str, count: usize) -> String {
+    if count == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
 }
 
 async fn fetch_all_workspace_templates(
