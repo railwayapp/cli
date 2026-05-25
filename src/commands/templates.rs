@@ -107,7 +107,7 @@ enum TerminalTheme {
 /// Discover Railway templates
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates update template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates unpublish template-code --yes --json\n  railway templates delete template-id --yes --json\n  railway template find redis --limit 5 --json\n  railway templates ls --category database --json"
+    after_help = "Examples:\n\n  railway templates search postgres --json\n  railway templates list --json\n  railway templates list --workspace my-workspace --json\n  railway templates create --project project-id --json\n  railway templates publish template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates update template-id --category Other --description \"Deploy and Host My App with Railway\" --readme-file README.md --json\n  railway templates unpublish template-code --yes --json\n  railway templates delete template-id --yes --json\n  railway templates find redis --limit 5 --json"
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -116,9 +116,13 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// Search published templates
-    #[clap(visible_alias = "find", visible_alias = "list", visible_alias = "ls")]
+    /// Search published templates in the marketplace
+    #[clap(visible_alias = "find")]
     Search(SearchArgs),
+
+    /// List templates owned by a workspace
+    #[clap(visible_alias = "ls")]
+    List(ListArgs),
 
     /// Create an unpublished template from a project
     #[clap(visible_alias = "generate")]
@@ -161,6 +165,20 @@ struct SearchArgs {
     /// Filter by verification state
     #[arg(long)]
     verified: Option<bool>,
+}
+
+#[derive(Parser, Clone)]
+#[clap(
+    after_help = "Examples:\n\n  railway templates list --json\n  railway templates list --workspace my-workspace --json\n\nAutomation notes:\n  Lists templates owned by a workspace, including drafts and published templates.\n  Omit --workspace to list templates across every workspace you belong to.\n  Output is grouped by workspace; in --json mode each entry carries workspaceId and workspaceName."
+)]
+struct ListArgs {
+    /// Workspace ID or name. Defaults to listing across every workspace you belong to.
+    #[arg(short, long)]
+    workspace: Option<String>,
+
+    /// Print results as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Parser, Clone)]
@@ -366,6 +384,7 @@ impl From<WorkspaceTemplateItem> for TemplateDetailItem {
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::Search(args) => search_command(args).await,
+        Commands::List(args) => list_command(args).await,
         Commands::Create(args) => create_command(args).await,
         Commands::Publish(args) => publish_command(args).await,
         Commands::Unpublish(args) => unpublish_command(args).await,
@@ -412,6 +431,257 @@ async fn create_command(args: CreateArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn list_command(args: ListArgs) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_user_authorized(&configs)?;
+
+    let filter_query = args.workspace.and_then(non_empty_string);
+
+    let all_workspaces = workspaces_with_client(&client, &configs).await?;
+
+    let workspaces: Vec<&crate::workspace::Workspace> = match filter_query.as_deref() {
+        Some(query) => {
+            let matched = match_workspace(&all_workspaces, query)?;
+            fake_select("Select workspace", matched.name());
+            vec![matched]
+        }
+        None => all_workspaces.iter().collect(),
+    };
+
+    let spinner = create_spinner_if(!args.json, "Loading workspace templates...".to_string());
+
+    let fetches = workspaces.iter().map(|workspace| {
+        let workspace_id = workspace.id().to_string();
+        let workspace_name = workspace.name().to_string();
+        let client = &client;
+        let configs = &configs;
+        async move {
+            let result = fetch_all_workspace_templates(client, configs, &workspace_id).await;
+            (workspace_name, result)
+        }
+    });
+    let results = futures::future::join_all(fetches).await;
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    let mut groups: Vec<WorkspaceTemplateGroup> = Vec::new();
+    let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
+    for (workspace_name, result) in results {
+        match result {
+            Ok(templates) => groups.push(WorkspaceTemplateGroup {
+                workspace_name,
+                templates,
+            }),
+            Err(error) => failures.push((workspace_name, error)),
+        }
+    }
+
+    // If we have no successful results, every fetch failed — surface a hard error
+    // instead of pretending the user simply has no templates.
+    if groups.is_empty() && !failures.is_empty() {
+        let (workspace_name, error) = failures.into_iter().next().unwrap();
+        return Err(error.context(if filter_query.is_some() {
+            format!("Failed to load templates for {workspace_name}")
+        } else {
+            format!("Failed to load templates from any workspace (first error: {workspace_name})")
+        }));
+    }
+
+    for (workspace_name, error) in &failures {
+        eprintln!(
+            "{}: unable to load templates for {}: {:#}",
+            "Warning".yellow(),
+            workspace_name,
+            error
+        );
+    }
+
+    if args.json {
+        let output: Vec<serde_json::Value> = groups
+            .iter()
+            .flat_map(|group| {
+                let workspace_name = group.workspace_name.clone();
+                group.templates.iter().map(move |template| {
+                    serde_json::json!({
+                        "id": template.id,
+                        "code": template.code,
+                        "name": template.name,
+                        "description": template.description,
+                        "category": template.category,
+                        "status": template.status,
+                        "image": template.image,
+                        "demoProjectId": template.demo_project_id,
+                        "workspaceId": template.workspace_id,
+                        "workspaceName": workspace_name,
+                    })
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    print_workspace_template_groups(&groups, filter_query.is_some(), &configs);
+
+    Ok(())
+}
+
+fn print_workspace_template_groups(
+    groups: &[WorkspaceTemplateGroup],
+    filtered: bool,
+    configs: &Configs,
+) {
+    let total: usize = groups.iter().map(|group| group.templates.len()).sum();
+    let populated_workspaces = groups
+        .iter()
+        .filter(|group| !group.templates.is_empty())
+        .count();
+
+    if total == 0 {
+        let message = if filtered {
+            "No templates found in workspace."
+        } else {
+            "No templates found across your workspaces."
+        };
+        println!();
+        println!("{}", message.dimmed());
+        return;
+    }
+
+    println!();
+    for (idx, group) in groups
+        .iter()
+        .filter(|group| !group.templates.is_empty())
+        .enumerate()
+    {
+        if idx > 0 {
+            println!();
+        }
+        print_workspace_template_section(group, configs);
+    }
+
+    println!();
+    println!(
+        "{}",
+        format!(
+            "{} {} across {} {}",
+            total,
+            pluralize("template", total),
+            populated_workspaces,
+            pluralize("workspace", populated_workspaces),
+        )
+        .dimmed()
+    );
+}
+
+fn print_workspace_template_section(group: &WorkspaceTemplateGroup, configs: &Configs) {
+    println!(
+        "{}  {}",
+        group.workspace_name.bold(),
+        format!(
+            "{} {}",
+            group.templates.len(),
+            pluralize("template", group.templates.len())
+        )
+        .dimmed()
+    );
+
+    for template in &group.templates {
+        println!();
+        println!(
+            "  {}  {}",
+            template.name.bold(),
+            format!("({})", template.code).dimmed()
+        );
+
+        if let Some(description) = template
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+        {
+            println!("    {}", truncate_chars(description, 92).dimmed());
+        }
+
+        let details = workspace_template_detail_spans(template);
+        println!("    {}", details.join(&format!(" {} ", "·".dimmed())));
+
+        let url = if is_published_status(&template.status) {
+            template_url(configs, &template.code)
+        } else {
+            template_editor_url(configs, &template.id)
+        };
+        println!("    {}", url.dimmed().underline());
+    }
+}
+
+fn workspace_template_detail_spans(template: &TemplateDetailItem) -> Vec<String> {
+    let mut details = vec![colorize_template_status(&template.status)];
+    if let Some(category) = template
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        details.push(category.to_string());
+    }
+    details
+}
+
+fn colorize_template_status(status: &str) -> String {
+    match status {
+        "PUBLISHED" => status.green().bold().to_string(),
+        "UNPUBLISHED" => status.yellow().to_string(),
+        _ => status.dimmed().to_string(),
+    }
+}
+
+fn pluralize(word: &str, count: usize) -> String {
+    if count == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
+async fn fetch_all_workspace_templates(
+    client: &reqwest::Client,
+    configs: &Configs,
+    workspace_id: &str,
+) -> Result<Vec<TemplateDetailItem>> {
+    let mut all = Vec::new();
+    let mut after = None;
+    loop {
+        let response = post_graphql::<queries::WorkspaceTemplates, _>(
+            client,
+            configs.get_backboard(),
+            queries::workspace_templates::Variables {
+                workspace_id: workspace_id.to_string(),
+                first: Some(MAX_LIMIT),
+                after,
+            },
+        )
+        .await?;
+
+        for edge in response.workspace_templates.edges {
+            all.push(edge.node.into());
+        }
+
+        if !response.workspace_templates.page_info.has_next_page {
+            break;
+        }
+        after = response.workspace_templates.page_info.end_cursor;
+    }
+    Ok(all)
+}
+
+struct WorkspaceTemplateGroup {
+    workspace_name: String,
+    templates: Vec<TemplateDetailItem>,
 }
 
 async fn publish_command(args: PublishArgs) -> Result<()> {
@@ -963,28 +1233,33 @@ async fn resolve_workspace_id(
     configs: &Configs,
     workspace: &str,
 ) -> Result<String> {
-    let matches = workspaces_with_client(client, configs)
-        .await?
-        .into_iter()
+    let workspaces = workspaces_with_client(client, configs).await?;
+    let matched = match_workspace(&workspaces, workspace)?;
+    fake_select("Select workspace", matched.name());
+    Ok(matched.id().to_string())
+}
+
+fn match_workspace<'a>(
+    workspaces: &'a [crate::workspace::Workspace],
+    query: &str,
+) -> Result<&'a crate::workspace::Workspace> {
+    let matches: Vec<&crate::workspace::Workspace> = workspaces
+        .iter()
         .filter(|candidate| {
-            candidate.id().eq_ignore_ascii_case(workspace)
-                || candidate.name().eq_ignore_ascii_case(workspace)
+            candidate.id().eq_ignore_ascii_case(query)
+                || candidate.name().eq_ignore_ascii_case(query)
                 || candidate
                     .team_id()
-                    .is_some_and(|team_id| team_id.eq_ignore_ascii_case(workspace))
+                    .is_some_and(|team_id| team_id.eq_ignore_ascii_case(query))
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     match matches.len() {
-        0 => bail!(RailwayError::WorkspaceNotFound(workspace.to_string())),
-        1 => {
-            let workspace = matches[0].clone();
-            fake_select("Select workspace", workspace.name());
-            Ok(workspace.id().to_string())
-        }
+        0 => bail!(RailwayError::WorkspaceNotFound(query.to_string())),
+        1 => Ok(matches[0]),
         _ => bail!(
             "Workspace \"{}\" is ambiguous. Use the workspace ID.",
-            workspace
+            query
         ),
     }
 }
