@@ -437,29 +437,20 @@ async fn list_command(args: ListArgs) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_user_authorized(&configs)?;
 
-    let filter_id = match args.workspace.as_deref().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
+    let filter_query = args.workspace.and_then(non_empty_string);
+
+    let all_workspaces = workspaces_with_client(&client, &configs).await?;
+
+    let workspaces: Vec<&crate::workspace::Workspace> = match filter_query.as_deref() {
+        Some(query) => {
+            let matched = match_workspace(&all_workspaces, query)?;
+            fake_select("Select workspace", matched.name());
+            vec![matched]
         }
-    }) {
-        Some(workspace) => Some(resolve_workspace_id(&client, &configs, &workspace).await?),
-        None => None,
+        None => all_workspaces.iter().collect(),
     };
 
     let spinner = create_spinner_if(!args.json, "Loading workspace templates...".to_string());
-
-    let workspaces: Vec<_> = workspaces_with_client(&client, &configs)
-        .await?
-        .into_iter()
-        .filter(|workspace| {
-            filter_id
-                .as_deref()
-                .is_none_or(|filter| workspace.id() == filter)
-        })
-        .collect();
 
     let fetches = workspaces.iter().map(|workspace| {
         let workspace_id = workspace.id().to_string();
@@ -489,11 +480,15 @@ async fn list_command(args: ListArgs) -> Result<()> {
         }
     }
 
-    // A user that explicitly targeted one workspace and got nothing back deserves
-    // a hard failure, not a silent warning.
-    if filter_id.is_some() && groups.is_empty() && !failures.is_empty() {
+    // If we have no successful results, every fetch failed — surface a hard error
+    // instead of pretending the user simply has no templates.
+    if groups.is_empty() && !failures.is_empty() {
         let (workspace_name, error) = failures.into_iter().next().unwrap();
-        return Err(error.context(format!("Failed to load templates for {workspace_name}")));
+        return Err(error.context(if filter_query.is_some() {
+            format!("Failed to load templates for {workspace_name}")
+        } else {
+            format!("Failed to load templates from any workspace (first error: {workspace_name})")
+        }));
     }
 
     for (workspace_name, error) in &failures {
@@ -530,7 +525,7 @@ async fn list_command(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    print_workspace_template_groups(&groups, filter_id.is_some(), &configs);
+    print_workspace_template_groups(&groups, filter_query.is_some(), &configs);
 
     Ok(())
 }
@@ -1238,28 +1233,33 @@ async fn resolve_workspace_id(
     configs: &Configs,
     workspace: &str,
 ) -> Result<String> {
-    let matches = workspaces_with_client(client, configs)
-        .await?
-        .into_iter()
+    let workspaces = workspaces_with_client(client, configs).await?;
+    let matched = match_workspace(&workspaces, workspace)?;
+    fake_select("Select workspace", matched.name());
+    Ok(matched.id().to_string())
+}
+
+fn match_workspace<'a>(
+    workspaces: &'a [crate::workspace::Workspace],
+    query: &str,
+) -> Result<&'a crate::workspace::Workspace> {
+    let matches: Vec<&crate::workspace::Workspace> = workspaces
+        .iter()
         .filter(|candidate| {
-            candidate.id().eq_ignore_ascii_case(workspace)
-                || candidate.name().eq_ignore_ascii_case(workspace)
+            candidate.id().eq_ignore_ascii_case(query)
+                || candidate.name().eq_ignore_ascii_case(query)
                 || candidate
                     .team_id()
-                    .is_some_and(|team_id| team_id.eq_ignore_ascii_case(workspace))
+                    .is_some_and(|team_id| team_id.eq_ignore_ascii_case(query))
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     match matches.len() {
-        0 => bail!(RailwayError::WorkspaceNotFound(workspace.to_string())),
-        1 => {
-            let workspace = matches[0].clone();
-            fake_select("Select workspace", workspace.name());
-            Ok(workspace.id().to_string())
-        }
+        0 => bail!(RailwayError::WorkspaceNotFound(query.to_string())),
+        1 => Ok(matches[0]),
         _ => bail!(
             "Workspace \"{}\" is ambiguous. Use the workspace ID.",
-            workspace
+            query
         ),
     }
 }
