@@ -529,6 +529,12 @@ else
   VERBOSE=
 fi
 
+# --remote only takes effect alongside --agents (it routes setup agent to the
+# hosted MCP server). Warn loudly rather than silently no-op.
+if [ "$REMOTE" = 1 ] && [ "$AGENTS" != 1 ]; then
+  warn "--remote has no effect without --agents. Re-run with both flags to configure remote MCP."
+fi
+
 write_env_files() {
   local quoted_railway_home
   local fish_railway_home
@@ -1007,6 +1013,15 @@ if [ "$AGENTS" = 1 ] && has railway; then
   esac
 
   if [ "$BREW_INSTALL" = 1 ]; then
+    if [ "$REMOTE" = 1 ]; then
+      # --remote was added in a newer release. Continuing with an older brewed
+      # CLI would call `setup agent --remote` and fail with an unrecognized-arg
+      # error after we already told the user we were continuing. Refuse early.
+      error "Railway CLI was installed via Homebrew (version $CURRENT_VERSION)."
+      error "The --remote flag requires Railway CLI $RAILWAY_VERSION or newer."
+      error "Run 'brew upgrade railway' first, then re-run cli.new --agents --remote."
+      exit 1
+    fi
     warn "Railway CLI was installed via Homebrew."
     warn "Run 'brew upgrade railway' to update from $CURRENT_VERSION to $RAILWAY_VERSION, then re-run cli.new --agents."
     info "Continuing with $CURRENT_VERSION."
