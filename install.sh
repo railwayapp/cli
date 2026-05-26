@@ -26,6 +26,10 @@ help_text="Options
    --agents
    Install or reuse the Railway CLI, then configure Railway agent support
 
+   --remote
+   When used with --agents, configure the remote HTTP MCP server at
+   mcp.railway.com instead of the local stdio server
+
    -r, --remove
    Uninstall railway
 
@@ -393,6 +397,7 @@ is_build_available() {
 UNINSTALL=0
 HELP=0
 AGENTS=0
+REMOTE=0
 RAILWAY_HOME_DIR=""
 RAILWAY_ENV_FILE=""
 RAILWAY_FISH_ENV_FILE=""
@@ -475,6 +480,10 @@ while [ "$#" -gt 0 ]; do
     ;;
   --agents)
     AGENTS=1
+    shift 1
+    ;;
+  --remote)
+    REMOTE=1
     shift 1
     ;;
   -h | --help)
@@ -887,6 +896,7 @@ warn_existing_path_conflict() {
 run_agent_setup() {
   local railway_bin="$1"
   local yes=""
+  local remote=""
 
   if [ -z "${RAILWAY_INSTALL_REQUEST_ID-}" ]; then
     RAILWAY_INSTALL_REQUEST_ID="install_$(od -vAn -N16 -tx1 < /dev/urandom | tr -d ' \n')"
@@ -895,6 +905,10 @@ run_agent_setup() {
 
   if [ -n "${FORCE-}" ] || [ ! -t 0 ]; then
     yes="-y"
+  fi
+
+  if [ "$REMOTE" = 1 ]; then
+    remote="--remote"
   fi
 
   if [ -t 0 ] && [ -z "${FORCE-}" ]; then
@@ -906,7 +920,7 @@ run_agent_setup() {
     fi
   fi
 
-  "$railway_bin" setup agent $yes
+  "$railway_bin" setup agent $yes $remote
 
   if ! "$railway_bin" whoami >/dev/null 2>&1; then
     warn "Next: run '$railway_bin login' to finish setup (opens a browser)."
