@@ -3562,6 +3562,7 @@ dependencies = [
  "notify",
  "num_cpus",
  "open",
+ "pageant",
  "pastey 0.1.1",
  "pathdiff",
  "rand 0.8.5",

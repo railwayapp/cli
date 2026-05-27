@@ -12,7 +12,7 @@ pub mod project;
 pub mod regions;
 pub mod scale_tui;
 pub mod service;
-pub mod ssh_keys;
+pub mod ssh;
 pub mod upload;
 pub mod user;
 pub mod variables;

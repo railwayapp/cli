@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use tokio::io::AsyncWriteExt;
 
 use crate::controllers::database::DatabaseType;
-use crate::controllers::ssh_keys::find_local_ssh_keys;
+use crate::controllers::ssh::keys::find_local_ssh_keys;
 
 pub use types::DatabaseStats;
 
@@ -19,10 +19,10 @@ const SSH_HOST: &str = "ssh.railway.com";
 /// Preflight check for SSH-based DB stats collection. Runs locally only --
 /// it catches the common "no SSH key" case before we spawn the SSH process,
 /// so we can surface actionable guidance instead of a cryptic failure.
-pub fn preflight_db_stats_ssh() -> Result<(), String> {
-    match find_local_ssh_keys() {
+pub async fn preflight_db_stats_ssh() -> Result<(), String> {
+    match find_local_ssh_keys().await {
         Ok(keys) if keys.is_empty() => Err(
-            "no local SSH key found in ~/.ssh\n  \
+            "no SSH keys found in your SSH agent or ~/.ssh/\n\n\
              generate one with `ssh-keygen -t ed25519`, then register it with `railway ssh keys add`"
                 .to_string(),
         ),
