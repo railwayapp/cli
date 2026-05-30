@@ -264,6 +264,15 @@ pub struct SshPublicKeys;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Sandboxes.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct Sandboxes;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/TemplateSearch.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none

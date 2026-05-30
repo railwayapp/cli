@@ -36,6 +36,7 @@ pub mod project;
 pub mod redeploy;
 pub mod restart;
 pub mod run;
+pub mod sandbox;
 pub mod scale;
 pub mod service;
 pub mod setup;
