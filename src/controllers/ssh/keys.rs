@@ -75,10 +75,16 @@ pub async fn find_local_ssh_keys() -> Result<Vec<LocalSshKey>> {
 
     let mut keys = seen.into_values().collect::<Vec<_>>();
     keys.sort_by_key(|k| {
-        SUPPORTED_KEY_TYPES
+        let source_priority = match k.source {
+            SshKeySource::Agent => 0,
+            SshKeySource::File(_) => 1,
+        };
+        let type_priority = SUPPORTED_KEY_TYPES
             .iter()
             .position(|t| k.key_type.starts_with(t))
-            .unwrap_or(usize::MAX)
+            .unwrap_or(usize::MAX);
+
+        (source_priority, type_priority)
     });
 
     Ok(keys)
