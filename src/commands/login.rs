@@ -208,7 +208,7 @@ async fn wait_for_callback(
                 .find(|(k, _)| k == "error_description")
                 .map(|(_, v)| v.to_string())
                 .unwrap_or_default();
-            send_response(&mut stream, "Authentication failed", false, host, false).await;
+            send_response(&mut stream, "Authentication failed", false, host).await;
             bail!("OAuth error: {err}: {desc}");
         }
 
@@ -220,7 +220,7 @@ async fn wait_for_callback(
         match received_state {
             Some(s) if s == expected_state => {}
             _ => {
-                send_response(&mut stream, "Authentication failed", false, host, false).await;
+                send_response(&mut stream, "Authentication failed", false, host).await;
                 bail!("OAuth state parameter mismatch (possible CSRF attack)");
             }
         }
@@ -245,7 +245,7 @@ async fn wait_for_callback(
         } else {
             "Authentication successful!"
         };
-        send_response(&mut stream, success_message, true, host, is_new_user).await;
+        send_response(&mut stream, success_message, true, host).await;
 
         return Ok(code);
     }
@@ -256,7 +256,6 @@ async fn send_response(
     message: &str,
     success: bool,
     host: &str,
-    redirect_to_dashboard: bool,
 ) {
     let icon = if success { "&#10003;" } else { "&#10007;" };
     let accent = if success {
@@ -266,23 +265,19 @@ async fn send_response(
     };
     let dots_url = format!("https://{host}/dots-oxipng.png");
 
-    // Always redirect the browser to the dashboard after a short
-    // pause. Brand-new users get a "Welcome to Railway!" framing;
-    // existing users get the standard confirmation. Either way the
-    // CLI's localhost callback doesn't need the browser tab to stay
-    // open past this point — the token was captured before we
-    // serve this response.
+    // On success, redirect the browser to the dashboard after a short
+    // pause; the CLI's localhost callback doesn't need the tab to stay
+    // open past this point — the token was captured before we serve
+    // this response.
     let refresh_meta = if success {
         format!(r#"<meta http-equiv="refresh" content="2;url=https://{host}/dashboard">"#)
     } else {
         String::new()
     };
-    let body_copy = if !success {
-        "You can close this window and return to your terminal.".to_string()
-    } else if redirect_to_dashboard {
-        "Taking you to your dashboard…".to_string()
+    let body_copy = if success {
+        "Taking you to your dashboard…"
     } else {
-        "Taking you to your dashboard…".to_string()
+        "You can close this window and return to your terminal."
     };
 
     let body = format!(
