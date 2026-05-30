@@ -1,5 +1,5 @@
 use super::*;
-use crate::commands::skills::resolve_tools;
+use crate::{commands::skills::resolve_tools, consts::RAILWAY_API_TOKEN_ENV};
 use serde_json::{Value as JsonValue, json};
 use std::path::{Path, PathBuf};
 
@@ -171,6 +171,10 @@ fn codex_mcp_configured(path: &Path, remote: bool) -> bool {
         .is_some_and(|entry| {
             if remote {
                 entry.get("url").and_then(toml::Value::as_str) == Some(REMOTE_MCP_URL)
+                    && entry
+                        .get("bearer_token_env_var")
+                        .and_then(toml::Value::as_str)
+                        == Some(RAILWAY_API_TOKEN_ENV)
             } else {
                 entry.get("command").and_then(toml::Value::as_str) == Some("railway")
                     && entry
@@ -327,6 +331,10 @@ fn write_codex_toml(path: &Path, remote: bool) -> Result<()> {
         railway.insert(
             "url".to_string(),
             toml::Value::String(REMOTE_MCP_URL.to_string()),
+        );
+        railway.insert(
+            "bearer_token_env_var".to_string(),
+            toml::Value::String(RAILWAY_API_TOKEN_ENV.to_string()),
         );
     } else {
         railway.insert(
@@ -511,12 +519,30 @@ mod tests {
             r#"
                 [mcp_servers.railway]
                 url = "https://mcp.railway.com"
+                bearer_token_env_var = "RAILWAY_API_TOKEN"
             "#,
         )
         .unwrap();
 
         assert!(mcp_configured_for_slug(home.path(), "codex", true));
         assert!(!mcp_configured_for_slug(home.path(), "codex", false));
+    }
+
+    #[test]
+    fn treats_codex_remote_without_bearer_env_as_incomplete() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".codex").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+                [mcp_servers.railway]
+                url = "https://mcp.railway.com"
+            "#,
+        )
+        .unwrap();
+
+        assert!(!mcp_configured_for_slug(home.path(), "codex", true));
     }
 
     #[test]
@@ -537,6 +563,12 @@ mod tests {
         assert_eq!(
             railway.get("url").and_then(toml::Value::as_str),
             Some("https://mcp.railway.com")
+        );
+        assert_eq!(
+            railway
+                .get("bearer_token_env_var")
+                .and_then(toml::Value::as_str),
+            Some("RAILWAY_API_TOKEN")
         );
         assert!(railway.get("command").is_none());
         assert!(railway.get("args").is_none());
