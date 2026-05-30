@@ -1,25 +1,25 @@
 //! Conservative service-dependency detection for the guest-app flow.
 //!
 //! Scans the cwd for explicit data-store client libraries in known
-//! manifest files. Hints get sent to the server alongside the
-//! tarball; the server stores them on the Project and the post-claim
-//! workflow provisions the corresponding templates.
+//! manifest files. Today these hints are printed as local diagnostics
+//! only; automatic provisioning is intentionally not wired until the
+//! backend has a durable resource-creation flow.
 //!
 //! Conservative on purpose: only matches **explicit** client libraries
 //! whose presence strongly implies a specific data store (e.g., `pg`
 //! → Postgres). Ambiguous signals (`prisma`, `drizzle-orm` without
-//! provider config) are deliberately skipped — false positives mean
-//! the user claims and finds a Postgres they didn't want.
+//! provider config) are deliberately skipped — false positives clutter
+//! diagnostics now and would be dangerous if later wired to provision.
 //!
-//! Allowlist matches the server's `ALLOWED_REQUESTED_SERVICES`:
+//! Keep the slug allowlist aligned with backend-supported templates:
 //!   - postgres
 //!   - redis
 //!   - mysql
 //!   - mongo
 //!   - valkey (no public client library yet; placeholder)
 //!
-//! Empty hint list is the right answer when we're not sure. The
-//! post-claim agent can still help the user add services manually.
+//! Empty hint list is the right answer when we're not sure. The user
+//! can still add services manually.
 
 use std::collections::BTreeSet;
 use std::path::Path;

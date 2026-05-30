@@ -22,7 +22,13 @@ use crate::{
 
 use super::*;
 
-/// Upload and deploy project from the current directory
+/// Upload and deploy project from the current directory.
+///
+/// If you're not signed in, opens a browser to sign in or create a
+/// Railway account (single unified OAuth flow — new accounts are
+/// created on the fly), then chains into project + service creation
+/// and deploy. Pair with -y to skip the surrounding prompts in
+/// scripted or agent-driven contexts.
 #[derive(Parser)]
 #[clap(
     after_help = "Examples:\n\n  railway up --service api --environment production\n  railway up ./apps/api --path-as-root --service api\n  railway up --detach --json --message \"deploy api\"\n\nAutomation notes:\n  `railway up --detach --json` starts an upload and deployment, but it does not wait for the deployment to become healthy.\n  Poll with `railway deployment list --json` and inspect logs with `railway logs --json --lines 100`."
@@ -58,6 +64,10 @@ pub struct Args {
     #[clap(short = 'p', long, value_name = "PROJECT_ID")]
     /// Project ID to deploy to (defaults to linked project)
     project: Option<String>,
+
+    #[clap(short, long)]
+    /// Workspace to create a first-run project in when unauthenticated
+    workspace: Option<String>,
 
     #[clap(long)]
     /// Don't ignore paths from .gitignore
@@ -107,7 +117,7 @@ pub async fn command(args: Args) -> Result<()> {
     {
         return super::create::command_app(super::create::AppArgs {
             path: args.path.clone(),
-            workspace: None,
+            workspace: args.workspace.clone(),
             name: None,
             no_gitignore: args.no_gitignore,
             no_wait: args.detach,
@@ -442,13 +452,42 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
 /// detects fresh accounts on its own (via user.createdAt) and adapts
 /// the consent screen + post-auth landing accordingly.
 async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
-    // In a non-interactive shell (JSON output, --ci, any CI env,
-    // SSH, no DISPLAY, agent capture) we can't drive an interactive
-    // browser flow. Give a clear instruction instead of hanging.
-    if args.json
-        || args.ci
+    // JSON mode: the caller is consuming machine-readable output on
+    // stdout, so we can't drop them into an interactive browser flow.
+    // Emit a structured, parseable error (instead of a human string)
+    // on stdout so an agent can detect the not-signed-in state and
+    // react — e.g. run `railway create account`, then retry. The
+    // bail! below still sets a non-zero exit and prints a human
+    // message to stderr, leaving stdout as clean JSON.
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "error": "Not signed in.",
+                "code": "NOT_AUTHENTICATED",
+                "hint": "Run `railway create account` (or `railway login`) to authenticate, then re-run `railway up`.",
+            })
+        );
+        bail!(
+            "Not signed in. Run `railway create account` (or `railway login`), then re-run `railway up`."
+        );
+    }
+
+    // Other non-interactive contexts (--ci, any CI env, SSH, no
+    // DISPLAY, or piped stdout) can't drive a browser either. Agent
+    // harnesses (Claude Code, Cursor, Codex, ...) capture stdout
+    // through a pipe so `is_terminal()` is false, but there's still a
+    // real human at a browser who can complete OAuth — so the
+    // captured-stdout check is suppressed when an agent harness is
+    // detected. We additionally require stdin to be non-TTY: a real
+    // agent pipes stdin too, while a normal interactive terminal with
+    // a stale `AI_AGENT=…` dotfile export still has a TTY stdin, and
+    // we don't want that leak to silently route into the auto-consent
+    // path below.
+    let in_agent = crate::telemetry::is_non_interactive_agent();
+    if args.ci
         || super::login::is_likely_headless()
-        || !std::io::stdout().is_terminal()
+        || (!std::io::stdout().is_terminal() && !in_agent)
     {
         bail!(
             "You're not signed in. Run `railway login` first, then re-run `railway up`."
@@ -458,16 +497,39 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
     println!();
     println!(
         "  {} {}",
-        "▲".cyan(),
+        "!".yellow().bold(),
         "You're not signed in to Railway.".bold(),
     );
+    println!();
+    println!(
+        "  {} will sign you in (or create an account if you don't have one),",
+        "railway up".bold(),
+    );
+    println!(
+        "  then create a new Railway project from this directory and deploy it."
+    );
+    println!();
+    println!("  To deploy to an existing project instead, cancel and run");
+    println!("  `railway login && railway link --project <name>` first.");
+    println!();
 
-    if !args.yes {
+    // Skip the confirm prompt under an agent harness (stdin isn't a
+    // TTY there either, so the prompt would fail). The agent invoking
+    // `railway up` is treated as implicit consent to proceed — print
+    // a one-liner so the human watching the agent's transcript knows
+    // a browser tab is about to open without a prompt.
+    if in_agent {
+        println!(
+            "  {} Agent harness detected — opening browser (skipping confirm).",
+            "→".cyan(),
+        );
+    }
+    if !args.yes && !in_agent {
         // Confirm before opening a browser tab — interactive users
         // appreciate not having tabs spawn out from under them. -y
         // skips this for unattended flows.
         let confirm = crate::util::prompt::prompt_confirm_with_default_with_cancel(
-            "Sign in or sign up to continue?",
+            "Continue?",
             true,
         )?;
         match confirm {
@@ -476,5 +538,8 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
         }
     }
 
-    super::login::command(super::login::Args { browserless: false }).await
+    super::login::command(super::login::Args {
+        browserless: false,
+    })
+    .await
 }

@@ -16,7 +16,10 @@ use crate::{
     },
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::git::detect_github_remote,
+    util::{
+        detect::detect_services,
+        git::{detect_current_branch, detect_github_remote},
+    },
     workspace::{pick_workspace, workspaces},
 };
 
@@ -179,12 +182,26 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     // App integration is a separate piece; we deploy from local
     // tarball regardless).
     if let Some(remote) = detect_github_remote(&cwd_path) {
+        let branch = detect_current_branch(&cwd_path)
+            .map(|branch| format!(" on {branch}"))
+            .unwrap_or_default();
         println!(
-            "  {} GitHub remote: {} {}",
+            "  {} GitHub remote: {}{} {}",
             "◇".cyan(),
             remote.full_repo_name().bold(),
+            branch,
             "(deploying current directory; GH App integration coming later)"
                 .dimmed(),
+        );
+    }
+
+    let detected_services = detect_services(&cwd_path);
+    if !detected_services.is_empty() {
+        println!(
+            "  {} Detected service dependencies: {} {}",
+            "◇".cyan(),
+            detected_services.join(", ").bold(),
+            "(automatic provisioning is not wired yet)".dimmed(),
         );
     }
 

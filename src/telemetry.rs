@@ -187,6 +187,30 @@ const STRONG_AGENT_ENV: &[(&str, &str)] = &[
     ("ROO_ACTIVE", "roo_code"),
 ];
 
+/// True when the CLI is being driven by a known agent harness
+/// (Claude Code, Cursor, Codex, Opencode, etc.). Used by interactive
+/// flows that would otherwise bail because stdout isn't a TTY: in an
+/// agent harness there is still a real human present who can complete
+/// a browser OAuth, even though the CLI's stdout is piped.
+pub fn is_agent_harness() -> bool {
+    agent_from_strong_env().is_some()
+}
+
+/// True when an agent harness is driving us AND stdin is not a TTY.
+/// Used by `railway up` to skip the interactive "Continue?" confirm
+/// before opening a browser for an unauthenticated user: a real agent
+/// pipes stdin (no TTY), so the prompt can't be answered, and the
+/// agent invocation is treated as implicit consent to proceed. The
+/// stdin-is-not-a-TTY check guards against a normal interactive
+/// terminal that merely has a stale `AI_AGENT=…` export being treated
+/// as an agent. This gates prompt-skipping ONLY — it does not change
+/// any OAuth timeout. The browser flow keeps its fixed wait because a
+/// human is still present (watching the agent) to complete sign-in.
+pub fn is_non_interactive_agent() -> bool {
+    use std::io::IsTerminal;
+    is_agent_harness() && !std::io::stdin().is_terminal()
+}
+
 fn agent_from_strong_env() -> Option<&'static str> {
     // `AGENT=amp` is what Sourcegraph Amp sets as a generic marker.
     if std::env::var("AGENT")

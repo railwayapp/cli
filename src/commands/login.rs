@@ -9,30 +9,29 @@ use crate::{
     controllers::user::get_user,
     errors::RailwayError,
     oauth,
-    util::{progress::create_spinner, prompt::prompt_confirm_with_default_with_cancel},
+    util::progress::create_spinner,
 };
 
 use super::*;
 
-/// Login to your Railway account
+/// Sign in to Railway — also creates a new account if you don't have one.
+///
+/// Uses a single OAuth flow for both sign-in and sign-up. Brand-new
+/// accounts are detected automatically and land on a welcome page;
+/// existing users see the standard sign-in confirmation. Use
+/// --browserless for SSH sessions, remote dev boxes, or any
+/// environment where a local browser can't open.
 #[derive(Parser)]
 pub struct Args {
-    /// Browserless login
+    /// Use a device-code flow instead of opening a browser. Prints
+    /// a verification URL + short code to paste into a browser on
+    /// any device. Required for SSH/headless sessions.
     #[clap(short, long)]
     pub browserless: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let is_tty = crate::macros::is_stdout_terminal();
     let headless = is_likely_headless();
-
-    // --browserless prints a user code the human types into another
-    // browser; without a terminal the code has nowhere visible to land.
-    if !is_tty && args.browserless {
-        bail!(
-            "Browserless login requires an interactive terminal. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
-        );
-    }
 
     let mut configs = Configs::new()?;
 
@@ -151,8 +150,8 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
 
     spinner.finish_and_clear();
 
-    let code =
-        result.context("Authentication timed out — no callback received after 5 minutes")??;
+    let code = result
+        .context("Authentication timed out — no callback received after 5 minutes")??;
 
     oauth::exchange_authorization_code(host, &code, &redirect_uri, &pkce.code_verifier).await
 }
