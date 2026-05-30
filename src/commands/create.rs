@@ -42,6 +42,7 @@ enum CreateCommands {
     /// Create a new project + service from the current directory and
     /// deploy it. Requires you to be signed in (run `railway create
     /// account` first if you're new).
+    #[clap(visible_alias = "application")]
     App {
         /// Path to the project directory (defaults to cwd).
         path: Option<PathBuf>,
