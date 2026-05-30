@@ -97,25 +97,27 @@ impl ExecutionContext {
     }
 
     /// Decision for *implicit* sign-in triggered as a side effect (an
-    /// unauthenticated `railway up`). Fails fast when there's no
-    /// interactive human to complete a flow; otherwise proceeds with the
-    /// appropriate transport.
+    /// unauthenticated `railway up`). Fails fast only when there's no
+    /// human to complete a flow; otherwise proceeds with the appropriate
+    /// transport — a browser when one is reachable, or a device code
+    /// (which the human completes on another device) when it isn't.
     pub fn auto_auth(&self, browserless: bool) -> AutoAuth {
-        // Fail fast when there's no interactive path to a completed
-        // sign-in:
-        //  - JSON consumers parse stdout; CI is non-interactive.
-        //  - No local browser (CI/SSH/no-DISPLAY): an unauthenticated
-        //    `up` does not fall back to device-code — printing a code
-        //    into a non-interactive deploy helps no one; tell the user to
-        //    `railway login` first.
-        //  - stdout captured with no agent harness: nobody to drive the
-        //    flow.
-        if self.json || self.ci || !self.browser_reachable {
+        // Machine contexts have no human in the loop: JSON output is
+        // consumed by a tool, and --ci is non-interactive by definition.
+        if self.json || self.ci {
             return AutoAuth::FailFast;
         }
+        // No human reachable to complete a sign-in: stdout is captured
+        // and there's no agent harness whose human could complete it.
         if !self.stdout_tty && !self.agent_implicit_consent() {
             return AutoAuth::FailFast;
         }
+        // A human is present. Pick the transport: a browser if one can
+        // open, otherwise device-code (SSH / no DISPLAY) — the same
+        // fallback `railway login` uses here, so an unauthenticated `up`
+        // can sign the user in and deploy in one shot even on a remote
+        // box. (When there's genuinely no human, we already failed fast
+        // above rather than print a code into the void.)
         AutoAuth::Proceed(self.login_transport(browserless))
     }
 }
@@ -195,11 +197,33 @@ mod tests {
     }
 
     #[test]
-    fn auto_auth_fails_fast_when_no_browser_reachable() {
-        // SSH / no-DISPLAY, even with an interactive TTY: an unauthed
-        // `up` does not start a device-code flow — it tells the user to
-        // `railway login` first (preserves the prior gate's behavior).
+    fn auto_auth_uses_device_code_on_ssh_with_an_interactive_human() {
+        // SSH / no-DISPLAY with an interactive TTY: no local browser, but
+        // a human is present, so `up` falls back to a device code they
+        // complete on another device instead of failing fast.
         let c = ctx(false, false, true, true, false, false);
+        assert_eq!(
+            c.auto_auth(false),
+            AutoAuth::Proceed(AuthTransport::DeviceCode)
+        );
+    }
+
+    #[test]
+    fn auto_auth_uses_device_code_on_ssh_under_a_watching_agent() {
+        // SSH with an agent harness (piped stdio): the watching human can
+        // complete the printed device code.
+        let c = ctx(false, false, false, false, true, false);
+        assert_eq!(
+            c.auto_auth(false),
+            AutoAuth::Proceed(AuthTransport::DeviceCode)
+        );
+    }
+
+    #[test]
+    fn auto_auth_fails_fast_on_ssh_with_no_human() {
+        // SSH / no-DISPLAY, captured stdout, no agent harness: nobody to
+        // read the code, so fail fast rather than print it into the void.
+        let c = ctx(false, false, false, false, false, false);
         assert_eq!(c.auto_auth(false), AutoAuth::FailFast);
     }
 

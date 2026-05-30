@@ -454,23 +454,24 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
 /// detects fresh accounts on its own (via user.createdAt) and adapts
 /// the consent screen + post-auth landing accordingly.
 async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
-    // Decide whether there's an interactive human who can complete a
-    // sign-in. JSON/CI consumers, and captured-stdout runs with no agent
-    // harness, have nobody to drive the browser — so surface a
-    // structured NOT_AUTHENTICATED error (rendered as JSON in --json mode
-    // by the top-level handler) instead of opening a browser nobody can
-    // see. The full truth table lives in `exec_context`.
+    // Decide whether there's a human who can complete a sign-in.
+    // JSON/CI consumers, and captured-stdout runs with no agent harness,
+    // have nobody to drive it — so surface a structured NOT_AUTHENTICATED
+    // error (rendered as JSON in --json mode by the top-level handler)
+    // instead of starting a flow nobody can finish. Otherwise we proceed
+    // with a browser when one is reachable, or a device code (which the
+    // human completes on another device) on SSH / no-DISPLAY. The full
+    // truth table lives in `exec_context`.
     let ctx = crate::exec_context::ExecutionContext::detect(args.json, args.ci);
-    match ctx.auto_auth(false) {
-        crate::exec_context::AutoAuth::Proceed(_) => {}
+    let transport = match ctx.auto_auth(false) {
+        crate::exec_context::AutoAuth::Proceed(transport) => transport,
         crate::exec_context::AutoAuth::FailFast => {
             return Err(crate::errors::RailwayError::NotAuthenticated.into());
         }
-    }
+    };
 
     // An agent harness with piped stdin is treated as implicit consent:
-    // skip the "Continue?" prompt (stdin can't answer it) but still open
-    // the browser for the watching human.
+    // skip the "Continue?" prompt (stdin can't answer it) and proceed.
     let implicit_consent = ctx.agent_implicit_consent();
 
     println!();
@@ -494,12 +495,18 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
 
     // Skip the confirm prompt under an agent harness (stdin isn't a
     // TTY there either, so the prompt would fail). The agent invoking
-    // `railway up` is treated as implicit consent to proceed — print
-    // a one-liner so the human watching the agent's transcript knows
-    // a browser tab is about to open without a prompt.
+    // `railway up` is treated as implicit consent to proceed — print a
+    // one-liner so the human watching the agent's transcript knows how
+    // sign-in is about to surface, without a prompt.
     if implicit_consent {
+        let how = match transport {
+            crate::exec_context::AuthTransport::Browser => "opening browser",
+            crate::exec_context::AuthTransport::DeviceCode => {
+                "printing a device-code sign-in link"
+            }
+        };
         println!(
-            "  {} Agent harness detected — opening browser (skipping confirm).",
+            "  {} Agent harness detected — {how} (skipping confirm).",
             "→".cyan(),
         );
     }
