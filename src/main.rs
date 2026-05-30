@@ -15,6 +15,7 @@ mod config;
 mod consts;
 mod controllers;
 mod errors;
+mod exec_context;
 mod gql;
 mod oauth;
 mod resources;
@@ -394,7 +395,7 @@ async fn main() -> Result<()> {
             std::process::exit(130);
         }
 
-        eprintln!("{e:?}");
+        crate::util::reporter::render_error(&e);
 
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);

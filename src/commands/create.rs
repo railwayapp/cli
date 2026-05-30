@@ -300,6 +300,16 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     // so `railway logs` and friends work right after `create app`.
     if let Some(service_id) = parse_service_id_from_logs_url(&up_response.logs_url) {
         configs.link_service(service_id)?;
+    } else {
+        // The service was created server-side but we couldn't recover its
+        // id from the logs URL (shape changed?). Don't fail the deploy,
+        // but warn — otherwise `railway logs`/`railway service` would
+        // silently act on no linked service.
+        crate::util::reporter::warn(
+            "SERVICE_LINK_UNRESOLVED",
+            "Couldn't determine the new service id, so it wasn't linked automatically.",
+            Some("Run `railway service` to link it before `railway logs`."),
+        );
     }
 
     configs.write()?;

@@ -7,6 +7,7 @@ pub mod install_method;
 pub mod logs;
 pub mod progress;
 pub mod prompt;
+pub mod reporter;
 pub mod retry;
 pub mod self_update;
 pub mod time;

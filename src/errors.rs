@@ -114,4 +114,70 @@ pub enum RailwayError {
 
     #[error("OAuth error: {0}")]
     OAuthError(String),
+
+    #[error("Not signed in.")]
+    NotAuthenticated,
+}
+
+impl RailwayError {
+    /// Stable, machine-readable error code for structured (`--json`)
+    /// output. Exhaustive on purpose: adding a variant forces a code
+    /// decision rather than silently falling into a generic bucket.
+    pub fn code(&self) -> &'static str {
+        match self {
+            RailwayError::Unauthorized
+            | RailwayError::UnauthorizedToken(_)
+            | RailwayError::UnauthorizedLogin => "UNAUTHORIZED",
+            RailwayError::InvalidRailwayToken(_) => "INVALID_TOKEN",
+            RailwayError::InvalidHeader(_) => "INVALID_AUTH_STATE",
+            RailwayError::MissingResponseData => "MISSING_RESPONSE_DATA",
+            RailwayError::GraphQLError(_) => "GRAPHQL_ERROR",
+            RailwayError::FetchError(_) => "FETCH_ERROR",
+            RailwayError::NoLinkedProject => "NO_LINKED_PROJECT",
+            RailwayError::NoPersonalWorkspace => "NO_PERSONAL_WORKSPACE",
+            RailwayError::ProjectNotFound => "PROJECT_NOT_FOUND",
+            RailwayError::ProjectDeleted => "PROJECT_DELETED",
+            RailwayError::EnvironmentDeleted => "ENVIRONMENT_DELETED",
+            RailwayError::EnvironmentRestricted(_) => "ENVIRONMENT_RESTRICTED",
+            RailwayError::NoProjects => "NO_PROJECTS",
+            RailwayError::EnvironmentNotFound(_) => "ENVIRONMENT_NOT_FOUND",
+            RailwayError::WorkspaceNotFound(_) => "WORKSPACE_NOT_FOUND",
+            RailwayError::ServiceNotFound(_) => "SERVICE_NOT_FOUND",
+            RailwayError::ProjectHasNoServices => "PROJECT_HAS_NO_SERVICES",
+            RailwayError::NoServiceLinked => "NO_SERVICE_LINKED",
+            RailwayError::NoCommandProvided => "NO_COMMAND_PROVIDED",
+            RailwayError::FailedToUpload(_) => "UPLOAD_FAILED",
+            RailwayError::VolumeNotFound(_) => "VOLUME_NOT_FOUND",
+            RailwayError::BucketNotFound(_) => "BUCKET_NOT_FOUND",
+            RailwayError::BucketNotInEnvironment(_, _) => "BUCKET_NOT_IN_ENVIRONMENT",
+            RailwayError::InvalidTwoFactorCode => "INVALID_2FA_CODE",
+            RailwayError::TwoFactorEnforcementRequired(_, _) => "TWO_FACTOR_REQUIRED",
+            RailwayError::ConnectionVariableNotFound(_) => "CONNECTION_VARIABLE_NOT_FOUND",
+            RailwayError::InvalidConnectionVariable => "INVALID_CONNECTION_VARIABLE",
+            RailwayError::Ratelimited => "RATELIMITED",
+            RailwayError::OAuthDeviceCodeExpired => "OAUTH_DEVICE_CODE_EXPIRED",
+            RailwayError::OAuthAccessDenied => "OAUTH_ACCESS_DENIED",
+            RailwayError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",
+            RailwayError::OAuthError(_) => "OAUTH_ERROR",
+            RailwayError::NotAuthenticated => "NOT_AUTHENTICATED",
+        }
+    }
+
+    /// Optional actionable next step, surfaced as a `hint` field in
+    /// structured output. Opt-in per variant — most variants already
+    /// embed guidance in their message.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            RailwayError::NotAuthenticated => Some(
+                "Run `railway create account` (or `railway login`) to authenticate, then re-run.",
+            ),
+            RailwayError::NoLinkedProject | RailwayError::ProjectNotFound => {
+                Some("Run `railway link` to connect to a project.")
+            }
+            RailwayError::NoServiceLinked => {
+                Some("Run `railway service` to link a service.")
+            }
+            _ => None,
+        }
+    }
 }
