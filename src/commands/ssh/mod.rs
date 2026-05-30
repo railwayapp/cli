@@ -83,8 +83,10 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
+    let mut auto_ssh_identity = None;
     if args.identity_file.is_none() {
-        tel::track("key_setup", native::ensure_ssh_key(&client, &configs).await).await?;
+        auto_ssh_identity =
+            tel::track("key_setup", ensure_ssh_key(&client, &configs).await).await?;
     }
 
     let ssh_target = if let Some(ref instance_id) = args.deployment_instance {
@@ -108,17 +110,20 @@ pub async fn command(args: Args) -> Result<()> {
         .await?
     };
 
-    let identity_file = args.identity_file.as_deref();
+    let effective_identity = args
+        .identity_file
+        .as_deref()
+        .or(auto_ssh_identity.as_deref());
 
     if let Some(session_name) = args.session {
         tel::track(
             "tmux_install",
-            native::ensure_tmux_installed(&ssh_target, identity_file),
+            native::ensure_tmux_installed(&ssh_target, effective_identity),
         )
         .await?;
         return tel::track(
             "session_connect",
-            native::run_tmux_session(&ssh_target, &session_name, identity_file),
+            native::run_tmux_session(&ssh_target, &session_name, effective_identity),
         )
         .await;
     }
@@ -130,7 +135,7 @@ pub async fn command(args: Args) -> Result<()> {
     };
     let exit_code = tel::track(
         "spawn",
-        native::run_native_ssh(&ssh_target, command, identity_file),
+        native::run_native_ssh(&ssh_target, command, effective_identity),
     )
     .await?;
     if exit_code != 0 {
