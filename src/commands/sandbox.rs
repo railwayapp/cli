@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use clap::Parser;
 use is_terminal::IsTerminal;
 
-use crate::client::{post_graphql, GQLClient};
+use crate::client::{GQLClient, post_graphql};
 use crate::commands::ssh::{ensure_ssh_key, run_native_ssh};
 use crate::config::{Configs, StoredSandbox};
 use crate::controllers::environment::get_matched_environment;
@@ -176,9 +176,9 @@ async fn resolve_project_and_env(
     let project_id = match project.or_else(|| linked.as_ref().map(|l| l.project.clone())) {
         Some(id) => id,
         None if interactive => return prompt_workspace_project_env(client, configs).await,
-        None => bail!(
-            "No project selected. Pass --project and --environment, or run `railway link`."
-        ),
+        None => {
+            bail!("No project selected. Pass --project and --environment, or run `railway link`.")
+        }
     };
 
     let project_obj = get_project(client, configs, project_id).await?;
@@ -313,7 +313,9 @@ async fn resolve_target(
             } else if let Some(stored) = configs.get_sandbox(&id) {
                 stored.environment_id
             } else {
-                resolve_project_and_env(configs, client, None, None).await?.1
+                resolve_project_and_env(configs, client, None, None)
+                    .await?
+                    .1
             };
             Ok((id, environment_id))
         }
