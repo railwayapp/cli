@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 use reqwest::Client;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
@@ -39,7 +39,7 @@ pub async fn get_service_instance_id(
 /// its workspace's keys; session and user tokens get personal keys. The
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
-pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
+pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
     let local_keys = find_local_ssh_keys().await?;
 
     if local_keys.is_empty() {
@@ -69,7 +69,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
             ),
             SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
         }
-        return Ok(());
+        return Ok(identity_for(key));
     }
 
     // No local key is registered - need to register one
@@ -125,7 +125,23 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     println!("SSH key registered successfully!");
 
-    Ok(())
+    Ok(identity_for(key_to_register))
+}
+
+/// The path to hand `ssh -i` for a registered local key. File-backed keys point
+/// at the private key beside the `.pub`; agent-backed keys return `None` (the
+/// agent offers them automatically, and there's no file to pass).
+fn identity_for(key: &crate::controllers::ssh::keys::LocalSshKey) -> Option<PathBuf> {
+    match &key.source {
+        SshKeySource::File(path) => {
+            if path.extension().and_then(|e| e.to_str()) == Some("pub") {
+                Some(path.with_extension(""))
+            } else {
+                Some(path.to_path_buf())
+            }
+        }
+        SshKeySource::Agent => None,
+    }
 }
 
 /// Ensure tmux is installed inside the target container.

@@ -332,6 +332,41 @@ pub struct SshPublicKeyCreate;
 )]
 pub struct SshPublicKeyDelete;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxExec.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxExec;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxDestroy.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SandboxDestroy;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxHeartbeat.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+#[allow(dead_code)]
+pub struct SandboxHeartbeat;
+
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

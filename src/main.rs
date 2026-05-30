@@ -55,6 +55,7 @@ commands!(
     open,
     project,
     run(local),
+    sandbox(sandboxes, sbx),
     service,
     setup,
     shell,

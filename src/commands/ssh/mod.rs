@@ -13,6 +13,10 @@ mod tel;
 
 use common::*;
 
+// Re-exported for the `sandbox` command, which reuses the same native SSH
+// transport (key registration + `ssh <target>@ssh.railway.com`).
+pub use native::{ensure_ssh_key, run_native_ssh};
+
 /// Connect to a service via SSH or manage SSH keys
 #[derive(Parser, Clone)]
 pub struct Args {
