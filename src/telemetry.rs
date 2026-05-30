@@ -98,6 +98,36 @@ struct SetupAgentEventTrackInput {
     is_ci: bool,
 }
 
+/// Outcome of a single CLI authentication attempt, for the signup /
+/// sign-in funnel. Emitted via a public mutation so timeouts and
+/// failures (which occur before any token exists) are still captured,
+/// attributed by `caller` / `agent_session_id`.
+pub struct CliAuthTrackEvent {
+    /// "browser" | "device_code"
+    pub transport: &'static str,
+    /// "succeeded" | "timed_out" | "failed"
+    pub outcome: &'static str,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliAuthEventTrackInput {
+    transport: &'static str,
+    outcome: &'static str,
+    success: bool,
+    error_message: Option<String>,
+    session_id: String,
+    caller: String,
+    agent_session_id: Option<String>,
+    install_request_id: Option<String>,
+    cli_version: String,
+    os: String,
+    arch: String,
+    is_ci: bool,
+}
+
 #[derive(Clone)]
 struct TelemetryContext {
     session_id: String,
@@ -1483,6 +1513,50 @@ pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
 
     let body = json!({
         "query": "mutation SetupAgentEventTrack($input: SetupAgentEventTrackInput!) { setupAgentEventTrack(input: $input) }",
+        "variables": { "input": input },
+    });
+
+    let _ = post_telemetry_body(&client, configs.get_backboard(), body).await;
+}
+
+pub async fn send_auth_event(event: CliAuthTrackEvent) {
+    if is_telemetry_disabled() {
+        return;
+    }
+
+    let configs = match Configs::new() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Public-capable client: the attempt may have failed or timed out
+    // with no token yet, so fall back to an unauthenticated client. On
+    // success a token exists and the backend attaches the user.
+    let client = GQLClient::new_authorized(&configs)
+        .or_else(|_| GQLClient::new_public())
+        .ok();
+    let Some(client) = client else {
+        return;
+    };
+
+    let context = TelemetryContext::current(&configs);
+    let input = CliAuthEventTrackInput {
+        transport: event.transport,
+        outcome: event.outcome,
+        success: event.success,
+        error_message: event.error_message,
+        session_id: context.session_id,
+        caller: context.caller,
+        agent_session_id: context.agent_session_id,
+        install_request_id: context.install_request_id,
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        is_ci: Configs::env_is_ci(),
+    };
+
+    let body = json!({
+        "query": "mutation CliAuthEventTrack($input: CliAuthEventTrackInput!) { cliAuthEventTrack(input: $input) }",
         "variables": { "input": input },
     });
 

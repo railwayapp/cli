@@ -66,10 +66,34 @@ pub async fn command(args: Args) -> Result<()> {
     // DISPLAY); otherwise open a browser. browser_login itself falls
     // back to device-code if `open` fails. Neither path needs a TTY.
     let ctx = crate::exec_context::ExecutionContext::detect(false, false);
-    let token_resp = match ctx.login_transport(args.browserless) {
-        crate::exec_context::AuthTransport::DeviceCode => device_flow_login(host).await?,
-        crate::exec_context::AuthTransport::Browser => browser_login(host).await?,
+    let (transport, result) = match ctx.login_transport(args.browserless) {
+        crate::exec_context::AuthTransport::DeviceCode => {
+            ("device_code", device_flow_login(host).await)
+        }
+        crate::exec_context::AuthTransport::Browser => {
+            ("browser", browser_login(host).await)
+        }
     };
+
+    // Funnel telemetry: record the auth-attempt outcome. Sent via a
+    // public mutation so timeouts/failures (no token yet) are captured,
+    // attributed by caller/agent-session. Fires from here regardless of
+    // whether `login` was invoked directly or chained from `up` /
+    // `create account`.
+    let outcome = match &result {
+        Ok(_) => "succeeded",
+        Err(e) if e.to_string().contains("timed out") => "timed_out",
+        Err(_) => "failed",
+    };
+    crate::telemetry::send_auth_event(crate::telemetry::CliAuthTrackEvent {
+        transport,
+        outcome,
+        success: result.is_ok(),
+        error_message: result.as_ref().err().map(|e| e.to_string()),
+    })
+    .await;
+
+    let token_resp = result?;
 
     configs.save_oauth_tokens(
         &token_resp.access_token,
