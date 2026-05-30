@@ -10,8 +10,8 @@ use crate::config::{Configs, StoredSandbox};
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
 use crate::gql::{mutations, queries};
-use crate::util::progress::{create_cube_spinner, fail_spinner};
-use crate::util::prompt::{prompt_options, prompt_options_skippable};
+use crate::util::progress::{create_shimmer_spinner, fail_spinner};
+use crate::util::prompt::prompt_options_skippable_indented;
 
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
@@ -223,7 +223,7 @@ async fn prompt_workspace_project_env(
                 name: w.name().to_string(),
             })
             .collect();
-        let ws_id = match prompt_options_skippable("Select a workspace", ws_choices)? {
+        let ws_id = match prompt_options_skippable_indented("Select a workspace", ws_choices)? {
             Some(choice) => choice.id,
             None => bail!("Cancelled."),
         };
@@ -246,7 +246,7 @@ async fn prompt_workspace_project_env(
                     name: p.name().to_string(),
                 })
                 .collect();
-            let project_id = match prompt_options_skippable("Select a project", proj_choices)? {
+            let project_id = match prompt_options_skippable_indented("Select a project", proj_choices)? {
                 Some(choice) => choice.id,
                 None => break 'project,
             };
@@ -268,7 +268,7 @@ async fn prompt_workspace_project_env(
             }
 
             // Environment level. Esc steps back to project selection.
-            match prompt_options_skippable("Select an environment", env_choices)? {
+            match prompt_options_skippable_indented("Select an environment", env_choices)? {
                 Some(choice) => return Ok((project_obj.id, choice.id)),
                 None => continue 'project,
             }
@@ -291,7 +291,10 @@ fn prompt_environment(project: &queries::RailwayProject) -> Result<String> {
     if choices.is_empty() {
         bail!("No accessible environments in this project.");
     }
-    Ok(prompt_options("Select an environment", choices)?.id)
+    match prompt_options_skippable_indented("Select an environment", choices)? {
+        Some(choice) => Ok(choice.id),
+        None => bail!("Cancelled."),
+    }
 }
 
 /// Resolve which sandbox a command should act on: an explicit id (using the
@@ -338,7 +341,7 @@ async fn create(
     let (project_id, environment_id) =
         resolve_project_and_env(configs, client, project, environment).await?;
 
-    let mut spinner = create_cube_spinner("Creating sandbox…".to_string());
+    let mut spinner = create_shimmer_spinner("Creating sandbox");
     let sandbox = match post_graphql::<mutations::SandboxCreate, _>(
         client,
         configs.get_backboard(),
@@ -498,7 +501,7 @@ async fn destroy(
     let (sandbox_id, environment_id) =
         resolve_target(configs, client, args.explicit_id(), project, environment).await?;
 
-    let mut spinner = create_cube_spinner("Destroying sandbox…".to_string());
+    let mut spinner = create_shimmer_spinner("Destroying sandbox");
     if let Err(e) = post_graphql::<mutations::SandboxDestroy, _>(
         client,
         configs.get_backboard(),

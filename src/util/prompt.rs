@@ -32,6 +32,32 @@ pub fn prompt_options_skippable<T: Display>(message: &str, options: Vec<T>) -> R
         .context("Failed to prompt for options")
 }
 
+/// Render config that indents the prompt and its options ~2 columns, so a
+/// selection menu reads as running "under" the command that launched it.
+fn indented_render_config() -> inquire::ui::RenderConfig<'static> {
+    use inquire::ui::{Attributes, Color, StyleSheet, Styled};
+    Configs::get_render_config()
+        .with_prompt_prefix(
+            Styled::new("  ?").with_style_sheet(
+                StyleSheet::new()
+                    .with_fg(Color::LightCyan)
+                    .with_attr(Attributes::BOLD),
+            ),
+        )
+        .with_highlighted_option_prefix(Styled::new("  ❯"))
+}
+
+/// Like [`prompt_options_skippable`] but indented under the launching command.
+pub fn prompt_options_skippable_indented<T: Display>(
+    message: &str,
+    options: Vec<T>,
+) -> Result<Option<T>> {
+    inquire::Select::new(message, options)
+        .with_render_config(indented_render_config())
+        .prompt_skippable()
+        .context("Failed to prompt for options")
+}
+
 pub fn prompt_options_skippable_with_default<T: Display>(
     message: &str,
     options: Vec<T>,
