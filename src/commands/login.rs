@@ -110,10 +110,9 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
     let pkce = oauth::generate_pkce();
     let state = oauth::generate_state();
     let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
-    // The backend decides whether this is a signup flow (based on
-    // user.createdAt) and tags the OAuth callback URL with
-    // new_user=1 accordingly. The CLI doesn't need to declare its
-    // intent up front.
+    // Sign-up vs sign-in is handled entirely server-side (the consent
+    // screen adapts for brand-new accounts); the CLI doesn't declare
+    // its intent up front.
 
     // If we can't open a browser, fall back to device-code flow
     // (which uses a different URL that doesn't need a localhost
@@ -150,11 +149,6 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
 /// Wait for the OAuth callback on the local TCP listener. Returns the authorization code.
 /// Accepts connections in a loop so that browser preconnects or stray requests don't
 /// consume the single chance to receive the real callback.
-///
-/// Reads `new_user=1` from the callback URL (backend appends it for
-/// brand-new accounts) and uses it to toggle the browser-facing
-/// success page: brand-new users get sent to the dashboard, existing
-/// users get the standard "close this tab" page.
 async fn wait_for_callback(
     listener: TcpListener,
     expected_state: &str,
@@ -231,21 +225,7 @@ async fn wait_for_callback(
             .map(|(_, v)| v.to_string())
             .context("No authorization code in callback")?;
 
-        // Backend tags brand-new accounts with new_user=1 on the
-        // callback URL. Use it to pick the post-auth landing
-        // experience for the browser tab.
-        let is_new_user = parsed
-            .query_pairs()
-            .find(|(k, _)| k == "new_user")
-            .map(|(_, v)| v == "1")
-            .unwrap_or(false);
-
-        let success_message = if is_new_user {
-            "Welcome to Railway!"
-        } else {
-            "Authentication successful!"
-        };
-        send_response(&mut stream, success_message, true, host).await;
+        send_response(&mut stream, "Authentication successful!", true, host).await;
 
         return Ok(code);
     }
