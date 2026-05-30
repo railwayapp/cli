@@ -31,8 +31,6 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let headless = is_likely_headless();
-
     let mut configs = Configs::new()?;
 
     // Check for env var tokens first
@@ -62,22 +60,15 @@ pub async fn command(args: Args) -> Result<()> {
 
     let host = configs.get_host();
 
-    let token_resp = if args.browserless || headless {
-        // Browserless because the user asked for it, OR because the
-        // environment suggests no browser is available (CI, SSH, no
-        // DISPLAY). Skip the doomed `open` attempt and go straight
-        // to device-code.
-        device_flow_login(host).await?
-    } else {
-        // Default: open the browser. We used to gate this behind a
-        // "Open the browser?" prompt, but the answer is always yes
-        // in practice — anything else routes through --browserless
-        // or the environment-based headless detection above.
-        // browser_login opens a browser and waits on a local TCP
-        // listener for the OAuth callback — neither needs stdin or
-        // a TTY. If opening the browser fails, browser_login falls
-        // back to device_flow.
-        browser_login(host).await?
+    // `login` is an explicit auth request, so we always attempt it —
+    // only the transport varies. Device-code when the user asked for it
+    // (--browserless) or no local browser is reachable (CI/SSH/no
+    // DISPLAY); otherwise open a browser. browser_login itself falls
+    // back to device-code if `open` fails. Neither path needs a TTY.
+    let ctx = crate::exec_context::ExecutionContext::detect(false, false);
+    let token_resp = match ctx.login_transport(args.browserless) {
+        crate::exec_context::AuthTransport::DeviceCode => device_flow_login(host).await?,
+        crate::exec_context::AuthTransport::Browser => browser_login(host).await?,
     };
 
     configs.save_oauth_tokens(

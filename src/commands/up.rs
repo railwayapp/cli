@@ -91,6 +91,8 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    crate::util::reporter::set_mode(args.json);
+
     let mut configs = Configs::new()?;
 
     // If the user isn't signed in, intercept early: show a clack-style
@@ -452,47 +454,24 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
 /// detects fresh accounts on its own (via user.createdAt) and adapts
 /// the consent screen + post-auth landing accordingly.
 async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
-    // JSON mode: the caller is consuming machine-readable output on
-    // stdout, so we can't drop them into an interactive browser flow.
-    // Emit a structured, parseable error (instead of a human string)
-    // on stdout so an agent can detect the not-signed-in state and
-    // react — e.g. run `railway create account`, then retry. The
-    // bail! below still sets a non-zero exit and prints a human
-    // message to stderr, leaving stdout as clean JSON.
-    if args.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "error": "Not signed in.",
-                "code": "NOT_AUTHENTICATED",
-                "hint": "Run `railway create account` (or `railway login`) to authenticate, then re-run `railway up`.",
-            })
-        );
-        bail!(
-            "Not signed in. Run `railway create account` (or `railway login`), then re-run `railway up`."
-        );
+    // Decide whether there's an interactive human who can complete a
+    // sign-in. JSON/CI consumers, and captured-stdout runs with no agent
+    // harness, have nobody to drive the browser — so surface a
+    // structured NOT_AUTHENTICATED error (rendered as JSON in --json mode
+    // by the top-level handler) instead of opening a browser nobody can
+    // see. The full truth table lives in `exec_context`.
+    let ctx = crate::exec_context::ExecutionContext::detect(args.json, args.ci);
+    match ctx.auto_auth(false) {
+        crate::exec_context::AutoAuth::Proceed(_) => {}
+        crate::exec_context::AutoAuth::FailFast => {
+            return Err(crate::errors::RailwayError::NotAuthenticated.into());
+        }
     }
 
-    // Other non-interactive contexts (--ci, any CI env, SSH, no
-    // DISPLAY, or piped stdout) can't drive a browser either. Agent
-    // harnesses (Claude Code, Cursor, Codex, ...) capture stdout
-    // through a pipe so `is_terminal()` is false, but there's still a
-    // real human at a browser who can complete OAuth — so the
-    // captured-stdout check is suppressed when an agent harness is
-    // detected. We additionally require stdin to be non-TTY: a real
-    // agent pipes stdin too, while a normal interactive terminal with
-    // a stale `AI_AGENT=…` dotfile export still has a TTY stdin, and
-    // we don't want that leak to silently route into the auto-consent
-    // path below.
-    let in_agent = crate::telemetry::is_non_interactive_agent();
-    if args.ci
-        || super::login::is_likely_headless()
-        || (!std::io::stdout().is_terminal() && !in_agent)
-    {
-        bail!(
-            "You're not signed in. Run `railway login` first, then re-run `railway up`."
-        );
-    }
+    // An agent harness with piped stdin is treated as implicit consent:
+    // skip the "Continue?" prompt (stdin can't answer it) but still open
+    // the browser for the watching human.
+    let implicit_consent = ctx.agent_implicit_consent();
 
     println!();
     println!(
@@ -518,13 +497,13 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
     // `railway up` is treated as implicit consent to proceed — print
     // a one-liner so the human watching the agent's transcript knows
     // a browser tab is about to open without a prompt.
-    if in_agent {
+    if implicit_consent {
         println!(
             "  {} Agent harness detected — opening browser (skipping confirm).",
             "→".cyan(),
         );
     }
-    if !args.yes && !in_agent {
+    if !args.yes && !implicit_consent {
         // Confirm before opening a browser tab — interactive users
         // appreciate not having tabs spawn out from under them. -y
         // skips this for unattended flows.
