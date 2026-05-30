@@ -11,7 +11,7 @@ use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
 use crate::gql::{mutations, queries};
 use crate::util::progress::{create_shimmer_spinner, fail_spinner};
-use crate::util::prompt::prompt_options_skippable_indented;
+use crate::util::prompt::{prompt_options, prompt_options_skippable};
 
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
@@ -223,7 +223,7 @@ async fn prompt_workspace_project_env(
                 name: w.name().to_string(),
             })
             .collect();
-        let ws_id = match prompt_options_skippable_indented("Select a workspace", ws_choices)? {
+        let ws_id = match prompt_options_skippable("Select a workspace", ws_choices)? {
             Some(choice) => choice.id,
             None => bail!("Cancelled."),
         };
@@ -246,7 +246,7 @@ async fn prompt_workspace_project_env(
                     name: p.name().to_string(),
                 })
                 .collect();
-            let project_id = match prompt_options_skippable_indented("Select a project", proj_choices)? {
+            let project_id = match prompt_options_skippable("Select a project", proj_choices)? {
                 Some(choice) => choice.id,
                 None => break 'project,
             };
@@ -268,7 +268,7 @@ async fn prompt_workspace_project_env(
             }
 
             // Environment level. Esc steps back to project selection.
-            match prompt_options_skippable_indented("Select an environment", env_choices)? {
+            match prompt_options_skippable("Select an environment", env_choices)? {
                 Some(choice) => return Ok((project_obj.id, choice.id)),
                 None => continue 'project,
             }
@@ -291,10 +291,7 @@ fn prompt_environment(project: &queries::RailwayProject) -> Result<String> {
     if choices.is_empty() {
         bail!("No accessible environments in this project.");
     }
-    match prompt_options_skippable_indented("Select an environment", choices)? {
-        Some(choice) => Ok(choice.id),
-        None => bail!("Cancelled."),
-    }
+    Ok(prompt_options("Select an environment", choices)?.id)
 }
 
 /// Resolve which sandbox a command should act on: an explicit id (using the
