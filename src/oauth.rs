@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub const CLI_SCOPES: &str =
-    "openid email profile offline_access workspace:admin project:admin ssh_keys";
+    "openid email profile offline_access workspace:admin project:admin ssh_keys sandbox";
 
 const DEFAULT_OAUTH_CLIENT_ID: &str = "rlwy_oaci_onEklvmksh1hRUiCo7E2zX12";
 
