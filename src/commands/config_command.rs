@@ -239,7 +239,7 @@ async fn load_current_graph(runner: Option<String>) -> Result<crate::commands::s
         runner,
         verbose: false,
     };
-    let response = crate::commands::sync::run(&args, "plan").await?;
+    let response = crate::commands::sync::run(&args, "current").await?;
     let _ = fs::remove_file(temp_file);
     let _ = fs::remove_dir(temp_dir);
 
