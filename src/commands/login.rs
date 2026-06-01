@@ -138,21 +138,25 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
     // screen adapts for brand-new accounts); the CLI doesn't declare
     // its intent up front.
 
-    // If we can't open a browser, fall back to device-code flow
-    // (which uses a different URL that doesn't need a localhost
-    // callback, and prints its own copy of the URL).
+    // Tell the user before we steal window focus, and show the URL up
+    // front as a copy-paste fallback (wrong browser/profile/tab opened,
+    // or debugging).
+    println!();
+    println!("  {} Opening your browser to sign in — finish there.", "→".cyan());
+    println!("    {}", auth_url.bold().underline());
+    println!();
+
+    // If we can't open a browser, fall back to device-code flow (which
+    // uses a different URL that doesn't need a localhost callback, and
+    // prints its own verification URL + short code).
     if ::open::that(&auth_url).is_err() {
+        println!(
+            "  {} Couldn't open a browser — use the sign-in code below instead.",
+            "→".cyan(),
+        );
         drop(listener);
         return device_flow_login(host).await;
     }
-
-    // Browser opened. Print the URL too so the user has a
-    // copy-paste fallback if the wrong browser/profile/tab opened,
-    // or for debugging when something goes wrong.
-    println!();
-    println!("  {} Opening browser to sign in", "→".cyan());
-    println!("    {}", auth_url.bold().underline());
-    println!();
 
     let spinner = create_spinner("Waiting for sign-in...".into());
 

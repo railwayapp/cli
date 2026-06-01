@@ -451,8 +451,9 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
 /// Drop into the login flow when the user isn't signed in. Sign-up
 /// and sign-in go through the same OAuth surface, so we don't bother
 /// prompting the user to declare which they're doing — the backend
-/// detects fresh accounts on its own (via user.createdAt) and adapts
-/// the consent screen + post-auth landing accordingly.
+/// detects fresh accounts on its own (from durable compliance state —
+/// a CLI client that hasn't accepted ToS/Fair-Use yet) and adapts the
+/// consent screen + post-auth landing accordingly.
 async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
     // Decide whether there's a human who can complete a sign-in.
     // JSON/CI consumers, and captured-stdout runs with no agent harness,

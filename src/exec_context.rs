@@ -66,7 +66,13 @@ impl ExecutionContext {
     pub fn detect(json: bool, ci: bool) -> Self {
         Self {
             json,
-            ci,
+            // Treat the CI env var the same as the --ci flag: a runner that
+            // sets CI=true is non-interactive even without the flag, so an
+            // unauthed implicit sign-in (auto_auth) must fail fast rather
+            // than hang on a prompt or device-code poll nobody can complete.
+            // (login_transport ignores `ci`, so explicit `railway login` is
+            // unaffected.)
+            ci: ci || crate::config::Configs::env_is_ci(),
             stdout_tty: std::io::stdout().is_terminal(),
             stdin_tty: std::io::stdin().is_terminal(),
             agent_harness: crate::telemetry::is_agent_harness(),

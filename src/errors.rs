@@ -169,7 +169,7 @@ impl RailwayError {
     pub fn hint(&self) -> Option<&'static str> {
         match self {
             RailwayError::NotAuthenticated => Some(
-                "Run `railway create account` (or `railway login`) to authenticate, then re-run.",
+                "Run `railway login` (or `railway create account` to make a new account), then re-run.",
             ),
             RailwayError::NoLinkedProject | RailwayError::ProjectNotFound => {
                 Some("Run `railway link` to connect to a project.")

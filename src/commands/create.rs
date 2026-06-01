@@ -36,8 +36,15 @@ pub struct Args {
 enum CreateCommands {
     /// Sign up for a new Railway account (or sign in if you have one).
     /// Opens the browser to a signup-friendly landing page and writes
-    /// the CLI token on success.
-    Account,
+    /// the CLI token on success. Use --browserless on SSH/headless
+    /// sessions for a device-code flow instead.
+    Account {
+        /// Use a device-code flow instead of opening a browser. Prints
+        /// a verification URL + short code to complete on any device.
+        /// Auto-selected on SSH/CI/no-DISPLAY even without this flag.
+        #[clap(short, long)]
+        browserless: bool,
+    },
 
     /// Create a new project + service from the current directory and
     /// deploy it. Requires you to be signed in (run `railway create
@@ -77,15 +84,13 @@ enum CreateCommands {
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
-        CreateCommands::Account => {
+        CreateCommands::Account { browserless } => {
             // Backed by the same OAuth flow as `railway login` — the
-            // backend detects fresh-account state via user.createdAt
-            // and adapts the consent screen + post-auth landing, so
-            // we don't need a separate signup signal here.
-            super::login::command(super::login::Args {
-                browserless: false,
-            })
-            .await
+            // backend detects fresh-account state from durable compliance
+            // state (a CLI client that hasn't accepted ToS/Fair-Use yet)
+            // and adapts the consent screen + post-auth landing, so we
+            // don't need a separate signup signal here.
+            super::login::command(super::login::Args { browserless }).await
         }
         CreateCommands::App {
             path,
@@ -124,7 +129,7 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     // app` invocation needs the same guard.
     if !configs.has_oauth_token() || configs.is_token_expired() {
         bail!(
-            "Not signed in. Run `railway create account` (or `railway login`) first."
+            "Not signed in. Run `railway login` (or `railway create account` to make a new account) first."
         );
     }
 
