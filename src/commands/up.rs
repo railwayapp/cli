@@ -26,7 +26,7 @@ use crate::{
     errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::logs::print_log,
+    util::{logs::print_log, prompt::prompt_confirm_with_default},
 };
 
 use super::*;
@@ -71,6 +71,18 @@ pub struct Args {
     #[clap(long)]
     /// Output logs in JSON format (implies CI mode behavior)
     json: bool,
+
+    #[clap(long)]
+    /// Apply Railway configuration before deploying if .railway/railway.ts exists
+    sync: bool,
+
+    #[clap(long)]
+    /// Do not apply Railway configuration before deploying
+    no_sync: bool,
+
+    #[clap(long)]
+    /// Confirm Railway configuration prompts
+    yes: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -95,6 +107,8 @@ pub async fn command(args: Args) -> Result<()> {
     if args.project.is_some() && args.environment.is_none() {
         bail!("--environment is required when using --project");
     }
+
+    let iac_service = maybe_sync_iac_before_up(&args).await?;
 
     let linked_project = if args.project.is_none() {
         Some(configs.get_linked_project().await?)
@@ -126,7 +140,7 @@ pub async fn command(args: Args) -> Result<()> {
         })?;
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service = get_or_prompt_service(linked_project, project, args.service).await?;
+    let service = get_or_prompt_service(linked_project, project, args.service.clone().or(iac_service)).await?;
 
     let spinner = if std::io::stdout().is_terminal() && !args.json {
         let spinner = ProgressBar::new_spinner()
@@ -244,7 +258,6 @@ pub async fn command(args: Args) -> Result<()> {
         println!("url: {url}");
     }
 
-    let builder = client.post(url);
     let spinner = if std::io::stdout().is_terminal() && !args.json {
         let spinner = ProgressBar::new_spinner()
             .with_style(
@@ -264,11 +277,20 @@ pub async fn command(args: Args) -> Result<()> {
 
     let body = arc.lock().unwrap().clone();
 
-    let res = builder
-        .header("Content-Type", "multipart/form-data")
-        .body(body)
-        .send()
-        .await?;
+    let mut upload_attempt = 0;
+    let res = loop {
+        let res = client
+            .post(url.clone())
+            .header("Content-Type", "multipart/form-data")
+            .body(body.clone())
+            .send()
+            .await?;
+        if res.status() != 404 || upload_attempt >= 10 {
+            break res;
+        }
+        upload_attempt += 1;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
 
     let status = res.status();
     if status != 200 {
@@ -439,6 +461,98 @@ pub async fn command(args: Args) -> Result<()> {
     futures::future::join_all(tasks).await;
 
     Ok(())
+}
+
+async fn maybe_sync_iac_before_up(args: &Args) -> Result<Option<String>> {
+    if args.no_sync {
+        return Ok(None);
+    }
+
+    let railway_file = match find_railway_file(std::env::current_dir()?) {
+        Some(file) => file,
+        None => return Ok(None),
+    };
+
+    let apply_sync = if args.yes {
+        true
+    } else if args.sync {
+        if !std::io::stdout().is_terminal() {
+            bail!("Applying Railway configuration before deploy requires --yes in non-interactive mode.");
+        }
+        prompt_confirm_with_default(
+            &format!(
+                "Found Railway configuration at {}. Apply project changes before deploying?",
+                railway_file.display()
+            ),
+            true,
+        )?
+    } else {
+        if !std::io::stdout().is_terminal() {
+            println!(
+                "Found Railway configuration at {}, skipping project changes in non-interactive mode. Use --sync --yes to apply before deploy.",
+                railway_file.display()
+            );
+            return Ok(None);
+        }
+
+        prompt_confirm_with_default(
+            &format!(
+                "Found Railway configuration at {}. Apply project changes before deploying?",
+                railway_file.display()
+            ),
+            true,
+        )?
+    };
+
+    if !apply_sync {
+        return Ok(None);
+    }
+
+    let sync_args = crate::commands::sync::Args {
+        file: Some(railway_file),
+        stage: false,
+        json: args.json,
+        yes: true,
+        decrypt_variables: false,
+        include_types: false,
+        runner: None,
+        verbose: false,
+    };
+
+    let response = crate::commands::sync::run(&sync_args, "apply").await?;
+    crate::commands::sync::print_response(&response);
+    if !response.ok {
+        bail!("IaC runner returned diagnostics");
+    }
+    Ok(infer_iac_deploy_service(&response))
+}
+
+fn infer_iac_deploy_service(response: &crate::commands::sync::RunnerResponse) -> Option<String> {
+    let services = response
+        .desired_graph
+        .as_ref()?
+        .resources
+        .iter()
+        .filter(|resource| resource.r#type == "service")
+        .collect::<Vec<_>>();
+    if services.len() == 1 {
+        Some(services[0].name.clone())
+    } else {
+        None
+    }
+}
+
+fn find_railway_file(start: PathBuf) -> Option<PathBuf> {
+    let mut cursor = start;
+    loop {
+        let file = cursor.join(".railway/railway.ts");
+        if file.exists() {
+            return Some(file);
+        }
+        if !cursor.pop() {
+            return None;
+        }
+    }
 }
 
 struct DeployPaths {

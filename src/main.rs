@@ -27,6 +27,7 @@ mod macros;
 commands!(
     add,
     completion,
+    config_command,
     connect,
     delete,
     deploy,

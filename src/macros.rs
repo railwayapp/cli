@@ -37,8 +37,9 @@ macro_rules! commands {
                             s = s.name(stringify!($module));
                             s
                         };
+                        let command_name = stringify!($module).strip_suffix("_command").unwrap_or(stringify!($module));
                         // Add this subcommand into the global CLI.
-                        cmd = cmd.subcommand(sub);
+                        cmd = cmd.subcommand(sub.name(command_name));
                     }
                 )*
                 cmd
@@ -48,7 +49,7 @@ macro_rules! commands {
             pub async fn exec_cli(matches: clap::ArgMatches) -> anyhow::Result<()> {
                 match matches.subcommand() {
                     $(
-                        Some((stringify!([<$module:snake>]), sub_matches)) => {
+                        Some((name, sub_matches)) if name == stringify!([<$module:snake>]).strip_suffix("_command").unwrap_or(stringify!([<$module:snake>])) => {
                                let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
                                    .map_err(anyhow::Error::from)?;
                             $module::command(args).await?;

@@ -1,8 +1,12 @@
 use std::{env, path::PathBuf, process::Stdio};
 
+use is_terminal::IsTerminal;
+
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
+
+use crate::util::progress::{create_spinner_if, fail_spinner, success_spinner};
 
 use super::*;
 
@@ -11,52 +15,53 @@ use super::*;
 pub struct Args {
     /// Path to the Railway IaC file. Defaults to nearest .railway/railway.ts resolved by the runner.
     #[clap(long)]
-    file: Option<PathBuf>,
+    pub(super) file: Option<PathBuf>,
 
     /// Stage the proposed ChangeSet in Backboard.
     #[clap(long)]
-    stage: bool,
+    pub(super) stage: bool,
 
     /// Output raw runner JSON.
     #[clap(long)]
-    json: bool,
+    pub(super) json: bool,
 
     /// Confirm destructive staged changes.
     #[clap(long)]
-    yes: bool,
+    pub(super) yes: bool,
 
     /// Ask Backboard to decrypt variables while planning, when authorized.
     #[clap(long)]
-    decrypt_variables: bool,
+    pub(super) decrypt_variables: bool,
 
     /// Include generated graph TypeScript types in runner output.
     #[clap(long)]
-    include_types: bool,
-
-    /// Override linked project id. Primarily for local alpha testing.
-    #[clap(long)]
-    project_id: Option<String>,
-
-    /// Override linked environment id. Primarily for local alpha testing.
-    #[clap(long)]
-    environment_id: Option<String>,
+    pub(super) include_types: bool,
 
     /// Path to the TypeScript IaC runner binary. Defaults to RAILWAY_IAC_TS_BIN or railway-iac-ts.
     #[clap(long)]
-    runner: Option<String>,
+    pub(super) runner: Option<String>,
+
+    /// Show full change details.
+    #[clap(long, alias = "full")]
+    pub(super) verbose: bool,
 }
 
 #[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RunnerResponse {
-    ok: bool,
+pub(super) struct RunnerResponse {
+    pub(super) ok: bool,
     command: String,
     file: String,
     current_environment: Option<CurrentEnvironment>,
     change_set: Option<ChangeSet>,
     diff: Option<String>,
     diagnostics: Vec<Diagnostic>,
+    pub(super) current_graph: Option<DesiredGraph>,
+    pub(super) desired_graph: Option<DesiredGraph>,
     staged_patch: Option<StagedPatch>,
+    apply_result: Option<ChangeSetApplyResult>,
+    deployment_id: Option<String>,
+    staged_patch_id: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -77,6 +82,7 @@ struct Change {
     summary: Option<String>,
     severity: Option<String>,
     kind: Option<String>,
+    details: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -87,26 +93,91 @@ struct Diagnostic {
 }
 
 #[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeSetApplyResult {
+    id: String,
+    status: String,
+    changes: Vec<ChangeOperationResult>,
+    diagnostics: Value,
+    deployment_id: Option<String>,
+    staged_patch_id: Option<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct ChangeOperationResult {
+    kind: String,
+    path: Option<String>,
+    summary: Option<String>,
+    status: String,
+    outputs: Option<Value>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesiredGraph {
+    pub(super) resources: Vec<DesiredResource>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesiredResource {
+    pub(super) address: Option<String>,
+    pub(super) r#type: String,
+    pub(super) name: String,
+    pub(super) engine: Option<String>,
+    pub(super) variables: Option<serde_json::Map<String, Value>>,
+    pub(super) source: Option<Value>,
+    pub(super) build: Option<Value>,
+    pub(super) deploy: Option<Value>,
+    pub(super) networking: Option<Value>,
+    pub(super) config: Option<Value>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
 struct StagedPatch {
     id: String,
     #[allow(dead_code)]
     patch: Option<Value>,
 }
 
+pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
+    let configs = Configs::new()?;
+    let linked_project = configs.get_linked_project().await?;
+    let (token, auth_type) = get_runner_token(&configs)?;
+    invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await
+}
+
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let linked_project = configs.get_linked_project().await?;
-    let token = get_runner_token(&configs)?;
-    let command = if args.stage { "stage" } else { "plan" };
+    let (token, auth_type) = get_runner_token(&configs)?;
+    let command = if args.stage { "stage" } else if args.yes { "apply" } else { "plan" };
 
     if args.stage && !args.yes {
-        let preview = invoke_runner(&args, &configs, &linked_project, &token, "plan").await?;
+        let mut spinner = create_spinner_if(!args.json && std::io::stdout().is_terminal(), "Checking proposed changes".into());
+        let preview = invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
+        if let Some(spinner) = &mut spinner {
+            if preview.ok {
+                success_spinner(spinner, "Checked proposed changes".into());
+            } else {
+                fail_spinner(spinner, "Could not check proposed changes".into());
+            }
+        }
+
         if has_destructive_changes(&preview) {
-            bail!("Plan contains destructive changes. Re-run with --yes to stage.");
+            bail!("These changes remove Railway resources. Re-run with --stage --yes to stage them.");
         }
     }
 
-    let output = invoke_runner(&args, &configs, &linked_project, &token, command).await?;
+    let mut spinner = create_spinner_if(!args.json && std::io::stdout().is_terminal(), runner_message(command).into());
+    let output = invoke_runner(&args, &configs, &linked_project, &token, auth_type, command).await?;
+    if let Some(spinner) = &mut spinner {
+        if output.ok {
+            success_spinner(spinner, runner_done_message(command).into());
+        } else {
+            fail_spinner(spinner, "Could not read Railway configuration".into());
+        }
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -116,7 +187,7 @@ pub async fn command(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    print_response(&output);
+    print_response_with_options(&output, args.verbose);
     if !output.ok {
         bail!("IaC runner returned diagnostics");
     }
@@ -124,14 +195,15 @@ pub async fn command(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn get_runner_token(configs: &Configs) -> Result<String> {
-    if Configs::get_railway_token().is_some() {
-        bail!("railway sync currently requires a user/API token; project tokens are not supported by the TypeScript IaC runner yet")
+fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
+    if let Some(token) = Configs::get_railway_token() {
+        return Ok((token, "project-token"));
     }
 
     configs
         .get_railway_auth_token()
-        .context("Not authenticated. Run `railway login` or set RAILWAY_API_TOKEN.")
+        .map(|token| (token, "bearer"))
+        .context("Not authenticated. Run `railway login`, set RAILWAY_API_TOKEN, or set RAILWAY_TOKEN.")
 }
 
 async fn invoke_runner(
@@ -139,6 +211,7 @@ async fn invoke_runner(
     configs: &Configs,
     linked_project: &LinkedProject,
     token: &str,
+    auth_type: &str,
     command: &str,
 ) -> Result<RunnerResponse> {
     let runner = args
@@ -147,16 +220,23 @@ async fn invoke_runner(
         .or_else(|| env::var("RAILWAY_IAC_TS_BIN").ok())
         .unwrap_or_else(|| "railway-iac-ts".to_string());
 
+    let cwd = env::current_dir()
+        .context("Unable to get current working directory")?
+        .to_string_lossy()
+        .to_string();
+
     let request = serde_json::json!({
         "command": command,
+        "cwd": cwd,
         "file": args.file.as_ref().map(|path| path.to_string_lossy().to_string()),
         "includeTypes": args.include_types,
         "pretty": false,
         "backboard": {
             "endpoint": configs.get_backboard(),
             "token": token,
-            "projectId": args.project_id.as_deref().unwrap_or(&linked_project.project),
-            "environmentId": args.environment_id.as_deref().unwrap_or(&linked_project.environment),
+            "authType": auth_type,
+            "projectId": linked_project.project,
+            "environmentId": linked_project.environment,
             "decryptVariables": args.decrypt_variables,
             "merge": true
         }
@@ -221,23 +301,40 @@ fn has_destructive_changes(response: &RunnerResponse) -> bool {
         .unwrap_or(false)
 }
 
-fn print_response(response: &RunnerResponse) {
-    println!("{}", "Railway IaC sync".bold());
-    println!("runner: {}", response.command);
-    println!("file: {}", response.file);
+fn runner_message(command: &str) -> &'static str {
+    match command {
+        "apply" => "Applying Railway configuration",
+        "stage" => "Checking Railway configuration",
+        _ => "Checking Railway configuration",
+    }
+}
+
+fn runner_done_message(command: &str) -> &'static str {
+    match command {
+        "apply" => "Applied Railway configuration",
+        "stage" => "Checked Railway configuration",
+        _ => "Checked Railway configuration",
+    }
+}
+
+pub(super) fn print_response(response: &RunnerResponse) {
+    print_response_with_options(response, false);
+}
+
+pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
+    println!();
+    println!("{}", "Railway configuration".bold());
+    println!("{} {}", "File".dimmed(), response.file.cyan());
 
     if let Some(environment) = &response.current_environment {
-        println!(
-            "project: {}",
-            environment.project_id.as_deref().unwrap_or("(unknown)")
-        );
-        println!(
-            "environment: {}",
-            environment
-                .environment_name
-                .as_deref()
-                .unwrap_or(&environment.environment_id)
-        );
+        let environment_name = environment
+            .environment_name
+            .as_deref()
+            .unwrap_or(&environment.environment_id);
+        println!("{} {}", "Environment".dimmed(), environment_name.cyan());
+        if let Some(project_id) = &environment.project_id {
+            println!("{} {}", "Project".dimmed(), project_id.dimmed());
+        }
     }
     println!();
 
@@ -251,9 +348,9 @@ fn print_response(response: &RunnerResponse) {
             )
         };
         if diagnostic.severity == "error" {
-            println!("{}", text.red());
+            println!("{} {}", "Error".red().bold(), text.red());
         } else {
-            println!("{}", text.yellow());
+            println!("{} {}", "Warning".yellow().bold(), text.yellow());
         }
     }
 
@@ -268,21 +365,21 @@ fn print_response(response: &RunnerResponse) {
         .unwrap_or(&[]);
 
     if changes.is_empty() {
-        println!("{}", "No changes.".green());
+        println!("{}", "✓ Your Railway configuration is already up to date.".green());
     } else {
-        println!("{}", "ChangeSet".bold());
-        if let Some(diff) = &response.diff {
-            println!("{diff}");
+        let total = changes.len();
+        println!("{} {}", "Planned changes".bold(), format!("({total})").dimmed());
+        if !verbose {
+            if let Some(diff) = &response.diff {
+                print_colored_diff(diff);
+            } else {
+                for change in changes {
+                    print_change(change, verbose);
+                }
+            }
         } else {
             for change in changes {
-                println!(
-                    "{}",
-                    change
-                        .summary
-                        .as_deref()
-                        .or(change.kind.as_deref())
-                        .unwrap_or("change")
-                );
+                print_change(change, verbose);
             }
         }
 
@@ -291,18 +388,129 @@ fn print_response(response: &RunnerResponse) {
             .filter(|change| change.severity.as_deref() == Some("destructive"))
             .count();
         if destructive > 0 {
-            println!("{}", format!("{destructive} destructive change(s).").red());
+            println!();
+            println!(
+                "{} {}",
+                "!".red().bold(),
+                format!("{destructive} destructive change(s) will remove Railway resources or variables.").red()
+            );
         }
     }
 
-    if let Some(staged_patch) = &response.staged_patch {
-        println!();
-        println!(
-            "{}",
-            format!("Staged Backboard patch: {}", staged_patch.id).green()
-        );
-    } else {
-        println!();
-        println!("Run with {} to stage the proposed ChangeSet.", "--stage".cyan());
+    println!();
+    if let Some(apply_result) = &response.apply_result {
+        println!("{}", "✓ Railway configuration applied.".green().bold());
+        println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
+        if let Some(deployment_id) = response.deployment_id.as_ref().or(apply_result.deployment_id.as_ref()) {
+            println!("{} {}", "Deployment".dimmed(), deployment_id.dimmed());
+        }
+        if let Some(staged_patch_id) = response.staged_patch_id.as_ref().or(apply_result.staged_patch_id.as_ref()) {
+            println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
+        }
+        print_operation_results(apply_result);
+    } else if let Some(staged_patch) = &response.staged_patch {
+        println!("{}", "✓ Changes staged for review in Railway.".green().bold());
+        println!("{} {}", "Stage".dimmed(), staged_patch.id.dimmed());
+    } else if !changes.is_empty() {
+        if !verbose && changes.iter().any(|change| change.details.as_ref().is_some_and(|details| !details.is_empty())) {
+            println!("  {} Run {} to show every changed field.", "•".cyan(), "railway config plan --verbose".cyan());
+        }
+        println!("{}", "Next steps".bold());
+        println!("  {} Preview only; nothing has changed yet.", "•".cyan());
+        println!("  {} Run {} to apply them now.", "•".cyan(), "railway config apply".cyan());
+    }
+}
+
+fn print_operation_results(apply_result: &ChangeSetApplyResult) {
+    if apply_result.changes.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", "Applied changes".bold());
+    for change in &apply_result.changes {
+        let summary = change
+            .summary
+            .as_deref()
+            .or(change.path.as_deref())
+            .unwrap_or(&change.kind);
+        let marker = match change.status.as_str() {
+            "applied" => "+".green().bold(),
+            "noop" => "=".dimmed(),
+            "failed" => "!".red().bold(),
+            _ => "•".cyan(),
+        };
+        println!("  {} {} {}", marker, summary, format!("({})", change.status).dimmed());
+        if let Some(outputs) = &change.outputs {
+            print_operation_outputs(outputs, 4);
+        }
+    }
+}
+
+fn print_operation_outputs(value: &Value, indent: usize) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                match value {
+                    Value::Object(_) | Value::Array(_) => {
+                        println!("{}{}", " ".repeat(indent), key.dimmed());
+                        print_operation_outputs(value, indent + 2);
+                    }
+                    _ => println!("{}{} {}", " ".repeat(indent), key.dimmed(), format_output_value(value).cyan()),
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                print_operation_outputs(value, indent);
+            }
+        }
+        _ => println!("{}{}", " ".repeat(indent), format_output_value(value).cyan()),
+    }
+}
+
+fn format_output_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Null => "null".to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn print_change(change: &Change, verbose: bool) {
+    let summary = change
+        .summary
+        .as_deref()
+        .or(change.kind.as_deref())
+        .unwrap_or("change");
+    let marker = marker_for_change(change);
+    println!("  {} {}", marker, summary);
+    if verbose {
+        if let Some(details) = &change.details {
+            for detail in details {
+                println!("    {} {}", "└".dimmed(), detail.dimmed());
+            }
+        }
+    }
+}
+
+fn print_colored_diff(diff: &str) {
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+ ") {
+            println!("  {} {}", "+".green().bold(), rest.green());
+        } else if let Some(rest) = line.strip_prefix("- ") {
+            println!("  {} {}", "-".red().bold(), rest.red());
+        } else if let Some(rest) = line.strip_prefix("~ ") {
+            println!("  {} {}", "~".yellow().bold(), rest.yellow());
+        } else {
+            println!("  {line}");
+        }
+    }
+}
+
+fn marker_for_change(change: &Change) -> colored::ColoredString {
+    match change.kind.as_deref() {
+        Some("resource.create") | Some("variable.set") | Some("domain.create") => "+".green().bold(),
+        Some("resource.delete") | Some("variable.delete") => "-".red().bold(),
+        _ => "~".yellow().bold(),
     }
 }
