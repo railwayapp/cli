@@ -78,8 +78,8 @@ pub async fn command(args: Args) -> Result<()> {
     // Funnel telemetry: record the auth-attempt outcome. Sent via a
     // public mutation so timeouts/failures (no token yet) are captured,
     // attributed by caller/agent-session. Fires from here regardless of
-    // whether `login` was invoked directly or chained from `up` /
-    // `create account`.
+    // whether `login` was invoked directly or chained from an unauthed
+    // `up`.
     let outcome = match &result {
         Ok(_) => "succeeded",
         Err(e) if e.to_string().contains("timed out") => "timed_out",

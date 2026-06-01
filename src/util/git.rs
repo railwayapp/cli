@@ -1,7 +1,7 @@
 //! Minimal git config introspection. Parses `.git/config` and `.git/HEAD`
 //! directly so we don't shell out or take a `git2` dependency.
 //!
-//! Used by `railway create app` to detect whether the current
+//! Used by `railway up --new` to detect whether the current
 //! directory has a GitHub remote — when it does, we can deploy from
 //! the repo instead of bundling and uploading a tarball.
 

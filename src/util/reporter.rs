@@ -143,7 +143,7 @@ mod tests {
         assert!(text.contains("Not signed in."));
         // Regression guard: the actionable hint must not be lost in
         // human mode just because it lives in hint() not the message.
-        assert!(text.contains("railway create account"));
+        assert!(text.contains("railway login"));
     }
 
     #[test]
@@ -167,7 +167,7 @@ mod tests {
             v["hint"]
                 .as_str()
                 .unwrap()
-                .contains("railway create account")
+                .contains("railway login")
         );
     }
 

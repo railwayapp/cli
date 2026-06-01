@@ -37,7 +37,6 @@ commands!(
     bucket,
     completion,
     connect,
-    create,
     delete,
     deploy,
     deployment,
@@ -344,18 +343,9 @@ async fn main() -> Result<()> {
         Some(("mcp", mcp_matches)) if mcp_matches.subcommand_name() == Some("install")
     );
 
-    // `create account` is a signin/signup verb — same shape as
-    // `login`. Skip the global token-refresh check so a stale token
-    // doesn't surface a scary "Token refresh failed" warning right
-    // before we go re-auth the user anyway.
-    let is_create_account = matches!(
-        cli.subcommand(),
-        Some(("create", create_matches)) if create_matches.subcommand_name() == Some("account")
-    );
-
     let needs_refresh = cli
         .subcommand_name()
-        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install && !is_create_account)
+        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install)
         .unwrap_or(false);
 
     if needs_refresh {

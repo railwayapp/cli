@@ -13,7 +13,6 @@ pub mod autoupdate;
 pub mod bucket;
 pub mod completion;
 pub mod connect;
-pub mod create;
 pub mod delete;
 pub mod deploy;
 pub mod deployment;
