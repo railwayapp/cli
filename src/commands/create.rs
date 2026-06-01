@@ -323,19 +323,23 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     println!("  {} Build queued", "✓".green());
     println!("  {} {}", "Build Logs:".green().bold(), up_response.logs_url);
 
-    // --no-wait: surface the URL and return without streaming.
+    // --no-wait: surface the URL + summary and return without streaming.
     if args.no_wait {
-        println!();
-        if !up_response.deployment_domain.is_empty() {
-            let url = if up_response.deployment_domain.starts_with("http") {
-                up_response.deployment_domain.clone()
-            } else {
-                format!("https://{}", up_response.deployment_domain)
-            };
-            println!("  {} {}", "⏳".dimmed(), "Deploying — your URL:".bold());
-            println!("     {}", url.bold().underline());
-            println!();
-        }
+        let url = if up_response.deployment_domain.is_empty() {
+            None
+        } else if up_response.deployment_domain.starts_with("http") {
+            Some(up_response.deployment_domain.clone())
+        } else {
+            Some(format!("https://{}", up_response.deployment_domain))
+        };
+        print_app_summary(
+            &hostname,
+            &project_create.id,
+            &project_create.name,
+            parse_service_id_from_logs_url(&up_response.logs_url).as_deref(),
+            &environment.id,
+            url.as_deref(),
+        );
         return Ok(());
     }
 
@@ -374,6 +378,13 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
         Some(format!("https://{}", up_response.deployment_domain))
     };
     let logs_url_for_status = up_response.logs_url.clone();
+    // Captured for the end-of-run summary (the status task runs after
+    // these locals would otherwise drop out of scope).
+    let summary_host = hostname.clone();
+    let summary_project_id = project_create.id.clone();
+    let summary_project_name = project_create.name.clone();
+    let summary_service_id = parse_service_id_from_logs_url(&up_response.logs_url);
+    let summary_environment_id = environment.id.clone();
     let mut status_stream =
         subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
             id: up_response.deployment_id.clone(),
@@ -384,21 +395,14 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
             let Some(data) = res.data else { continue };
             match data.deployment.status {
                 DeploymentStatus::SUCCESS => {
-                    println!();
-                    match deploy_url.as_deref() {
-                        Some(url) => {
-                            println!("  {} {}", "🚀".dimmed(), "Live at".bold());
-                            println!("     {}", url.bold().underline());
-                        }
-                        None => {
-                            println!(
-                                "  {} {}",
-                                "✓".green(),
-                                "Deploy complete".bold(),
-                            );
-                        }
-                    }
-                    println!();
+                    print_app_summary(
+                        &summary_host,
+                        &summary_project_id,
+                        &summary_project_name,
+                        summary_service_id.as_deref(),
+                        &summary_environment_id,
+                        deploy_url.as_deref(),
+                    );
                     std::process::exit(0);
                 }
                 DeploymentStatus::FAILED => {
@@ -438,6 +442,50 @@ pub async fn command_app(args: AppArgs) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+/// Print the end-of-run summary: the running URL when one exists, a
+/// hint to add one when it doesn't, and the project + dashboard link so
+/// an agent (or human) has something concrete to hand back. We never
+/// auto-generate a domain here — exposing a service publicly is the
+/// user's call (`railway domain`).
+fn print_app_summary(
+    host: &str,
+    project_id: &str,
+    project_name: &str,
+    service_id: Option<&str>,
+    environment_id: &str,
+    deploy_url: Option<&str>,
+) {
+    println!();
+    match deploy_url {
+        Some(url) => {
+            println!("  {} {}", "🚀".dimmed(), "Live at".bold());
+            println!("     {}", url.bold().underline());
+        }
+        None => {
+            println!("  {} {}", "✓".green(), "Deploy complete".bold());
+            println!(
+                "     {} run {} to add a public URL.",
+                "No public domain yet —".dimmed(),
+                "railway domain".bold(),
+            );
+        }
+    }
+
+    // Dashboard link targets the service when we recovered its id,
+    // otherwise the project. (The service is created server-side; we
+    // don't always get its name back, but the link opens it.)
+    let dashboard = match service_id {
+        Some(sid) => format!(
+            "https://{host}/project/{project_id}/service/{sid}?environmentId={environment_id}"
+        ),
+        None => format!("https://{host}/project/{project_id}"),
+    };
+    println!();
+    println!("  {} Project {}", "✓".green(), project_name.bold());
+    println!("     {} {}", "Manage:".dimmed(), dashboard.bold().underline());
+    println!();
 }
 
 /// Extract the service ID from a logs URL of shape
