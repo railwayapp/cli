@@ -351,7 +351,7 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
             .environment_name
             .as_deref()
             .unwrap_or(&environment.environment_id);
-        println!("{} {}", "Target".dimmed(), environment_name.cyan());
+        println!("{} {}", "Environment".dimmed(), environment_name.cyan());
         if verbose {
             if let Some(project_id) = &environment.project_id {
                 println!("{} {}", "Project".dimmed(), project_id.dimmed());
@@ -391,6 +391,7 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
     } else {
         let total = changes.len();
         let section = if response.command == "apply" { "Applying" } else { "Railway will" };
+        println!();
         println!("{} {}", section.bold(), format!("({total})").dimmed());
         if !verbose {
             if let Some(diff) = &response.diff {
@@ -422,6 +423,7 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
 
     println!();
     if let Some(apply_result) = &response.apply_result {
+        println!();
         println!("{}", "✓ Your Railway project is configured.".green().bold());
         if verbose {
             println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
@@ -433,6 +435,7 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
             }
         }
         print_operation_results(apply_result, verbose);
+        println!();
         println!();
         println!("{}", "Next".bold());
         println!("  {} Run {} to deploy your code.", "•".cyan(), "railway up".cyan());
