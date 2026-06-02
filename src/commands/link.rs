@@ -53,6 +53,31 @@ struct LinkOutput {
     service_name: Option<String>,
 }
 
+pub async fn link_project_without_service() -> Result<LinkedProject> {
+    let mut configs = Configs::new()?;
+    let workspaces = workspaces().await?;
+    let workspace = select_workspace(None, None, workspaces)?;
+    let project = select_project(workspace, None)?;
+    let environment = select_environment(None, &project)?;
+
+    configs.link_project(
+        project.id.clone(),
+        Some(project.name.clone()),
+        environment.id.clone(),
+        Some(environment.name.clone()),
+    )?;
+    configs.write()?;
+
+    println!(
+        "\n{} {} {}",
+        "Project".green(),
+        project.name.magenta().bold(),
+        "linked successfully! 🎉".green()
+    );
+
+    configs.get_linked_project().await
+}
+
 pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
 

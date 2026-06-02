@@ -127,7 +127,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
     let railway_dir = cwd.join(".railway");
     let railway_file = railway_dir.join("railway.ts");
     let readme_file = railway_dir.join("README.md");
-    let skill_dir = cwd.join(".skills").join("railway-config");
+    let skill_dir = cwd.join(".agents").join("skills").join("railway-config");
     let skill_file = skill_dir.join("SKILL.md");
 
     create_parent(&railway_file)?;

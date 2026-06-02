@@ -27,6 +27,10 @@ pub struct Args {
     browserless: bool,
 }
 
+pub async fn prompt_login() -> Result<()> {
+    command(Args { browserless: false }).await
+}
+
 pub async fn command(args: Args) -> Result<()> {
     interact_or!("Cannot login in non-interactive mode");
 

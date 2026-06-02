@@ -141,16 +141,12 @@ struct StagedPatch {
 }
 
 pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
-    let configs = Configs::new()?;
-    let linked_project = configs.get_linked_project().await?;
-    let (token, auth_type) = get_runner_token(&configs)?;
+    let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
     invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let configs = Configs::new()?;
-    let linked_project = configs.get_linked_project().await?;
-    let (token, auth_type) = get_runner_token(&configs)?;
+    let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
     let command = if args.stage { "stage" } else if args.yes { "apply" } else { "plan" };
 
     if args.stage && !args.yes {
@@ -193,6 +189,30 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn ensure_config_context() -> Result<(Configs, LinkedProject, String, &'static str)> {
+    let configs = Configs::new()?;
+    let (token, auth_type) = match get_runner_token(&configs) {
+        Ok(token) => token,
+        Err(error) if std::io::stdout().is_terminal() => {
+            println!("{}", "Log in to Railway to continue.".bold());
+            crate::commands::login::prompt_login().await?;
+            get_runner_token(&Configs::new()?).map_err(|_| error)?
+        }
+        Err(error) => return Err(error),
+    };
+
+    let linked_project = match configs.get_linked_project().await {
+        Ok(linked_project) => linked_project,
+        Err(_error) if std::io::stdout().is_terminal() => {
+            println!("{}", "Link a Railway project to continue.".bold());
+            crate::commands::link::link_project_without_service().await?
+        }
+        Err(error) => return Err(error),
+    };
+
+    Ok((Configs::new()?, linked_project, token, auth_type))
 }
 
 fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
