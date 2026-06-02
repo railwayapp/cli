@@ -183,7 +183,7 @@ pub async fn command(args: Args) -> Result<()> {
             }
         }
 
-        print_response_with_options(&preview, args.verbose);
+        print_response_with_options_and_next(&preview, args.verbose, false);
         if !preview.ok {
             bail!("IaC runner returned diagnostics");
         }
@@ -384,6 +384,10 @@ pub(super) fn print_response(response: &RunnerResponse) {
 }
 
 pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
+    print_response_with_options_and_next(response, verbose, true);
+}
+
+fn print_response_with_options_and_next(response: &RunnerResponse, verbose: bool, show_next: bool) {
     println!();
     println!("{}", "Railway configuration".bold());
     println!("{} {}", "Using".dimmed(), display_file_path(&response.file).cyan());
@@ -475,12 +479,14 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
             );
         }
 
-        println!();
-        if !verbose && changes.iter().any(|change| change.details.as_ref().is_some_and(|details| !details.is_empty())) {
-            println!("  {} Run {} to show every changed field.", "•".cyan(), "railway config plan --verbose".cyan());
+        if show_next {
+            println!();
+            if !verbose && changes.iter().any(|change| change.details.as_ref().is_some_and(|details| !details.is_empty())) {
+                println!("  {} Run {} to show every changed field.", "•".cyan(), "railway config plan --verbose".cyan());
+            }
+            println!("{}", "Next".bold());
+            println!("  {} Run {} to apply these changes.", "•".cyan(), "railway config apply".cyan());
         }
-        println!("{}", "Next".bold());
-        println!("  {} Run {} to apply these changes.", "•".cyan(), "railway config apply".cyan());
     }
 }
 
