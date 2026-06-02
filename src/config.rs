@@ -344,7 +344,7 @@ impl Configs {
     }
 
     pub fn get_render_config() -> RenderConfig<'static> {
-        let mut config = RenderConfig::default_colored()
+        RenderConfig::default_colored()
             .with_help_message(
                 StyleSheet::new()
                     .with_fg(inquire::ui::Color::LightMagenta)
@@ -362,22 +362,9 @@ impl Configs {
                         .with_attr(Attributes::BOLD),
                 ),
             )
-            .with_highlighted_option_prefix(
-                Styled::new("›").with_fg(inquire::ui::Color::LightCyan),
-            )
-            .with_option(
-                StyleSheet::new(),
-            )
-            .with_selected_option(Some(
-                StyleSheet::new()
-                    .with_fg(inquire::ui::Color::LightCyan)
-                    .with_attr(Attributes::BOLD),
-            ))
             .with_canceled_prompt_indicator(
                 Styled::new("<cancelled>").with_fg(inquire::ui::Color::DarkRed),
-            );
-        config.prompt = StyleSheet::new().with_attr(Attributes::BOLD);
-        config
+            )
     }
 
     pub fn write(&self) -> Result<()> {
