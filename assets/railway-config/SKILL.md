@@ -1,3 +1,8 @@
+---
+name: railway-config
+description: Edit this project's Railway infrastructure-as-code configuration. Use this skill whenever the user asks to create, change, import, review, deploy, or troubleshoot Railway project infrastructure for the current repository, including services, databases, buckets, custom domains, regions, environment variables, `railway config *`, `.railway/railway.ts`, or `railway up` behavior.
+---
+
 # Railway configuration skill
 
 Use this skill when editing this repository's Railway configuration.
