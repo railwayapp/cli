@@ -344,16 +344,18 @@ pub(super) fn print_response(response: &RunnerResponse) {
 pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
     println!();
     println!("{}", "Railway configuration".bold());
-    println!("{} {}", "File".dimmed(), response.file.cyan());
+    println!("{} {}", "Using".dimmed(), response.file.cyan());
 
     if let Some(environment) = &response.current_environment {
         let environment_name = environment
             .environment_name
             .as_deref()
             .unwrap_or(&environment.environment_id);
-        println!("{} {}", "Environment".dimmed(), environment_name.cyan());
-        if let Some(project_id) = &environment.project_id {
-            println!("{} {}", "Project".dimmed(), project_id.dimmed());
+        println!("{} {}", "Target".dimmed(), environment_name.cyan());
+        if verbose {
+            if let Some(project_id) = &environment.project_id {
+                println!("{} {}", "Project".dimmed(), project_id.dimmed());
+            }
         }
     }
     println!();
@@ -388,7 +390,8 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
         println!("{}", "✓ Your Railway configuration is already up to date.".green());
     } else {
         let total = changes.len();
-        println!("{} {}", "Planned changes".bold(), format!("({total})").dimmed());
+        let section = if response.command == "apply" { "Applying" } else { "Railway will" };
+        println!("{} {}", section.bold(), format!("({total})").dimmed());
         if !verbose {
             if let Some(diff) = &response.diff {
                 print_colored_diff(diff);
@@ -419,15 +422,20 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
 
     println!();
     if let Some(apply_result) = &response.apply_result {
-        println!("{}", "✓ Railway configuration applied.".green().bold());
-        println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
-        if let Some(deployment_id) = response.deployment_id.as_ref().or(apply_result.deployment_id.as_ref()) {
-            println!("{} {}", "Deployment".dimmed(), deployment_id.dimmed());
+        println!("{}", "✓ Your Railway project is configured.".green().bold());
+        if verbose {
+            println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
+            if let Some(deployment_id) = response.deployment_id.as_ref().or(apply_result.deployment_id.as_ref()) {
+                println!("{} {}", "Deployment".dimmed(), deployment_id.dimmed());
+            }
+            if let Some(staged_patch_id) = response.staged_patch_id.as_ref().or(apply_result.staged_patch_id.as_ref()) {
+                println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
+            }
         }
-        if let Some(staged_patch_id) = response.staged_patch_id.as_ref().or(apply_result.staged_patch_id.as_ref()) {
-            println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
-        }
-        print_operation_results(apply_result);
+        print_operation_results(apply_result, verbose);
+        println!();
+        println!("{}", "Next".bold());
+        println!("  {} Run {} to deploy your code.", "•".cyan(), "railway up".cyan());
     } else if let Some(staged_patch) = &response.staged_patch {
         println!("{}", "✓ Changes staged for review in Railway.".green().bold());
         println!("{} {}", "Stage".dimmed(), staged_patch.id.dimmed());
@@ -435,18 +443,18 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
         if !verbose && changes.iter().any(|change| change.details.as_ref().is_some_and(|details| !details.is_empty())) {
             println!("  {} Run {} to show every changed field.", "•".cyan(), "railway config plan --verbose".cyan());
         }
-        println!("{}", "Next steps".bold());
-        println!("  {} Preview only; nothing has changed yet.", "•".cyan());
-        println!("  {} Run {} to apply them now.", "•".cyan(), "railway config apply".cyan());
+        println!("{}", "Next".bold());
+        println!("  {} Nothing has changed yet.", "•".cyan());
+        println!("  {} Run {} to make it real.", "•".cyan(), "railway config apply".cyan());
     }
 }
 
-fn print_operation_results(apply_result: &ChangeSetApplyResult) {
+fn print_operation_results(apply_result: &ChangeSetApplyResult, verbose: bool) {
     if apply_result.changes.is_empty() {
         return;
     }
     println!();
-    println!("{}", "Applied changes".bold());
+    println!("{}", "Applied".bold());
     for change in &apply_result.changes {
         let summary = change
             .summary
@@ -459,9 +467,15 @@ fn print_operation_results(apply_result: &ChangeSetApplyResult) {
             "failed" => "!".red().bold(),
             _ => "•".cyan(),
         };
-        println!("  {} {} {}", marker, summary, format!("({})", change.status).dimmed());
-        if let Some(outputs) = &change.outputs {
-            print_operation_outputs(outputs, 4);
+        if verbose {
+            println!("  {} {} {}", marker, summary, format!("({})", change.status).dimmed());
+        } else {
+            println!("  {} {}", marker, summary);
+        }
+        if verbose {
+            if let Some(outputs) = &change.outputs {
+                print_operation_outputs(outputs, 4);
+            }
         }
     }
 }
