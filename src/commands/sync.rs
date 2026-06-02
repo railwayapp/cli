@@ -56,7 +56,7 @@ pub(super) struct RunnerResponse {
     command: String,
     file: String,
     current_environment: Option<CurrentEnvironment>,
-    change_set: Option<ChangeSet>,
+    pub(super) change_set: Option<ChangeSet>,
     diff: Option<String>,
     diagnostics: Vec<Diagnostic>,
     pub(super) current_graph: Option<DesiredGraph>,
@@ -76,12 +76,12 @@ struct CurrentEnvironment {
 }
 
 #[derive(Deserialize, serde::Serialize)]
-struct ChangeSet {
-    changes: Vec<Change>,
+pub(super) struct ChangeSet {
+    pub(super) changes: Vec<Change>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
-struct Change {
+pub(super) struct Change {
     summary: Option<String>,
     severity: Option<String>,
     kind: Option<String>,
@@ -387,7 +387,7 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
     print_response_with_options_and_next(response, verbose, true);
 }
 
-fn print_response_with_options_and_next(response: &RunnerResponse, verbose: bool, show_next: bool) {
+pub(super) fn print_response_with_options_and_next(response: &RunnerResponse, verbose: bool, show_next: bool) {
     println!();
     println!("{}", "Railway configuration".bold());
     println!("{} {}", "Using".dimmed(), display_file_path(&response.file).cyan());

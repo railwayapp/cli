@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -473,59 +473,74 @@ async fn maybe_sync_iac_before_up(args: &Args) -> Result<Option<String>> {
         None => return Ok(None),
     };
 
-    let apply_sync = if args.yes {
-        true
-    } else if args.sync {
-        if !std::io::stdout().is_terminal() {
-            bail!("Applying Railway configuration before deploy requires --yes in non-interactive mode.");
-        }
-        prompt_confirm_with_default(
-            &format!(
-                "Found Railway configuration at {}. Apply project changes before deploying?",
-                railway_file.display()
-            ),
-            true,
-        )?
-    } else {
-        if !std::io::stdout().is_terminal() {
-            println!(
-                "Found Railway configuration at {}, skipping project changes in non-interactive mode. Use --sync --yes to apply before deploy.",
-                railway_file.display()
-            );
-            return Ok(None);
-        }
-
-        prompt_confirm_with_default(
-            &format!(
-                "Found Railway configuration at {}. Apply project changes before deploying?",
-                railway_file.display()
-            ),
-            true,
-        )?
-    };
-
-    if !apply_sync {
-        return Ok(None);
-    }
-
     let sync_args = crate::commands::sync::Args {
-        file: Some(railway_file),
+        file: Some(railway_file.clone()),
         stage: false,
         json: args.json,
         yes: true,
-        apply: true,
+        apply: false,
         decrypt_variables: false,
         include_types: false,
         runner: None,
         verbose: false,
     };
 
-    let response = crate::commands::sync::run(&sync_args, "apply").await?;
+    let plan = crate::commands::sync::run(&sync_args, "plan").await?;
+    if !plan.ok {
+        crate::commands::sync::print_response(&plan);
+        bail!("IaC runner returned diagnostics");
+    }
+
+    let changes = plan.change_set.as_ref().map(|change_set| change_set.changes.len()).unwrap_or(0);
+    if changes == 0 {
+        crate::commands::sync::print_response(&plan);
+        return Ok(infer_iac_deploy_service(&plan));
+    }
+
+    if !args.yes {
+        if !std::io::stdout().is_terminal() {
+            if args.sync {
+                bail!("Applying Railway configuration before deploy requires --yes in non-interactive mode.");
+            }
+            println!(
+                "Found Railway configuration at {}, skipping project changes in non-interactive mode. Use --sync --yes to apply before deploy.",
+                display_path(&railway_file)
+            );
+            return Ok(None);
+        }
+
+        crate::commands::sync::print_response_with_options_and_next(&plan, false, false);
+        println!();
+        let apply_sync = prompt_confirm_with_default(
+            "Apply these Railway configuration changes before deploying?",
+            true,
+        )?;
+        if !apply_sync {
+            return Ok(infer_iac_deploy_service(&plan));
+        }
+        println!();
+    }
+
+    let apply_args = crate::commands::sync::Args {
+        apply: true,
+        ..sync_args
+    };
+    let response = crate::commands::sync::run(&apply_args, "apply").await?;
     crate::commands::sync::print_response(&response);
     if !response.ok {
         bail!("IaC runner returned diagnostics");
     }
     Ok(infer_iac_deploy_service(&response))
+}
+
+fn display_path(path: &Path) -> String {
+    let cwd = std::env::current_dir().ok();
+    let display_path = cwd
+        .as_ref()
+        .and_then(|cwd| path.strip_prefix(cwd).ok())
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(path);
+    display_path.display().to_string()
 }
 
 fn infer_iac_deploy_service(response: &crate::commands::sync::RunnerResponse) -> Option<String> {
