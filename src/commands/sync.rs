@@ -388,12 +388,26 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
         .map(|change_set| change_set.changes.as_slice())
         .unwrap_or(&[]);
 
+    if let Some(apply_result) = &response.apply_result {
+        print_operation_results(apply_result, verbose);
+        if verbose {
+            println!();
+            println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
+            if let Some(deployment_id) = response.deployment_id.as_ref().or(apply_result.deployment_id.as_ref()) {
+                println!("{} {}", "Deployment".dimmed(), deployment_id.dimmed());
+            }
+            if let Some(staged_patch_id) = response.staged_patch_id.as_ref().or(apply_result.staged_patch_id.as_ref()) {
+                println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
+            }
+        }
+        return;
+    }
+
     if changes.is_empty() {
         println!("{}", "✓ Your Railway configuration is already up to date.".green());
     } else {
         let total = changes.len();
-        let section = if response.command == "apply" { "Applying" } else { "Railway will" };
-        println!("{} {}", section.bold(), format!("({total})").dimmed());
+        println!("{} {}", "Changes".bold(), format!("({total})").dimmed());
         if !verbose {
             if let Some(diff) = &response.diff {
                 print_colored_diff(diff);
@@ -420,36 +434,13 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
                 format!("{destructive} destructive change(s) will remove Railway resources or variables.").red()
             );
         }
-    }
 
-    println!();
-    if let Some(apply_result) = &response.apply_result {
         println!();
-        println!("{}", "✓ Your Railway project is configured.".green().bold());
-        if verbose {
-            println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
-            if let Some(deployment_id) = response.deployment_id.as_ref().or(apply_result.deployment_id.as_ref()) {
-                println!("{} {}", "Deployment".dimmed(), deployment_id.dimmed());
-            }
-            if let Some(staged_patch_id) = response.staged_patch_id.as_ref().or(apply_result.staged_patch_id.as_ref()) {
-                println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
-            }
-        }
-        print_operation_results(apply_result, verbose);
-        println!();
-        println!();
-        println!("{}", "Next".bold());
-        println!("  {} Run {} to deploy your code.", "•".cyan(), "railway up".cyan());
-    } else if let Some(staged_patch) = &response.staged_patch {
-        println!("{}", "✓ Changes staged for review in Railway.".green().bold());
-        println!("{} {}", "Stage".dimmed(), staged_patch.id.dimmed());
-    } else if !changes.is_empty() {
         if !verbose && changes.iter().any(|change| change.details.as_ref().is_some_and(|details| !details.is_empty())) {
             println!("  {} Run {} to show every changed field.", "•".cyan(), "railway config plan --verbose".cyan());
         }
         println!("{}", "Next".bold());
-        println!("  {} No changes have been applied yet.", "•".cyan());
-        println!("  {} Run {} to make this real.", "•".cyan(), "railway config apply".cyan());
+        println!("  {} Run {} to apply these changes.", "•".cyan(), "railway config apply".cyan());
     }
 }
 
@@ -468,8 +459,8 @@ fn print_operation_results(apply_result: &ChangeSetApplyResult, verbose: bool) {
     if apply_result.changes.is_empty() {
         return;
     }
-    println!();
-    println!("{}", "Applied".bold());
+    let total = apply_result.changes.len();
+    println!("{} {}", "Changes".bold(), format!("({total})").dimmed());
     for change in &apply_result.changes {
         let summary = change
             .summary
@@ -477,9 +468,9 @@ fn print_operation_results(apply_result: &ChangeSetApplyResult, verbose: bool) {
             .or(change.path.as_deref())
             .unwrap_or(&change.kind);
         let marker = match change.status.as_str() {
-            "applied" => "+".green().bold(),
+            "applied" => "✓".green().bold(),
             "noop" => "=".dimmed(),
-            "failed" => "!".red().bold(),
+            "failed" => "✕".red().bold(),
             _ => "•".cyan(),
         };
         if verbose {
