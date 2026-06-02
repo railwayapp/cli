@@ -372,9 +372,24 @@ fn render_service_body(resource: &crate::commands::sync::DesiredResource) -> Str
 
 fn render_build(build: Option<&serde_json::Value>, lines: &mut Vec<String>) {
     let Some(build) = build else { return; };
-    if let Some(command) = build.get("buildCommand").and_then(|value| value.as_str()) {
-        lines.push(format!("    build: {:?},", command));
-        return;
+    if let Some(object) = build.as_object() {
+        let non_default_keys = object
+            .iter()
+            .filter(|(key, value)| {
+                !matches!((key.as_str(), value),
+                    ("builder", serde_json::Value::String(builder)) if builder == "RAILPACK" || builder == "NIXPACKS"
+                ) && !matches!((key.as_str(), value),
+                    ("buildEnvironment", serde_json::Value::String(environment)) if environment == "V3"
+                )
+            })
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>();
+        if non_default_keys == ["buildCommand"] {
+            if let Some(command) = build.get("buildCommand").and_then(|value| value.as_str()) {
+                lines.push(format!("    build: {:?},", command));
+                return;
+            }
+        }
     }
     lines.push(format!("    build: {},", ts_value(build)));
 }
