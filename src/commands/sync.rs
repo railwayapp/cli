@@ -452,18 +452,8 @@ pub(super) fn print_response_with_options_and_next(response: &RunnerResponse, ve
     } else {
         let total = changes.len();
         println!("{} {}", "Changes".bold(), format!("({total})").dimmed());
-        if !verbose {
-            if let Some(diff) = &response.diff {
-                print_colored_diff(diff);
-            } else {
-                for change in changes {
-                    print_change(change, verbose);
-                }
-            }
-        } else {
-            for change in changes {
-                print_change(change, verbose);
-            }
+        for change in changes {
+            print_change(change, verbose);
         }
 
         let destructive = changes
@@ -481,9 +471,6 @@ pub(super) fn print_response_with_options_and_next(response: &RunnerResponse, ve
 
         if show_next {
             println!();
-            if !verbose && changes.iter().any(|change| change.details.as_ref().is_some_and(|details| !details.is_empty())) {
-                println!("  {} Run {} to show every changed field.", "•".cyan(), "railway config plan --verbose".cyan());
-            }
             println!("{}", "Next".bold());
             println!("  {} Run {} to apply these changes.", "•".cyan(), "railway config apply".cyan());
         }
@@ -562,7 +549,7 @@ fn format_output_value(value: &Value) -> String {
     }
 }
 
-fn print_change(change: &Change, verbose: bool) {
+fn print_change(change: &Change, _verbose: bool) {
     let summary = change
         .summary
         .as_deref()
@@ -570,11 +557,9 @@ fn print_change(change: &Change, verbose: bool) {
         .unwrap_or("change");
     let marker = marker_for_change(change);
     println!("  {} {}", marker, summary);
-    if verbose {
-        if let Some(details) = &change.details {
-            for detail in details {
-                println!("    {} {}", "└".dimmed(), detail.dimmed());
-            }
+    if let Some(details) = &change.details {
+        for detail in details {
+            println!("    {} {}", "└".dimmed(), detail.dimmed());
         }
     }
 }
