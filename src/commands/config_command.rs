@@ -2,7 +2,7 @@ use std::{fs, path::{Path, PathBuf}};
 
 use is_terminal::IsTerminal;
 
-use crate::util::prompt::prompt_select;
+use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
 use super::*;
 
@@ -596,6 +596,8 @@ export default defineRailway(() => {{
 }
 
 async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
+    ensure_config_initialized(&args).await?;
+
     crate::commands::sync::command(crate::commands::sync::Args {
         file: args.file,
         stage,
@@ -607,4 +609,38 @@ async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
         verbose: args.verbose,
     })
     .await
+}
+
+async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
+    if args.file.is_some() {
+        return Ok(());
+    }
+
+    let cwd = std::env::current_dir().context("Unable to get current directory")?;
+    let railway_file = cwd.join(".railway").join("railway.ts");
+    if railway_file.exists() {
+        return Ok(());
+    }
+
+    println!();
+    println!("{}", "Railway configuration is not initialized yet.".bold());
+    println!("{} {}", "Create".dimmed(), railway_file.display().to_string().cyan());
+    println!();
+
+    let should_init = if args.yes {
+        true
+    } else {
+        if !std::io::stdout().is_terminal() {
+            bail!("Railway configuration is not initialized. Run `railway config init` first.");
+        }
+        prompt_confirm_with_default("Initialize Railway configuration for this project?", false)?
+    };
+
+    if !should_init {
+        bail!("Run `railway config init` to create .railway/railway.ts, then try again.");
+    }
+
+    init_config(InitArgs { force: false }).await?;
+    println!();
+    Ok(())
 }
