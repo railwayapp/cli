@@ -509,7 +509,7 @@ async fn maybe_sync_iac_before_up(args: &Args) -> Result<Option<String>> {
             return Ok(None);
         }
 
-        crate::commands::sync::print_response_with_options_and_next(&plan, false, false);
+        crate::commands::sync::print_response_with_options_and_next(&plan, true, false);
         println!();
         let apply_sync = prompt_confirm_with_default(
             "Apply these Railway configuration changes before deploying?",
