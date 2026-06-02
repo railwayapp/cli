@@ -200,6 +200,8 @@ fn write_new(path: &Path, contents: &str, force: bool) -> Result<()> {
 async fn pull_config(args: PullArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
     let railway_file = cwd.join(".railway").join("railway.ts");
+    let readme_file = cwd.join(".railway").join("README.md");
+    let skill_file = cwd.join(".agents").join("skills").join("railway-config").join("SKILL.md");
 
     if args.json {
         let graph = load_current_graph(args.runner).await?;
@@ -208,10 +210,19 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     }
 
     create_parent(&railway_file)?;
+    create_parent(&skill_file)?;
     write_pulled_config(&railway_file, args.force, args.runner).await?;
+    let wrote_readme = write_asset_if_missing(&readme_file, include_str!("../../assets/railway-config/README.md"))?;
+    let wrote_skill = write_asset_if_missing(&skill_file, include_str!("../../assets/railway-config/SKILL.md"))?;
 
     println!("{}", "Railway configuration imported".green().bold());
     println!("{} {}", "Updated".dimmed(), railway_file.display().to_string().cyan());
+    if wrote_readme {
+        println!("{} {}", "Created".dimmed(), readme_file.display().to_string().cyan());
+    }
+    if wrote_skill {
+        println!("{} {}", "Created".dimmed(), skill_file.display().to_string().cyan());
+    }
     println!();
     println!("{}", "Next steps".bold());
     println!("  {} Review {} and remove anything you do not want managed from code.", "•".cyan(), ".railway/railway.ts".cyan());
