@@ -62,8 +62,8 @@ enum LinkProjectChoice {
 impl Display for LinkProjectChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LinkProjectChoice::Existing => write!(f, "Use an existing project"),
-            LinkProjectChoice::New => write!(f, "Create a new project"),
+            LinkProjectChoice::Existing => write!(f, "Use an existing Railway project"),
+            LinkProjectChoice::New => write!(f, "Create a new Railway project"),
         }
     }
 }
@@ -74,7 +74,7 @@ pub async fn link_project_without_service() -> Result<LinkedProject> {
 
     let choice = if std::io::stdout().is_terminal() {
         prompt_select(
-            "How should Railway continue?",
+            "Where should Railway apply this configuration?",
             vec![LinkProjectChoice::Existing, LinkProjectChoice::New],
         )?
     } else {

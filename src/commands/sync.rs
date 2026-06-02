@@ -206,7 +206,9 @@ async fn ensure_config_context() -> Result<(Configs, LinkedProject, String, &'st
     let linked_project = match configs.get_linked_project().await {
         Ok(linked_project) => linked_project,
         Err(_error) if std::io::stdout().is_terminal() => {
-            println!("{}", "Link a Railway project to continue.".bold());
+            println!();
+            println!("{}", "Connect Railway configuration".bold());
+            println!("Choose where .railway/railway.ts should plan and apply changes.");
             crate::commands::link::link_project_without_service().await?
         }
         Err(error) => return Err(error),
@@ -344,7 +346,7 @@ pub(super) fn print_response(response: &RunnerResponse) {
 pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
     println!();
     println!("{}", "Railway configuration".bold());
-    println!("{} {}", "Using".dimmed(), response.file.cyan());
+    println!("{} {}", "Using".dimmed(), display_file_path(&response.file).cyan());
 
     if let Some(environment) = &response.current_environment {
         let environment_name = environment
@@ -391,7 +393,6 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
     } else {
         let total = changes.len();
         let section = if response.command == "apply" { "Applying" } else { "Railway will" };
-        println!();
         println!("{} {}", section.bold(), format!("({total})").dimmed());
         if !verbose {
             if let Some(diff) = &response.diff {
@@ -447,9 +448,20 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
             println!("  {} Run {} to show every changed field.", "•".cyan(), "railway config plan --verbose".cyan());
         }
         println!("{}", "Next".bold());
-        println!("  {} Nothing has changed yet.", "•".cyan());
-        println!("  {} Run {} to make it real.", "•".cyan(), "railway config apply".cyan());
+        println!("  {} No changes have been applied yet.", "•".cyan());
+        println!("  {} Run {} to make this real.", "•".cyan(), "railway config apply".cyan());
     }
+}
+
+fn display_file_path(path: &str) -> String {
+    let path = PathBuf::from(path);
+    let cwd = std::env::current_dir().ok();
+    let display_path = cwd
+        .as_ref()
+        .and_then(|cwd| path.strip_prefix(cwd).ok())
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(&path);
+    display_path.display().to_string()
 }
 
 fn print_operation_results(apply_result: &ChangeSetApplyResult, verbose: bool) {
