@@ -1,4 +1,4 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{fs, path::{Path, PathBuf}, process::Command as ProcessCommand};
 
 use is_terminal::IsTerminal;
 
@@ -530,29 +530,33 @@ fn railway_ts_from_repo(cwd: &Path, project_name: &str) -> String {
         .unwrap_or_default();
     let scripts = package.get("scripts").and_then(|scripts| scripts.as_object());
     let package_manager = detect_package_manager(cwd);
-    let install = match package_manager.as_str() {
-        "bun" => "bun install --frozen-lockfile",
-        "pnpm" => "pnpm install --frozen-lockfile",
-        "yarn" => "yarn install --frozen-lockfile",
-        _ => "npm ci",
-    };
-    let build = scripts
-        .and_then(|scripts| scripts.get("build"))
-        .and_then(|value| value.as_str())
-        .map(|_| format!("{install} && {package_manager} run build"));
-    let start = if scripts.and_then(|scripts| scripts.get("start")).is_some() {
-        Some(format!("{package_manager} run start"))
-    } else if cwd.join("src/index.ts").exists() && package_manager == "bun" {
-        Some("bun src/index.ts".to_string())
-    } else if cwd.join("index.js").exists() {
-        Some("node index.js".to_string())
-    } else {
-        None
-    };
+    let build = script_command(scripts, "build").map(|_| format!("{package_manager} run build"));
+    let start = script_command(scripts, "start")
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            if cwd.join("src/index.ts").exists() && package_manager == "bun" {
+                Some("bun src/index.ts".to_string())
+            } else if cwd.join("index.js").exists() {
+                Some("node index.js".to_string())
+            } else {
+                None
+            }
+        });
+    let github_source = detect_github_remote(cwd);
 
-    let mut out = "import { defineRailway, project, service } from \"railway/iac\";\n\n".to_string();
+    let imports = if github_source.is_some() {
+        "defineRailway, github, project, service"
+    } else {
+        "defineRailway, project, service"
+    };
+    let mut out = format!("import {{ {imports} }} from \"railway/iac\";\n\n");
     out.push_str("export default defineRailway(() => {\n");
     out.push_str("  const web = service(\"web\", {\n");
+    if let Some(source) = github_source {
+        out.push_str(&format!("    source: github({:?}),\n", source));
+    } else {
+        out.push_str("    // No GitHub remote detected. `railway up` will upload this directory.\n");
+    }
     if let Some(build) = build {
         out.push_str(&format!("    build: {:?},\n", build));
     }
@@ -564,6 +568,37 @@ fn railway_ts_from_repo(cwd: &Path, project_name: &str) -> String {
     out.push_str(&format!("  return project(\"{project_name}\", {{\n"));
     out.push_str("    environments: [\"production\"],\n    services: [web],\n  });\n});\n");
     out
+}
+
+fn script_command<'a>(scripts: Option<&'a serde_json::Map<String, serde_json::Value>>, name: &str) -> Option<&'a str> {
+    scripts
+        .and_then(|scripts| scripts.get(name))
+        .and_then(|value| value.as_str())
+}
+
+fn detect_github_remote(cwd: &Path) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_github_remote(std::str::from_utf8(&output.stdout).ok()?.trim())
+}
+
+fn parse_github_remote(remote: &str) -> Option<String> {
+    let remote = remote.strip_suffix(".git").unwrap_or(remote);
+    if let Some(path) = remote.strip_prefix("git@github.com:") {
+        return Some(path.to_string());
+    }
+    for prefix in ["https://github.com/", "http://github.com/", "ssh://git@github.com/"] {
+        if let Some(path) = remote.strip_prefix(prefix) {
+            return Some(path.to_string());
+        }
+    }
+    None
 }
 
 fn detect_package_manager(cwd: &Path) -> String {
