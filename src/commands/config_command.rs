@@ -6,7 +6,7 @@ use crate::util::prompt::prompt_select;
 
 use super::*;
 
-/// Manage Railway project configuration from .railway/railway.ts
+/// Define, import, preview, and apply your Railway project from .railway/railway.ts
 #[derive(Parser)]
 pub struct Args {
     #[clap(subcommand)]
