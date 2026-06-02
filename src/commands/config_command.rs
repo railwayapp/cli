@@ -73,9 +73,9 @@ enum InitMode {
 impl std::fmt::Display for InitMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InitMode::GenerateFromRepo => write!(f, "Generate from this repo"),
-            InitMode::ImportFromRailway => write!(f, "Import from linked Railway project"),
-            InitMode::MinimalFile => write!(f, "Create minimal file"),
+            InitMode::GenerateFromRepo => write!(f, "Start from this directory"),
+            InitMode::ImportFromRailway => write!(f, "Import an existing Railway project"),
+            InitMode::MinimalFile => write!(f, "Start with a blank Railway project"),
         }
     }
 }
@@ -137,7 +137,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
         InitMode::GenerateFromRepo
     } else {
         prompt_select(
-            "How should Railway start your configuration?",
+            "How should Railway create .railway/railway.ts?",
             vec![
                 InitMode::GenerateFromRepo,
                 InitMode::ImportFromRailway,
