@@ -6,7 +6,7 @@ use crate::util::prompt::prompt_select;
 
 use super::*;
 
-/// Manage Railway configuration from .railway/railway.ts
+/// Manage Railway project configuration from .railway/railway.ts
 #[derive(Parser)]
 pub struct Args {
     #[clap(subcommand)]
@@ -15,19 +15,20 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Command {
-    /// Preview project configuration changes
+    /// Preview the changes Railway would make from .railway/railway.ts without applying them
     Plan(SharedArgs),
 
-    /// Stage project configuration changes for review
+    /// Staged Railway configuration changes are not available yet; use `railway config plan` or `railway config apply`
+    #[clap(hide = true)]
     Stage(SharedArgs),
 
-    /// Apply project configuration changes
+    /// Apply the changes from .railway/railway.ts to the linked Railway project
     Apply(SharedArgs),
 
-    /// Create a Railway configuration file for this project
+    /// Create .railway/railway.ts for this repo or import from the linked project
     Init(InitArgs),
 
-    /// Pull current Railway project configuration into code
+    /// Import the linked Railway project's current configuration into .railway/railway.ts
     Pull(PullArgs),
 }
 
@@ -108,7 +109,7 @@ struct PullArgs {
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Command::Plan(args) => run_sync(args, false, false).await,
-        Command::Stage(args) => run_sync(args, true, false).await,
+        Command::Stage(_args) => bail!("Staged Railway configuration changes are not available yet. Run `railway config plan` to preview changes or `railway config apply` to apply them."),
         Command::Apply(args) => run_sync(args, false, true).await,
         Command::Init(args) => init_config(args).await,
         Command::Pull(args) => pull_config(args).await,
