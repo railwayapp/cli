@@ -6,7 +6,7 @@ use std::fmt::Display;
 
 use crate::{
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_options, prompt_options_skippable},
+    util::prompt::{fake_select, prompt_options, prompt_options_skippable, prompt_select, prompt_text_with_placeholder_if_blank},
     workspace::{Project, Workspace, workspaces},
 };
 
@@ -53,27 +53,91 @@ struct LinkOutput {
     service_name: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum LinkProjectChoice {
+    Existing,
+    New,
+}
+
+impl Display for LinkProjectChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkProjectChoice::Existing => write!(f, "Use an existing project"),
+            LinkProjectChoice::New => write!(f, "Create a new project"),
+        }
+    }
+}
+
 pub async fn link_project_without_service() -> Result<LinkedProject> {
     let mut configs = Configs::new()?;
     let workspaces = workspaces().await?;
-    let workspace = select_workspace(None, None, workspaces)?;
-    let project = select_project(workspace, None)?;
-    let environment = select_environment(None, &project)?;
 
-    configs.link_project(
-        project.id.clone(),
-        Some(project.name.clone()),
-        environment.id.clone(),
-        Some(environment.name.clone()),
-    )?;
-    configs.write()?;
+    let choice = if std::io::stdout().is_terminal() {
+        prompt_select(
+            "How should Railway continue?",
+            vec![LinkProjectChoice::Existing, LinkProjectChoice::New],
+        )?
+    } else {
+        LinkProjectChoice::Existing
+    };
 
-    println!(
-        "\n{} {} {}",
-        "Project".green(),
-        project.name.magenta().bold(),
-        "linked successfully! 🎉".green()
-    );
+    match choice {
+        LinkProjectChoice::Existing => {
+            let workspace = select_workspace(None, None, workspaces)?;
+            let project = select_project(workspace, None)?;
+            let environment = select_environment(None, &project)?;
+
+            configs.link_project(
+                project.id.clone(),
+                Some(project.name.clone()),
+                environment.id.clone(),
+                Some(environment.name.clone()),
+            )?;
+            configs.write()?;
+
+            println!(
+                "\n{} {} {}",
+                "Project".green(),
+                project.name.magenta().bold(),
+                "linked successfully! 🎉".green()
+            );
+        }
+        LinkProjectChoice::New => {
+            let client = GQLClient::new_authorized(&configs)?;
+            let workspace = select_workspace(None, None, workspaces)?;
+            let project_name = prompt_new_project_name()?;
+            let vars = mutations::project_create::Variables {
+                name: if project_name.is_empty() { None } else { Some(project_name) },
+                description: None,
+                workspace_id: Some(workspace.id().to_owned()),
+            };
+            let project = post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
+                .await?
+                .project_create;
+            let environment = project
+                .environments
+                .edges
+                .first()
+                .context("No environments")?
+                .node
+                .clone();
+
+            configs.link_project(
+                project.id.clone(),
+                Some(project.name.clone()),
+                environment.id.clone(),
+                Some(environment.name.clone()),
+            )?;
+            configs.write()?;
+
+            println!(
+                "\n{} {} {}",
+                "Created and linked project".green().bold(),
+                project.name.magenta().bold(),
+                format!("on {workspace}").green()
+            );
+        }
+    }
 
     configs.get_linked_project().await
 }
@@ -142,6 +206,25 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn prompt_new_project_name() -> Result<String> {
+    let default_name = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "railway-project".to_string());
+
+    if !std::io::stdout().is_terminal() {
+        return Ok(default_name);
+    }
+
+    let maybe_name = prompt_text_with_placeholder_if_blank(
+        "Project name",
+        &default_name,
+        &default_name,
+    )?;
+    let name = maybe_name.trim();
+    Ok(if name.is_empty() { default_name } else { name.to_string() })
 }
 
 fn select_service(
