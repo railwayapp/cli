@@ -513,6 +513,7 @@ async fn maybe_sync_iac_before_up(args: &Args) -> Result<Option<String>> {
         stage: false,
         json: args.json,
         yes: true,
+        apply: true,
         decrypt_variables: false,
         include_types: false,
         runner: None,

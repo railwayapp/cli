@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::util::progress::{create_spinner_if, fail_spinner, success_spinner};
+use crate::util::{progress::{create_spinner_if, fail_spinner, success_spinner}, prompt::prompt_confirm_with_default};
 
 use super::*;
 
@@ -25,9 +25,12 @@ pub struct Args {
     #[clap(long)]
     pub(super) json: bool,
 
-    /// Confirm destructive staged changes.
+    /// Confirm prompts and proceed non-interactively.
     #[clap(long)]
     pub(super) yes: bool,
+
+    #[clap(skip)]
+    pub(super) apply: bool,
 
     /// Ask Backboard to decrypt variables while planning, when authorized.
     #[clap(long)]
@@ -147,7 +150,7 @@ pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
 
 pub async fn command(args: Args) -> Result<()> {
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
-    let command = if args.stage { "stage" } else if args.yes { "apply" } else { "plan" };
+    let command = if args.stage { "stage" } else if args.apply || args.yes { "apply" } else { "plan" };
 
     if args.stage && !args.yes {
         let mut spinner = create_spinner_if(!args.json && std::io::stdout().is_terminal(), "Checking proposed changes".into());
@@ -163,6 +166,43 @@ pub async fn command(args: Args) -> Result<()> {
         if has_destructive_changes(&preview) {
             bail!("These changes remove Railway resources. Re-run with --stage --yes to stage them.");
         }
+    }
+
+    if command == "apply" && !args.yes && !args.json {
+        if !std::io::stdout().is_terminal() {
+            bail!("Run `railway config apply --yes` to apply changes non-interactively.");
+        }
+
+        let mut spinner = create_spinner_if(true, "Checking Railway configuration".into());
+        let preview = invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
+        if let Some(spinner) = &mut spinner {
+            if preview.ok {
+                success_spinner(spinner, "Checked Railway configuration".into());
+            } else {
+                fail_spinner(spinner, "Could not read Railway configuration".into());
+            }
+        }
+
+        print_response_with_options(&preview, args.verbose);
+        if !preview.ok {
+            bail!("IaC runner returned diagnostics");
+        }
+        let changes = preview.change_set.as_ref().map(|change_set| change_set.changes.len()).unwrap_or(0);
+        if changes == 0 {
+            return Ok(());
+        }
+
+        let destructive = has_destructive_changes(&preview);
+        println!();
+        let prompt = if destructive {
+            "Apply these changes? This will remove Railway resources or variables."
+        } else {
+            "Apply these changes to Railway?"
+        };
+        if !prompt_confirm_with_default(prompt, false)? {
+            bail!("No changes applied.");
+        }
+        println!();
     }
 
     let mut spinner = create_spinner_if(!args.json && std::io::stdout().is_terminal(), runner_message(command).into());
