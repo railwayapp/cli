@@ -564,20 +564,6 @@ fn print_change(change: &Change, _verbose: bool) {
     }
 }
 
-fn print_colored_diff(diff: &str) {
-    for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("+ ") {
-            println!("  {} {}", "+".green().bold(), rest.green());
-        } else if let Some(rest) = line.strip_prefix("- ") {
-            println!("  {} {}", "-".red().bold(), rest.red());
-        } else if let Some(rest) = line.strip_prefix("~ ") {
-            println!("  {} {}", "~".yellow().bold(), rest.yellow());
-        } else {
-            println!("  {line}");
-        }
-    }
-}
-
 fn marker_for_change(change: &Change) -> colored::ColoredString {
     match change.kind.as_deref() {
         Some("resource.create") | Some("variable.set") | Some("domain.create") => "+".green().bold(),
