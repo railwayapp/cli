@@ -136,8 +136,9 @@ async fn init_config(args: InitArgs) -> Result<()> {
     let init_mode = if railway_file.exists() || !std::io::stdout().is_terminal() {
         InitMode::GenerateFromRepo
     } else {
+        println!();
         prompt_select(
-            "How should Railway create .railway/railway.ts?",
+            "How should Railway create .railway/railway.ts?\n",
             vec![
                 InitMode::GenerateFromRepo,
                 InitMode::ImportFromRailway,
