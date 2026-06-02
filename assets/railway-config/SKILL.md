@@ -8,34 +8,49 @@ The source of desired Railway project state is:
 .railway/railway.ts
 ```
 
-## Rules
+## Core rules
 
 1. Express Railway product intent, not internal API details.
 2. Do not write Railway UUIDs into `.railway/railway.ts`.
-3. Do not write `EnvironmentConfigPatch`, `ServiceInstance`, or Backboard internals into source.
-4. Prefer helpers like `service()`, `postgres()`, `redis()`, `bucket()`, and `volume()`.
-5. Keep secrets out of source. Prefer references and Railway-managed variables.
-6. After editing `.railway/railway.ts`, run `railway config plan`.
-7. Do not run `railway config apply` unless the user asks.
+3. Do not write `EnvironmentConfigPatch`, `ServiceInstance`, Backboard internals, or generated Railway domains into source.
+4. Prefer Railway configuration helpers like `service()`, `postgres()`, `redis()`, `mysql()`, `mongo()`, `bucket()`, `github()`, and `image()`.
+5. Use `service.env.VARIABLE` and `database.env.VARIABLE` for references.
+6. Keep secrets out of source. Use references or `preserve()` for existing Railway-managed values.
+7. Prefer product DSL names such as `domains` and `regions`; avoid internal names like `customDomains` and `multiRegionConfig`.
+8. Do not add platform defaults unless the user explicitly wants them.
+9. After editing `.railway/railway.ts`, run `railway config plan`.
+10. Do not run `railway config apply` unless the user asks.
 
 ## Commands
 
-Preview:
+Initialize configuration files:
+
+```bash
+railway config init
+```
+
+Import current Railway state:
+
+```bash
+railway config pull
+```
+
+Preview changes:
 
 ```bash
 railway config plan
 ```
 
-Stage:
-
-```bash
-railway config stage
-```
-
-Apply:
+Apply changes:
 
 ```bash
 railway config apply
+```
+
+Deploy this directory:
+
+```bash
+railway up
 ```
 
 Machine-readable preview:
@@ -46,7 +61,7 @@ railway config plan --json
 
 ## Authoring
 
-Use the Railway configuration helpers:
+Use Railway configuration helpers:
 
 ```ts
 import {
@@ -57,22 +72,37 @@ import {
   mongo,
   mysql,
   postgres,
+  preserve,
   project,
   redis,
   service,
-  volume,
 } from "railway/iac";
 ```
 
-Minimal service:
+Minimal local service:
 
 ```ts
 const web = service("web", {
-  build: "pnpm install --frozen-lockfile && pnpm build",
+  build: "bun run build",
+  start: "NODE_ENV=production bun src/index.ts",
+});
+```
+
+GitHub service:
+
+```ts
+const web = service("web", {
+  source: github("owner/repo", { branch: "main" }),
+  build: "pnpm run build",
   start: "pnpm start",
-  env: {
-    NODE_ENV: "production",
-  },
+});
+```
+
+Docker image service:
+
+```ts
+const worker = service("worker", {
+  source: image("ghcr.io/acme/worker:latest"),
 });
 ```
 
@@ -83,8 +113,7 @@ const db = postgres("postgres");
 
 const web = service("web", {
   env: {
-    DATABASE_URL: db.url(),
-    PGHOST: db.env.PGHOST,
+    DATABASE_URL: db.env.DATABASE_URL,
   },
 });
 ```
@@ -94,7 +123,7 @@ Service-to-service reference:
 ```ts
 const api = service("api", {
   env: {
-    INTERNAL_TOKEN: "replace-me",
+    INTERNAL_TOKEN: preserve(),
   },
 });
 
@@ -106,12 +135,29 @@ const web = service("web", {
 });
 ```
 
-Custom domain:
+Custom domains:
 
 ```ts
 const web = service("web", {
   domains: ["app.example.com"],
 });
+```
+
+Regions:
+
+```ts
+const web = service("web", {
+  regions: {
+    "us-west2": 1,
+    "europe-west4": 1,
+  },
+});
+```
+
+Bucket:
+
+```ts
+const media = bucket("media", { region: "iad" });
 ```
 
 Project shape:
@@ -121,7 +167,7 @@ export default defineRailway(() => {
   const db = postgres("postgres");
   const web = service("web", {
     env: {
-      DATABASE_URL: db.url(),
+      DATABASE_URL: db.env.DATABASE_URL,
     },
   });
 
@@ -131,3 +177,14 @@ export default defineRailway(() => {
   });
 });
 ```
+
+## Review checklist
+
+Before applying changes, confirm:
+
+- `railway config plan` shows only expected changes.
+- Secrets are not replaced with literal placeholder values.
+- Existing Railway-managed variables use `preserve()` when the value should remain untouched.
+- Custom domains are declared with `domains`, not networking internals.
+- Regions are declared with `regions`, not `multiRegionConfig`.
+- No generated Railway service domains are committed.

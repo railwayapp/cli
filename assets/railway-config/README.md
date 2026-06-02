@@ -1,37 +1,50 @@
 # Railway configuration
 
-This project contains a Railway configuration file:
+This project defines its Railway infrastructure in code.
 
 ```txt
 .railway/railway.ts
 ```
 
-Use it to describe the desired shape of this Railway project: services, databases, buckets, volumes, domains, and environment variables.
+Use this file to describe the Railway project you want: services, databases, buckets, custom domains, regions, and environment variables.
 
-## Commands
+## Common commands
 
-Preview changes:
+Create the configuration files:
+
+```bash
+railway config init
+```
+
+Import an existing Railway project into code:
+
+```bash
+railway config pull
+```
+
+Preview what Railway would change:
 
 ```bash
 railway config plan
 ```
 
-Stage changes for review:
-
-```bash
-railway config stage
-```
-
-Apply changes:
+Apply the planned changes:
 
 ```bash
 railway config apply
 ```
 
-Deploy code:
+Deploy this directory:
 
 ```bash
 railway up
 ```
 
-If `.railway/railway.ts` has pending changes, `railway up` may ask to apply them before deploying.
+If `.railway/railway.ts` has pending project changes, `railway up` previews them and asks before applying them.
+
+## Notes
+
+- `railway config plan` is safe and does not change Railway.
+- `railway config apply` asks before applying unless you pass `--yes`.
+- `railway up` deploys this directory when the service has no GitHub or image source.
+- Secrets imported from Railway may appear as `preserve()` so they are not overwritten.
