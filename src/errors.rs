@@ -168,15 +168,13 @@ impl RailwayError {
     /// embed guidance in their message.
     pub fn hint(&self) -> Option<&'static str> {
         match self {
-            RailwayError::NotAuthenticated => Some(
-                "Run `railway login` to authenticate, then re-run.",
-            ),
+            RailwayError::NotAuthenticated => {
+                Some("Run `railway login` to authenticate, then re-run.")
+            }
             RailwayError::NoLinkedProject | RailwayError::ProjectNotFound => {
                 Some("Run `railway link` to connect to a project.")
             }
-            RailwayError::NoServiceLinked => {
-                Some("Run `railway service` to link a service.")
-            }
+            RailwayError::NoServiceLinked => Some("Run `railway service` to link a service."),
             _ => None,
         }
     }

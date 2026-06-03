@@ -109,8 +109,9 @@ fn render_error_message(err: &anyhow::Error, mode: OutputMode) -> (Stream, Strin
             // context chain), then surface the RailwayError hint so the
             // actionable next step isn't lost in human mode.
             let mut text = format!("{err:?}");
-            if let Some(hint) =
-                err.downcast_ref::<RailwayError>().and_then(RailwayError::hint)
+            if let Some(hint) = err
+                .downcast_ref::<RailwayError>()
+                .and_then(RailwayError::hint)
             {
                 text.push_str(&format!("\n  {} {hint}", "→".cyan()));
             }
@@ -163,12 +164,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["code"], "NOT_AUTHENTICATED");
         assert_eq!(v["error"], "Not signed in.");
-        assert!(
-            v["hint"]
-                .as_str()
-                .unwrap()
-                .contains("railway login")
-        );
+        assert!(v["hint"].as_str().unwrap().contains("railway login"));
     }
 
     #[test]

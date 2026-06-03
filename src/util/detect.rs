@@ -66,11 +66,7 @@ fn scan_package_json(cwd: &Path, out: &mut BTreeSet<String>) {
         out.insert("postgres".to_owned());
     }
     // Redis clients
-    if pkg_match("redis")
-        || pkg_match("ioredis")
-        || pkg_match("bullmq")
-        || pkg_match("bull")
-    {
+    if pkg_match("redis") || pkg_match("ioredis") || pkg_match("bullmq") || pkg_match("bull") {
         out.insert("redis".to_owned());
     }
     // MySQL clients
@@ -169,9 +165,7 @@ fn scan_go_mod(cwd: &Path, out: &mut BTreeSet<String>) {
     let Some(contents) = read_file(cwd, "go.mod") else {
         return;
     };
-    if contents.contains("github.com/jackc/pgx")
-        || contents.contains("github.com/lib/pq")
-    {
+    if contents.contains("github.com/jackc/pgx") || contents.contains("github.com/lib/pq") {
         out.insert("postgres".to_owned());
     }
     if contents.contains("github.com/redis/go-redis")
@@ -193,8 +187,7 @@ fn scan_cargo_toml(cwd: &Path, out: &mut BTreeSet<String>) {
     };
     let has = |name: &str| {
         // `tokio-postgres = "..."` or `tokio-postgres = { ... }`
-        contents.contains(&format!("{} =", name))
-            || contents.contains(&format!("\"{}\"", name))
+        contents.contains(&format!("{} =", name)) || contents.contains(&format!("\"{}\"", name))
     };
     if has("tokio-postgres") || has("sqlx") && contents.contains("postgres") {
         out.insert("postgres".to_owned());
@@ -217,8 +210,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_dir() -> PathBuf {
-        let p = std::env::temp_dir()
-            .join(format!("railway-detect-{}", rand::random::<u32>()));
+        let p = std::env::temp_dir().join(format!("railway-detect-{}", rand::random::<u32>()));
         fs::create_dir_all(&p).unwrap();
         p
     }
@@ -299,11 +291,7 @@ mod tests {
     #[test]
     fn deduplicates_across_files() {
         let dir = tmp_dir();
-        fs::write(
-            dir.join("package.json"),
-            r#"{"dependencies":{"pg":"^8"}}"#,
-        )
-        .unwrap();
+        fs::write(dir.join("package.json"), r#"{"dependencies":{"pg":"^8"}}"#).unwrap();
         fs::write(dir.join("requirements.txt"), "psycopg2-binary\n").unwrap();
         let got = detect_services(&dir);
         assert_eq!(got, vec!["postgres".to_owned()]);

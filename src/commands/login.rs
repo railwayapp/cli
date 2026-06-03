@@ -70,9 +70,7 @@ pub async fn command(args: Args) -> Result<()> {
         crate::exec_context::AuthTransport::DeviceCode => {
             ("device_code", device_flow_login(host).await)
         }
-        crate::exec_context::AuthTransport::Browser => {
-            ("browser", browser_login(host).await)
-        }
+        crate::exec_context::AuthTransport::Browser => ("browser", browser_login(host).await),
     };
 
     // Funnel telemetry: record the auth-attempt outcome. Sent via a
@@ -142,7 +140,10 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
     // front as a copy-paste fallback (wrong browser/profile/tab opened,
     // or debugging).
     println!();
-    println!("  {} Opening your browser to sign in — finish there.", "→".cyan());
+    println!(
+        "  {} Opening your browser to sign in — finish there.",
+        "→".cyan()
+    );
     println!("    {}", auth_url.bold().underline());
     println!();
 
@@ -168,8 +169,8 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
 
     spinner.finish_and_clear();
 
-    let code = result
-        .context("Authentication timed out — no callback received after 5 minutes")??;
+    let code =
+        result.context("Authentication timed out — no callback received after 5 minutes")??;
 
     oauth::exchange_authorization_code(host, &code, &redirect_uri, &pkce.code_verifier).await
 }

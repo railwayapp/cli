@@ -179,7 +179,10 @@ mod tests {
     #[test]
     fn auto_auth_proceeds_in_a_plain_interactive_terminal() {
         let c = ctx(false, false, true, true, false, true);
-        assert_eq!(c.auto_auth(false), AutoAuth::Proceed(AuthTransport::Browser));
+        assert_eq!(
+            c.auto_auth(false),
+            AutoAuth::Proceed(AuthTransport::Browser)
+        );
     }
 
     #[test]
@@ -187,7 +190,10 @@ mod tests {
         // Agent harness with captured stdout/stdin: a human is watching
         // and can complete the browser sign-in.
         let c = ctx(false, false, false, false, true, true);
-        assert_eq!(c.auto_auth(false), AutoAuth::Proceed(AuthTransport::Browser));
+        assert_eq!(
+            c.auto_auth(false),
+            AutoAuth::Proceed(AuthTransport::Browser)
+        );
     }
 
     #[test]
@@ -248,6 +254,9 @@ mod tests {
         // the normal interactive path, not implicit-agent consent.
         let c = ctx(false, false, true, true, true, true);
         assert!(!c.agent_implicit_consent());
-        assert_eq!(c.auto_auth(false), AutoAuth::Proceed(AuthTransport::Browser));
+        assert_eq!(
+            c.auto_auth(false),
+            AutoAuth::Proceed(AuthTransport::Browser)
+        );
     }
 }

@@ -110,9 +110,7 @@ pub fn detect_current_branch(cwd: &Path) -> Option<String> {
     let git_dir = find_git_dir(cwd)?;
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let trimmed = head.trim();
-    trimmed
-        .strip_prefix("ref: refs/heads/")
-        .map(str::to_owned)
+    trimmed.strip_prefix("ref: refs/heads/").map(str::to_owned)
 }
 
 #[cfg(test)]

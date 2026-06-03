@@ -172,10 +172,7 @@ pub struct ProjectWithWorkspace {
 /// or this bails. When the workspace is auto-selected (flag or
 /// single-workspace cases), echoes the choice via `fake_select` so
 /// the user can see what landed.
-pub fn pick_workspace(
-    workspaces: Vec<Workspace>,
-    requested: Option<String>,
-) -> Result<Workspace> {
+pub fn pick_workspace(workspaces: Vec<Workspace>, requested: Option<String>) -> Result<Workspace> {
     use crate::errors::RailwayError;
     use crate::util::prompt::{fake_select, prompt_select};
     use is_terminal::IsTerminal;
@@ -188,9 +185,7 @@ pub fn pick_workspace(
     if let Some(input) = requested {
         return workspaces
             .iter()
-            .find(|w| {
-                w.id().eq_ignore_ascii_case(&input) || w.name().eq_ignore_ascii_case(&input)
-            })
+            .find(|w| w.id().eq_ignore_ascii_case(&input) || w.name().eq_ignore_ascii_case(&input))
             .map(confirm)
             .ok_or_else(|| RailwayError::WorkspaceNotFound(input).into());
     }
