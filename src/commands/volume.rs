@@ -7,7 +7,7 @@ use crate::{
         find_service_instance, get_environment_instances, get_project, volume_instances_in_env,
     },
     errors::RailwayError,
-    queries::project::ProjectProject,
+    queries::{environment_instances::VolumeState, project::ProjectProject},
     util::{
         progress::create_spinner,
         prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
@@ -659,6 +659,39 @@ async fn delete(
     Ok(())
 }
 
+/// A human-readable label for a volume's state, used in JSON output.
+fn volume_state_label(state: &Option<VolumeState>) -> String {
+    match state {
+        Some(VolumeState::READY) => "Ready".to_string(),
+        Some(VolumeState::DELETING) => "Deleting".to_string(),
+        Some(VolumeState::DELETED) => "Deleted".to_string(),
+        Some(VolumeState::ERROR) => "Error".to_string(),
+        Some(VolumeState::MIGRATING) => "Migrating".to_string(),
+        Some(VolumeState::MIGRATION_PENDING) => "Migration pending".to_string(),
+        Some(VolumeState::RESTORING) => "Restoring".to_string(),
+        Some(VolumeState::UPDATING) => "Updating".to_string(),
+        Some(VolumeState::Other(s)) => s.clone(),
+        None => "Unknown".to_string(),
+    }
+}
+
+/// A colored label for a volume's state, used in the human-readable output.
+fn colored_volume_state(state: &Option<VolumeState>) -> colored::ColoredString {
+    let label = volume_state_label(state);
+    match state {
+        Some(VolumeState::READY) => label.green(),
+        Some(VolumeState::DELETING | VolumeState::DELETED | VolumeState::ERROR) => label.red(),
+        Some(
+            VolumeState::MIGRATING
+            | VolumeState::MIGRATION_PENDING
+            | VolumeState::RESTORING
+            | VolumeState::UPDATING,
+        ) => label.yellow(),
+        Some(VolumeState::Other(_)) => label.normal(),
+        None => label.dimmed(),
+    }
+}
+
 async fn list(
     environment: String,
     environment_instances: &ProjectEnvironmentInstances,
@@ -705,6 +738,9 @@ async fn list(
                     "serviceName": service_name,
                     "currentSizeMB": volume.current_size_mb,
                     "sizeMB": volume.size_mb,
+                    "status": volume_state_label(&volume.state),
+                    "isPendingDeletion": volume.is_pending_deletion,
+                    "deletedAt": volume.deleted_at.map(|dt| dt.to_rfc3339()),
                 })
             })
             .collect();
@@ -743,7 +779,22 @@ async fn list(
                 "MB".blue(),
                 volume.size_mb.to_string().red(),
                 "MB".red()
-            )
+            );
+            println!("Status: {}", colored_volume_state(&volume.state));
+            if volume.is_pending_deletion {
+                if let Some(deleted_at) = volume.deleted_at {
+                    let local_time: chrono::DateTime<chrono::Local> =
+                        chrono::DateTime::from(deleted_at);
+                    println!(
+                        "{} {}",
+                        "Deletes on:".red().bold(),
+                        local_time
+                            .format("%b %-d %Y %-I:%M %p %Z")
+                            .to_string()
+                            .red()
+                    );
+                }
+            }
         }
     }
     Ok(())
