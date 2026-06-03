@@ -122,23 +122,38 @@ pub async fn command(args: Args) -> Result<()> {
         configs = Configs::new()?;
     }
 
-    // Create-a-new-project path. `--new` forces it (a fresh project even
-    // if one is already linked). Otherwise, when there's no project to
-    // deploy to, create one automatically if we just signed up (cold
-    // start) or the user passed `-y` ("accept everything"). An authed
-    // user with no linked project and no `-y`/`--new` still hits the
-    // standard "no project specified" error below — we don't silently
-    // create a project behind their back.
-    let should_create_new = if args.new {
-        true
-    } else if args.project.is_some() {
-        false
-    } else {
-        (came_from_unauth_prompt || args.yes)
-            && configs.get_linked_project().await.is_err()
-    };
-    if should_create_new {
+    // Decide whether to create a fresh project from this directory.
+    // `--new` always forces it. Otherwise it only applies when there's no
+    // project to deploy to (no link, no `--project`): create automatically
+    // when creation has been implicitly authorized — a just-completed
+    // signup, an explicit `-y`, or an agent harness driving us (the agent
+    // invocation is the authorization, the same signal that skips the auth
+    // confirm). An interactive human with no link gets a choice
+    // (create / link / cancel) instead of a silent create. Pure automation
+    // (no link, no flag, no agent) falls through to the standard "no
+    // project" error below — we never silently create from a script.
+    let ctx = crate::exec_context::ExecutionContext::detect(args.json, args.ci);
+    if args.new {
         return deploy_new_project(&args).await;
+    }
+    if args.project.is_none() && configs.get_linked_project().await.is_err() {
+        if came_from_unauth_prompt || args.yes || ctx.agent_implicit_consent() {
+            return deploy_new_project(&args).await;
+        }
+        if ctx.stdout_tty && !args.json && !args.ci {
+            match prompt_no_link_action()? {
+                NoLinkAction::Create => return deploy_new_project(&args).await,
+                NoLinkAction::Link => {
+                    super::link::command(super::link::Args::for_service_link(None, None, None))
+                        .await?;
+                    configs = Configs::new()?;
+                    // Fall through to the normal deploy path, now linked.
+                }
+                NoLinkAction::Cancel => return Ok(()),
+            }
+        }
+        // Non-interactive with no link and no implicit authorization: fall
+        // through; the standard "no linked project" error surfaces below.
     }
 
     let hostname = configs.get_host();
@@ -499,9 +514,7 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
         "  {} will sign you in (or create an account if you don't have one),",
         "railway up".bold(),
     );
-    println!(
-        "  then create a new Railway project from this directory and deploy it."
-    );
+    println!("  then create a new Railway project from this directory and deploy it.");
     println!();
     println!("  To deploy to an existing project instead, cancel and run");
     println!("  `railway login && railway link --project <name>` first.");
@@ -515,9 +528,7 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
     if implicit_consent {
         let how = match transport {
             crate::exec_context::AuthTransport::Browser => "opening browser",
-            crate::exec_context::AuthTransport::DeviceCode => {
-                "printing a device-code sign-in link"
-            }
+            crate::exec_context::AuthTransport::DeviceCode => "printing a device-code sign-in link",
         };
         println!(
             "  {} Agent harness detected — {how} (skipping confirm).",
@@ -528,20 +539,54 @@ async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
         // Confirm before opening a browser tab — interactive users
         // appreciate not having tabs spawn out from under them. -y
         // skips this for unattended flows.
-        let confirm = crate::util::prompt::prompt_confirm_with_default_with_cancel(
-            "Continue?",
-            true,
-        )?;
+        let confirm =
+            crate::util::prompt::prompt_confirm_with_default_with_cancel("Continue?", true)?;
         match confirm {
             Some(true) => {}
             _ => bail!("Aborted."),
         }
     }
 
-    super::login::command(super::login::Args {
-        browserless: false,
-    })
-    .await
+    super::login::command(super::login::Args { browserless: false }).await
+}
+
+/// What an interactive human chooses when `railway up` runs in a
+/// directory with no linked project and creation wasn't implicitly
+/// authorized (agents / `-y` / just-signed-up are handled before this).
+enum NoLinkAction {
+    Create,
+    Link,
+    Cancel,
+}
+
+impl std::fmt::Display for NoLinkAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            NoLinkAction::Create => "Create a new project here and deploy",
+            NoLinkAction::Link => "Link an existing project, then deploy",
+            NoLinkAction::Cancel => "Cancel",
+        })
+    }
+}
+
+/// Offer create / link / cancel when there's no linked project. Returning
+/// users (wrong dir, fresh clone, moved dir) can pick "Link" instead of
+/// being railroaded into a duplicate project.
+fn prompt_no_link_action() -> Result<NoLinkAction> {
+    println!();
+    println!(
+        "  {} No Railway project is linked to this directory.",
+        "!".yellow().bold(),
+    );
+    println!();
+    crate::util::prompt::prompt_options(
+        "What would you like to do?",
+        vec![
+            NoLinkAction::Create,
+            NoLinkAction::Link,
+            NoLinkAction::Cancel,
+        ],
+    )
 }
 
 /// Create a brand-new project + service from the current directory and
@@ -736,7 +781,11 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
     configs.write()?;
 
     println!("  {} Build queued", "✓".green());
-    println!("  {} {}", "Build Logs:".green().bold(), up_response.logs_url);
+    println!(
+        "  {} {}",
+        "Build Logs:".green().bold(),
+        up_response.logs_url
+    );
 
     let deploy_url = if up_response.deployment_domain.is_empty() {
         None
@@ -880,7 +929,11 @@ fn print_app_summary(
     };
     println!();
     println!("  {} Project {}", "✓".green(), project_name.bold());
-    println!("     {} {}", "Manage:".dimmed(), dashboard.bold().underline());
+    println!(
+        "     {} {}",
+        "Manage:".dimmed(),
+        dashboard.bold().underline()
+    );
     println!();
 }
 
