@@ -1341,7 +1341,9 @@ async fn post_telemetry_body(client: &reqwest::Client, url: String, body: Value)
 ///
 /// Header names mirror the propagation contract used by railway-skills
 /// (X-Railway-Skill-Id / X-Railway-Skill-Version / X-Railway-Agent-Session)
-/// to keep one envelope across surfaces.
+/// to keep one envelope across surfaces. The version rides on backboard's
+/// existing `x-railway-version` header (read by getCliVersionFromRequest)
+/// rather than a parallel name, so the two surfaces stay reconciled.
 pub fn http_telemetry_headers() -> Vec<(&'static str, String)> {
     if is_telemetry_disabled() {
         return Vec::new();
@@ -1352,10 +1354,7 @@ pub fn http_telemetry_headers() -> Vec<(&'static str, String)> {
     };
     let context = TelemetryContext::current(&configs);
     let mut headers = Vec::with_capacity(4);
-    headers.push((
-        "X-Railway-CLI-Version",
-        env!("CARGO_PKG_VERSION").to_string(),
-    ));
+    headers.push(("X-Railway-Version", env!("CARGO_PKG_VERSION").to_string()));
     headers.push(("X-Railway-Session", context.session_id));
     if !context.caller.is_empty() {
         headers.push(("X-Railway-Caller", context.caller));
