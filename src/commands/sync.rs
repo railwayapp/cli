@@ -293,6 +293,13 @@ async fn invoke_runner(
         "file": args.file.as_ref().map(|path| path.to_string_lossy().to_string()),
         "includeTypes": args.include_types,
         "pretty": false,
+        "context": {
+            "projectId": linked_project.project,
+            "projectName": linked_project.name,
+            "environmentId": linked_project.environment,
+            "environment": linked_project.environment_name,
+            "environmentName": linked_project.environment_name
+        },
         "backboard": {
             "endpoint": configs.get_backboard(),
             "token": token,
