@@ -8,7 +8,7 @@ use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
 use crate::commands::ssh::{ensure_ssh_key, run_native_ssh};
-use crate::config::{Configs, StoredSandbox};
+use crate::config::{Configs, StoredSandbox, StoredSandboxTemplate};
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
 use crate::controllers::variables::Variable;
@@ -19,7 +19,7 @@ use crate::util::prompt::{prompt_options, prompt_options_skippable};
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -42,6 +42,9 @@ enum Commands {
 
     /// Fork an existing sandbox into a new one and make it active
     Fork(ForkArgs),
+
+    /// Manage sandbox templates (pre-built filesystem snapshots)
+    Template(TemplateArgs),
 
     /// List sandboxes in the environment
     #[clap(visible_alias = "ls")]
@@ -76,7 +79,82 @@ struct CreateArgs {
     #[clap(long = "env-file", value_name = "PATH")]
     env_files: Vec<std::path::PathBuf>,
 
+    /// Create from a built template, by local name or template id (see
+    /// `railway sandbox template build`)
+    #[clap(long, value_name = "NAME_OR_ID")]
+    template: Option<String>,
+
     /// Output the created sandbox as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct TemplateArgs {
+    #[clap(subcommand)]
+    command: TemplateCommands,
+}
+
+#[derive(Parser)]
+enum TemplateCommands {
+    /// Build a template from shell instructions. Templates are
+    /// content-addressed and cached server-side (~7 days), so re-running the
+    /// same build is an instant cache hit
+    #[clap(visible_alias = "create", visible_alias = "new")]
+    Build(TemplateBuildArgs),
+
+    /// Show the build status of a template
+    Status(TemplateStatusArgs),
+
+    /// List templates this CLI has built
+    #[clap(visible_alias = "ls")]
+    List(TemplateListArgs),
+}
+
+#[derive(Parser)]
+struct TemplateBuildArgs {
+    /// Shell instruction to run while building (repeatable, runs in order;
+    /// each step must exit 0 within 10 minutes)
+    #[clap(
+        short = 'c',
+        long = "command",
+        value_name = "SHELL_COMMAND",
+        required = true
+    )]
+    commands: Vec<String>,
+
+    /// Local name for the template, usable with `railway sandbox create
+    /// --template <name>`
+    #[clap(long)]
+    name: Option<String>,
+
+    /// Base image digest to build on (defaults to the standard sandbox image)
+    #[clap(long, value_name = "DIGEST")]
+    base_image_digest: Option<String>,
+
+    /// Wait for the build to finish (polls until READY or FAILED)
+    #[clap(long)]
+    wait: bool,
+
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct TemplateStatusArgs {
+    /// Template id or local name
+    #[clap(value_name = "ID_OR_NAME")]
+    template: String,
+
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct TemplateListArgs {
+    /// Output as JSON
     #[clap(long)]
     json: bool,
 }
@@ -195,6 +273,9 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::Create(sub) => create(&mut configs, &client, project, environment, sub).await,
         Commands::Fork(sub) => fork(&mut configs, &client, project, environment, sub).await,
+        Commands::Template(sub) => {
+            template(&mut configs, &client, project, environment, sub).await
+        }
         Commands::List(sub) => list(&mut configs, &client, project, environment, sub).await,
         Commands::Ssh(sub) => ssh(&mut configs, &client, project, environment, sub).await,
         Commands::Exec(sub) => exec(&mut configs, &client, project, environment, sub).await,
@@ -585,10 +666,29 @@ async fn create(
     let (project_id, environment_id) =
         resolve_project_and_env(configs, client, project, environment).await?;
 
+    // Templates are content-addressed server-side: sandboxCreate needs the
+    // full recipe, not just the id, so resolve it from the local store.
+    let template = match &args.template {
+        Some(handle) => {
+            let stored = configs
+                .find_sandbox_template(handle, Some(&environment_id))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Unknown template `{handle}` for this environment. Build it first:\n  railway sandbox template build --name {handle} -c '<command>' --wait"
+                    )
+                })?;
+            Some(mutations::sandbox_create::SandboxTemplateInput {
+                instructions: stored.instructions,
+                base_image_digest: stored.base_image_digest,
+            })
+        }
+        None => None,
+    };
+
     let input = mutations::sandbox_create::SandboxCreateInput {
         environment_id: environment_id.clone(),
         idle_timeout_minutes: args.idle_timeout_minutes,
-        template: None,
+        template,
         source_sandbox_id: None,
         network_isolation: None,
         variables: variables_to_input(&args.env_files, &args.variables)?,
@@ -603,6 +703,252 @@ async fn create(
         false,
     )
     .await
+}
+
+async fn template(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateArgs,
+) -> Result<()> {
+    match args.command {
+        TemplateCommands::Build(sub) => {
+            template_build(configs, client, project, environment, sub).await
+        }
+        TemplateCommands::Status(sub) => {
+            template_status(configs, client, project, environment, sub).await
+        }
+        TemplateCommands::List(sub) => {
+            template_list(configs, client, project, environment, sub).await
+        }
+    }
+}
+
+async fn template_build(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateBuildArgs,
+) -> Result<()> {
+    let (_, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+
+    let res = post_graphql::<mutations::SandboxTemplateBuild, _>(
+        client,
+        configs.get_backboard(),
+        mutations::sandbox_template_build::Variables {
+            environment_id: environment_id.clone(),
+            input: mutations::sandbox_template_build::SandboxTemplateInput {
+                instructions: args.commands.clone(),
+                base_image_digest: args.base_image_digest.clone(),
+            },
+        },
+    )
+    .await?;
+    let built = res.sandbox_template_build;
+
+    // Keep the recipe locally: `sandbox create --template` must resend the
+    // instructions, since the server only caches by hash.
+    configs.upsert_sandbox_template(StoredSandboxTemplate {
+        id: built.id.clone(),
+        name: args.name.clone(),
+        environment_id: environment_id.clone(),
+        instructions: args.commands,
+        base_image_digest: args.base_image_digest,
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+    });
+    configs.write()?;
+
+    let already_ready = matches!(
+        built.status,
+        mutations::sandbox_template_build::SandboxTemplateStatus::READY
+    );
+    let status = if args.wait && !already_ready {
+        wait_for_template(client, configs, &environment_id, &built.id).await?
+    } else {
+        format!("{:?}", built.status)
+    };
+
+    let handle = args.name.unwrap_or_else(|| built.id.clone());
+    if args.json {
+        let out = serde_json::json!({
+            "id": built.id,
+            "status": status,
+            "environmentId": environment_id,
+            "name": handle,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if already_ready {
+        println!("✓ Template {handle} ready (cached)");
+    } else if status == "READY" {
+        println!("✓ Template {handle} built");
+    } else {
+        println!("Template {handle} status: {status}");
+        println!("\nCheck progress with:\n  railway sandbox template status {handle}");
+    }
+    if status == "READY" {
+        println!("\nCreate a sandbox from it with:\n  railway sandbox create --template {handle}");
+    }
+    Ok(())
+}
+
+async fn template_status(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateStatusArgs,
+) -> Result<()> {
+    // A locally stored template knows its environment; a raw id falls back to
+    // flags / the linked environment.
+    let stored = configs.find_sandbox_template(&args.template, None);
+    let (id, environment_id) = match &stored {
+        Some(t) => (t.id.clone(), t.environment_id.clone()),
+        None => {
+            let (_, environment_id) =
+                resolve_project_and_env(configs, client, project, environment).await?;
+            (args.template.clone(), environment_id)
+        }
+    };
+
+    let res = post_graphql::<queries::SandboxTemplate, _>(
+        client,
+        configs.get_backboard(),
+        queries::sandbox_template::Variables {
+            environment_id,
+            id,
+        },
+    )
+    .await?;
+    let tpl = res.sandbox_template;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&tpl)?);
+        return Ok(());
+    }
+    if let Some(name) = stored.and_then(|t| t.name) {
+        println!("Template {name} ({})", tpl.id);
+    } else {
+        println!("Template {}", tpl.id);
+    }
+    println!("  status: {:?}", tpl.status);
+    Ok(())
+}
+
+async fn template_list(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateListArgs,
+) -> Result<()> {
+    let (_, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+    let templates = configs.list_sandbox_templates(Some(&environment_id));
+
+    if templates.is_empty() {
+        if args.json {
+            println!("[]");
+        } else {
+            println!(
+                "No templates built from this CLI for this environment.\nBuild one with:\n  railway sandbox template build --name <name> -c '<command>' --wait"
+            );
+        }
+        return Ok(());
+    }
+
+    let mut rows = Vec::new();
+    for t in &templates {
+        let status = post_graphql::<queries::SandboxTemplate, _>(
+            client,
+            configs.get_backboard(),
+            queries::sandbox_template::Variables {
+                environment_id: environment_id.clone(),
+                id: t.id.clone(),
+            },
+        )
+        .await
+        .map(|r| format!("{:?}", r.sandbox_template.status))
+        .unwrap_or_else(|_| "UNKNOWN".to_string());
+        rows.push((t, status));
+    }
+
+    if args.json {
+        let out: Vec<_> = rows
+            .iter()
+            .map(|(t, status)| {
+                serde_json::json!({
+                    "id": t.id,
+                    "name": t.name,
+                    "status": status,
+                    "instructions": t.instructions,
+                    "baseImageDigest": t.base_image_digest,
+                    "createdAt": t.created_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!("{:<20}  {:<16}  {:<10}  {:<6}", "NAME", "ID", "STATUS", "STEPS");
+    for (t, status) in rows {
+        println!(
+            "{:<20}  {:<16}  {:<10}  {:<6}",
+            t.name.as_deref().unwrap_or("-"),
+            &t.id[..t.id.len().min(16)],
+            status,
+            t.instructions.len()
+        );
+    }
+    Ok(())
+}
+
+/// Poll the template status until READY (or fail on FAILED/timeout). Build
+/// steps run server-side in a transient sandbox; the workflow caps out at 40m,
+/// so poll a little past that.
+async fn wait_for_template(
+    client: &reqwest::Client,
+    configs: &Configs,
+    environment_id: &str,
+    id: &str,
+) -> Result<String> {
+    let mut spinner = create_shimmer_spinner("Building template");
+    let deadline = std::time::Instant::now() + Duration::from_secs(45 * 60);
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let res = post_graphql::<queries::SandboxTemplate, _>(
+            client,
+            configs.get_backboard(),
+            queries::sandbox_template::Variables {
+                environment_id: environment_id.to_string(),
+                id: id.to_string(),
+            },
+        )
+        .await?;
+        match res.sandbox_template.status {
+            queries::sandbox_template::SandboxTemplateStatus::READY => {
+                spinner.finish_and_clear();
+                return Ok("READY".to_string());
+            }
+            queries::sandbox_template::SandboxTemplateStatus::FAILED => {
+                fail_spinner(&mut spinner, "Template build failed".to_string());
+                bail!(
+                    "Template build failed. Each instruction must exit 0 within 10 minutes; fix the failing step and rebuild."
+                );
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() > deadline {
+            fail_spinner(&mut spinner, "Timed out waiting for template".to_string());
+            bail!("Timed out waiting for the template build.");
+        }
+    }
 }
 
 async fn fork(

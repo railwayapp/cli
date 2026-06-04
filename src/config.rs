@@ -64,6 +64,25 @@ pub struct StoredSandbox {
     pub created_at: Option<String>,
 }
 
+/// A sandbox template recipe the CLI has built. Templates are
+/// content-addressed server-side (the id is a hash of the recipe) and
+/// `sandboxCreate` needs the full recipe — not just the id — so the CLI keeps
+/// the instructions locally to make `railway sandbox create --template <name>`
+/// possible.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde_with::skip_serializing_none]
+#[serde(rename_all = "camelCase")]
+pub struct StoredSandboxTemplate {
+    /// Server-side template id (sha256 of the recipe).
+    pub id: String,
+    /// Optional local-only name for friendlier lookup.
+    pub name: Option<String>,
+    pub environment_id: String,
+    pub instructions: Vec<String>,
+    pub base_image_digest: Option<String>,
+    pub created_at: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +97,9 @@ pub struct RailwayConfig {
     /// The most recently created/used sandbox; the default target for
     /// `railway sandbox ssh` when no id is given.
     pub active_sandbox: Option<String>,
+    /// Sandbox template recipes the CLI has built (id is server-side hash;
+    /// instructions kept locally because sandboxCreate needs the full recipe).
+    pub sandbox_templates: Option<Vec<StoredSandboxTemplate>>,
 }
 
 #[derive(Debug)]
@@ -444,6 +466,77 @@ impl Configs {
         if self.root_config.active_sandbox.as_deref() == Some(id) {
             self.root_config.active_sandbox = None;
         }
+    }
+
+    /// Record a sandbox template recipe (upsert by template id within the same
+    /// environment). When a name is given, any other template in the
+    /// environment holding that name loses it — names are unique handles.
+    /// Caller persists with `write()`.
+    pub fn upsert_sandbox_template(&mut self, template: StoredSandboxTemplate) {
+        let templates = self
+            .root_config
+            .sandbox_templates
+            .get_or_insert_with(Vec::new);
+        if let Some(name) = &template.name {
+            for other in templates.iter_mut() {
+                if other.environment_id == template.environment_id
+                    && other.id != template.id
+                    && other.name.as_deref() == Some(name)
+                {
+                    other.name = None;
+                }
+            }
+        }
+        match templates
+            .iter_mut()
+            .find(|t| t.id == template.id && t.environment_id == template.environment_id)
+        {
+            Some(existing) => *existing = template,
+            None => templates.push(template),
+        }
+    }
+
+    /// Look up a stored template by local name or id (exact or unambiguous id
+    /// prefix), optionally scoped to an environment.
+    pub fn find_sandbox_template(
+        &self,
+        name_or_id: &str,
+        environment_id: Option<&str>,
+    ) -> Option<StoredSandboxTemplate> {
+        let templates = self.root_config.sandbox_templates.as_ref()?;
+        let in_env = |t: &&StoredSandboxTemplate| {
+            environment_id.is_none_or(|env| t.environment_id == env)
+        };
+        if let Some(t) = templates
+            .iter()
+            .filter(in_env)
+            .find(|t| t.name.as_deref() == Some(name_or_id))
+        {
+            return Some(t.clone());
+        }
+        let mut matches = templates
+            .iter()
+            .filter(in_env)
+            .filter(|t| t.id.starts_with(name_or_id));
+        match (matches.next(), matches.next()) {
+            (Some(t), None) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    /// All stored templates, optionally scoped to an environment.
+    pub fn list_sandbox_templates(
+        &self,
+        environment_id: Option<&str>,
+    ) -> Vec<StoredSandboxTemplate> {
+        self.root_config
+            .sandbox_templates
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|t| environment_id.is_none_or(|env| t.environment_id == env))
+            .cloned()
+            .collect()
     }
 
     pub fn link_service(&mut self, service_id: String) -> Result<()> {
