@@ -515,9 +515,8 @@ impl Configs {
         environment_id: Option<&str>,
     ) -> Option<StoredSandboxTemplate> {
         let templates = self.root_config.sandbox_templates.as_ref()?;
-        let in_env = |t: &&StoredSandboxTemplate| {
-            environment_id.is_none_or(|env| t.environment_id == env)
-        };
+        let in_env =
+            |t: &&StoredSandboxTemplate| environment_id.is_none_or(|env| t.environment_id == env);
         if let Some(t) = templates
             .iter()
             .filter(in_env)

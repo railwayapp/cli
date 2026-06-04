@@ -284,9 +284,7 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::Create(sub) => create(&mut configs, &client, project, environment, sub).await,
         Commands::Fork(sub) => fork(&mut configs, &client, project, environment, sub).await,
-        Commands::Template(sub) => {
-            template(&mut configs, &client, project, environment, sub).await
-        }
+        Commands::Template(sub) => template(&mut configs, &client, project, environment, sub).await,
         Commands::List(sub) => list(&mut configs, &client, project, environment, sub).await,
         Commands::Ssh(sub) => ssh(&mut configs, &client, project, environment, sub).await,
         Commands::Exec(sub) => exec(&mut configs, &client, project, environment, sub).await,
@@ -527,9 +525,7 @@ fn auto_wrap_reference(value: &str) -> String {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     let var_ok = if name == "shared" {
         var.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-            && var
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     } else {
         var.chars().next().is_some_and(|c| c.is_ascii_uppercase())
             && var
@@ -832,10 +828,7 @@ async fn template_status(
     let res = post_graphql::<queries::SandboxTemplate, _>(
         client,
         configs.get_backboard(),
-        queries::sandbox_template::Variables {
-            environment_id,
-            id,
-        },
+        queries::sandbox_template::Variables { environment_id, id },
     )
     .await?;
     let tpl = res.sandbox_template;
@@ -909,7 +902,10 @@ async fn template_list(
         return Ok(());
     }
 
-    println!("{:<20}  {:<16}  {:<10}  {:<6}", "NAME", "ID", "STATUS", "STEPS");
+    println!(
+        "{:<20}  {:<16}  {:<10}  {:<6}",
+        "NAME", "ID", "STATUS", "STEPS"
+    );
     for (t, status) in rows {
         println!(
             "{:<20}  {:<16}  {:<10}  {:<6}",
@@ -1413,7 +1409,7 @@ mod tests {
     fn flags_override_env_file_entries() {
         let path = write_temp_env("override.env", "FOO=from-file\nKEEP=file-value\n");
         let input = variables_to_input(
-            &[path.clone()],
+            std::slice::from_ref(&path),
             &args(&["FOO=from-flag,REF=shared.char"]),
         )
         .unwrap()
@@ -1421,6 +1417,9 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert_eq!(input.get("FOO").map(String::as_str), Some("from-flag"));
         assert_eq!(input.get("KEEP").map(String::as_str), Some("file-value"));
-        assert_eq!(input.get("REF").map(String::as_str), Some("${{shared.char}}"));
+        assert_eq!(
+            input.get("REF").map(String::as_str),
+            Some("${{shared.char}}")
+        );
     }
 }
