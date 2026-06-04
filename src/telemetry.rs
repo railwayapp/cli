@@ -200,7 +200,12 @@ const STRONG_AGENT_ENV: &[(&str, &str)] = &[
     ("AIDER", "aider"),
     ("COPILOT_AGENT_SESSION_ID", "copilot_cli"),
     ("COPILOT_CLI", "copilot_cli"),
+    // Factory Droid exports `FACTORY_DROID_BINARY` (path to the droid
+    // binary) in every spawned shell; the bare `FACTORY_DROID` is not
+    // currently set. Match both here, and see the `FACTORY_DROID`-prefix
+    // fallback in `agent_from_strong_env` for any future `FACTORY_DROID_*`.
     ("FACTORY_DROID", "factory_droid"),
+    ("FACTORY_DROID_BINARY", "factory_droid"),
     ("GEMINI_CLI", "gemini_cli"),
     ("REPLIT_AGENT", "replit_agent"),
     ("PI_CODING_AGENT", "pi"),
@@ -222,8 +227,14 @@ const STRONG_AGENT_ENV: &[(&str, &str)] = &[
 /// flows that would otherwise bail because stdout isn't a TTY: in an
 /// agent harness there is still a real human present who can complete
 /// a browser OAuth, even though the CLI's stdout is piped.
+///
+/// Checks strong env fingerprints first (cheap), then falls back to a
+/// process-tree walk. The env fallback matters because some harnesses
+/// (e.g. Factory Droid, whose `droid exec` parent is detectable in the
+/// ancestry) do not reliably export an identifying env var into every
+/// spawned shell, so env-only detection misses them.
 pub fn is_agent_harness() -> bool {
-    agent_from_strong_env().is_some()
+    agent_from_strong_env().is_some() || agent_from_process_tree().is_some()
 }
 
 fn agent_from_strong_env() -> Option<&'static str> {
@@ -239,6 +250,16 @@ fn agent_from_strong_env() -> Option<&'static str> {
     STRONG_AGENT_ENV
         .iter()
         .find_map(|(name, caller)| std::env::var(name).ok().map(|_| *caller))
+        .or_else(|| {
+            // Any `FACTORY_DROID*` var indicates a Factory Droid harness,
+            // covering future suffixes beyond `FACTORY_DROID_BINARY`.
+            std::env::vars_os()
+                .any(|(name, _)| {
+                    name.to_str()
+                        .is_some_and(|name| name.starts_with("FACTORY_DROID"))
+                })
+                .then_some("factory_droid")
+        })
         .or_else(|| {
             // `AI_AGENT` is set by Claude Code (e.g. `claude-code_2-1-133_agent`).
             std::env::var("AI_AGENT").ok().and_then(|value| {
@@ -1566,8 +1587,9 @@ pub async fn send_auth_event(event: CliAuthTrackEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcessNode, agent_ancestor_pid, caller_from_mcp_client_name, caller_from_process_name,
-        is_agent_caller, new_session_uuid, parent_kind_from_command,
+        ProcessNode, agent_ancestor_pid, agent_from_strong_env, caller_from_mcp_client_name,
+        caller_from_process_name, is_agent_caller, is_agent_harness, new_session_uuid,
+        parent_kind_from_command, walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -1644,6 +1666,24 @@ mod tests {
             Some("factory_droid")
         );
         assert_eq!(caller_from_process_name("droid run"), Some("factory_droid"));
+    }
+
+    #[test]
+    fn detects_factory_droid_via_binary_env_var() {
+        // Factory Droid sets `FACTORY_DROID_BINARY` (not the bare
+        // `FACTORY_DROID`) in every spawned shell. No other test reads
+        // `FACTORY_DROID*`, so mutating it here is race-safe.
+        let key = "FACTORY_DROID_BINARY";
+        let prev = std::env::var_os(key);
+        unsafe { std::env::set_var(key, "/tmp/droid-preserved-xxxx/droid") };
+        assert_eq!(agent_from_strong_env(), Some("factory_droid"));
+        assert!(is_agent_harness());
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]
@@ -1801,6 +1841,29 @@ mod tests {
         snap.insert(7300, node(7000, "sh -c 'railway logs'"));
         snap.insert(7000, node(1, "/usr/local/bin/codex"));
         assert_eq!(agent_ancestor_pid(&snap, 7300), Some(7000));
+    }
+
+    #[test]
+    fn process_tree_detects_factory_droid_exec_parent() {
+        // Mirrors a real Factory Droid session where no identifying env var
+        // is exported but `droid exec` sits in the ancestry:
+        // droid exec (4000) -> bash -c (4100) -> railway (4200).
+        // This is what `agent_from_process_tree` walks internally, so the
+        // harness must be detected even with env-only signals absent.
+        let mut snap = HashMap::new();
+        snap.insert(4200, node(4100, "railway up --detach"));
+        snap.insert(4100, node(4000, "bash -c 'railway up --detach'"));
+        snap.insert(
+            4000,
+            node(
+                1,
+                "/users/x/.local/bin/droid exec --input-format stream-jsonrpc",
+            ),
+        );
+        assert_eq!(
+            walk_ancestors(&snap, 4200, 15, |n| caller_from_process_name(&n.command)),
+            Some("factory_droid")
+        );
     }
 
     #[test]
