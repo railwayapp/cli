@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -9,6 +11,7 @@ use crate::commands::ssh::{ensure_ssh_key, run_native_ssh};
 use crate::config::{Configs, StoredSandbox};
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
+use crate::controllers::variables::Variable;
 use crate::gql::{mutations, queries};
 use crate::util::progress::{create_shimmer_spinner, fail_spinner};
 use crate::util::prompt::{prompt_options, prompt_options_skippable};
@@ -16,7 +19,7 @@ use crate::util::prompt::{prompt_options, prompt_options_skippable};
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -36,6 +39,9 @@ enum Commands {
     /// Create a sandbox and remember it as the active sandbox
     #[clap(visible_alias = "new")]
     Create(CreateArgs),
+
+    /// Fork an existing sandbox into a new one and make it active
+    Fork(ForkArgs),
 
     /// List sandboxes in the environment
     #[clap(visible_alias = "ls")]
@@ -59,9 +65,59 @@ struct CreateArgs {
     #[clap(long)]
     idle_timeout_minutes: Option<i64>,
 
+    /// Set a variable on the sandbox (repeatable, comma-separable). Values may
+    /// reference other variables — `DB_URL=postgres.DATABASE_URL` or the full
+    /// `${{postgres.DATABASE_URL}}` form — resolved server-side at create time
+    #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
+    variables: Vec<String>,
+
+    /// Load variables from a .env file (repeatable). `--variable` flags
+    /// override file entries with the same key
+    #[clap(long = "env-file", value_name = "PATH")]
+    env_files: Vec<std::path::PathBuf>,
+
     /// Output the created sandbox as JSON
     #[clap(long)]
     json: bool,
+}
+
+/// Fork has no trailing command, so a positional id is unambiguous; `--id` is
+/// also accepted. Omitted → the active sandbox is the fork source.
+#[derive(Parser)]
+struct ForkArgs {
+    /// Source sandbox ID to fork (defaults to the active sandbox)
+    #[clap(value_name = "ID")]
+    id_positional: Option<String>,
+
+    /// Source sandbox ID (alternative to the positional argument)
+    #[clap(long = "id", value_name = "ID")]
+    id: Option<String>,
+
+    /// Minutes the new sandbox may sit idle before it is auto-destroyed
+    #[clap(long)]
+    idle_timeout_minutes: Option<i64>,
+
+    /// Set a variable on the fork (repeatable, comma-separable). The fork does
+    /// not inherit the source's variables; values may reference other
+    /// variables — `DB_URL=postgres.DATABASE_URL` or the full
+    /// `${{postgres.DATABASE_URL}}` form — resolved server-side at fork time
+    #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
+    variables: Vec<String>,
+
+    /// Load variables from a .env file (repeatable). `--variable` flags
+    /// override file entries with the same key
+    #[clap(long = "env-file", value_name = "PATH")]
+    env_files: Vec<std::path::PathBuf>,
+
+    /// Output the created sandbox as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+impl ForkArgs {
+    fn explicit_id(&self) -> Option<String> {
+        self.id.clone().or_else(|| self.id_positional.clone())
+    }
 }
 
 #[derive(Parser)]
@@ -124,6 +180,13 @@ impl DestroyArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    use colored::Colorize;
+    eprintln!(
+        "{}",
+        "Warning: Railway sandboxes are experimental and APIs may change or break during testing."
+            .yellow()
+    );
+
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let project = args.project;
@@ -131,6 +194,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     match args.command {
         Commands::Create(sub) => create(&mut configs, &client, project, environment, sub).await,
+        Commands::Fork(sub) => fork(&mut configs, &client, project, environment, sub).await,
         Commands::List(sub) => list(&mut configs, &client, project, environment, sub).await,
         Commands::Ssh(sub) => ssh(&mut configs, &client, project, environment, sub).await,
         Commands::Exec(sub) => exec(&mut configs, &client, project, environment, sub).await,
@@ -330,33 +394,157 @@ async fn resolve_target(
     }
 }
 
-async fn create(
+/// Parse repeatable `--variable` values into key/value pairs. Each argument is
+/// a single `KEY=VALUE` or a comma-separated list of them (`A=1,B=2`). A comma
+/// only splits when every segment carries its own `=` — `ALLOWED=a.com,b.com`
+/// stays one variable whose value contains the comma. Repeating the flag is
+/// the unambiguous form for values that mix commas and `=`.
+fn parse_variable_args(args: &[String]) -> Result<Vec<Variable>> {
+    let mut vars = Vec::new();
+    for arg in args {
+        let segments: Vec<&str> = arg.split(',').collect();
+        if segments.len() > 1 && segments.iter().all(|s| s.contains('=')) {
+            for segment in segments {
+                vars.push(Variable::from_str(segment)?);
+            }
+        } else {
+            vars.push(Variable::from_str(arg)?);
+        }
+    }
+    Ok(vars)
+}
+
+/// Wrap a bare Railway reference (`name.VAR`) in `${{...}}` so users can write
+/// `--variable DB_URL=postgres.DATABASE_URL` without shell-quoting the full
+/// `${{postgres.DATABASE_URL}}` form. Only an exact `<name>.<VAR>` value is
+/// wrapped — `name` alphanumeric/`_`/`-` starting with a letter, `VAR` in
+/// UPPER_SNAKE starting with an uppercase letter — so plain values like `1.5`,
+/// `example.com`, or `file.txt` pass through untouched, as does anything
+/// already containing `${{`. The `shared.` namespace is unmistakable, so its
+/// var segment may be any case (`shared.char`), not just UPPER_SNAKE.
+fn auto_wrap_reference(value: &str) -> String {
+    if value.contains("${{") {
+        return value.to_string();
+    }
+    let Some((name, var)) = value.split_once('.') else {
+        return value.to_string();
+    };
+    let name_ok = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let var_ok = if name == "shared" {
+        var.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && var
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    } else {
+        var.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && var
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    };
+    if name_ok && var_ok {
+        format!("${{{{{name}.{var}}}}}")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Parse a dotenv-style file into key/value pairs. Supports `KEY=VALUE` lines,
+/// blank lines, `#` comments, an optional `export ` prefix, single/double
+/// quoted values (kept verbatim inside the quotes), and trailing ` #` comments
+/// on unquoted values. Multiline values are not supported.
+fn parse_env_file(path: &std::path::Path) -> Result<Vec<Variable>> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("Failed to read env file {}: {e}", path.display()))?;
+    let mut vars = Vec::new();
+    for (i, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, value)) = line.split_once('=') else {
+            bail!(
+                "{}:{}: expected KEY=VALUE, got `{raw_line}`",
+                path.display(),
+                i + 1
+            );
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            bail!("{}:{}: empty variable name", path.display(), i + 1);
+        }
+        let value = value.trim();
+        let value = if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+            || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+        {
+            &value[1..value.len() - 1]
+        } else {
+            // Unquoted: strip a trailing ` # comment`.
+            value.split(" #").next().unwrap_or(value).trim_end()
+        };
+        vars.push(Variable {
+            key: key.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(vars)
+}
+
+/// Convert `--env-file` and `--variable` args into the `EnvironmentVariables`
+/// scalar, wrapping bare references. Files load first (in order), then flags —
+/// so a `--variable` overrides a file entry with the same key. `None` when
+/// empty so `skip_serializing_none` omits the field from the mutation input.
+fn variables_to_input(
+    env_files: &[std::path::PathBuf],
+    args: &[String],
+) -> Result<Option<BTreeMap<String, String>>> {
+    let mut vars = Vec::new();
+    for path in env_files {
+        vars.extend(parse_env_file(path)?);
+    }
+    vars.extend(parse_variable_args(args)?);
+    if vars.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        vars.into_iter()
+            .map(|v| (v.key, auto_wrap_reference(&v.value)))
+            .collect(),
+    ))
+}
+
+/// Run `sandboxCreate` with the given input, persist the result as the active
+/// sandbox (create and fork both retarget `ssh`/`exec` at the new sandbox),
+/// and print create-style output.
+async fn create_and_store(
     configs: &mut Configs,
     client: &reqwest::Client,
-    project: Option<String>,
-    environment: Option<String>,
-    args: CreateArgs,
+    project_id: String,
+    environment_id: String,
+    input: mutations::sandbox_create::SandboxCreateInput,
+    json: bool,
+    forked: bool,
 ) -> Result<()> {
-    let (project_id, environment_id) =
-        resolve_project_and_env(configs, client, project, environment).await?;
+    let (doing, did, failed) = if forked {
+        ("Forking sandbox", "Forked", "Failed to fork sandbox")
+    } else {
+        ("Creating sandbox", "Created", "Failed to create sandbox")
+    };
 
-    let mut spinner = create_shimmer_spinner("Creating sandbox");
+    let mut spinner = create_shimmer_spinner(doing);
     let sandbox = match post_graphql::<mutations::SandboxCreate, _>(
         client,
         configs.get_backboard(),
-        mutations::sandbox_create::Variables {
-            input: mutations::sandbox_create::SandboxCreateInput {
-                environment_id: environment_id.clone(),
-                idle_timeout_minutes: args.idle_timeout_minutes,
-                template: None,
-            },
-        },
+        mutations::sandbox_create::Variables { input },
     )
     .await
     {
         Ok(res) => res.sandbox_create,
         Err(e) => {
-            fail_spinner(&mut spinner, "Failed to create sandbox".to_string());
+            fail_spinner(&mut spinner, failed.to_string());
             return Err(e.into());
         }
     };
@@ -373,10 +561,10 @@ async fn create(
     );
     configs.write()?;
 
-    if args.json {
+    if json {
         println!("{}", serde_json::to_string_pretty(&sandbox)?);
     } else {
-        println!("✓ Created sandbox {} (now active)", sandbox.id);
+        println!("✓ {did} sandbox {} (now active)", sandbox.id);
         println!("  status: {:?}", sandbox.status);
         println!("  region: {}", sandbox.region);
         if let Some(idle) = sandbox.idle_timeout_minutes {
@@ -385,6 +573,86 @@ async fn create(
         println!("\nConnect with:\n  railway sandbox ssh");
     }
     Ok(())
+}
+
+async fn create(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: CreateArgs,
+) -> Result<()> {
+    let (project_id, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+
+    let input = mutations::sandbox_create::SandboxCreateInput {
+        environment_id: environment_id.clone(),
+        idle_timeout_minutes: args.idle_timeout_minutes,
+        template: None,
+        source_sandbox_id: None,
+        network_isolation: None,
+        variables: variables_to_input(&args.env_files, &args.variables)?,
+    };
+    create_and_store(
+        configs,
+        client,
+        project_id,
+        environment_id,
+        input,
+        args.json,
+        false,
+    )
+    .await
+}
+
+async fn fork(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: ForkArgs,
+) -> Result<()> {
+    let (source_sandbox_id, environment_id) = resolve_target(
+        configs,
+        client,
+        args.explicit_id(),
+        project.clone(),
+        environment.clone(),
+    )
+    .await?;
+
+    // For the stored ref: prefer the source's cached project_id, else resolve
+    // from flags / the linked project.
+    let project_id = match configs
+        .get_sandbox(&source_sandbox_id)
+        .and_then(|s| s.project_id)
+    {
+        Some(id) => id,
+        None => {
+            resolve_project_and_env(configs, client, project, environment)
+                .await?
+                .0
+        }
+    };
+
+    let input = mutations::sandbox_create::SandboxCreateInput {
+        environment_id: environment_id.clone(),
+        idle_timeout_minutes: args.idle_timeout_minutes,
+        template: None,
+        source_sandbox_id: Some(source_sandbox_id),
+        network_isolation: None,
+        variables: variables_to_input(&args.env_files, &args.variables)?,
+    };
+    create_and_store(
+        configs,
+        client,
+        project_id,
+        environment_id,
+        input,
+        args.json,
+        true,
+    )
+    .await
 }
 
 async fn list(
@@ -607,4 +875,191 @@ fn spawn_heartbeat(
             .await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_single_pair() {
+        let vars = parse_variable_args(&args(&["FOO=bar"])).unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "FOO");
+        assert_eq!(vars[0].value, "bar");
+    }
+
+    #[test]
+    fn parse_comma_separated_pairs() {
+        let vars = parse_variable_args(&args(&["FOO=bar,BAZ=qux,N=1"])).unwrap();
+        assert_eq!(
+            vars.iter()
+                .map(|v| (v.key.as_str(), v.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("FOO", "bar"), ("BAZ", "qux"), ("N", "1")]
+        );
+    }
+
+    #[test]
+    fn comma_in_value_stays_single_pair() {
+        // "b.com" has no '=', so the comma is part of the value, not a separator.
+        let vars = parse_variable_args(&args(&["ALLOWED=a.com,b.com"])).unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "ALLOWED");
+        assert_eq!(vars[0].value, "a.com,b.com");
+    }
+
+    #[test]
+    fn repeated_flags_accumulate() {
+        let vars = parse_variable_args(&args(&["A=1", "B=2,C=3"])).unwrap();
+        assert_eq!(vars.len(), 3);
+    }
+
+    #[test]
+    fn invalid_pair_errors() {
+        assert!(parse_variable_args(&args(&["NOVALUE"])).is_err());
+        assert!(parse_variable_args(&args(&["FOO=bar,NOVALUE=,BAZ=qux"])).is_err());
+    }
+
+    #[test]
+    fn wraps_bare_references() {
+        assert_eq!(
+            auto_wrap_reference("postgres.DATABASE_URL"),
+            "${{postgres.DATABASE_URL}}"
+        );
+        assert_eq!(auto_wrap_reference("shared.FOO"), "${{shared.FOO}}");
+        assert_eq!(
+            auto_wrap_reference("my-api_2.PORT_8080"),
+            "${{my-api_2.PORT_8080}}"
+        );
+    }
+
+    #[test]
+    fn leaves_plain_values_alone() {
+        for v in ["bar", "1.5", "example.com", "file.txt", "a.b.C", "2.0.1"] {
+            assert_eq!(auto_wrap_reference(v), v);
+        }
+    }
+
+    #[test]
+    fn leaves_existing_references_alone() {
+        let full = "${{postgres.DATABASE_URL}}";
+        assert_eq!(auto_wrap_reference(full), full);
+        let embedded = "postgres://${{postgres.PGUSER}}@host";
+        assert_eq!(auto_wrap_reference(embedded), embedded);
+    }
+
+    #[test]
+    fn variables_to_input_wraps_and_collects() {
+        let input = variables_to_input(&[], &args(&["DB=postgres.DATABASE_URL,FOO=bar"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            input.get("DB").map(String::as_str),
+            Some("${{postgres.DATABASE_URL}}")
+        );
+        assert_eq!(input.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn variables_to_input_empty_is_none() {
+        assert!(variables_to_input(&[], &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn manually_wrapped_pairs_split_and_pass_verbatim() {
+        // Users may pre-wrap references themselves; comma-splitting still
+        // applies and the wrapped values are sent untouched.
+        let input = variables_to_input(
+            &[],
+            &args(&["FOO=${{serviceName.FOO}},BAR=${{serviceName.BAR}}"]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            input.get("FOO").map(String::as_str),
+            Some("${{serviceName.FOO}}")
+        );
+        assert_eq!(
+            input.get("BAR").map(String::as_str),
+            Some("${{serviceName.BAR}}")
+        );
+        // Embedded references inside larger values also pass through.
+        let input = variables_to_input(&[], &args(&["URL=http://${{svc.HOST}}:8080"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            input.get("URL").map(String::as_str),
+            Some("http://${{svc.HOST}}:8080")
+        );
+    }
+
+    #[test]
+    fn wraps_shared_refs_any_case() {
+        assert_eq!(auto_wrap_reference("shared.char"), "${{shared.char}}");
+        assert_eq!(auto_wrap_reference("shared.FOO"), "${{shared.FOO}}");
+        // Other namespaces still require UPPER_SNAKE vars.
+        assert_eq!(auto_wrap_reference("postgres.char"), "postgres.char");
+    }
+
+    fn write_temp_env(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("railway-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn env_file_parses_dotenv_format() {
+        let path = write_temp_env(
+            "basic.env",
+            "# comment\n\nFOO=bar\nexport BAZ=qux\nQUOTED=\"hello world\"\nSINGLE='a # not comment'\nTRAIL=value # comment\nREF=postgres.DATABASE_URL\n",
+        );
+        let vars = parse_env_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        let map: BTreeMap<_, _> = vars.into_iter().map(|v| (v.key, v.value)).collect();
+        assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(map.get("BAZ").map(String::as_str), Some("qux"));
+        assert_eq!(map.get("QUOTED").map(String::as_str), Some("hello world"));
+        assert_eq!(
+            map.get("SINGLE").map(String::as_str),
+            Some("a # not comment")
+        );
+        assert_eq!(map.get("TRAIL").map(String::as_str), Some("value"));
+        assert_eq!(
+            map.get("REF").map(String::as_str),
+            Some("postgres.DATABASE_URL")
+        );
+    }
+
+    #[test]
+    fn env_file_invalid_line_errors_with_location() {
+        let path = write_temp_env("bad.env", "FOO=bar\nNOT A PAIR\n");
+        let err = parse_env_file(&path).unwrap_err().to_string();
+        std::fs::remove_file(&path).ok();
+        assert!(err.contains(":2:"), "error should cite line 2: {err}");
+    }
+
+    #[test]
+    fn env_file_missing_errors() {
+        assert!(parse_env_file(std::path::Path::new("/nonexistent/x.env")).is_err());
+    }
+
+    #[test]
+    fn flags_override_env_file_entries() {
+        let path = write_temp_env("override.env", "FOO=from-file\nKEEP=file-value\n");
+        let input = variables_to_input(
+            &[path.clone()],
+            &args(&["FOO=from-flag,REF=shared.char"]),
+        )
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(input.get("FOO").map(String::as_str), Some("from-flag"));
+        assert_eq!(input.get("KEEP").map(String::as_str), Some("file-value"));
+        assert_eq!(input.get("REF").map(String::as_str), Some("${{shared.char}}"));
+    }
 }
