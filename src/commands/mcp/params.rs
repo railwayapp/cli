@@ -210,7 +210,32 @@ pub struct CreateServiceParams {
     /// GitHub repo to connect (e.g. "owner/repo").
     #[serde(default)]
     pub source_repo: Option<String>,
+    /// Git branch to deploy when source_repo is set. Defaults to the repo default branch when Railway can see it.
+    #[serde(default)]
+    pub branch: Option<String>,
     /// Docker image to use (e.g. "nginx:latest").
+    #[serde(default)]
+    pub source_image: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ConnectServiceSourceParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// GitHub repo to connect, in owner/repo format.
+    #[serde(default)]
+    pub source_repo: Option<String>,
+    /// Git branch to deploy when source_repo is set. Defaults to the repo default branch when Railway can see it.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Docker image to connect (e.g. "nginx:latest").
     #[serde(default)]
     pub source_image: Option<String>,
 }

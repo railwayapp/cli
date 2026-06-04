@@ -63,7 +63,18 @@ macro_rules! commands {
                 match matches.subcommand() {
                     $(
                         Some((stringify!([<$module:snake>]), sub_matches)) => {
-                            let subcommand_name = sub_matches.subcommand_name().map(|s| s.to_string());
+                            // Walk nested subcommand levels so telemetry can
+                            // distinguish e.g. `sandbox template build` from
+                            // `sandbox template status` ("template:build").
+                            let subcommand_name = {
+                                let mut parts: Vec<&str> = Vec::new();
+                                let mut current = sub_matches;
+                                while let Some((name, next)) = current.subcommand() {
+                                    parts.push(name);
+                                    current = next;
+                                }
+                                if parts.is_empty() { None } else { Some(parts.join(":")) }
+                            };
                             let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
                                 .map_err(anyhow::Error::from)?;
                             let start = ::std::time::Instant::now();

@@ -1,0 +1,10 @@
+mutation SandboxCreate($input: SandboxCreateInput!) {
+  sandboxCreate(input: $input) {
+    id
+    status
+    region
+    environmentId
+    createdAt
+    idleTimeoutMinutes
+  }
+}

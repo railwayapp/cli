@@ -8,13 +8,20 @@ use crate::telemetry::{self, CliTrackEvent};
 /// *which stage* failed. Use lowercase_snake_case stage names; they appear
 /// in telemetry as `sub_command = "stage_<name>_failed"`.
 pub async fn report_failure(stage: &str, message: &str) {
+    report_failure_for("ssh", stage, message).await;
+}
+
+/// Like [`report_failure`] but under an arbitrary command namespace, so other
+/// SSH-backed commands (e.g. `sandbox ssh`) land in the same stage-failure
+/// dashboards with their own command tag.
+pub async fn report_failure_for(command: &str, stage: &str, message: &str) {
     let mut truncated = message.to_string();
     if truncated.len() > 256 {
         truncated.truncate(256);
     }
 
     telemetry::send(CliTrackEvent {
-        command: "ssh".to_string(),
+        command: command.to_string(),
         sub_command: Some(format!("stage_{stage}_failed")),
         success: false,
         error_message: Some(truncated),
@@ -31,8 +38,17 @@ pub async fn report_failure(stage: &str, message: &str) {
 /// unchanged. Intended to wrap each step of an SSH flow so failures are
 /// categorized without replacing the existing `?`-propagation.
 pub async fn track<T>(stage: &str, result: anyhow::Result<T>) -> anyhow::Result<T> {
+    track_for("ssh", stage, result).await
+}
+
+/// [`track`] under an arbitrary command namespace.
+pub async fn track_for<T>(
+    command: &str,
+    stage: &str,
+    result: anyhow::Result<T>,
+) -> anyhow::Result<T> {
     if let Err(ref e) = result {
-        report_failure(stage, &format!("{e}")).await;
+        report_failure_for(command, stage, &format!("{e}")).await;
     }
     result
 }

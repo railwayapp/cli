@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
+use std::{fs::File, io::Read, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::{telemetry, util};
 
 const STATE_VERSION: u32 = 1;
-const ADVISORY_INTERVAL_HOURS: i64 = 24;
 const DISABLE_ENV: &str = "RAILWAY_AGENT_ADVISORY";
 const FORCE_ENV: &str = "RAILWAY_AGENT";
 
@@ -18,7 +17,7 @@ struct AgentState {
     #[serde(default)]
     setup: SetupState,
     #[serde(default)]
-    advisories: BTreeMap<String, AdvisoryState>,
+    advisory: AdvisoryState,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -31,6 +30,7 @@ struct SetupState {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AdvisoryState {
+    last_shown_cli_version: Option<String>,
     last_shown_at: Option<DateTime<Utc>>,
 }
 
@@ -156,15 +156,14 @@ fn should_skip_for_args(raw_args: &[String]) -> bool {
     })
 }
 
-fn advisory_is_recent(state: &AgentState, command: &str) -> bool {
+// Suppress the advisory if we've already shown it for the currently running
+// CLI version. Upgrading the CLI re-arms the advisory exactly once.
+fn advisory_already_shown_for_current_cli(state: &AgentState) -> bool {
     state
-        .advisories
-        .get(command)
-        .and_then(|advisory| advisory.last_shown_at)
-        .map(|last_shown_at| {
-            Utc::now() - last_shown_at < chrono::Duration::hours(ADVISORY_INTERVAL_HOURS)
-        })
-        .unwrap_or(false)
+        .advisory
+        .last_shown_cli_version
+        .as_deref()
+        .is_some_and(|shown| shown == env!("CARGO_PKG_VERSION"))
 }
 
 pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
@@ -180,25 +179,20 @@ pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
     }
 
     let mut state = read_state();
-    if agent_setup_is_current(&state) || advisory_is_recent(&state, command) {
+    if agent_setup_is_current(&state) || advisory_already_shown_for_current_cli(&state) {
         return;
     }
 
     eprintln!(
-        "\n{}\n\n{}\n\n{}",
-        "IMPORTANT: Railway agent tooling not detected.".yellow().bold(),
-        "Ask the user if they would like this agent to run `railway setup agent -y` to configure the Railway agent tooling (agent skills and MCP configurations)."
-            .yellow(),
-        "Your agent will work much more effectively in Railway with these installed.".yellow()
-            .yellow()
+        "\n{}\n{}",
+        "Railway agent tooling (skills + MCP) isn't installed.".yellow(),
+        "Run `railway setup agent` to configure it.".dimmed(),
     );
 
-    state.advisories.insert(
-        command.to_string(),
-        AdvisoryState {
-            last_shown_at: Some(Utc::now()),
-        },
-    );
+    state.advisory = AdvisoryState {
+        last_shown_cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        last_shown_at: Some(Utc::now()),
+    };
 
     let _ = write_state(&state);
 

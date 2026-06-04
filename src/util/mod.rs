@@ -2,6 +2,7 @@ pub mod agent_advisory;
 pub mod check_update;
 pub mod compare_semver;
 pub mod detect;
+pub mod editor;
 pub mod git;
 pub mod install_method;
 pub mod logs;

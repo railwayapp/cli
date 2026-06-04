@@ -75,6 +75,8 @@ query EnvironmentInstances(
           currentSizeMB
           sizeMB
           state
+          deletedAt
+          isPendingDeletion
           volume {
             name
             id

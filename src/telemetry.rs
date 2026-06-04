@@ -1195,6 +1195,12 @@ fn is_agent_caller(caller: &str) -> bool {
     true
 }
 
+/// True when the current process appears to be invoked by an agent or other
+/// non-human automation rather than a human terminal.
+pub fn is_agent() -> bool {
+    is_agent_caller(&detect_caller())
+}
+
 fn error_class(message: Option<&str>) -> String {
     let Some(message) = message else {
         return "UNKNOWN".to_string();

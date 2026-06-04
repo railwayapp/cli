@@ -63,6 +63,39 @@ pub type SerializedTemplateConfig = serde_json::Value;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateGenerate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateGenerate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplatePublish.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplatePublish;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateUnpublish.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateUnpublish;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/TemplateDeploy.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
@@ -167,6 +200,23 @@ pub struct VariableDelete;
     skip_serializing_none
 )]
 pub struct ServiceCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceConnect.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceConnect;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceDisconnect.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceDisconnect;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -298,6 +348,50 @@ pub struct SshPublicKeyCreate;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct SshPublicKeyDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxTemplateBuild.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxTemplateBuild;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxExec.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxExec;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxDestroy.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SandboxDestroy;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxHeartbeat.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+#[allow(dead_code)]
+pub struct SandboxHeartbeat;
 
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
