@@ -370,11 +370,15 @@ pub(crate) async fn refresh_skill_update_state() {
         }
     }
 
+    // Stamp `last_checked` regardless of the fetch outcome: a failing
+    // GitHub API (rate limit, network) would otherwise re-fire the
+    // request on every CLI invocation until one succeeded. Worst case
+    // a transient failure just delays the banner by one interval.
+    manifest.last_checked = Some(Utc::now().to_rfc3339());
     if let Some(sha) = fetch_latest_sha().await {
         manifest.latest_sha = Some(sha);
-        manifest.last_checked = Some(Utc::now().to_rfc3339());
-        let _ = manifest.save(&home);
     }
+    let _ = manifest.save(&home);
 }
 
 pub async fn command(args: Args) -> Result<()> {

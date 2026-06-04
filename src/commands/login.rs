@@ -80,7 +80,17 @@ pub async fn command(args: Args) -> Result<()> {
     // `up`.
     let outcome = match &result {
         Ok(_) => "succeeded",
-        Err(e) if e.to_string().contains("timed out") => "timed_out",
+        // Device-code expiry is a typed error; the browser path's
+        // timeout is an anyhow context string ("Authentication timed
+        // out…"), so check both.
+        Err(e)
+            if matches!(
+                e.downcast_ref::<crate::errors::RailwayError>(),
+                Some(crate::errors::RailwayError::OAuthDeviceCodeExpired)
+            ) || e.to_string().contains("timed out") =>
+        {
+            "timed_out"
+        }
         Err(_) => "failed",
     };
     crate::telemetry::send_auth_event(crate::telemetry::CliAuthTrackEvent {

@@ -1587,9 +1587,9 @@ pub async fn send_auth_event(event: CliAuthTrackEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcessNode, agent_ancestor_pid, agent_from_strong_env, caller_from_mcp_client_name,
-        caller_from_process_name, is_agent_caller, is_agent_harness, new_session_uuid,
-        parent_kind_from_command, walk_ancestors,
+        ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
+        caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, is_agent_harness,
+        new_session_uuid, parent_kind_from_command, walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -1671,19 +1671,41 @@ mod tests {
     #[test]
     fn detects_factory_droid_via_binary_env_var() {
         // Factory Droid sets `FACTORY_DROID_BINARY` (not the bare
-        // `FACTORY_DROID`) in every spawned shell. No other test reads
-        // `FACTORY_DROID*`, so mutating it here is race-safe.
-        let key = "FACTORY_DROID_BINARY";
-        let prev = std::env::var_os(key);
-        unsafe { std::env::set_var(key, "/tmp/droid-preserved-xxxx/droid") };
-        assert_eq!(agent_from_strong_env(), Some("factory_droid"));
-        assert!(is_agent_harness());
+        // `FACTORY_DROID`) in every spawned shell. An ambient agent
+        // harness running this suite (e.g. Claude Code) exports its own
+        // STRONG_AGENT_ENV vars, which win by array order — clear every
+        // strong signal first so the var this test sets is the only one
+        // present. No other test reads these vars, so mutating them here
+        // is race-safe.
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = STRONG_AGENT_ENV
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once("AGENT"))
+            .map(|name| {
+                let prev = std::env::var_os(name);
+                unsafe { std::env::remove_var(name) };
+                (name, prev)
+            })
+            .collect();
+
+        unsafe { std::env::set_var("FACTORY_DROID_BINARY", "/tmp/droid-preserved-xxxx/droid") };
+        let detected = agent_from_strong_env();
+        let harness = is_agent_harness();
+
+        // Restore the original environment before asserting so a failure
+        // doesn't leak a mutated env into other tests.
         unsafe {
-            match prev {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+            std::env::remove_var("FACTORY_DROID_BINARY");
+            for (name, prev) in saved {
+                match prev {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
             }
         }
+
+        assert_eq!(detected, Some("factory_droid"));
+        assert!(harness);
     }
 
     #[test]
