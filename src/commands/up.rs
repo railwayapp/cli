@@ -29,11 +29,11 @@ use super::*;
 
 /// Upload and deploy project from the current directory.
 ///
-/// If you're not signed in, opens a browser to sign in or create a
-/// Railway account (single unified OAuth flow — new accounts are
-/// created on the fly), then chains into project + service creation
-/// and deploy. Pair with -y to skip the surrounding prompts in
-/// scripted or agent-driven contexts.
+/// If you're not signed in, signs you in or creates a Railway account
+/// (single unified OAuth flow — new accounts are created on the fly)
+/// via a browser, or a device code on SSH/headless sessions, then
+/// chains into project + service creation and deploy. Pair with -y to
+/// skip the surrounding prompts in scripted or agent-driven contexts.
 #[derive(Parser)]
 #[clap(
     after_help = "Examples:\n\n  railway up --service api --environment production\n  railway up ./apps/api --path-as-root --service api\n  railway up --detach --json --message \"deploy api\"\n\nAutomation notes:\n  `railway up --detach --json` starts an upload and deployment, but it does not wait for the deployment to become healthy.\n  Poll with `railway deployment list --json` and inspect logs with `railway logs --json --lines 100`."
@@ -50,8 +50,9 @@ pub struct Args {
     #[clap(short = 'y', long)]
     /// Accept all defaults — skip the auth confirm prompt for unauthed
     /// users and skip the project-name prompt when creating a new
-    /// project from this directory. The browser still has to open for
-    /// OAuth itself; -y just removes the surrounding prompts.
+    /// project from this directory. OAuth itself still needs a human
+    /// (browser, or device code on SSH/headless); -y just removes the
+    /// surrounding prompts.
     yes: bool,
 
     #[clap(short, long)]
@@ -596,11 +597,11 @@ fn prompt_no_link_action() -> Result<NoLinkAction> {
 async fn deploy_new_project(args: &Args) -> Result<()> {
     let mut configs = Configs::new()?;
 
-    // Surface a helpful error rather than a cryptic GQL failure when
+    // Surface a structured error rather than a cryptic GQL failure when
     // unauthed. The unauthed `up` chain runs login before we get here,
     // so this only fires for a direct `up --new` with no/expired token.
     if !configs.has_oauth_token() || configs.is_token_expired() {
-        bail!("Not signed in. Run `railway login` first.");
+        return Err(crate::errors::RailwayError::NotAuthenticated.into());
     }
 
     let hostname = configs.get_host().to_owned();
@@ -630,7 +631,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
 
     let project_name: Option<String> = if args.name.is_some() {
         args.name.clone()
-    } else if args.yes || !std::io::stdout().is_terminal() {
+    } else if args.yes || args.json || !std::io::stdout().is_terminal() {
         default_name.clone()
     } else {
         let default = default_name.clone().unwrap_or_default();
@@ -654,21 +655,23 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
 
     // Show GitHub repo detection (informational for now — full GH App
     // integration is a separate piece; we deploy from local tarball).
-    if let Some(remote) = detect_github_remote(&cwd_path) {
-        let branch = detect_current_branch(&cwd_path)
-            .map(|branch| format!(" on {branch}"))
-            .unwrap_or_default();
-        println!(
-            "  {} GitHub remote: {}{} {}",
-            "◇".cyan(),
-            remote.full_repo_name().bold(),
-            branch,
-            "(deploying current directory; GH App integration coming later)".dimmed(),
-        );
+    if !args.json {
+        if let Some(remote) = detect_github_remote(&cwd_path) {
+            let branch = detect_current_branch(&cwd_path)
+                .map(|branch| format!(" on {branch}"))
+                .unwrap_or_default();
+            println!(
+                "  {} GitHub remote: {}{} {}",
+                "◇".cyan(),
+                remote.full_repo_name().bold(),
+                branch,
+                "(deploying current directory; GH App integration coming later)".dimmed(),
+            );
+        }
     }
 
     let detected_services = detect_services(&cwd_path);
-    if !detected_services.is_empty() {
+    if !detected_services.is_empty() && !args.json {
         println!(
             "  {} Detected service dependencies: {} {}",
             "◇".cyan(),
@@ -679,15 +682,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
 
     // Create the project first so the user has a landing pad even if
     // the build later fails.
-    let create_spinner = ProgressBar::new_spinner();
-    let _ = create_spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars(TICK_STRING)
-            .template("{spinner:.green} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
-    create_spinner.set_message("Creating project");
-    create_spinner.enable_steady_tick(Duration::from_millis(100));
+    let create_spinner = step_spinner(args.json, "Creating project");
 
     let vars = mutations::project_create::Variables {
         name: project_name,
@@ -707,39 +702,43 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
         .node
         .clone();
 
-    create_spinner.finish_and_clear();
-    println!(
-        "  {} Created project {} on {}",
-        "✓".green(),
-        project_create.name.bold(),
-        workspace.name(),
-    );
+    if let Some(spinner) = create_spinner {
+        spinner.finish_and_clear();
+    }
+    if !args.json {
+        println!(
+            "  {} Created project {} on {}",
+            "✓".green(),
+            project_create.name.bold(),
+            workspace.name(),
+        );
+    }
+
+    // Link the project to the current directory *before* bundling and
+    // uploading: if either fails, a re-run of `railway up` then targets
+    // this project (the landing pad) instead of minting a duplicate.
+    // The service link has to wait until after the upload — backboard's
+    // /up endpoint is what creates the service.
+    configs.link_project(
+        project_create.id.clone(),
+        Some(project_create.name.clone()),
+        environment.id.clone(),
+        Some(environment.name.clone()),
+    )?;
+    configs.write()?;
 
     // Bundle the directory.
-    let bundle_spinner = ProgressBar::new_spinner();
-    let _ = bundle_spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars(TICK_STRING)
-            .template("{spinner:.green} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
-    bundle_spinner.set_message("Bundling project");
-    bundle_spinner.enable_steady_tick(Duration::from_millis(100));
-
+    let bundle_spinner = step_spinner(args.json, "Bundling project");
     let tarball = create_deploy_tarball(&cwd_path, &cwd_path, args.no_gitignore, |_, _| {})?;
-    bundle_spinner.finish_and_clear();
-    println!("  {} Bundled ({} bytes)", "✓".green(), tarball.len());
+    if let Some(spinner) = bundle_spinner {
+        spinner.finish_and_clear();
+    }
+    if !args.json {
+        println!("  {} Bundled ({} bytes)", "✓".green(), tarball.len());
+    }
 
     // Upload + queue the build.
-    let upload_spinner = ProgressBar::new_spinner();
-    let _ = upload_spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars(TICK_STRING)
-            .template("{spinner:.green} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
-    upload_spinner.set_message("Uploading & queuing build");
-    upload_spinner.enable_steady_tick(Duration::from_millis(100));
+    let upload_spinner = step_spinner(args.json, "Uploading & queuing build");
 
     // Reuse the GQLClient::new_authorized reqwest client — it bakes the
     // bearer token into default headers, which backboard's
@@ -754,38 +753,32 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
         tarball,
     )
     .await?;
-    upload_spinner.finish_and_clear();
-
-    // Link the project to the current directory so future `railway up`,
-    // `railway logs`, etc. target it.
-    configs.link_project(
-        project_create.id.clone(),
-        Some(project_create.name.clone()),
-        environment.id.clone(),
-        Some(environment.name.clone()),
-    )?;
+    if let Some(spinner) = upload_spinner {
+        spinner.finish_and_clear();
+    }
 
     // backboard's /up endpoint creates a service implicitly but doesn't
     // return its id, so recover it from the logs_url
     // (.../project/<pid>/service/<sid>?...) to link the service too.
-    if let Some(service_id) = parse_service_id_from_logs_url(&up_response.logs_url) {
-        configs.link_service(service_id)?;
-    } else {
-        crate::util::reporter::warn(
+    let service_id = parse_service_id_from_logs_url(&up_response.logs_url);
+    match &service_id {
+        Some(service_id) => configs.link_service(service_id.clone())?,
+        None => crate::util::reporter::warn(
             "SERVICE_LINK_UNRESOLVED",
             "Couldn't determine the new service id, so it wasn't linked automatically.",
             Some("Run `railway service` to link it before `railway logs`."),
-        );
+        ),
     }
-
     configs.write()?;
 
-    println!("  {} Build queued", "✓".green());
-    println!(
-        "  {} {}",
-        "Build Logs:".green().bold(),
-        up_response.logs_url
-    );
+    if !args.json {
+        println!("  {} Build queued", "✓".green());
+        println!(
+            "  {} {}",
+            "Build Logs:".green().bold(),
+            up_response.logs_url
+        );
+    }
 
     let deploy_url = if up_response.deployment_domain.is_empty() {
         None
@@ -795,16 +788,48 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
         Some(format!("https://{}", up_response.deployment_domain))
     };
 
-    // --no-wait / --detach: surface the URL + summary and return.
+    // Single structured result for --json consumers (stream contract:
+    // one JSON object on stdout — preceded by NDJSON build logs in
+    // attached mode). `status` is the deployment's terminal state, or
+    // "queued" under --detach.
+    let dashboard_url = match &service_id {
+        Some(sid) => format!(
+            "https://{hostname}/project/{}/service/{sid}?environmentId={}",
+            project_create.id, environment.id
+        ),
+        None => format!("https://{hostname}/project/{}", project_create.id),
+    };
+    let json_result = |status: &str| {
+        serde_json::json!({
+            "status": status,
+            "projectId": project_create.id,
+            "projectName": project_create.name,
+            "environmentId": environment.id,
+            "serviceId": service_id,
+            "deploymentId": up_response.deployment_id,
+            "logsUrl": up_response.logs_url,
+            "dashboardUrl": dashboard_url,
+            "url": deploy_url,
+            "detectedServices": detected_services,
+        })
+    };
+
+    // --no-wait / --detach: surface the summary and return. The build
+    // was only queued — neither output mode claims a deploy outcome.
     if args.detach {
-        print_app_summary(
-            &hostname,
-            &project_create.id,
-            &project_create.name,
-            parse_service_id_from_logs_url(&up_response.logs_url).as_deref(),
-            &environment.id,
-            deploy_url.as_deref(),
-        );
+        if args.json {
+            crate::util::reporter::emit_json(&json_result("queued"))?;
+        } else {
+            print_app_summary(
+                &hostname,
+                &project_create.id,
+                &project_create.name,
+                service_id.as_deref(),
+                &environment.id,
+                deploy_url.as_deref(),
+                false,
+            );
+        }
         return Ok(());
     }
 
@@ -812,91 +837,140 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
     // Small delay first to let backboard register the deployment.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    let json_mode = args.json;
     let build_id_for_logs = up_response.deployment_id.clone();
-    let build_task = tokio::task::spawn(async move {
+    let _build_task = tokio::task::spawn(async move {
         let _ = stream_build_logs(build_id_for_logs, None, |log| {
-            println!("{}", log.message);
+            if json_mode {
+                print_log(log, true, LogFormat::LevelOnly);
+            } else {
+                println!("{}", log.message);
+            }
         })
         .await;
     });
 
-    let deploy_id_for_logs = up_response.deployment_id.clone();
-    let deploy_task = tokio::task::spawn(async move {
-        let _ = stream_deploy_logs(deploy_id_for_logs, None, |log| {
-            println!("{}", log.message);
-        })
-        .await;
-    });
+    // Raw deploy logs are a human nicety; in JSON mode the build-log
+    // NDJSON plus the final result object are the whole contract.
+    let _deploy_task = if json_mode {
+        None
+    } else {
+        let deploy_id_for_logs = up_response.deployment_id.clone();
+        Some(tokio::task::spawn(async move {
+            let _ = stream_deploy_logs(deploy_id_for_logs, None, |log| {
+                println!("{}", log.message);
+            })
+            .await;
+        }))
+    };
 
-    // Watch deployment status so we exit cleanly on terminal states.
-    let logs_url_for_status = up_response.logs_url.clone();
-    let summary_host = hostname.clone();
-    let summary_project_id = project_create.id.clone();
-    let summary_project_name = project_create.name.clone();
-    let summary_service_id = parse_service_id_from_logs_url(&up_response.logs_url);
-    let summary_environment_id = environment.id.clone();
-    let summary_deploy_url = deploy_url.clone();
+    // Await the deployment status in the foreground: the exit code must
+    // come from the deployment's terminal state, not from the log
+    // streams ending (they can close before the build finishes, which
+    // previously let a failing deploy exit 0).
     let mut status_stream =
         subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
             id: up_response.deployment_id.clone(),
         })
         .await?;
-    tokio::task::spawn(async move {
-        while let Some(Ok(res)) = status_stream.next().await {
-            let Some(data) = res.data else { continue };
-            match data.deployment.status {
-                DeploymentStatus::SUCCESS => {
+    while let Some(Ok(res)) = status_stream.next().await {
+        let Some(data) = res.data else { continue };
+        match data.deployment.status {
+            DeploymentStatus::SUCCESS => {
+                if json_mode {
+                    crate::util::reporter::emit_json(&json_result("success"))?;
+                } else {
                     print_app_summary(
-                        &summary_host,
-                        &summary_project_id,
-                        &summary_project_name,
-                        summary_service_id.as_deref(),
-                        &summary_environment_id,
-                        summary_deploy_url.as_deref(),
+                        &hostname,
+                        &project_create.id,
+                        &project_create.name,
+                        service_id.as_deref(),
+                        &environment.id,
+                        deploy_url.as_deref(),
+                        true,
                     );
-                    std::process::exit(0);
                 }
-                DeploymentStatus::FAILED => {
+                std::process::exit(0);
+            }
+            DeploymentStatus::FAILED => {
+                if json_mode {
+                    crate::util::reporter::emit_json(&json_result("failed"))?;
+                } else {
                     println!();
                     println!("  {} {}", "✗".red(), "Build failed".bold());
                     println!(
                         "     {} {}",
                         "Logs:".dimmed(),
-                        logs_url_for_status.bold().underline(),
+                        up_response.logs_url.bold().underline(),
                     );
                     println!();
-                    std::process::exit(1);
                 }
-                DeploymentStatus::CRASHED => {
+                std::process::exit(1);
+            }
+            DeploymentStatus::CRASHED => {
+                if json_mode {
+                    crate::util::reporter::emit_json(&json_result("crashed"))?;
+                } else {
                     println!();
                     println!("  {} {}", "✗".red(), "Deploy crashed".bold());
                     println!(
                         "     {} {}",
                         "Logs:".dimmed(),
-                        logs_url_for_status.bold().underline(),
+                        up_response.logs_url.bold().underline(),
                     );
                     println!();
-                    std::process::exit(1);
                 }
-                _ => {}
+                std::process::exit(1);
             }
+            _ => {}
         }
-    });
+    }
 
-    let _ = futures::future::join_all([build_task, deploy_task]).await;
-    println!();
-    println!("  {} Watch the build:", "🔧".dimmed());
-    println!("     {}", up_response.logs_url.bold().underline());
-    println!();
+    // The status stream ended without reaching a terminal state (e.g.
+    // the websocket dropped). Don't claim success — surface the
+    // ambiguity and point at the logs.
+    crate::util::reporter::warn(
+        "DEPLOY_STATUS_UNKNOWN",
+        "Lost the deployment status stream before the deploy finished.",
+        Some("Check the build logs or run `railway deployment list --json`."),
+    );
+    if json_mode {
+        crate::util::reporter::emit_json(&json_result("unknown"))?;
+    } else {
+        println!();
+        println!("  {} Watch the build:", "→".cyan());
+        println!("     {}", up_response.logs_url.bold().underline());
+        println!();
+    }
 
     Ok(())
+}
+
+/// Spinner for one step of the create-and-deploy flow, or `None` in JSON
+/// mode (machine consumers get the structured result instead; indicatif
+/// already no-ops when stderr isn't a terminal).
+fn step_spinner(json_mode: bool, msg: &'static str) -> Option<ProgressBar> {
+    if json_mode {
+        return None;
+    }
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .tick_chars(TICK_STRING)
+            .template("{spinner:.green} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+    );
+    spinner.set_message(msg);
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    Some(spinner)
 }
 
 /// Print the end-of-run summary: the running URL when one exists, a hint
 /// to add one when it doesn't, and the project + dashboard link so an
 /// agent (or human) has something concrete to hand back. We never
 /// auto-generate a domain — exposing a service publicly is the user's
-/// call (`railway domain`).
+/// call (`railway domain`). `completed` distinguishes a deploy that
+/// reached SUCCESS from a --detach run where the build was only queued.
 fn print_app_summary(
     host: &str,
     project_id: &str,
@@ -904,15 +978,32 @@ fn print_app_summary(
     service_id: Option<&str>,
     environment_id: &str,
     deploy_url: Option<&str>,
+    completed: bool,
 ) {
     println!();
-    match deploy_url {
-        Some(url) => {
-            println!("  {} {}", "🚀".dimmed(), "Live at".bold());
+    match (completed, deploy_url) {
+        (true, Some(url)) => {
+            println!("  {} {}", "✓".green(), "Live at".bold());
             println!("     {}", url.bold().underline());
         }
-        None => {
+        (true, None) => {
             println!("  {} {}", "✓".green(), "Deploy complete".bold());
+            println!(
+                "     {} run {} to add a public URL.",
+                "No public domain yet —".dimmed(),
+                "railway domain".bold(),
+            );
+        }
+        (false, Some(url)) => {
+            println!(
+                "  {} {}",
+                "→".cyan(),
+                "Build queued — once deployed, live at".bold()
+            );
+            println!("     {}", url.bold().underline());
+        }
+        (false, None) => {
+            println!("  {} {}", "→".cyan(), "Build queued".bold());
             println!(
                 "     {} run {} to add a public URL.",
                 "No public domain yet —".dimmed(),
