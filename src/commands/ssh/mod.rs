@@ -9,12 +9,13 @@ mod common;
 mod config;
 mod keys;
 mod native;
-mod tel;
+// `pub(crate)` so `sandbox ssh` can emit the same stage-failure telemetry.
+pub(crate) mod tel;
 
 use common::*;
 
 // Re-exported for the `sandbox` command, which reuses the same native SSH
-// transport (key registration + `ssh <target>@ssh.railway.com`).
+// transport (key registration + `ssh <target>@<env relay host>`).
 pub use native::{ensure_ssh_key, run_native_ssh};
 
 /// Connect to a service via SSH or manage SSH keys

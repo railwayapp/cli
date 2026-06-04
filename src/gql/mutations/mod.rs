@@ -361,6 +361,15 @@ pub struct SandboxCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxTemplateBuild.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxTemplateBuild;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/SandboxExec.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none

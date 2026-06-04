@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -5,10 +7,11 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
-use crate::commands::ssh::{ensure_ssh_key, run_native_ssh};
-use crate::config::{Configs, StoredSandbox};
+use crate::commands::ssh::{ensure_ssh_key, run_native_ssh, tel};
+use crate::config::{Configs, StoredSandbox, StoredSandboxTemplate};
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
+use crate::controllers::variables::Variable;
 use crate::gql::{mutations, queries};
 use crate::util::progress::{create_shimmer_spinner, fail_spinner};
 use crate::util::prompt::{prompt_options, prompt_options_skippable};
@@ -16,7 +19,7 @@ use crate::util::prompt::{prompt_options, prompt_options_skippable};
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -36,6 +39,12 @@ enum Commands {
     /// Create a sandbox and remember it as the active sandbox
     #[clap(visible_alias = "new")]
     Create(CreateArgs),
+
+    /// Fork an existing sandbox into a new one and make it active
+    Fork(ForkArgs),
+
+    /// Manage sandbox templates (pre-built filesystem snapshots)
+    Template(TemplateArgs),
 
     /// List sandboxes in the environment
     #[clap(visible_alias = "ls")]
@@ -59,9 +68,145 @@ struct CreateArgs {
     #[clap(long)]
     idle_timeout_minutes: Option<i64>,
 
+    /// Set a variable on the sandbox (repeatable, comma-separable). Values may
+    /// reference other variables — `DB_URL=postgres.DATABASE_URL` or the full
+    /// `${{postgres.DATABASE_URL}}` form — resolved server-side at create time
+    #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
+    variables: Vec<String>,
+
+    /// Load variables from a .env file (repeatable). `--variable` flags
+    /// override file entries with the same key
+    #[clap(long = "env-file", value_name = "PATH")]
+    env_files: Vec<std::path::PathBuf>,
+
+    /// Create from a built template, by local name or template id (see
+    /// `railway sandbox template build`)
+    #[clap(long, value_name = "NAME_OR_ID")]
+    template: Option<String>,
+
+    /// Join the environment's private network (default: isolated, public
+    /// egress only). Needed to reach internal hosts like
+    /// `postgres.railway.internal`
+    #[clap(long)]
+    private_network: bool,
+
     /// Output the created sandbox as JSON
     #[clap(long)]
     json: bool,
+}
+
+#[derive(Parser)]
+struct TemplateArgs {
+    #[clap(subcommand)]
+    command: TemplateCommands,
+}
+
+#[derive(Parser)]
+enum TemplateCommands {
+    /// Build a template from shell instructions. Templates are
+    /// content-addressed and cached server-side (~7 days), so re-running the
+    /// same build is an instant cache hit
+    #[clap(visible_alias = "create", visible_alias = "new")]
+    Build(TemplateBuildArgs),
+
+    /// Show the build status of a template
+    Status(TemplateStatusArgs),
+
+    /// List templates this CLI has built
+    #[clap(visible_alias = "ls")]
+    List(TemplateListArgs),
+}
+
+#[derive(Parser)]
+struct TemplateBuildArgs {
+    /// Shell instruction to run while building (repeatable, runs in order;
+    /// each step must exit 0 within 10 minutes)
+    #[clap(
+        short = 'c',
+        long = "command",
+        value_name = "SHELL_COMMAND",
+        required = true
+    )]
+    commands: Vec<String>,
+
+    /// Local name for the template, usable with `railway sandbox create
+    /// --template <name>`
+    #[clap(long)]
+    name: Option<String>,
+
+    /// Base image digest to build on (defaults to the standard sandbox image)
+    #[clap(long, value_name = "DIGEST")]
+    base_image_digest: Option<String>,
+
+    /// Wait for the build to finish (polls until READY or FAILED)
+    #[clap(long)]
+    wait: bool,
+
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct TemplateStatusArgs {
+    /// Template id or local name
+    #[clap(value_name = "ID_OR_NAME")]
+    template: String,
+
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct TemplateListArgs {
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+/// Fork has no trailing command, so a positional id is unambiguous; `--id` is
+/// also accepted. Omitted → the active sandbox is the fork source.
+#[derive(Parser)]
+struct ForkArgs {
+    /// Source sandbox ID to fork (defaults to the active sandbox)
+    #[clap(value_name = "ID")]
+    id_positional: Option<String>,
+
+    /// Source sandbox ID (alternative to the positional argument)
+    #[clap(long = "id", value_name = "ID")]
+    id: Option<String>,
+
+    /// Minutes the new sandbox may sit idle before it is auto-destroyed
+    #[clap(long)]
+    idle_timeout_minutes: Option<i64>,
+
+    /// Set a variable on the fork (repeatable, comma-separable). The fork does
+    /// not inherit the source's variables; values may reference other
+    /// variables — `DB_URL=postgres.DATABASE_URL` or the full
+    /// `${{postgres.DATABASE_URL}}` form — resolved server-side at fork time
+    #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
+    variables: Vec<String>,
+
+    /// Load variables from a .env file (repeatable). `--variable` flags
+    /// override file entries with the same key
+    #[clap(long = "env-file", value_name = "PATH")]
+    env_files: Vec<std::path::PathBuf>,
+
+    /// Join the environment's private network (default: isolated, public
+    /// egress only). The fork does not inherit the source's network mode
+    #[clap(long)]
+    private_network: bool,
+
+    /// Output the created sandbox as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+impl ForkArgs {
+    fn explicit_id(&self) -> Option<String> {
+        self.id.clone().or_else(|| self.id_positional.clone())
+    }
 }
 
 #[derive(Parser)]
@@ -124,6 +269,13 @@ impl DestroyArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    use colored::Colorize;
+    eprintln!(
+        "{}",
+        "Warning: Railway sandboxes are experimental and APIs may change or break during testing."
+            .yellow()
+    );
+
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let project = args.project;
@@ -131,6 +283,8 @@ pub async fn command(args: Args) -> Result<()> {
 
     match args.command {
         Commands::Create(sub) => create(&mut configs, &client, project, environment, sub).await,
+        Commands::Fork(sub) => fork(&mut configs, &client, project, environment, sub).await,
+        Commands::Template(sub) => template(&mut configs, &client, project, environment, sub).await,
         Commands::List(sub) => list(&mut configs, &client, project, environment, sub).await,
         Commands::Ssh(sub) => ssh(&mut configs, &client, project, environment, sub).await,
         Commands::Exec(sub) => exec(&mut configs, &client, project, environment, sub).await,
@@ -330,33 +484,155 @@ async fn resolve_target(
     }
 }
 
-async fn create(
+/// Parse repeatable `--variable` values into key/value pairs. Each argument is
+/// a single `KEY=VALUE` or a comma-separated list of them (`A=1,B=2`). A comma
+/// only splits when every segment carries its own `=` — `ALLOWED=a.com,b.com`
+/// stays one variable whose value contains the comma. Repeating the flag is
+/// the unambiguous form for values that mix commas and `=`.
+fn parse_variable_args(args: &[String]) -> Result<Vec<Variable>> {
+    let mut vars = Vec::new();
+    for arg in args {
+        let segments: Vec<&str> = arg.split(',').collect();
+        if segments.len() > 1 && segments.iter().all(|s| s.contains('=')) {
+            for segment in segments {
+                vars.push(Variable::from_str(segment)?);
+            }
+        } else {
+            vars.push(Variable::from_str(arg)?);
+        }
+    }
+    Ok(vars)
+}
+
+/// Wrap a bare Railway reference (`name.VAR`) in `${{...}}` so users can write
+/// `--variable DB_URL=postgres.DATABASE_URL` without shell-quoting the full
+/// `${{postgres.DATABASE_URL}}` form. Only an exact `<name>.<VAR>` value is
+/// wrapped — `name` alphanumeric/`_`/`-` starting with a letter, `VAR` in
+/// UPPER_SNAKE starting with an uppercase letter — so plain values like `1.5`,
+/// `example.com`, or `file.txt` pass through untouched, as does anything
+/// already containing `${{`. The `shared.` namespace is unmistakable, so its
+/// var segment may be any case (`shared.char`), not just UPPER_SNAKE.
+fn auto_wrap_reference(value: &str) -> String {
+    if value.contains("${{") {
+        return value.to_string();
+    }
+    let Some((name, var)) = value.split_once('.') else {
+        return value.to_string();
+    };
+    let name_ok = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let var_ok = if name == "shared" {
+        var.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    } else {
+        var.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && var
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    };
+    if name_ok && var_ok {
+        format!("${{{{{name}.{var}}}}}")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Parse a dotenv-style file into key/value pairs. Supports `KEY=VALUE` lines,
+/// blank lines, `#` comments, an optional `export ` prefix, single/double
+/// quoted values (kept verbatim inside the quotes), and trailing ` #` comments
+/// on unquoted values. Multiline values are not supported.
+fn parse_env_file(path: &std::path::Path) -> Result<Vec<Variable>> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("Failed to read env file {}: {e}", path.display()))?;
+    let mut vars = Vec::new();
+    for (i, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, value)) = line.split_once('=') else {
+            bail!(
+                "{}:{}: expected KEY=VALUE, got `{raw_line}`",
+                path.display(),
+                i + 1
+            );
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            bail!("{}:{}: empty variable name", path.display(), i + 1);
+        }
+        let value = value.trim();
+        let value = if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+            || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+        {
+            &value[1..value.len() - 1]
+        } else {
+            // Unquoted: strip a trailing ` # comment`.
+            value.split(" #").next().unwrap_or(value).trim_end()
+        };
+        vars.push(Variable {
+            key: key.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(vars)
+}
+
+/// Convert `--env-file` and `--variable` args into the `EnvironmentVariables`
+/// scalar, wrapping bare references. Files load first (in order), then flags —
+/// so a `--variable` overrides a file entry with the same key. `None` when
+/// empty so `skip_serializing_none` omits the field from the mutation input.
+fn variables_to_input(
+    env_files: &[std::path::PathBuf],
+    args: &[String],
+) -> Result<Option<BTreeMap<String, String>>> {
+    let mut vars = Vec::new();
+    for path in env_files {
+        vars.extend(parse_env_file(path)?);
+    }
+    vars.extend(parse_variable_args(args)?);
+    if vars.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        vars.into_iter()
+            .map(|v| (v.key, auto_wrap_reference(&v.value)))
+            .collect(),
+    ))
+}
+
+/// Run `sandboxCreate` with the given input, persist the result as the active
+/// sandbox (create and fork both retarget `ssh`/`exec` at the new sandbox),
+/// and print create-style output.
+async fn create_and_store(
     configs: &mut Configs,
     client: &reqwest::Client,
-    project: Option<String>,
-    environment: Option<String>,
-    args: CreateArgs,
+    project_id: String,
+    environment_id: String,
+    input: mutations::sandbox_create::SandboxCreateInput,
+    json: bool,
+    forked: bool,
 ) -> Result<()> {
-    let (project_id, environment_id) =
-        resolve_project_and_env(configs, client, project, environment).await?;
+    let (doing, did, failed) = if forked {
+        ("Forking sandbox", "Forked", "Failed to fork sandbox")
+    } else {
+        ("Creating sandbox", "Created", "Failed to create sandbox")
+    };
 
-    let mut spinner = create_shimmer_spinner("Creating sandbox");
+    let mut spinner = create_shimmer_spinner(doing);
     let sandbox = match post_graphql::<mutations::SandboxCreate, _>(
         client,
         configs.get_backboard(),
-        mutations::sandbox_create::Variables {
-            input: mutations::sandbox_create::SandboxCreateInput {
-                environment_id: environment_id.clone(),
-                idle_timeout_minutes: args.idle_timeout_minutes,
-                template: None,
-            },
-        },
+        mutations::sandbox_create::Variables { input },
     )
     .await
     {
         Ok(res) => res.sandbox_create,
         Err(e) => {
-            fail_spinner(&mut spinner, "Failed to create sandbox".to_string());
+            fail_spinner(&mut spinner, failed.to_string());
             return Err(e.into());
         }
     };
@@ -373,10 +649,10 @@ async fn create(
     );
     configs.write()?;
 
-    if args.json {
+    if json {
         println!("{}", serde_json::to_string_pretty(&sandbox)?);
     } else {
-        println!("✓ Created sandbox {} (now active)", sandbox.id);
+        println!("✓ {did} sandbox {} (now active)", sandbox.id);
         println!("  status: {:?}", sandbox.status);
         println!("  region: {}", sandbox.region);
         if let Some(idle) = sandbox.idle_timeout_minutes {
@@ -385,6 +661,355 @@ async fn create(
         println!("\nConnect with:\n  railway sandbox ssh");
     }
     Ok(())
+}
+
+async fn create(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: CreateArgs,
+) -> Result<()> {
+    let (project_id, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+
+    // Templates are content-addressed server-side: sandboxCreate needs the
+    // full recipe, not just the id, so resolve it from the local store.
+    let template = match &args.template {
+        Some(handle) => {
+            let stored = configs
+                .find_sandbox_template(handle, Some(&environment_id))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Unknown template `{handle}` for this environment. Build it first:\n  railway sandbox template build --name {handle} -c '<command>' --wait"
+                    )
+                })?;
+            Some(mutations::sandbox_create::SandboxTemplateInput {
+                instructions: stored.instructions,
+                base_image_digest: stored.base_image_digest,
+            })
+        }
+        None => None,
+    };
+
+    let input = mutations::sandbox_create::SandboxCreateInput {
+        environment_id: environment_id.clone(),
+        idle_timeout_minutes: args.idle_timeout_minutes,
+        template,
+        source_sandbox_id: None,
+        network_isolation: args
+            .private_network
+            .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
+        variables: variables_to_input(&args.env_files, &args.variables)?,
+    };
+    create_and_store(
+        configs,
+        client,
+        project_id,
+        environment_id,
+        input,
+        args.json,
+        false,
+    )
+    .await
+}
+
+async fn template(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateArgs,
+) -> Result<()> {
+    match args.command {
+        TemplateCommands::Build(sub) => {
+            template_build(configs, client, project, environment, sub).await
+        }
+        TemplateCommands::Status(sub) => {
+            template_status(configs, client, project, environment, sub).await
+        }
+        TemplateCommands::List(sub) => {
+            template_list(configs, client, project, environment, sub).await
+        }
+    }
+}
+
+async fn template_build(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateBuildArgs,
+) -> Result<()> {
+    let (_, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+
+    let res = post_graphql::<mutations::SandboxTemplateBuild, _>(
+        client,
+        configs.get_backboard(),
+        mutations::sandbox_template_build::Variables {
+            environment_id: environment_id.clone(),
+            input: mutations::sandbox_template_build::SandboxTemplateInput {
+                instructions: args.commands.clone(),
+                base_image_digest: args.base_image_digest.clone(),
+            },
+        },
+    )
+    .await?;
+    let built = res.sandbox_template_build;
+
+    // Keep the recipe locally: `sandbox create --template` must resend the
+    // instructions, since the server only caches by hash.
+    configs.upsert_sandbox_template(StoredSandboxTemplate {
+        id: built.id.clone(),
+        name: args.name.clone(),
+        environment_id: environment_id.clone(),
+        instructions: args.commands,
+        base_image_digest: args.base_image_digest,
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+    });
+    configs.write()?;
+
+    let already_ready = matches!(
+        built.status,
+        mutations::sandbox_template_build::SandboxTemplateStatus::READY
+    );
+    let status = if args.wait && !already_ready {
+        wait_for_template(client, configs, &environment_id, &built.id).await?
+    } else {
+        format!("{:?}", built.status)
+    };
+
+    let handle = args.name.unwrap_or_else(|| built.id.clone());
+    if args.json {
+        let out = serde_json::json!({
+            "id": built.id,
+            "status": status,
+            "environmentId": environment_id,
+            "name": handle,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if already_ready {
+        println!("✓ Template {handle} ready (cached)");
+    } else if status == "READY" {
+        println!("✓ Template {handle} built");
+    } else {
+        println!("Template {handle} status: {status}");
+        println!("\nCheck progress with:\n  railway sandbox template status {handle}");
+    }
+    if status == "READY" {
+        println!("\nCreate a sandbox from it with:\n  railway sandbox create --template {handle}");
+    }
+    Ok(())
+}
+
+async fn template_status(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateStatusArgs,
+) -> Result<()> {
+    // A locally stored template knows its environment; a raw id falls back to
+    // flags / the linked environment.
+    let stored = configs.find_sandbox_template(&args.template, None);
+    let (id, environment_id) = match &stored {
+        Some(t) => (t.id.clone(), t.environment_id.clone()),
+        None => {
+            let (_, environment_id) =
+                resolve_project_and_env(configs, client, project, environment).await?;
+            (args.template.clone(), environment_id)
+        }
+    };
+
+    let res = post_graphql::<queries::SandboxTemplate, _>(
+        client,
+        configs.get_backboard(),
+        queries::sandbox_template::Variables { environment_id, id },
+    )
+    .await?;
+    let tpl = res.sandbox_template;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&tpl)?);
+        return Ok(());
+    }
+    if let Some(name) = stored.and_then(|t| t.name) {
+        println!("Template {name} ({})", tpl.id);
+    } else {
+        println!("Template {}", tpl.id);
+    }
+    println!("  status: {:?}", tpl.status);
+    Ok(())
+}
+
+async fn template_list(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: TemplateListArgs,
+) -> Result<()> {
+    let (_, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+    let templates = configs.list_sandbox_templates(Some(&environment_id));
+
+    if templates.is_empty() {
+        if args.json {
+            println!("[]");
+        } else {
+            println!(
+                "No templates built from this CLI for this environment.\nBuild one with:\n  railway sandbox template build --name <name> -c '<command>' --wait"
+            );
+        }
+        return Ok(());
+    }
+
+    let mut rows = Vec::new();
+    for t in &templates {
+        let status = post_graphql::<queries::SandboxTemplate, _>(
+            client,
+            configs.get_backboard(),
+            queries::sandbox_template::Variables {
+                environment_id: environment_id.clone(),
+                id: t.id.clone(),
+            },
+        )
+        .await
+        .map(|r| format!("{:?}", r.sandbox_template.status))
+        .unwrap_or_else(|_| "UNKNOWN".to_string());
+        rows.push((t, status));
+    }
+
+    if args.json {
+        let out: Vec<_> = rows
+            .iter()
+            .map(|(t, status)| {
+                serde_json::json!({
+                    "id": t.id,
+                    "name": t.name,
+                    "status": status,
+                    "instructions": t.instructions,
+                    "baseImageDigest": t.base_image_digest,
+                    "createdAt": t.created_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!(
+        "{:<20}  {:<16}  {:<10}  {:<6}",
+        "NAME", "ID", "STATUS", "STEPS"
+    );
+    for (t, status) in rows {
+        println!(
+            "{:<20}  {:<16}  {:<10}  {:<6}",
+            t.name.as_deref().unwrap_or("-"),
+            &t.id[..t.id.len().min(16)],
+            status,
+            t.instructions.len()
+        );
+    }
+    Ok(())
+}
+
+/// Poll the template status until READY (or fail on FAILED/timeout). Build
+/// steps run server-side in a transient sandbox; the workflow caps out at 40m,
+/// so poll a little past that.
+async fn wait_for_template(
+    client: &reqwest::Client,
+    configs: &Configs,
+    environment_id: &str,
+    id: &str,
+) -> Result<String> {
+    let mut spinner = create_shimmer_spinner("Building template");
+    let deadline = std::time::Instant::now() + Duration::from_secs(45 * 60);
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let res = post_graphql::<queries::SandboxTemplate, _>(
+            client,
+            configs.get_backboard(),
+            queries::sandbox_template::Variables {
+                environment_id: environment_id.to_string(),
+                id: id.to_string(),
+            },
+        )
+        .await?;
+        match res.sandbox_template.status {
+            queries::sandbox_template::SandboxTemplateStatus::READY => {
+                spinner.finish_and_clear();
+                return Ok("READY".to_string());
+            }
+            queries::sandbox_template::SandboxTemplateStatus::FAILED => {
+                fail_spinner(&mut spinner, "Template build failed".to_string());
+                bail!(
+                    "Template build failed. Each instruction must exit 0 within 10 minutes; fix the failing step and rebuild."
+                );
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() > deadline {
+            fail_spinner(&mut spinner, "Timed out waiting for template".to_string());
+            bail!("Timed out waiting for the template build.");
+        }
+    }
+}
+
+async fn fork(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: ForkArgs,
+) -> Result<()> {
+    let (source_sandbox_id, environment_id) = resolve_target(
+        configs,
+        client,
+        args.explicit_id(),
+        project.clone(),
+        environment.clone(),
+    )
+    .await?;
+
+    // For the stored ref: prefer the source's cached project_id, else resolve
+    // from flags / the linked project.
+    let project_id = match configs
+        .get_sandbox(&source_sandbox_id)
+        .and_then(|s| s.project_id)
+    {
+        Some(id) => id,
+        None => {
+            resolve_project_and_env(configs, client, project, environment)
+                .await?
+                .0
+        }
+    };
+
+    let input = mutations::sandbox_create::SandboxCreateInput {
+        environment_id: environment_id.clone(),
+        idle_timeout_minutes: args.idle_timeout_minutes,
+        template: None,
+        source_sandbox_id: Some(source_sandbox_id),
+        network_isolation: args
+            .private_network
+            .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
+        variables: variables_to_input(&args.env_files, &args.variables)?,
+    };
+    create_and_store(
+        configs,
+        client,
+        project_id,
+        environment_id,
+        input,
+        args.json,
+        true,
+    )
+    .await
 }
 
 async fn list(
@@ -534,15 +1159,27 @@ async fn ssh(
     environment: Option<String>,
     args: SshArgs,
 ) -> Result<()> {
-    let (sandbox_id, environment_id) =
-        resolve_target(configs, client, args.id.clone(), project, environment).await?;
+    // Stage-tagged failure telemetry, mirroring `railway ssh` (tel.rs) so
+    // sandbox SSH sessions land in the same stage-failure dashboards under
+    // command = "sandbox".
+    let (sandbox_id, environment_id) = tel::track_for(
+        "sandbox",
+        "ssh_resolve_target",
+        resolve_target(configs, client, args.id.clone(), project, environment).await,
+    )
+    .await?;
 
     // Reuse the native-SSH key registration flow from `railway ssh`. When the
     // user didn't pass `-i`, use the registered key it resolves so a
     // non-default-named key (e.g. ~/.ssh/raildesk_railway_ed25519) is actually
     // offered to the relay instead of just ssh's default identities.
     let auto_identity = if args.identity_file.is_none() {
-        ensure_ssh_key(client, configs).await?
+        tel::track_for(
+            "sandbox",
+            "ssh_key_setup",
+            ensure_ssh_key(client, configs).await,
+        )
+        .await?
     } else {
         None
     };
@@ -551,7 +1188,7 @@ async fn ssh(
     configs.write()?;
 
     // Relay target format (per backboard): sbx:<environmentId>:<sandboxId>.
-    // `run_native_ssh` appends `@ssh.railway.com` internally.
+    // `run_native_ssh` appends the environment's relay host internally.
     let target = format!("sbx:{environment_id}:{sandbox_id}");
 
     // Keep the sandbox alive for the duration of the session.
@@ -571,14 +1208,23 @@ async fn ssh(
 
     // `run_native_ssh` is blocking (inherits the terminal); run it off the
     // async runtime so the heartbeat task keeps ticking.
-    let exit_code = tokio::task::spawn_blocking(move || {
+    let session = tokio::task::spawn_blocking(move || {
         run_native_ssh(&target, command.as_deref(), identity.as_deref())
     })
-    .await??;
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
+    let exit_code = tel::track_for("sandbox", "ssh_session", session).await?;
 
     heartbeat.abort();
 
     if exit_code != 0 {
+        tel::report_failure_for(
+            "sandbox",
+            "ssh_exit_nonzero",
+            &format!("ssh exited with code {exit_code}"),
+        )
+        .await;
         std::process::exit(exit_code);
     }
     Ok(())
@@ -607,4 +1253,194 @@ fn spawn_heartbeat(
             .await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_single_pair() {
+        let vars = parse_variable_args(&args(&["FOO=bar"])).unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "FOO");
+        assert_eq!(vars[0].value, "bar");
+    }
+
+    #[test]
+    fn parse_comma_separated_pairs() {
+        let vars = parse_variable_args(&args(&["FOO=bar,BAZ=qux,N=1"])).unwrap();
+        assert_eq!(
+            vars.iter()
+                .map(|v| (v.key.as_str(), v.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("FOO", "bar"), ("BAZ", "qux"), ("N", "1")]
+        );
+    }
+
+    #[test]
+    fn comma_in_value_stays_single_pair() {
+        // "b.com" has no '=', so the comma is part of the value, not a separator.
+        let vars = parse_variable_args(&args(&["ALLOWED=a.com,b.com"])).unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "ALLOWED");
+        assert_eq!(vars[0].value, "a.com,b.com");
+    }
+
+    #[test]
+    fn repeated_flags_accumulate() {
+        let vars = parse_variable_args(&args(&["A=1", "B=2,C=3"])).unwrap();
+        assert_eq!(vars.len(), 3);
+    }
+
+    #[test]
+    fn invalid_pair_errors() {
+        assert!(parse_variable_args(&args(&["NOVALUE"])).is_err());
+        assert!(parse_variable_args(&args(&["FOO=bar,NOVALUE=,BAZ=qux"])).is_err());
+    }
+
+    #[test]
+    fn wraps_bare_references() {
+        assert_eq!(
+            auto_wrap_reference("postgres.DATABASE_URL"),
+            "${{postgres.DATABASE_URL}}"
+        );
+        assert_eq!(auto_wrap_reference("shared.FOO"), "${{shared.FOO}}");
+        assert_eq!(
+            auto_wrap_reference("my-api_2.PORT_8080"),
+            "${{my-api_2.PORT_8080}}"
+        );
+    }
+
+    #[test]
+    fn leaves_plain_values_alone() {
+        for v in ["bar", "1.5", "example.com", "file.txt", "a.b.C", "2.0.1"] {
+            assert_eq!(auto_wrap_reference(v), v);
+        }
+    }
+
+    #[test]
+    fn leaves_existing_references_alone() {
+        let full = "${{postgres.DATABASE_URL}}";
+        assert_eq!(auto_wrap_reference(full), full);
+        let embedded = "postgres://${{postgres.PGUSER}}@host";
+        assert_eq!(auto_wrap_reference(embedded), embedded);
+    }
+
+    #[test]
+    fn variables_to_input_wraps_and_collects() {
+        let input = variables_to_input(&[], &args(&["DB=postgres.DATABASE_URL,FOO=bar"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            input.get("DB").map(String::as_str),
+            Some("${{postgres.DATABASE_URL}}")
+        );
+        assert_eq!(input.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn variables_to_input_empty_is_none() {
+        assert!(variables_to_input(&[], &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn manually_wrapped_pairs_split_and_pass_verbatim() {
+        // Users may pre-wrap references themselves; comma-splitting still
+        // applies and the wrapped values are sent untouched.
+        let input = variables_to_input(
+            &[],
+            &args(&["FOO=${{serviceName.FOO}},BAR=${{serviceName.BAR}}"]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            input.get("FOO").map(String::as_str),
+            Some("${{serviceName.FOO}}")
+        );
+        assert_eq!(
+            input.get("BAR").map(String::as_str),
+            Some("${{serviceName.BAR}}")
+        );
+        // Embedded references inside larger values also pass through.
+        let input = variables_to_input(&[], &args(&["URL=http://${{svc.HOST}}:8080"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            input.get("URL").map(String::as_str),
+            Some("http://${{svc.HOST}}:8080")
+        );
+    }
+
+    #[test]
+    fn wraps_shared_refs_any_case() {
+        assert_eq!(auto_wrap_reference("shared.char"), "${{shared.char}}");
+        assert_eq!(auto_wrap_reference("shared.FOO"), "${{shared.FOO}}");
+        // Other namespaces still require UPPER_SNAKE vars.
+        assert_eq!(auto_wrap_reference("postgres.char"), "postgres.char");
+    }
+
+    fn write_temp_env(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("railway-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn env_file_parses_dotenv_format() {
+        let path = write_temp_env(
+            "basic.env",
+            "# comment\n\nFOO=bar\nexport BAZ=qux\nQUOTED=\"hello world\"\nSINGLE='a # not comment'\nTRAIL=value # comment\nREF=postgres.DATABASE_URL\n",
+        );
+        let vars = parse_env_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        let map: BTreeMap<_, _> = vars.into_iter().map(|v| (v.key, v.value)).collect();
+        assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(map.get("BAZ").map(String::as_str), Some("qux"));
+        assert_eq!(map.get("QUOTED").map(String::as_str), Some("hello world"));
+        assert_eq!(
+            map.get("SINGLE").map(String::as_str),
+            Some("a # not comment")
+        );
+        assert_eq!(map.get("TRAIL").map(String::as_str), Some("value"));
+        assert_eq!(
+            map.get("REF").map(String::as_str),
+            Some("postgres.DATABASE_URL")
+        );
+    }
+
+    #[test]
+    fn env_file_invalid_line_errors_with_location() {
+        let path = write_temp_env("bad.env", "FOO=bar\nNOT A PAIR\n");
+        let err = parse_env_file(&path).unwrap_err().to_string();
+        std::fs::remove_file(&path).ok();
+        assert!(err.contains(":2:"), "error should cite line 2: {err}");
+    }
+
+    #[test]
+    fn env_file_missing_errors() {
+        assert!(parse_env_file(std::path::Path::new("/nonexistent/x.env")).is_err());
+    }
+
+    #[test]
+    fn flags_override_env_file_entries() {
+        let path = write_temp_env("override.env", "FOO=from-file\nKEEP=file-value\n");
+        let input = variables_to_input(
+            std::slice::from_ref(&path),
+            &args(&["FOO=from-flag,REF=shared.char"]),
+        )
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(input.get("FOO").map(String::as_str), Some("from-flag"));
+        assert_eq!(input.get("KEEP").map(String::as_str), Some("file-value"));
+        assert_eq!(
+            input.get("REF").map(String::as_str),
+            Some("${{shared.char}}")
+        );
+    }
 }

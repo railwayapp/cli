@@ -272,8 +272,12 @@ fn render_config_block(
     writeln!(block, "# BEGIN railway:{rendered_marker}").expect("writing to String cannot fail");
     writeln!(block, "# Railway service: {rendered_service_name}")
         .expect("writing to String cannot fail");
+    let (relay_host, relay_port) = native::ssh_relay();
     writeln!(block, "Host {alias}").expect("writing to String cannot fail");
-    writeln!(block, "    HostName {}", native::SSH_HOST).expect("writing to String cannot fail");
+    writeln!(block, "    HostName {relay_host}").expect("writing to String cannot fail");
+    if let Some(port) = relay_port {
+        writeln!(block, "    Port {port}").expect("writing to String cannot fail");
+    }
     writeln!(block, "    User {service_instance_id}").expect("writing to String cannot fail");
 
     if let Some(identity_file) = identity_file {
