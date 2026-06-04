@@ -1,0 +1,6 @@
+mutation ServiceDisconnect($id: String!) {
+  serviceDisconnect(id: $id) {
+    id
+    name
+  }
+}

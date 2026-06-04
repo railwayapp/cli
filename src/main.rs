@@ -594,6 +594,27 @@ mod cli_tests {
             assert_parses(&["service", "redeploy"]);
             assert_parses(&["service", "redeploy", "-s", "myservice"]);
             assert_parses(&["service", "restart"]);
+            assert_parses(&[
+                "service",
+                "source",
+                "connect",
+                "--repo",
+                "owner/repo",
+                "--branch",
+                "main",
+                "--service",
+                "web",
+            ]);
+            assert_parses(&[
+                "service",
+                "source",
+                "connect",
+                "--image",
+                "nginx:latest",
+                "--service",
+                "web",
+            ]);
+            assert_parses(&["service", "source", "disconnect", "--service", "web"]);
             assert_parses(&["service", "scale"]);
             assert_parses(&["service", "scale", "eu-west=2"]);
             assert_parses(&["service", "scale", "--eu-west", "2"]);
@@ -605,6 +626,11 @@ mod cli_tests {
                 "eu-west=2",
                 "us-east=1",
             ]);
+        }
+
+        #[test]
+        fn add_repo_branch() {
+            assert_parses(&["add", "--repo", "owner/repo", "--branch", "main"]);
         }
 
         #[test]
