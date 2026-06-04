@@ -118,7 +118,14 @@ struct ChangeOperationResult {
 #[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DesiredGraph {
+    pub(super) project: Option<DesiredProject>,
     pub(super) resources: Vec<DesiredResource>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesiredProject {
+    pub(super) name: String,
 }
 
 #[derive(Deserialize, serde::Serialize)]

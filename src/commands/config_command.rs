@@ -273,7 +273,7 @@ fn render_graph_as_railway_ts(graph: &crate::commands::sync::DesiredGraph) -> St
     if graph.resources.iter().any(|resource| resource.r#type == "bucket") { imports.push("bucket"); }
     if graph.resources.iter().any(|resource| resource.source.as_ref().and_then(|source| source.get("repo")).is_some()) { imports.push("github"); }
     if graph.resources.iter().any(|resource| resource.source.as_ref().and_then(|source| source.get("image")).is_some() && resource.r#type == "service") { imports.push("image"); }
-    if graph.resources.iter().any(|resource| resource.variables.as_ref().is_some_and(|vars| vars.values().any(|value| value.get("type").and_then(|value| value.as_str()) == Some("preserve")))) { imports.push("preserve"); }
+    // Imported unknown secrets are preserved by default and omitted from generated source.
     if graph.resources.iter().any(|resource| resource.r#type == "database" && resource.engine.as_deref() == Some("postgres")) { imports.push("postgres"); }
     if graph.resources.iter().any(|resource| resource.r#type == "database" && resource.engine.as_deref() == Some("redis")) { imports.push("redis"); }
     if graph.resources.iter().any(|resource| resource.r#type == "database" && resource.engine.as_deref() == Some("mysql")) { imports.push("mysql"); }
@@ -283,6 +283,14 @@ fn render_graph_as_railway_ts(graph: &crate::commands::sync::DesiredGraph) -> St
 
     let mut out = format!("import {{ {} }} from \"railway/iac\";\n\n", imports.join(", "));
     out.push_str("export default defineRailway(() => {\n");
+
+    let source_aliases = shared_github_sources(graph);
+    for (alias, repo) in &source_aliases {
+        out.push_str(&format!("  const {alias} = github({:?});\n", repo));
+    }
+    if !source_aliases.is_empty() {
+        out.push('\n');
+    }
 
     let mut names = Vec::new();
     let import_names: std::collections::HashSet<&str> = imports.iter().copied().collect();
@@ -306,7 +314,7 @@ fn render_graph_as_railway_ts(graph: &crate::commands::sync::DesiredGraph) -> St
             }
             "service" => {
                 out.push_str(&format!("  const {var_name} = service(\"{}\"", resource.name));
-                let body = render_service_body(resource);
+                let body = render_service_body(resource, &source_aliases);
                 if body.is_empty() {
                     out.push_str(");\n");
                 } else {
@@ -327,7 +335,8 @@ fn render_graph_as_railway_ts(graph: &crate::commands::sync::DesiredGraph) -> St
         }
     }
 
-    out.push_str("\n  return project(\"imported-project\", {\n");
+    let project_name = graph.project.as_ref().map(|project| project.name.as_str()).unwrap_or("imported-project");
+    out.push_str(&format!("\n  return project({:?}, {{\n", project_name));
     out.push_str("    environments: [\"production\"],\n");
     out.push_str(&format!("    services: [{}],\n", names.join(", ")));
     out.push_str("  });\n");
@@ -335,15 +344,47 @@ fn render_graph_as_railway_ts(graph: &crate::commands::sync::DesiredGraph) -> St
     out
 }
 
-fn render_service_body(resource: &crate::commands::sync::DesiredResource) -> String {
+fn shared_github_sources(graph: &crate::commands::sync::DesiredGraph) -> std::collections::BTreeMap<String, String> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for resource in &graph.resources {
+        if resource.r#type != "service" { continue; }
+        if let Some(repo) = resource.source.as_ref().and_then(|source| source.get("repo")).and_then(|value| value.as_str()) {
+            *counts.entry(repo.to_string()).or_default() += 1;
+        }
+    }
+
+    let reserved = std::collections::HashSet::from(["defineRailway", "project", "service", "github", "image", "bucket"]);
+    let mut used = Vec::new();
+    counts.into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(repo, _)| {
+            let repo_name = repo.rsplit('/').next().unwrap_or(&repo);
+            let alias = unique_resource_ident(repo_name, "source", &reserved, &used);
+            used.push(alias.clone());
+            (alias, repo)
+        })
+        .collect()
+}
+
+fn render_service_body(resource: &crate::commands::sync::DesiredResource, source_aliases: &std::collections::BTreeMap<String, String>) -> String {
     let mut lines = Vec::new();
     if let Some(source) = &resource.source {
         if let Some(repo) = source.get("repo").and_then(|value| value.as_str()) {
-            let mut args = format!("{:?}", repo);
-            if let Some(branch) = source.get("branch").and_then(|value| value.as_str()) {
-                args.push_str(&format!(", {{ branch: {:?} }}", branch));
+            let alias = source_aliases.iter().find_map(|(alias, shared_repo)| (shared_repo == repo).then_some(alias));
+            let root = source.get("rootDirectory").and_then(|value| value.as_str()).filter(|value| !value.is_empty());
+            let branch = source.get("branch").and_then(|value| value.as_str()).filter(|branch| *branch != "main");
+            if let Some(alias) = alias {
+                lines.push(format!("    source: {alias},"));
+                if let Some(root) = root {
+                    lines.push(format!("    root: {:?},", root));
+                }
+            } else {
+                let mut options = Vec::new();
+                if let Some(branch) = branch { options.push(format!("branch: {:?}", branch)); }
+                if let Some(root) = root { options.push(format!("rootDirectory: {:?}", root)); }
+                let args = if options.is_empty() { format!("{:?}", repo) } else { format!("{:?}, {{ {} }}", repo, options.join(", ")) };
+                lines.push(format!("    source: github({args}),"));
             }
-            lines.push(format!("    source: github({args}),"));
         } else if let Some(image_name) = source.get("image").and_then(|value| value.as_str()) {
             lines.push(format!("    source: image({:?}),", image_name));
         }
@@ -351,23 +392,39 @@ fn render_service_body(resource: &crate::commands::sync::DesiredResource) -> Str
     render_build(resource.build.as_ref(), &mut lines);
     render_deploy(resource.deploy.as_ref(), &mut lines);
     render_networking(resource.networking.as_ref(), &mut lines);
-    if let Some(vars) = &resource.variables {
-        if !vars.is_empty() {
-            lines.push("    env: {".to_string());
-            for (key, value) in vars {
-                if value.get("type").and_then(|value| value.as_str()) == Some("preserve") {
-                    lines.push(format!("      {key}: preserve(),"));
-                } else if let Some(literal) = value.get("value").and_then(|value| value.as_str()) {
-                    lines.push(format!("      {key}: {:?},", literal));
-                } else if let Some(output) = value.get("output").and_then(|value| value.as_str()) {
-                    lines.push(format!("      {key}: \"${{{{{output}}}}}\","));
-                }
-            }
-            lines.push("    },".to_string());
-        }
-    }
+    render_variables(resource.variables.as_ref(), &mut lines);
     if lines.is_empty() { return String::new(); }
     format!("{{\n{}\n  }}", lines.join("\n"))
+}
+
+fn render_variables(vars: Option<&serde_json::Map<String, serde_json::Value>>, lines: &mut Vec<String>) {
+    let Some(vars) = vars else { return; };
+    let mut entries = vars.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let rendered = entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            if value.get("type").and_then(|value| value.as_str()) == Some("preserve") {
+                return None;
+            }
+            if let Some(literal) = value.get("value").and_then(|value| value.as_str()) {
+                return Some(format!("      {}: {:?},", ts_key(key), literal));
+            }
+            if let (Some(resource), Some(output)) = (
+                value.get("resource").and_then(|value| value.as_str()),
+                value.get("output").and_then(|value| value.as_str()),
+            ) {
+                let name = resource.split('.').skip(1).collect::<Vec<_>>().join(".");
+                return Some(format!("      {}: /* {}.{} */ \"${{{{{}}}}}\",", ts_key(key), name, output, output));
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+
+    if rendered.is_empty() { return; }
+    lines.push("    env: {".to_string());
+    lines.extend(rendered);
+    lines.push("    },".to_string());
 }
 
 fn render_build(build: Option<&serde_json::Value>, lines: &mut Vec<String>) {
@@ -384,6 +441,9 @@ fn render_build(build: Option<&serde_json::Value>, lines: &mut Vec<String>) {
             })
             .map(|(key, _)| key.as_str())
             .collect::<Vec<_>>();
+        if non_default_keys.is_empty() {
+            return;
+        }
         if non_default_keys == ["buildCommand"] {
             if let Some(command) = build.get("buildCommand").and_then(|value| value.as_str()) {
                 lines.push(format!("    build: {:?},", command));
@@ -391,7 +451,9 @@ fn render_build(build: Option<&serde_json::Value>, lines: &mut Vec<String>) {
             }
         }
     }
-    lines.push(format!("    build: {},", ts_value(build)));
+    if !is_empty_object(build) {
+        lines.push(format!("    build: {},", ts_value(build)));
+    }
 }
 
 fn render_deploy(deploy: Option<&serde_json::Value>, lines: &mut Vec<String>) {
@@ -408,7 +470,7 @@ fn render_deploy(deploy: Option<&serde_json::Value>, lines: &mut Vec<String>) {
         lines.push(format!("    healthcheckTimeout: {},", ts_value(&timeout)));
     }
     if let Some(regions) = remaining.remove("multiRegionConfig") {
-        lines.push(format!("    regions: {},", render_regions(&regions)));
+        lines.push(format!("    replicas: {},", render_replicas(&regions)));
     }
 
     if remaining.get("ipv6EgressEnabled").and_then(|value| value.as_bool()) == Some(false) {
@@ -426,6 +488,20 @@ fn render_deploy(deploy: Option<&serde_json::Value>, lines: &mut Vec<String>) {
     }
 }
 
+fn render_replicas(value: &serde_json::Value) -> String {
+    let Some(regions) = value.as_object() else { return ts_value(value); };
+    let active = regions.iter()
+        .filter_map(|(region, config)| {
+            let replicas = config.get("numReplicas").and_then(|value| value.as_u64())?;
+            Some((region, config, replicas))
+        })
+        .collect::<Vec<_>>();
+    if active.len() == 1 {
+        return active[0].2.to_string();
+    }
+    render_regions(value)
+}
+
 fn render_regions(value: &serde_json::Value) -> String {
     let Some(regions) = value.as_object() else { return ts_value(value); };
     let rendered = regions.iter().map(|(region, config)| {
@@ -435,7 +511,7 @@ fn render_regions(value: &serde_json::Value) -> String {
             (Some(replicas), None) => replicas.to_string(),
             _ => {
                 let mut parts = Vec::new();
-                if let Some(replicas) = replicas { parts.push(format!("replicas: {replicas}")); }
+                if let Some(replicas) = replicas { parts.push(format!("count: {replicas}")); }
                 if let Some(stacker) = stacker { parts.push(format!("stacker: {:?}", stacker)); }
                 format!("{{ {} }}", parts.join(", "))
             }
@@ -452,7 +528,7 @@ fn render_networking(networking: Option<&serde_json::Value>, lines: &mut Vec<Str
     remaining.remove("serviceDomains");
 
     if let Some(custom_domains) = remaining.remove("customDomains") {
-        if let Some(domains) = custom_domains.as_object() {
+        if let Some(domains) = custom_domains.as_object().filter(|domains| !domains.is_empty()) {
             let rendered = domains.iter().map(|(domain, config)| {
                 let port = config.get("port").and_then(|value| value.as_u64());
                 match port {
@@ -467,6 +543,10 @@ fn render_networking(networking: Option<&serde_json::Value>, lines: &mut Vec<Str
     if !remaining.is_empty() {
         lines.push(format!("    networking: {},", ts_value(&serde_json::Value::Object(remaining))));
     }
+}
+
+fn is_empty_object(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| object.is_empty())
 }
 
 fn ts_value(value: &serde_json::Value) -> String {
@@ -589,7 +669,7 @@ fn railway_ts_from_repo(cwd: &Path, project_name: &str) -> String {
     if let Some(start) = start {
         out.push_str(&format!("    start: {:?},\n", start));
     }
-    out.push_str("    env: {\n      NODE_ENV: \"production\",\n    },\n");
+
     out.push_str("  });\n\n");
     out.push_str(&format!("  return project(\"{project_name}\", {{\n"));
     out.push_str("    environments: [\"production\"],\n    services: [web],\n  });\n});\n");
