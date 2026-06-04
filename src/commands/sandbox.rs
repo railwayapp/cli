@@ -7,7 +7,7 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
-use crate::commands::ssh::{ensure_ssh_key, run_native_ssh};
+use crate::commands::ssh::{ensure_ssh_key, run_native_ssh, tel};
 use crate::config::{Configs, StoredSandbox, StoredSandboxTemplate};
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
@@ -1159,15 +1159,27 @@ async fn ssh(
     environment: Option<String>,
     args: SshArgs,
 ) -> Result<()> {
-    let (sandbox_id, environment_id) =
-        resolve_target(configs, client, args.id.clone(), project, environment).await?;
+    // Stage-tagged failure telemetry, mirroring `railway ssh` (tel.rs) so
+    // sandbox SSH sessions land in the same stage-failure dashboards under
+    // command = "sandbox".
+    let (sandbox_id, environment_id) = tel::track_for(
+        "sandbox",
+        "ssh_resolve_target",
+        resolve_target(configs, client, args.id.clone(), project, environment).await,
+    )
+    .await?;
 
     // Reuse the native-SSH key registration flow from `railway ssh`. When the
     // user didn't pass `-i`, use the registered key it resolves so a
     // non-default-named key (e.g. ~/.ssh/raildesk_railway_ed25519) is actually
     // offered to the relay instead of just ssh's default identities.
     let auto_identity = if args.identity_file.is_none() {
-        ensure_ssh_key(client, configs).await?
+        tel::track_for(
+            "sandbox",
+            "ssh_key_setup",
+            ensure_ssh_key(client, configs).await,
+        )
+        .await?
     } else {
         None
     };
@@ -1196,14 +1208,23 @@ async fn ssh(
 
     // `run_native_ssh` is blocking (inherits the terminal); run it off the
     // async runtime so the heartbeat task keeps ticking.
-    let exit_code = tokio::task::spawn_blocking(move || {
+    let session = tokio::task::spawn_blocking(move || {
         run_native_ssh(&target, command.as_deref(), identity.as_deref())
     })
-    .await??;
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
+    let exit_code = tel::track_for("sandbox", "ssh_session", session).await?;
 
     heartbeat.abort();
 
     if exit_code != 0 {
+        tel::report_failure_for(
+            "sandbox",
+            "ssh_exit_nonzero",
+            &format!("ssh exited with code {exit_code}"),
+        )
+        .await;
         std::process::exit(exit_code);
     }
     Ok(())
