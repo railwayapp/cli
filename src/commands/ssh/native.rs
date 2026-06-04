@@ -12,7 +12,22 @@ use crate::controllers::ssh::keys::{SshKeySource, find_local_ssh_keys, register_
 use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
-pub(super) const SSH_HOST: &str = "ssh.railway.com";
+/// SSH relay endpoint (host, non-default port) for the current environment —
+/// must track `Configs::get_backboard()`'s environment, or key registration
+/// is checked against one backboard while the relay authenticates against
+/// another (dev-mode CLIs used to dial the prod relay and get publickey
+/// denials for keys that were registered fine).
+pub(super) fn ssh_relay() -> (&'static str, Option<u16>) {
+    Configs::get_ssh_relay()
+}
+
+/// Append `-p <port>` when the relay listens on a non-default port (the
+/// develop relay uses 2222).
+fn apply_relay_port(cmd: &mut Command, port: Option<u16>) {
+    if let Some(port) = port {
+        cmd.args(["-p", &port.to_string()]);
+    }
+}
 
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
@@ -149,10 +164,12 @@ fn identity_for(key: &crate::controllers::ssh::keys::LocalSshKey) -> Option<Path
 /// Split out from the session loop so that a tmux-install failure is
 /// distinguishable from a session connect failure in telemetry.
 pub fn ensure_tmux_installed(ssh_target: &str, identity_file: Option<&Path>) -> Result<()> {
-    let target = format!("{}@{}", ssh_target, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{ssh_target}@{host}");
 
     eprintln!("Ensuring tmux is installed...");
     let mut install_cmd = Command::new("ssh");
+    apply_relay_port(&mut install_cmd, port);
     if let Some(key) = identity_file {
         install_cmd.arg("-i").arg(key);
     }
@@ -183,7 +200,8 @@ pub fn run_tmux_session(
     session_name: &str,
     identity_file: Option<&Path>,
 ) -> Result<()> {
-    let target = format!("{}@{}", ssh_target, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{ssh_target}@{host}");
     let tmux_cmd = format!(
         "exec tmux new-session -A -s {} \\; set -g mouse on",
         session_name
@@ -191,6 +209,7 @@ pub fn run_tmux_session(
 
     loop {
         let mut session_cmd = Command::new("ssh");
+        apply_relay_port(&mut session_cmd, port);
         if let Some(key) = identity_file {
             session_cmd.arg("-i").arg(key);
         }
@@ -228,11 +247,13 @@ pub fn run_native_ssh(
     command: Option<&[String]>,
     identity_file: Option<&Path>,
 ) -> Result<i32> {
-    let target = format!("{}@{}", service_instance_id, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{service_instance_id}@{host}");
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
     let mut ssh_cmd = Command::new("ssh");
+    apply_relay_port(&mut ssh_cmd, port);
 
     if let Some(key) = identity_file {
         ssh_cmd.arg("-i").arg(key);

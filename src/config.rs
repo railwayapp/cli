@@ -277,6 +277,17 @@ impl Configs {
         format!("https://backboard.{}/graphql/v2", self.get_host())
     }
 
+    /// SSH relay host and non-default port for the current environment.
+    /// Mirrors backboard's `controllers/ssh` mapping: only the develop relay
+    /// is separate (and listens on 2222); staging falls through to the
+    /// production relay, same as backboard's IS_DEV-only branch.
+    pub fn get_ssh_relay() -> (&'static str, Option<u16>) {
+        match Self::get_environment_id() {
+            Environment::Dev => ("ssh.railway-develop.com", Some(2222)),
+            Environment::Production | Environment::Staging => ("ssh.railway.com", None),
+        }
+    }
+
     pub fn get_current_directory(&self) -> Result<String> {
         let current_dir = std::env::current_dir()?;
         let path = current_dir

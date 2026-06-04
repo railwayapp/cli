@@ -138,7 +138,13 @@ impl VolumeSftpHandler {
     }
 }
 
-const ADDR: &str = "ssh.railway.com";
+/// SSH relay endpoint for the current environment (host, port). Tracks the
+/// same env switching as `Configs::get_backboard()`; the develop relay
+/// listens on 2222.
+fn relay_addr() -> (&'static str, u16) {
+    let (host, port) = crate::config::Configs::get_ssh_relay();
+    (host, port.unwrap_or(22))
+}
 pub(crate) const DEFAULT_TRANSFER_CONCURRENCY: usize = 32;
 const DOWNLOAD_TRANSFER_BUFFER_SIZE: usize = 2 * 1024 * 1024;
 const DIRECTORY_UPLOAD_TRANSFER_BUFFER_SIZE: usize = 2 * 1024 * 1024;
@@ -197,13 +203,14 @@ impl VolumeSftp {
         if self.session.is_none() || self.is_disconnected() {
             self.disconnected.store(false, Ordering::SeqCst);
 
+            let (relay_host, relay_port) = relay_addr();
             let mut session = russh::client::connect(
                 Arc::new(russh::client::Config::default()),
-                (ADDR, 22),
+                (relay_host, relay_port),
                 VolumeSftpHandler::new(Arc::clone(&self.disconnected)),
             )
             .await
-            .with_context(|| format!("Failed to connect to Railway SFTP at {ADDR}"))?;
+            .with_context(|| format!("Failed to connect to Railway SFTP at {relay_host}"))?;
 
             crate::controllers::ssh::authenticate(&mut session, &self.service_instance_id).await?;
 
