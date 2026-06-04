@@ -551,7 +551,7 @@ async fn ssh(
     configs.write()?;
 
     // Relay target format (per backboard): sbx:<environmentId>:<sandboxId>.
-    // `run_native_ssh` appends `@ssh.railway.com` internally.
+    // `run_native_ssh` appends the environment's relay host internally.
     let target = format!("sbx:{environment_id}:{sandbox_id}");
 
     // Keep the sandbox alive for the duration of the session.
