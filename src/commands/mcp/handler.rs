@@ -927,6 +927,24 @@ impl RailwayMcp {
     }
 
     #[tool(
+        description = "Connect an existing Railway service to a GitHub repo or Docker image. For GitHub repos, this enables Railway-managed deployment triggers when the project has GitHub App access."
+    )]
+    async fn connect_service_source(
+        &self,
+        Parameters(params): Parameters<ConnectServiceSourceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_connect_service_source(params).await
+    }
+
+    #[tool(description = "Disconnect an existing Railway service from its current source.")]
+    async fn disconnect_service_source(
+        &self,
+        Parameters(params): Parameters<ServiceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_disconnect_service_source(params).await
+    }
+
+    #[tool(
         description = "Remove a service from a Railway project. This is irreversible. Returns a preview first.",
         annotations(destructive_hint = true)
     )]

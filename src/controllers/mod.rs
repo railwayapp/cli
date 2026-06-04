@@ -5,6 +5,7 @@ pub mod db_stats;
 pub mod deployment;
 pub mod develop;
 pub mod environment;
+pub mod github;
 pub mod local_override;
 pub mod metrics;
 pub mod metrics_tui;
