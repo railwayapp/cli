@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use colored::Colorize;
 use graphql_client::GraphQLQuery;
 use reqwest::{
     Client,
@@ -71,9 +72,46 @@ impl GQLClient {
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(resolve_timeout_secs()))
             .build()
             .unwrap()
+    }
+}
+
+/// Resolve the HTTP request timeout (in seconds).
+///
+/// Reads the `RAILWAY_HTTP_TIMEOUT` env var as an escape hatch for long-running
+/// operations (e.g. duplicating a large environment). Falls back to
+/// [`consts::DEFAULT_HTTP_TIMEOUT_SECS`] when unset, and surfaces a warning
+/// (rather than silently ignoring) when the value can't be parsed as a positive
+/// integer number of seconds.
+fn resolve_timeout_secs() -> u64 {
+    parse_timeout_secs(std::env::var(consts::RAILWAY_HTTP_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Parse a `RAILWAY_HTTP_TIMEOUT` value into a timeout in seconds.
+///
+/// `None` (env var unset) falls back to the default. A value that can't be parsed
+/// as a positive integer is surfaced as a warning (rather than silently ignored)
+/// and also falls back to the default.
+fn parse_timeout_secs(raw: Option<&str>) -> u64 {
+    let Some(raw) = raw else {
+        return consts::DEFAULT_HTTP_TIMEOUT_SECS;
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => secs,
+        _ => {
+            eprintln!(
+                "{}",
+                format!(
+                    "Warning: ignoring invalid {}={raw:?}; expected a positive number of seconds, using {}s",
+                    consts::RAILWAY_HTTP_TIMEOUT_ENV,
+                    consts::DEFAULT_HTTP_TIMEOUT_SECS
+                )
+                .yellow()
+            );
+            consts::DEFAULT_HTTP_TIMEOUT_SECS
+        }
     }
 }
 
@@ -252,6 +290,31 @@ mod tests {
 
     use super::*;
     use crate::gql::queries;
+
+    #[test]
+    fn timeout_defaults_when_unset() {
+        assert_eq!(
+            parse_timeout_secs(None),
+            consts::DEFAULT_HTTP_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn timeout_uses_valid_override() {
+        assert_eq!(parse_timeout_secs(Some("300")), 300);
+        assert_eq!(parse_timeout_secs(Some("  90  ")), 90);
+    }
+
+    #[test]
+    fn timeout_falls_back_on_invalid_values() {
+        for bad in ["0", "-5", "abc", "12.5", ""] {
+            assert_eq!(
+                parse_timeout_secs(Some(bad)),
+                consts::DEFAULT_HTTP_TIMEOUT_SECS,
+                "expected fallback for {bad:?}"
+            );
+        }
+    }
 
     fn spawn_graphql_server(
         response_for_request: impl FnOnce(String) -> String + Send + 'static,
