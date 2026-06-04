@@ -244,6 +244,7 @@ pub(crate) async fn list(target: FileTarget, args: ListArgs) -> Result<()> {
                     "path": entry.path,
                     "type": entry.kind,
                     "size": entry.size,
+                    "modifiedAt": entry.modified_at,
                 })
             })
             .collect();

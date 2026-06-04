@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use colored::Colorize;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use russh_sftp::{
@@ -31,6 +32,7 @@ pub(crate) struct VolumeFileEntry {
     pub(crate) path: String,
     pub(crate) kind: &'static str,
     pub(crate) size: u64,
+    pub(crate) modified_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) struct VolumeFileTree {
@@ -882,6 +884,7 @@ impl VolumeSftp {
                         _ => "other",
                     },
                     size: metadata.len(),
+                    modified_at: metadata.modified().ok().map(DateTime::<Utc>::from),
                 }
             })
             .collect();
