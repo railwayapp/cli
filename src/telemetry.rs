@@ -1247,47 +1247,7 @@ impl TelemetryContext {
             .or_else(|| MCP_CLIENT_CALLER.get().cloned())
             .unwrap_or_else(detect_caller);
         let linked_project = configs.get_local_linked_project().ok();
-        let agent_session_id = safe_env(RAILWAY_AGENT_SESSION_ENV)
-            .or_else(|| safe_env("COPILOT_AGENT_SESSION_ID"))
-            .or_else(|| safe_env("CLAUDE_CODE_SESSION_ID"))
-            // Verified 2026-05-11 via live env capture: Codex exports
-            // CODEX_THREAD_ID as a UUID v7 in every spawned bash; previous
-            // CODEX_SESSION_ID guess did not exist in the env at all (which
-            // matched the 100% per-process fallback observed in the warehouse).
-            .or_else(|| safe_env("CODEX_THREAD_ID"))
-            // Verified 2026-05-11 via live env capture: OpenCode exports
-            // OPENCODE_RUN_ID as a UUID v4. The previous OPENCODE_SESSION_ID
-            // entry was checking for a variable that does not exist, which
-            // matched the ~100% per-process fallback observed for opencode.
-            .or_else(|| safe_env("OPENCODE_RUN_ID"))
-            // Verified 2026-05-11 via a live interactive Amp session.
-            .or_else(|| safe_env("AMP_CURRENT_THREAD_ID"))
-            // Verified 2026-05-11: Cursor does NOT propagate a session
-            // identifier into its bash tool — only CURSOR_AGENT=1 (presence
-            // flag, used for caller detection) and CURSOR_SANDBOX metadata.
-            // CURSOR_TRACE_ID is documented for the IDE but does not appear
-            // in the agent's spawned subprocess env. Kept here as a no-cost
-            // forward-compat hook in case Cursor adds propagation later.
-            .or_else(|| safe_env("CURSOR_TRACE_ID"))
-            // Cross-agent convention exposed by Amp (verified) and observed
-            // in some other harnesses' docs. Late in the precedence chain
-            // so harness-specific IDs win when both are set; catches any
-            // future agent that adopts this generic name.
-            .or_else(|| safe_env("AGENT_THREAD_ID"))
-            .or_else(|| {
-                if is_agent_caller(&caller) {
-                    // Try the persistent session-file fallback first. It
-                    // recovers a stable UUID across `railway` invocations
-                    // spawned by the same parent process when the harness
-                    // doesn't propagate its session env var (e.g. when an
-                    // agent's bash tool doesn't whitelist its own session
-                    // ID). Falls through to the per-process mint when
-                    // parent identity can't be determined (non-unix, etc.).
-                    persistent_agent_session_id().or(Some(session_id.clone()))
-                } else {
-                    None
-                }
-            });
+        let agent_session_id = resolve_agent_session_id(&caller);
 
         Self {
             session_id,
@@ -1319,6 +1279,73 @@ impl TelemetryContext {
                 }),
         }
     }
+}
+
+/// Resolve the agent session id for the current invocation: the harness's
+/// own session env var when propagated, otherwise (for agent callers) the
+/// persistent session-file fallback or the per-process id. Shared by the
+/// telemetry event context and the deploy-upload attribution headers so
+/// the same id lands in both streams and warehouse joins line up.
+fn resolve_agent_session_id(caller: &str) -> Option<String> {
+    safe_env(RAILWAY_AGENT_SESSION_ENV)
+        .or_else(|| safe_env("COPILOT_AGENT_SESSION_ID"))
+        .or_else(|| safe_env("CLAUDE_CODE_SESSION_ID"))
+        // Verified 2026-05-11 via live env capture: Codex exports
+        // CODEX_THREAD_ID as a UUID v7 in every spawned bash; previous
+        // CODEX_SESSION_ID guess did not exist in the env at all (which
+        // matched the 100% per-process fallback observed in the warehouse).
+        .or_else(|| safe_env("CODEX_THREAD_ID"))
+        // Verified 2026-05-11 via live env capture: OpenCode exports
+        // OPENCODE_RUN_ID as a UUID v4. The previous OPENCODE_SESSION_ID
+        // entry was checking for a variable that does not exist, which
+        // matched the ~100% per-process fallback observed for opencode.
+        .or_else(|| safe_env("OPENCODE_RUN_ID"))
+        // Verified 2026-05-11 via a live interactive Amp session.
+        .or_else(|| safe_env("AMP_CURRENT_THREAD_ID"))
+        // Verified 2026-05-11: Cursor does NOT propagate a session
+        // identifier into its bash tool — only CURSOR_AGENT=1 (presence
+        // flag, used for caller detection) and CURSOR_SANDBOX metadata.
+        // CURSOR_TRACE_ID is documented for the IDE but does not appear
+        // in the agent's spawned subprocess env. Kept here as a no-cost
+        // forward-compat hook in case Cursor adds propagation later.
+        .or_else(|| safe_env("CURSOR_TRACE_ID"))
+        // Cross-agent convention exposed by Amp (verified) and observed
+        // in some other harnesses' docs. Late in the precedence chain
+        // so harness-specific IDs win when both are set; catches any
+        // future agent that adopts this generic name.
+        .or_else(|| safe_env("AGENT_THREAD_ID"))
+        .or_else(|| {
+            if is_agent_caller(caller) {
+                // Try the persistent session-file fallback first. It
+                // recovers a stable UUID across `railway` invocations
+                // spawned by the same parent process when the harness
+                // doesn't propagate its session env var (e.g. when an
+                // agent's bash tool doesn't whitelist its own session
+                // ID). Falls through to the per-process mint when
+                // parent identity can't be determined (non-unix, etc.).
+                persistent_agent_session_id().or_else(|| Some(session_id()))
+            } else {
+                None
+            }
+        })
+}
+
+/// Attribution for the deploy tarball upload (`x-railway-caller` /
+/// `x-railway-agent-session` headers). Returns `Some` only when the CLI
+/// detects an agent harness driving it — backboard treats header presence
+/// as the agent signal (`platform_create_deployment.source = "CLI Agent"`),
+/// so human-driven runs send nothing. Values mirror the telemetry event
+/// context exactly so the deploy event joins against the auth funnel.
+pub(crate) fn deploy_attribution() -> Option<(String, Option<String>)> {
+    let caller = MCP_CLIENT_CALLER
+        .get()
+        .cloned()
+        .unwrap_or_else(detect_caller);
+    if !is_agent_caller(&caller) {
+        return None;
+    }
+    let agent_session_id = resolve_agent_session_id(&caller);
+    Some((caller, agent_session_id))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
