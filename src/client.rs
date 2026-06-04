@@ -86,7 +86,11 @@ impl GQLClient {
 /// (rather than silently ignoring) when the value can't be parsed as a positive
 /// integer number of seconds.
 fn resolve_timeout_secs() -> u64 {
-    parse_timeout_secs(std::env::var(consts::RAILWAY_HTTP_TIMEOUT_ENV).ok().as_deref())
+    parse_timeout_secs(
+        std::env::var(consts::RAILWAY_HTTP_TIMEOUT_ENV)
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Parse a `RAILWAY_HTTP_TIMEOUT` value into a timeout in seconds.
@@ -293,10 +297,7 @@ mod tests {
 
     #[test]
     fn timeout_defaults_when_unset() {
-        assert_eq!(
-            parse_timeout_secs(None),
-            consts::DEFAULT_HTTP_TIMEOUT_SECS
-        );
+        assert_eq!(parse_timeout_secs(None), consts::DEFAULT_HTTP_TIMEOUT_SECS);
     }
 
     #[test]
