@@ -84,6 +84,12 @@ struct CreateArgs {
     #[clap(long, value_name = "NAME_OR_ID")]
     template: Option<String>,
 
+    /// Join the environment's private network (default: isolated, public
+    /// egress only). Needed to reach internal hosts like
+    /// `postgres.railway.internal`
+    #[clap(long)]
+    private_network: bool,
+
     /// Output the created sandbox as JSON
     #[clap(long)]
     json: bool,
@@ -186,6 +192,11 @@ struct ForkArgs {
     /// override file entries with the same key
     #[clap(long = "env-file", value_name = "PATH")]
     env_files: Vec<std::path::PathBuf>,
+
+    /// Join the environment's private network (default: isolated, public
+    /// egress only). The fork does not inherit the source's network mode
+    #[clap(long)]
+    private_network: bool,
 
     /// Output the created sandbox as JSON
     #[clap(long)]
@@ -690,7 +701,9 @@ async fn create(
         idle_timeout_minutes: args.idle_timeout_minutes,
         template,
         source_sandbox_id: None,
-        network_isolation: None,
+        network_isolation: args
+            .private_network
+            .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
     };
     create_and_store(
@@ -986,7 +999,9 @@ async fn fork(
         idle_timeout_minutes: args.idle_timeout_minutes,
         template: None,
         source_sandbox_id: Some(source_sandbox_id),
-        network_isolation: None,
+        network_isolation: args
+            .private_network
+            .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
     };
     create_and_store(
