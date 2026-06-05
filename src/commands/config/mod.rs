@@ -1,3 +1,5 @@
+mod runner;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -175,12 +177,12 @@ async fn init_config(args: InitArgs) -> Result<()> {
     }
     write_new(
         &readme_file,
-        include_str!("../../assets/railway-config/README.md"),
+        include_str!("../../../assets/railway-config/README.md"),
         args.force,
     )?;
     let wrote_skill = write_asset_if_missing(
         &skill_file,
-        include_str!("../../assets/railway-config/SKILL.md"),
+        include_str!("../../../assets/railway-config/SKILL.md"),
     )?;
 
     println!("{}", "Railway configuration initialized".green().bold());
@@ -278,11 +280,11 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     write_pulled_config(&railway_file, args.force, args.runner).await?;
     let wrote_readme = write_asset_if_missing(
         &readme_file,
-        include_str!("../../assets/railway-config/README.md"),
+        include_str!("../../../assets/railway-config/README.md"),
     )?;
     let wrote_skill = write_asset_if_missing(
         &skill_file,
-        include_str!("../../assets/railway-config/SKILL.md"),
+        include_str!("../../../assets/railway-config/SKILL.md"),
     )?;
 
     println!("{}", "Railway configuration imported".green().bold());
@@ -332,16 +334,14 @@ async fn write_pulled_config(path: &Path, force: bool, runner: Option<String>) -
     write_new(path, &render_graph_as_railway_ts(&graph), force)
 }
 
-async fn load_current_graph(
-    runner: Option<String>,
-) -> Result<crate::commands::iac_runner::DesiredGraph> {
+async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGraph> {
     let temp_dir = std::env::temp_dir().join(format!("railway-config-pull-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).context("Failed to create temporary Railway config directory")?;
     let temp_file = temp_dir.join("railway.ts");
     fs::write(&temp_file, railway_ts("import-placeholder"))
         .context("Failed to write temporary Railway config")?;
 
-    let args = crate::commands::iac_runner::Args {
+    let args = runner::Args {
         file: Some(temp_file.clone()),
         stage: false,
         json: true,
@@ -352,7 +352,7 @@ async fn load_current_graph(
         runner,
         verbose: false,
     };
-    let response = crate::commands::iac_runner::run(&args, "current").await?;
+    let response = runner::run(&args, "current").await?;
     let _ = fs::remove_file(temp_file);
     let _ = fs::remove_dir(temp_dir);
 
@@ -365,7 +365,7 @@ async fn load_current_graph(
         .context("Railway did not return current project state")
 }
 
-fn render_graph_as_railway_ts(graph: &crate::commands::iac_runner::DesiredGraph) -> String {
+fn render_graph_as_railway_ts(graph: &runner::DesiredGraph) -> String {
     let mut imports = vec!["defineRailway", "project", "service"];
     if graph
         .resources
@@ -503,7 +503,7 @@ fn render_graph_as_railway_ts(graph: &crate::commands::iac_runner::DesiredGraph)
 }
 
 fn shared_github_sources(
-    graph: &crate::commands::iac_runner::DesiredGraph,
+    graph: &runner::DesiredGraph,
 ) -> std::collections::BTreeMap<String, String> {
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     for resource in &graph.resources {
@@ -542,7 +542,7 @@ fn shared_github_sources(
 }
 
 fn render_service_body(
-    resource: &crate::commands::iac_runner::DesiredResource,
+    resource: &runner::DesiredResource,
     source_aliases: &std::collections::BTreeMap<String, String>,
 ) -> String {
     let mut lines = Vec::new();
@@ -1029,7 +1029,7 @@ export default defineRailway(() => {{
 async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
     ensure_config_initialized(&args).await?;
 
-    crate::commands::iac_runner::run_command(crate::commands::iac_runner::Args {
+    runner::run_command(runner::Args {
         file: args.file,
         stage,
         json: args.json,
