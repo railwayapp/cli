@@ -18,7 +18,7 @@ macro_rules! commands {
                 $(
                     {
                         // Get the subcommand as defined by the module.
-                        let sub = <$module::Args as ::clap::CommandFactory>::command();
+                        let sub = <$crate::commands::$module::Args as ::clap::CommandFactory>::command();
                         // Allow the module to add dynamic arguments (if needed) and add any aliases.
                         let sub = {
                             let mut s = sub;
@@ -40,7 +40,7 @@ macro_rules! commands {
                             s = s.name(stringify!($module));
                             s
                         };
-                        let command_name = stringify!($module).strip_suffix("_command").unwrap_or(stringify!($module));
+                        let command_name = stringify!($module);
                         // Add this subcommand into the global CLI.
                         cmd = cmd.subcommand(sub.name(command_name));
                     }
@@ -63,7 +63,7 @@ macro_rules! commands {
             pub async fn exec_cli(matches: clap::ArgMatches) -> anyhow::Result<()> {
                 match matches.subcommand() {
                     $(
-                        Some((name, sub_matches)) if name == stringify!([<$module:snake>]).strip_suffix("_command").unwrap_or(stringify!([<$module:snake>])) => {
+                        Some((stringify!([<$module:snake>]), sub_matches)) => {
                             // Walk nested subcommand levels so telemetry can
                             // distinguish e.g. `sandbox template build` from
                             // `sandbox template status` ("template:build").
@@ -76,11 +76,11 @@ macro_rules! commands {
                                 }
                                 if parts.is_empty() { None } else { Some(parts.join(":")) }
                             };
-                            let command_name = stringify!([<$module:snake>]).strip_suffix("_command").unwrap_or(stringify!([<$module:snake>]));
-                            let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
+                            let command_name = stringify!([<$module:snake>]);
+                            let args = <$crate::commands::$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
                                 .map_err(anyhow::Error::from)?;
                             let start = ::std::time::Instant::now();
-                            let result = $module::command(args).await;
+                            let result = $crate::commands::$module::command(args).await;
                             let duration = start.elapsed();
                             $crate::telemetry::send($crate::telemetry::CliTrackEvent {
                                 command: command_name.to_string(),

@@ -35,7 +35,7 @@ commands!(
     autoupdate,
     bucket,
     completion,
-    config_command,
+    config,
     connect,
     delete,
     deploy,

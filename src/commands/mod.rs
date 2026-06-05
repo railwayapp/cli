@@ -12,7 +12,7 @@ pub mod add;
 pub mod autoupdate;
 pub mod bucket;
 pub mod completion;
-pub mod config_command;
+pub mod config;
 pub mod connect;
 pub mod delete;
 pub mod deploy;
