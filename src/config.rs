@@ -219,6 +219,13 @@ impl Configs {
                 .filter(|t| !t.is_empty()))
     }
 
+    /// True when any CLI-supported credential is present. This includes
+    /// project tokens, so use this for auth preflight checks only; commands
+    /// that need user/workspace auth should call `get_railway_auth_token`.
+    pub fn has_auth_credentials(&self) -> bool {
+        Self::get_railway_token().is_some() || self.get_railway_auth_token().is_some()
+    }
+
     pub fn has_oauth_token(&self) -> bool {
         self.root_config.user.access_token.is_some()
     }
@@ -736,6 +743,11 @@ mod tests {
         F: FnOnce() -> R,
     {
         let _guard = ENV_LOCK.lock().unwrap();
+        let previous: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var(key).ok()))
+            .collect();
+
         // SAFETY: tests run sequentially under ENV_LOCK, so no concurrent mutation.
         unsafe {
             for (key, val) in vars {
@@ -747,11 +759,21 @@ mod tests {
         }
         let result = f();
         unsafe {
-            for (key, _) in vars {
-                std::env::remove_var(key);
+            for (key, val) in previous {
+                match val {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
             }
         }
         result
+    }
+
+    fn empty_configs() -> Configs {
+        Configs {
+            root_config_path: std::path::PathBuf::new(),
+            root_config: RailwayConfig::default(),
+        }
     }
 
     #[test]
@@ -783,5 +805,19 @@ mod tests {
                 .contains("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn auth_credentials_accept_project_token() {
+        let configs = empty_configs();
+        let has_credentials = with_env_vars(
+            &[
+                ("RAILWAY_TOKEN", Some("project-token")),
+                ("RAILWAY_API_TOKEN", None),
+            ],
+            || configs.has_auth_credentials(),
+        );
+
+        assert!(has_credentials);
     }
 }
