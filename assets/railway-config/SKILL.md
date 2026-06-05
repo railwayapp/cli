@@ -1,6 +1,6 @@
 ---
 name: railway-config
-description: Edit this project's Railway infrastructure-as-code configuration. Use this skill whenever the user asks to create, change, import, review, deploy, or troubleshoot Railway project infrastructure for the current repository, including services, databases, buckets, custom domains, regions, environment variables, `railway config *`, `.railway/railway.ts`, or `railway up` behavior.
+description: Edit this project's Railway infrastructure-as-code configuration. Use this skill whenever the user asks to create, change, import, review, deploy, or troubleshoot Railway project infrastructure for the current repository, including services, databases, buckets, custom domains, replicas/regions, groups, environment variables, `railway config *`, `.railway/railway.ts`, or `railway up` behavior.
 ---
 
 # Railway configuration skill
@@ -18,10 +18,10 @@ The source of desired Railway project state is:
 1. Express Railway product intent, not internal API details.
 2. Do not write Railway UUIDs into `.railway/railway.ts`.
 3. Do not write `EnvironmentConfigPatch`, `ServiceInstance`, Backboard internals, or generated Railway domains into source.
-4. Prefer Railway configuration helpers like `service()`, `postgres()`, `redis()`, `mysql()`, `mongo()`, `bucket()`, `github()`, and `image()`.
+4. Prefer Railway configuration helpers like `service()`, `postgres()`, `redis()`, `mysql()`, `mongo()`, `bucket()`, `group()`, `github()`, and `image()`.
 5. Use `service.env.VARIABLE` and `database.env.VARIABLE` for references.
-6. Keep secrets out of source. Use references or `preserve()` for existing Railway-managed values.
-7. Prefer product DSL names such as `domains` and `regions`; avoid internal names like `customDomains` and `multiRegionConfig`.
+6. Keep secrets out of source. Prefer omitting unknown imported secrets; use `preserve()` when an existing Railway-managed value must be explicitly retained.
+7. Prefer product DSL names such as `domains`, `replicas`, and `group`; avoid internal names like `customDomains` and `multiRegionConfig`.
 8. Do not add platform defaults unless the user explicitly wants them.
 9. After editing `.railway/railway.ts`, run `railway config plan`.
 10. Do not run `railway config apply` unless the user asks.
@@ -73,6 +73,7 @@ import {
   bucket,
   defineRailway,
   github,
+  group,
   image,
   mongo,
   mysql,
@@ -148,15 +149,31 @@ const web = service("web", {
 });
 ```
 
-Regions:
+Replicas:
 
 ```ts
 const web = service("web", {
-  regions: {
-    "us-west2": 1,
+  replicas: 3,
+});
+```
+
+Advanced placement:
+
+```ts
+const web = service("web", {
+  replicas: {
+    "us-west2": 2,
     "europe-west4": 1,
   },
 });
+```
+
+Groups:
+
+```ts
+const api = service("api");
+const worker = service("worker");
+const backend = group("Backend", [api, worker]);
 ```
 
 Bucket:
@@ -189,7 +206,7 @@ Before applying changes, confirm:
 
 - `railway config plan` shows only expected changes.
 - Secrets are not replaced with literal placeholder values.
-- Existing Railway-managed variables use `preserve()` when the value should remain untouched.
+- Existing Railway-managed variables are omitted or use `preserve()` when the value should remain untouched.
 - Custom domains are declared with `domains`, not networking internals.
-- Regions are declared with `regions`, not `multiRegionConfig`.
+- Scaling is declared with `replicas`, not `multiRegionConfig`.
 - No generated Railway service domains are committed.

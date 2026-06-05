@@ -6,7 +6,7 @@ This project defines its Railway infrastructure in code.
 .railway/railway.ts
 ```
 
-Use this file to describe the Railway project you want: services, databases, buckets, custom domains, regions, and environment variables.
+Use this file to describe the Railway project you want: services, databases, buckets, custom domains, replicas, groups, and environment variables.
 
 ## Common commands
 
@@ -47,4 +47,6 @@ If `.railway/railway.ts` has pending project changes, `railway up` previews them
 - `railway config plan` is safe and does not change Railway.
 - `railway config apply` asks before applying unless you pass `--yes`.
 - `railway up` deploys this directory when the service has no GitHub or image source.
-- Secrets imported from Railway may appear as `preserve()` so they are not overwritten.
+- Use `replicas` for scaling; advanced placement can still specify region names.
+- Use `group("Name", [resources])` to keep large projects organized on the Railway canvas.
+- Secrets imported from Railway may be omitted or represented with `preserve()` so they are not overwritten.
