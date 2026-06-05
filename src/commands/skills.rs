@@ -979,11 +979,7 @@ mod tests {
 
         // A manifest record for the target means it's managed — not an orphan.
         let mut manifest = SkillsManifest::default();
-        manifest.set_record(
-            &rel_key(&skills_dir),
-            "use-railway",
-            SkillRecord::default(),
-        );
+        manifest.set_record(&rel_key(&skills_dir), "use-railway", SkillRecord::default());
         assert!(unmanaged_skill_tools(home.path(), &manifest).is_empty());
 
         // A bare directory without SKILL.md (leftover scaffolding) is not a
