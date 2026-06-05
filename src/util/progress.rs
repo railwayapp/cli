@@ -91,5 +91,10 @@ pub fn fail_spinner(spinner: &mut ProgressBar, message: String) {
 }
 
 pub fn success_spinner(spinner: &mut ProgressBar, message: String) {
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{msg:.green}")
+            .expect("Failed to create success spinner template"),
+    );
     spinner.finish_with_message(format!("✓ {message}"));
 }

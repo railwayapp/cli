@@ -22,6 +22,10 @@ pub struct Args {
     pub browserless: bool,
 }
 
+pub async fn prompt_login() -> Result<()> {
+    command(Args { browserless: false }).await
+}
+
 pub async fn command(args: Args) -> Result<()> {
     if !crate::macros::is_stdout_terminal() {
         if args.browserless {
