@@ -16,7 +16,7 @@ use common::*;
 
 // Re-exported for the `sandbox` command, which reuses the same native SSH
 // transport (key registration + `ssh <target>@<env relay host>`).
-pub use native::{ensure_ssh_key, run_native_ssh};
+pub use native::{DurableResume, ensure_ssh_key, run_native_ssh};
 
 /// Connect to a service via SSH or manage SSH keys
 #[derive(Parser, Clone)]
@@ -136,7 +136,7 @@ pub async fn command(args: Args) -> Result<()> {
     };
     let exit_code = tel::track(
         "spawn",
-        native::run_native_ssh(&ssh_target, command, effective_identity),
+        native::run_native_ssh(&ssh_target, command, effective_identity, None),
     )
     .await?;
     if exit_code != 0 {

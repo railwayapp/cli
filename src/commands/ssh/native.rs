@@ -233,6 +233,15 @@ pub fn run_tmux_session(
     Ok(())
 }
 
+/// Resume request for a relay durable session, delivered via SSH `SetEnv`
+/// (the relay intercepts these env keys; they are not forwarded to the VM).
+pub struct DurableResume<'a> {
+    pub session_name: &'a str,
+    /// Resume from the server's last-read cursor instead of replaying the
+    /// full retained scrollback.
+    pub resume_from_last_read: bool,
+}
+
 /// Run SSH command with the given service instance ID.
 /// Optionally executes a command instead of starting an interactive shell.
 ///
@@ -246,6 +255,7 @@ pub fn run_native_ssh(
     service_instance_id: &str,
     command: Option<&[String]>,
     identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
     let (host, port) = ssh_relay();
     let target = format!("{service_instance_id}@{host}");
@@ -257,6 +267,19 @@ pub fn run_native_ssh(
 
     if let Some(key) = identity_file {
         ssh_cmd.arg("-i").arg(key);
+    }
+
+    if let Some(durable) = durable {
+        // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
+        // honors the first SetEnv it encounters.
+        let mut set_env = format!(
+            "SetEnv RAILWAY_DURABLE_SESSION_NAME={}",
+            durable.session_name
+        );
+        if durable.resume_from_last_read {
+            set_env.push_str(" RAILWAY_DURABLE_RESUME=lastread");
+        }
+        ssh_cmd.arg("-o").arg(set_env);
     }
 
     match command {

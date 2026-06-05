@@ -7,10 +7,11 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
-use crate::commands::ssh::{ensure_ssh_key, run_native_ssh, tel};
+use crate::commands::ssh::{DurableResume, ensure_ssh_key, run_native_ssh, tel};
 use crate::config::{Configs, StoredSandbox, StoredSandboxTemplate};
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
+use crate::controllers::sandbox_exec::{self, ExecOutcome};
 use crate::controllers::variables::Variable;
 use crate::gql::{mutations, queries};
 use crate::util::progress::{create_shimmer_spinner, fail_spinner};
@@ -19,7 +20,7 @@ use crate::util::prompt::{prompt_options, prompt_options_skippable};
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -229,6 +230,16 @@ struct SshArgs {
     #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
     identity_file: Option<std::path::PathBuf>,
 
+    /// Resume a durable session by name (the relay announces the name on
+    /// connect: "Railway durable session: <name>")
+    #[clap(long, value_name = "NAME")]
+    session: Option<String>,
+
+    /// When resuming, continue from the last-read position instead of
+    /// replaying the retained scrollback
+    #[clap(long, requires = "session")]
+    resume_from_last_read: bool,
+
     /// Command to run instead of an interactive shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
@@ -240,12 +251,27 @@ struct ExecArgs {
     #[clap(long = "id", value_name = "ID")]
     id: Option<String>,
 
-    /// Per-command timeout in seconds
+    /// Client-side deadline in seconds; on expiry the command is terminated
+    /// and the CLI exits 124
     #[clap(long)]
     timeout: Option<i64>,
 
-    /// Command to run (everything after `--`)
-    #[clap(trailing_var_arg = true, required = true)]
+    /// Reattach to a durable session by name (a command is then optional)
+    #[clap(long, value_name = "NAME", conflicts_with = "detach")]
+    session: Option<String>,
+
+    /// When reattaching, resume from the last-read position instead of
+    /// replaying the retained output
+    #[clap(long, requires = "session")]
+    resume_from_last_read: bool,
+
+    /// Start the command, print its durable session name to stdout, and exit
+    /// while it keeps running (reattach with --session)
+    #[clap(long)]
+    detach: bool,
+
+    /// Command to run (everything after `--`; optional with --session)
+    #[clap(trailing_var_arg = true)]
     command: Vec<String>,
 }
 
@@ -1088,40 +1114,161 @@ async fn exec(
     environment: Option<String>,
     args: ExecArgs,
 ) -> Result<()> {
-    let (sandbox_id, environment_id) =
-        resolve_target(configs, client, args.id, project, environment).await?;
+    use colored::Colorize;
+
+    // clap can't express "required unless --session" for a trailing vararg.
+    if args.command.is_empty() && args.session.is_none() {
+        bail!("a command is required (or pass --session <name> to reattach)");
+    }
+
+    let (sandbox_id, environment_id) = tel::track_for(
+        "sandbox",
+        "exec_resolve_target",
+        resolve_target(configs, client, args.id.clone(), project, environment).await,
+    )
+    .await?;
 
     configs.set_active_sandbox(&sandbox_id);
     configs.write()?;
 
-    let mut spinner = create_shimmer_spinner("Executing command");
-    let res = match post_graphql::<mutations::SandboxExec, _>(
-        client,
-        configs.get_backboard(),
-        mutations::sandbox_exec::Variables {
-            id: sandbox_id,
-            environment_id,
-            command: args.command.join(" "),
-            timeout_sec: args.timeout,
-        },
+    let mut spinner = create_shimmer_spinner("Connecting");
+
+    // The bridge is authorized by a short-lived shell-scoped JWT carried in
+    // the WebSocket subprotocol.
+    let jwt = match tel::track_for(
+        "sandbox",
+        "exec_mint_token",
+        mint_shell_token(
+            client,
+            configs.get_backboard(),
+            &environment_id,
+            &sandbox_id,
+        )
+        .await,
     )
     .await
     {
-        Ok(res) => res,
+        Ok(jwt) => jwt,
         Err(e) => {
-            fail_spinner(&mut spinner, "Failed to run command".to_string());
-            return Err(e.into());
+            fail_spinner(&mut spinner, "Failed to authorize command".to_string());
+            return Err(e);
         }
     };
-    spinner.finish_and_clear();
-    let result = res.sandbox_exec;
 
-    print!("{}", result.stdout);
-    eprint!("{}", result.stderr);
-    if result.timed_out {
-        eprintln!("\n(command timed out)");
+    let ws =
+        match tel::track_for("sandbox", "exec_connect", sandbox_exec::connect(&jwt).await).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                fail_spinner(&mut spinner, "Failed to connect to sandbox".to_string());
+                return Err(e);
+            }
+        };
+    spinner.finish_and_clear();
+
+    // Keep the sandbox alive against the idle reaper while the command runs.
+    let heartbeat = spawn_heartbeat(
+        client.clone(),
+        configs.get_backboard(),
+        environment_id,
+        sandbox_id.clone(),
+    );
+
+    let options = sandbox_exec::ExecOptions {
+        command: (!args.command.is_empty()).then(|| args.command.join(" ")),
+        session: args.session.clone(),
+        resume_from_last_read: args.resume_from_last_read,
+        timeout: args
+            .timeout
+            .map(|secs| Duration::from_secs(secs.max(0) as u64)),
+        detach: args.detach,
+        stdin_is_tty: std::io::stdin().is_terminal(),
+    };
+
+    let outcome = tel::track_for(
+        "sandbox",
+        "exec_stream",
+        sandbox_exec::run(ws, options).await,
+    )
+    .await;
+    heartbeat.abort();
+
+    match outcome? {
+        ExecOutcome::Exited {
+            code,
+            fresh_session_suspected,
+        } => {
+            if fresh_session_suspected {
+                eprintln!(
+                    "{}",
+                    "warning: that session may have expired; the server started a fresh one instead"
+                        .yellow()
+                );
+            }
+            if args.detach {
+                eprintln!(
+                    "{}",
+                    "warning: durable sessions are unavailable for this sandbox; ran attached"
+                        .yellow()
+                );
+            }
+            if code != 0 {
+                tel::report_failure_for("sandbox", "exec_exit_nonzero", &format!("exit {code}"))
+                    .await;
+            }
+            std::process::exit(code);
+        }
+        ExecOutcome::TimedOut { session_name } => {
+            eprintln!("\n(command timed out)");
+            if let Some(name) = session_name {
+                eprintln!("{}", reattach_hint(&sandbox_id, &name).dimmed());
+            }
+            std::process::exit(sandbox_exec::TIMEOUT_EXIT_CODE);
+        }
+        ExecOutcome::Detached { session_name } => {
+            // stdout carries just the session name so scripts can capture it.
+            println!("{session_name}");
+            eprintln!("{}", reattach_hint(&sandbox_id, &session_name).dimmed());
+            Ok(())
+        }
+        ExecOutcome::Disconnected { session_name } => {
+            match session_name {
+                Some(name) => {
+                    eprintln!("\nDisconnected; the command may still be running.");
+                    eprintln!("{}", reattach_hint(&sandbox_id, &name).dimmed());
+                }
+                None => eprintln!("\nConnection lost."),
+            }
+            std::process::exit(1);
+        }
     }
-    std::process::exit(result.exit_code as i32);
+}
+
+fn reattach_hint(sandbox_id: &str, session_name: &str) -> String {
+    format!("Reattach with: railway sandbox exec --id {sandbox_id} --session {session_name}")
+}
+
+async fn mint_shell_token(
+    client: &reqwest::Client,
+    backboard: String,
+    environment_id: &str,
+    sandbox_id: &str,
+) -> Result<String> {
+    let res = post_graphql::<mutations::GenerateShellToken, _>(
+        client,
+        backboard,
+        mutations::generate_shell_token::Variables {
+            input: mutations::generate_shell_token::ShellTokenInput {
+                environment_id: environment_id.to_string(),
+                instance_id: sandbox_id.to_string(),
+                kind: Some("sandbox".to_string()),
+                port: None,
+                scope: "shell".to_string(),
+                service_id: None,
+            },
+        },
+    )
+    .await?;
+    Ok(res.generate_shell_token)
 }
 
 async fn destroy(
@@ -1214,11 +1361,17 @@ async fn ssh(
         Some(args.command.clone())
     };
     let identity = args.identity_file.clone().or(auto_identity);
+    let durable_session = args.session.clone();
+    let resume_from_last_read = args.resume_from_last_read;
 
     // `run_native_ssh` is blocking (inherits the terminal); run it off the
     // async runtime so the heartbeat task keeps ticking.
     let session = tokio::task::spawn_blocking(move || {
-        run_native_ssh(&target, command.as_deref(), identity.as_deref())
+        let durable = durable_session.as_deref().map(|name| DurableResume {
+            session_name: name,
+            resume_from_last_read,
+        });
+        run_native_ssh(&target, command.as_deref(), identity.as_deref(), durable)
     })
     .await
     .map_err(anyhow::Error::from)
@@ -1355,6 +1508,44 @@ mod tests {
     #[test]
     fn variables_to_input_empty_is_none() {
         assert!(variables_to_input(&[], &[]).unwrap().is_none());
+    }
+
+    fn parse_exec(argv: &[&str]) -> std::result::Result<Args, clap::Error> {
+        let full: Vec<&str> = std::iter::once("sandbox")
+            .chain(argv.iter().copied())
+            .collect();
+        <Args as clap::Parser>::try_parse_from(full)
+    }
+
+    #[test]
+    fn exec_session_without_command_parses() {
+        let args = parse_exec(&["exec", "--session", "sess-1"]).unwrap();
+        let Commands::Exec(exec) = args.command else {
+            panic!("expected exec subcommand");
+        };
+        assert_eq!(exec.session.as_deref(), Some("sess-1"));
+        assert!(exec.command.is_empty());
+    }
+
+    #[test]
+    fn exec_session_conflicts_with_detach() {
+        assert!(parse_exec(&["exec", "--session", "s", "--detach", "--", "ls"]).is_err());
+    }
+
+    #[test]
+    fn exec_resume_requires_session() {
+        assert!(parse_exec(&["exec", "--resume-from-last-read", "--", "ls"]).is_err());
+        assert!(parse_exec(&["exec", "--session", "s", "--resume-from-last-read"]).is_ok());
+    }
+
+    #[test]
+    fn exec_detach_with_command_parses() {
+        let args = parse_exec(&["exec", "--detach", "--", "sleep", "300"]).unwrap();
+        let Commands::Exec(exec) = args.command else {
+            panic!("expected exec subcommand");
+        };
+        assert!(exec.detach);
+        assert_eq!(exec.command, vec!["sleep", "300"]);
     }
 
     #[test]

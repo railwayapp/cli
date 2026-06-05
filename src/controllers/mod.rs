@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod metrics_tui;
 pub mod project;
 pub mod regions;
+pub mod sandbox_exec;
 pub mod scale_tui;
 pub mod service;
 pub mod ssh;

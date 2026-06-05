@@ -370,11 +370,11 @@ pub struct SandboxTemplateBuild;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/SandboxExec.graphql",
+    query_path = "src/gql/mutations/strings/GenerateShellToken.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
-pub struct SandboxExec;
+pub struct GenerateShellToken;
 
 #[derive(GraphQLQuery)]
 #[graphql(
