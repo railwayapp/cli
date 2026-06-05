@@ -431,7 +431,7 @@ fn runner_not_found_message(runner: &ResolvedRunner) -> String {
             "Could not start Railway configuration support from `{}`. Check that the path exists and is executable.",
             runner.path
         ),
-        RunnerSource::ProjectDependency | RunnerSource::Path => "Could not find Railway configuration support for this project. Install the Railway TypeScript package with your package manager, then run this command again. For example: `npm install railway`.".to_string(),
+        RunnerSource::ProjectDependency | RunnerSource::Path => "Could not find Railway configuration support for this project. Install the Railway TypeScript SDK, then run this command again: https://github.com/railwayapp/railway-ts-sdk".to_string(),
     }
 }
 
