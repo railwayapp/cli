@@ -1,11 +1,14 @@
 pub mod agent_advisory;
 pub mod check_update;
 pub mod compare_semver;
+pub mod detect;
 pub mod editor;
+pub mod git;
 pub mod install_method;
 pub mod logs;
 pub mod progress;
 pub mod prompt;
+pub mod reporter;
 pub mod retry;
 pub mod self_update;
 pub mod time;

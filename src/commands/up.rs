@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
-use anyhow::{Result, bail};
-
+use anyhow::{Context, Result, bail};
+use colored::Colorize;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use is_terminal::IsTerminal;
@@ -17,12 +17,23 @@ use crate::{
     },
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::logs::{LogFormat, print_log},
+    util::{
+        detect::detect_services,
+        git::{detect_current_branch, detect_github_remote},
+        logs::{LogFormat, print_log},
+    },
+    workspace::{pick_workspace, workspaces},
 };
 
 use super::*;
 
-/// Upload and deploy project from the current directory
+/// Upload and deploy project from the current directory.
+///
+/// If you're not signed in, signs you in or creates a Railway account
+/// (single unified OAuth flow — new accounts are created on the fly)
+/// via a browser, or a device code on SSH/headless sessions, then
+/// chains into project + service creation and deploy. Pair with -y to
+/// skip the surrounding prompts in scripted or agent-driven contexts.
 #[derive(Parser)]
 #[clap(
     after_help = "Examples:\n\n  railway up --service api --environment production\n  railway up ./apps/api --path-as-root --service api\n  railway up --detach --json --message \"deploy api\"\n\nAutomation notes:\n  `railway up --detach --json` starts an upload and deployment, but it does not wait for the deployment to become healthy.\n  Poll with `railway deployment list --json` and inspect logs with `railway logs --json --lines 100`.\n  To switch a locally uploaded service to GitHub autodeploys, run `railway service source connect --repo owner/repo --branch main --service api`."
@@ -30,9 +41,19 @@ use super::*;
 pub struct Args {
     path: Option<PathBuf>,
 
-    #[clap(short, long)]
-    /// Don't attach to the log stream
+    #[clap(short, long, alias = "no-wait")]
+    /// Don't attach to the log stream — start the deploy and return
+    /// immediately. Use --no-wait as the alternate name in scripted
+    /// flows. Combine with -y for fully unattended runs.
     detach: bool,
+
+    #[clap(short = 'y', long)]
+    /// Accept all defaults — skip the auth confirm prompt for unauthed
+    /// users and skip the project-name prompt when creating a new
+    /// project from this directory. OAuth itself still needs a human
+    /// (browser, or device code on SSH/headless); -y just removes the
+    /// surrounding prompts.
+    yes: bool,
 
     #[clap(short, long)]
     /// Stream build logs only, then exit (equivalent to setting $CI=true).
@@ -49,6 +70,21 @@ pub struct Args {
     #[clap(short = 'p', long, value_name = "PROJECT_ID")]
     /// Project ID to deploy to (defaults to linked project)
     project: Option<String>,
+
+    #[clap(short, long)]
+    /// Workspace to create a new project in (first-run / --new). Auto-selects if you only have one; otherwise prompts.
+    workspace: Option<String>,
+
+    #[clap(long)]
+    /// Create a NEW project + service from this directory and deploy it,
+    /// even if one is already linked. Implied on a cold/unauthenticated
+    /// first run, and for `-y` when nothing is linked.
+    new: bool,
+
+    #[clap(long)]
+    /// Name for a newly created project (defaults to the current
+    /// directory's name). Only used when creating a new project.
+    name: Option<String>,
 
     #[clap(long)]
     /// Don't ignore paths from .gitignore
@@ -72,7 +108,55 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let configs = Configs::new()?;
+    crate::util::reporter::set_mode(args.json);
+
+    let mut configs = Configs::new()?;
+
+    // If the user isn't signed in, intercept early: show a clack-style
+    // picker (Create New Account / Log In and Deploy), chain into the
+    // login flow, then reload configs and continue with `up`. This
+    // turns the previously cryptic "no token" error path into the
+    // canonical first-run experience.
+    let came_from_unauth_prompt = configs.get_railway_auth_token().is_none();
+    if came_from_unauth_prompt {
+        prompt_unauth_and_login(&args).await?;
+        configs = Configs::new()?;
+    }
+
+    // Decide whether to create a fresh project from this directory.
+    // `--new` always forces it. Otherwise it only applies when there's no
+    // project to deploy to (no link, no `--project`): create automatically
+    // when creation has been implicitly authorized — a just-completed
+    // signup, an explicit `-y`, or an agent harness driving us (the agent
+    // invocation is the authorization, the same signal that skips the auth
+    // confirm). An interactive human with no link gets a choice
+    // (create / link / cancel) instead of a silent create. Pure automation
+    // (no link, no flag, no agent) falls through to the standard "no
+    // project" error below — we never silently create from a script.
+    let ctx = crate::exec_context::ExecutionContext::detect(args.json, args.ci);
+    if args.new {
+        return deploy_new_project(&args).await;
+    }
+    if args.project.is_none() && configs.get_linked_project().await.is_err() {
+        if came_from_unauth_prompt || args.yes || ctx.agent_implicit_consent() {
+            return deploy_new_project(&args).await;
+        }
+        if ctx.stdout_tty && !args.json && !args.ci {
+            match prompt_no_link_action()? {
+                NoLinkAction::Create => return deploy_new_project(&args).await,
+                NoLinkAction::Link => {
+                    super::link::command(super::link::Args::for_service_link(None, None, None))
+                        .await?;
+                    configs = Configs::new()?;
+                    // Fall through to the normal deploy path, now linked.
+                }
+                NoLinkAction::Cancel => return Ok(()),
+            }
+        }
+        // Non-interactive with no link and no implicit authorization: fall
+        // through; the standard "no linked project" error surfaces below.
+    }
+
     let hostname = configs.get_host();
     let client = GQLClient::new_authorized(&configs)?;
 
@@ -390,5 +474,572 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
             project_path,
             archive_prefix_path: project_dir,
         })
+    }
+}
+
+/// Drop into the login flow when the user isn't signed in. Sign-up
+/// and sign-in go through the same OAuth surface, so we don't bother
+/// prompting the user to declare which they're doing — the backend
+/// detects fresh accounts on its own (from durable compliance state —
+/// a CLI client that hasn't accepted ToS/Fair-Use yet) and adapts the
+/// consent screen + post-auth landing accordingly.
+async fn prompt_unauth_and_login(args: &Args) -> Result<()> {
+    // Decide whether there's a human who can complete a sign-in.
+    // JSON/CI consumers, and captured-stdout runs with no agent harness,
+    // have nobody to drive it — so surface a structured NOT_AUTHENTICATED
+    // error (rendered as JSON in --json mode by the top-level handler)
+    // instead of starting a flow nobody can finish. Otherwise we proceed
+    // with a browser when one is reachable, or a device code (which the
+    // human completes on another device) on SSH / no-DISPLAY. The full
+    // truth table lives in `exec_context`.
+    let ctx = crate::exec_context::ExecutionContext::detect(args.json, args.ci);
+    let transport = match ctx.auto_auth(false) {
+        crate::exec_context::AutoAuth::Proceed(transport) => transport,
+        crate::exec_context::AutoAuth::FailFast => {
+            return Err(crate::errors::RailwayError::NotAuthenticated.into());
+        }
+    };
+
+    // An agent harness with piped stdin is treated as implicit consent:
+    // skip the "Continue?" prompt (stdin can't answer it) and proceed.
+    let implicit_consent = ctx.agent_implicit_consent();
+
+    println!();
+    println!(
+        "  {} {}",
+        "!".yellow().bold(),
+        "You're not signed in to Railway.".bold(),
+    );
+    println!();
+    println!(
+        "  {} will sign you in (or create an account if you don't have one),",
+        "railway up".bold(),
+    );
+    println!("  then create a new Railway project from this directory and deploy it.");
+    println!();
+    println!("  To deploy to an existing project instead, cancel and run");
+    println!("  `railway login && railway link --project <name>` first.");
+    println!();
+
+    // Skip the confirm prompt under an agent harness (stdin isn't a
+    // TTY there either, so the prompt would fail). The agent invoking
+    // `railway up` is treated as implicit consent to proceed — print a
+    // one-liner so the human watching the agent's transcript knows how
+    // sign-in is about to surface, without a prompt.
+    if implicit_consent {
+        let how = match transport {
+            crate::exec_context::AuthTransport::Browser => "opening browser",
+            crate::exec_context::AuthTransport::DeviceCode => "printing a device-code sign-in link",
+        };
+        println!(
+            "  {} Agent harness detected — {how} (skipping confirm).",
+            "→".cyan(),
+        );
+    }
+    if !args.yes && !implicit_consent {
+        // Confirm before opening a browser tab — interactive users
+        // appreciate not having tabs spawn out from under them. -y
+        // skips this for unattended flows.
+        let confirm =
+            crate::util::prompt::prompt_confirm_with_default_with_cancel("Continue?", true)?;
+        match confirm {
+            Some(true) => {}
+            _ => bail!("Aborted."),
+        }
+    }
+
+    super::login::command(super::login::Args { browserless: false }).await
+}
+
+/// What an interactive human chooses when `railway up` runs in a
+/// directory with no linked project and creation wasn't implicitly
+/// authorized (agents / `-y` / just-signed-up are handled before this).
+enum NoLinkAction {
+    Create,
+    Link,
+    Cancel,
+}
+
+impl std::fmt::Display for NoLinkAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            NoLinkAction::Create => "Create a new project here and deploy",
+            NoLinkAction::Link => "Link an existing project, then deploy",
+            NoLinkAction::Cancel => "Cancel",
+        })
+    }
+}
+
+/// Offer create / link / cancel when there's no linked project. Returning
+/// users (wrong dir, fresh clone, moved dir) can pick "Link" instead of
+/// being railroaded into a duplicate project.
+fn prompt_no_link_action() -> Result<NoLinkAction> {
+    println!();
+    println!(
+        "  {} No Railway project is linked to this directory.",
+        "!".yellow().bold(),
+    );
+    println!();
+    crate::util::prompt::prompt_options(
+        "What would you like to do?",
+        vec![
+            NoLinkAction::Create,
+            NoLinkAction::Link,
+            NoLinkAction::Cancel,
+        ],
+    )
+}
+
+/// Create a brand-new project + service from the current directory and
+/// deploy it (the `up --new` path, and the cold-start / `-y`-with-no-link
+/// path). Creates the project, bundles + uploads the directory, links the
+/// project and service to the cwd, and streams the build to completion.
+async fn deploy_new_project(args: &Args) -> Result<()> {
+    let mut configs = Configs::new()?;
+
+    // Surface a structured error rather than a cryptic GQL failure when
+    // unauthed. The unauthed `up` chain runs login before we get here,
+    // so this only fires for a direct `up --new` with no/expired token.
+    if !configs.has_oauth_token() || configs.is_token_expired() {
+        return Err(crate::errors::RailwayError::NotAuthenticated.into());
+    }
+
+    let hostname = configs.get_host().to_owned();
+    let client = GQLClient::new_authorized(&configs)?;
+
+    let workspaces = workspaces().await?;
+    let workspace = pick_workspace(workspaces, args.workspace.clone())?;
+
+    let cwd_path = args
+        .path
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)?;
+
+    // Resolve the project name:
+    //   --name foo        → "foo"
+    //   -y, no --name     → current directory basename (or backboard-
+    //                       generated if there isn't one we can read)
+    //   interactive TTY   → prompt with the directory basename as
+    //                       default; user can hit Enter to accept
+    //   non-TTY, no -y    → fall back to directory basename
+    let default_name: Option<String> = cwd_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let project_name: Option<String> = if args.name.is_some() {
+        args.name.clone()
+    } else if args.yes || args.json || !std::io::stdout().is_terminal() {
+        default_name.clone()
+    } else {
+        let default = default_name.clone().unwrap_or_default();
+        let input = if default.is_empty() {
+            inquire::Text::new("Project name")
+                .with_render_config(Configs::get_render_config())
+                .prompt()?
+        } else {
+            inquire::Text::new("Project name")
+                .with_default(&default)
+                .with_render_config(Configs::get_render_config())
+                .prompt()?
+        };
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+
+    // Show GitHub repo detection (informational for now — full GH App
+    // integration is a separate piece; we deploy from local tarball).
+    if !args.json {
+        if let Some(remote) = detect_github_remote(&cwd_path) {
+            let branch = detect_current_branch(&cwd_path)
+                .map(|branch| format!(" on {branch}"))
+                .unwrap_or_default();
+            println!(
+                "  {} GitHub remote: {}{} {}",
+                "◇".cyan(),
+                remote.full_repo_name().bold(),
+                branch,
+                "(deploying current directory; GH App integration coming later)".dimmed(),
+            );
+        }
+    }
+
+    let detected_services = detect_services(&cwd_path);
+    if !detected_services.is_empty() && !args.json {
+        println!(
+            "  {} Detected service dependencies: {} {}",
+            "◇".cyan(),
+            detected_services.join(", ").bold(),
+            "(automatic provisioning is not wired yet)".dimmed(),
+        );
+    }
+
+    // Create the project first so the user has a landing pad even if
+    // the build later fails.
+    let create_spinner = step_spinner(args.json, "Creating project");
+
+    let vars = mutations::project_create::Variables {
+        name: project_name,
+        description: None,
+        workspace_id: Some(workspace.id().to_owned()),
+    };
+    let project_create =
+        post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
+            .await?
+            .project_create;
+
+    let environment = project_create
+        .environments
+        .edges
+        .first()
+        .context("Project has no default environment")?
+        .node
+        .clone();
+
+    if let Some(spinner) = create_spinner {
+        spinner.finish_and_clear();
+    }
+    if !args.json {
+        println!(
+            "  {} Created project {} on {}",
+            "✓".green(),
+            project_create.name.bold(),
+            workspace.name(),
+        );
+    }
+
+    // Link the project to the current directory *before* bundling and
+    // uploading: if either fails, a re-run of `railway up` then targets
+    // this project (the landing pad) instead of minting a duplicate.
+    // The service link has to wait until after the upload — backboard's
+    // /up endpoint is what creates the service.
+    configs.link_project(
+        project_create.id.clone(),
+        Some(project_create.name.clone()),
+        environment.id.clone(),
+        Some(environment.name.clone()),
+    )?;
+    configs.write()?;
+
+    // Bundle the directory.
+    let bundle_spinner = step_spinner(args.json, "Bundling project");
+    let tarball = create_deploy_tarball(&cwd_path, &cwd_path, args.no_gitignore, |_, _| {})?;
+    if let Some(spinner) = bundle_spinner {
+        spinner.finish_and_clear();
+    }
+    if !args.json {
+        println!("  {} Bundled ({} bytes)", "✓".green(), tarball.len());
+    }
+
+    // Upload + queue the build.
+    let upload_spinner = step_spinner(args.json, "Uploading & queuing build");
+
+    // Reuse the GQLClient::new_authorized reqwest client — it bakes the
+    // bearer token into default headers, which backboard's
+    // /project/:id/environment/:id/up endpoint requires.
+    let up_response = upload_deploy_tarball(
+        &client,
+        &hostname,
+        &project_create.id,
+        &environment.id,
+        None,
+        None,
+        tarball,
+    )
+    .await?;
+    if let Some(spinner) = upload_spinner {
+        spinner.finish_and_clear();
+    }
+
+    // backboard's /up endpoint creates a service implicitly but doesn't
+    // return its id, so recover it from the logs_url
+    // (.../project/<pid>/service/<sid>?...) to link the service too.
+    let service_id = parse_service_id_from_logs_url(&up_response.logs_url);
+    match &service_id {
+        Some(service_id) => configs.link_service(service_id.clone())?,
+        None => crate::util::reporter::warn(
+            "SERVICE_LINK_UNRESOLVED",
+            "Couldn't determine the new service id, so it wasn't linked automatically.",
+            Some("Run `railway service` to link it before `railway logs`."),
+        ),
+    }
+    configs.write()?;
+
+    if !args.json {
+        println!("  {} Build queued", "✓".green());
+        println!(
+            "  {} {}",
+            "Build Logs:".green().bold(),
+            up_response.logs_url
+        );
+    }
+
+    let deploy_url = if up_response.deployment_domain.is_empty() {
+        None
+    } else if up_response.deployment_domain.starts_with("http") {
+        Some(up_response.deployment_domain.clone())
+    } else {
+        Some(format!("https://{}", up_response.deployment_domain))
+    };
+
+    // Single structured result for --json consumers (stream contract:
+    // one JSON object on stdout — preceded by NDJSON build logs in
+    // attached mode). `status` is the deployment's terminal state, or
+    // "queued" under --detach.
+    let dashboard_url = match &service_id {
+        Some(sid) => format!(
+            "https://{hostname}/project/{}/service/{sid}?environmentId={}",
+            project_create.id, environment.id
+        ),
+        None => format!("https://{hostname}/project/{}", project_create.id),
+    };
+    let json_result = |status: &str| {
+        serde_json::json!({
+            "status": status,
+            "projectId": project_create.id,
+            "projectName": project_create.name,
+            "environmentId": environment.id,
+            "serviceId": service_id,
+            "deploymentId": up_response.deployment_id,
+            "logsUrl": up_response.logs_url,
+            "dashboardUrl": dashboard_url,
+            "url": deploy_url,
+            "detectedServices": detected_services,
+        })
+    };
+
+    // --no-wait / --detach: surface the summary and return. The build
+    // was only queued — neither output mode claims a deploy outcome.
+    if args.detach {
+        if args.json {
+            crate::util::reporter::emit_json(&json_result("queued"))?;
+        } else {
+            print_app_summary(
+                &hostname,
+                &project_create.id,
+                &project_create.name,
+                service_id.as_deref(),
+                &environment.id,
+                deploy_url.as_deref(),
+                false,
+            );
+        }
+        return Ok(());
+    }
+
+    // Stream build + deploy logs so the user sees the build happen.
+    // Small delay first to let backboard register the deployment.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let json_mode = args.json;
+    let build_id_for_logs = up_response.deployment_id.clone();
+    let _build_task = tokio::task::spawn(async move {
+        let _ = stream_build_logs(build_id_for_logs, None, |log| {
+            if json_mode {
+                print_log(log, true, LogFormat::LevelOnly);
+            } else {
+                println!("{}", log.message);
+            }
+        })
+        .await;
+    });
+
+    // Raw deploy logs are a human nicety; in JSON mode the build-log
+    // NDJSON plus the final result object are the whole contract.
+    let _deploy_task = if json_mode {
+        None
+    } else {
+        let deploy_id_for_logs = up_response.deployment_id.clone();
+        Some(tokio::task::spawn(async move {
+            let _ = stream_deploy_logs(deploy_id_for_logs, None, |log| {
+                println!("{}", log.message);
+            })
+            .await;
+        }))
+    };
+
+    // Await the deployment status in the foreground: the exit code must
+    // come from the deployment's terminal state, not from the log
+    // streams ending (they can close before the build finishes, which
+    // previously let a failing deploy exit 0).
+    let mut status_stream =
+        subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
+            id: up_response.deployment_id.clone(),
+        })
+        .await?;
+    while let Some(Ok(res)) = status_stream.next().await {
+        let Some(data) = res.data else { continue };
+        match data.deployment.status {
+            DeploymentStatus::SUCCESS => {
+                if json_mode {
+                    crate::util::reporter::emit_json(&json_result("success"))?;
+                } else {
+                    print_app_summary(
+                        &hostname,
+                        &project_create.id,
+                        &project_create.name,
+                        service_id.as_deref(),
+                        &environment.id,
+                        deploy_url.as_deref(),
+                        true,
+                    );
+                }
+                std::process::exit(0);
+            }
+            DeploymentStatus::FAILED => {
+                if json_mode {
+                    crate::util::reporter::emit_json(&json_result("failed"))?;
+                } else {
+                    println!();
+                    println!("  {} {}", "✗".red(), "Build failed".bold());
+                    println!(
+                        "     {} {}",
+                        "Logs:".dimmed(),
+                        up_response.logs_url.bold().underline(),
+                    );
+                    println!();
+                }
+                std::process::exit(1);
+            }
+            DeploymentStatus::CRASHED => {
+                if json_mode {
+                    crate::util::reporter::emit_json(&json_result("crashed"))?;
+                } else {
+                    println!();
+                    println!("  {} {}", "✗".red(), "Deploy crashed".bold());
+                    println!(
+                        "     {} {}",
+                        "Logs:".dimmed(),
+                        up_response.logs_url.bold().underline(),
+                    );
+                    println!();
+                }
+                std::process::exit(1);
+            }
+            _ => {}
+        }
+    }
+
+    // The status stream ended without reaching a terminal state (e.g.
+    // the websocket dropped). Don't claim success — surface the
+    // ambiguity and point at the logs.
+    crate::util::reporter::warn(
+        "DEPLOY_STATUS_UNKNOWN",
+        "Lost the deployment status stream before the deploy finished.",
+        Some("Check the build logs or run `railway deployment list --json`."),
+    );
+    if json_mode {
+        crate::util::reporter::emit_json(&json_result("unknown"))?;
+    } else {
+        println!();
+        println!("  {} Watch the build:", "→".cyan());
+        println!("     {}", up_response.logs_url.bold().underline());
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Spinner for one step of the create-and-deploy flow, or `None` in JSON
+/// mode (machine consumers get the structured result instead; indicatif
+/// already no-ops when stderr isn't a terminal).
+fn step_spinner(json_mode: bool, msg: &'static str) -> Option<ProgressBar> {
+    if json_mode {
+        return None;
+    }
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .tick_chars(TICK_STRING)
+            .template("{spinner:.green} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+    );
+    spinner.set_message(msg);
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    Some(spinner)
+}
+
+/// Print the end-of-run summary: the running URL when one exists, a hint
+/// to add one when it doesn't, and the project + dashboard link so an
+/// agent (or human) has something concrete to hand back. We never
+/// auto-generate a domain — exposing a service publicly is the user's
+/// call (`railway domain`). `completed` distinguishes a deploy that
+/// reached SUCCESS from a --detach run where the build was only queued.
+fn print_app_summary(
+    host: &str,
+    project_id: &str,
+    project_name: &str,
+    service_id: Option<&str>,
+    environment_id: &str,
+    deploy_url: Option<&str>,
+    completed: bool,
+) {
+    println!();
+    match (completed, deploy_url) {
+        (true, Some(url)) => {
+            println!("  {} {}", "✓".green(), "Live at".bold());
+            println!("     {}", url.bold().underline());
+        }
+        (true, None) => {
+            println!("  {} {}", "✓".green(), "Deploy complete".bold());
+            println!(
+                "     {} run {} to add a public URL.",
+                "No public domain yet —".dimmed(),
+                "railway domain".bold(),
+            );
+        }
+        (false, Some(url)) => {
+            println!(
+                "  {} {}",
+                "→".cyan(),
+                "Build queued — once deployed, live at".bold()
+            );
+            println!("     {}", url.bold().underline());
+        }
+        (false, None) => {
+            println!("  {} {}", "→".cyan(), "Build queued".bold());
+            println!(
+                "     {} run {} to add a public URL.",
+                "No public domain yet —".dimmed(),
+                "railway domain".bold(),
+            );
+        }
+    }
+
+    let dashboard = match service_id {
+        Some(sid) => format!(
+            "https://{host}/project/{project_id}/service/{sid}?environmentId={environment_id}"
+        ),
+        None => format!("https://{host}/project/{project_id}"),
+    };
+    println!();
+    println!("  {} Project {}", "✓".green(), project_name.bold());
+    println!(
+        "     {} {}",
+        "Manage:".dimmed(),
+        dashboard.bold().underline()
+    );
+    println!();
+}
+
+/// Extract the service ID from a logs URL of shape
+/// `.../project/{project_id}/service/{service_id}?...`. Returns None if
+/// the URL doesn't contain a `/service/<id>` segment.
+fn parse_service_id_from_logs_url(logs_url: &str) -> Option<String> {
+    let after_service = logs_url.split("/service/").nth(1)?;
+    let service_id: String = after_service
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if service_id.is_empty() {
+        None
+    } else {
+        Some(service_id)
     }
 }

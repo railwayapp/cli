@@ -98,6 +98,36 @@ struct SetupAgentEventTrackInput {
     is_ci: bool,
 }
 
+/// Outcome of a single CLI authentication attempt, for the signup /
+/// sign-in funnel. Emitted via a public mutation so timeouts and
+/// failures (which occur before any token exists) are still captured,
+/// attributed by `caller` / `agent_session_id`.
+pub struct CliAuthTrackEvent {
+    /// "browser" | "device_code"
+    pub transport: &'static str,
+    /// "succeeded" | "timed_out" | "failed"
+    pub outcome: &'static str,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliAuthEventTrackInput {
+    transport: &'static str,
+    outcome: &'static str,
+    success: bool,
+    error_message: Option<String>,
+    session_id: String,
+    caller: String,
+    agent_session_id: Option<String>,
+    install_request_id: Option<String>,
+    cli_version: String,
+    os: String,
+    arch: String,
+    is_ci: bool,
+}
+
 #[derive(Clone)]
 struct TelemetryContext {
     session_id: String,
@@ -170,7 +200,12 @@ const STRONG_AGENT_ENV: &[(&str, &str)] = &[
     ("AIDER", "aider"),
     ("COPILOT_AGENT_SESSION_ID", "copilot_cli"),
     ("COPILOT_CLI", "copilot_cli"),
+    // Factory Droid exports `FACTORY_DROID_BINARY` (path to the droid
+    // binary) in every spawned shell; the bare `FACTORY_DROID` is not
+    // currently set. Match both here, and see the `FACTORY_DROID`-prefix
+    // fallback in `agent_from_strong_env` for any future `FACTORY_DROID_*`.
     ("FACTORY_DROID", "factory_droid"),
+    ("FACTORY_DROID_BINARY", "factory_droid"),
     ("GEMINI_CLI", "gemini_cli"),
     ("REPLIT_AGENT", "replit_agent"),
     ("PI_CODING_AGENT", "pi"),
@@ -187,6 +222,21 @@ const STRONG_AGENT_ENV: &[(&str, &str)] = &[
     ("ROO_ACTIVE", "roo_code"),
 ];
 
+/// True when the CLI is being driven by a known agent harness
+/// (Claude Code, Cursor, Codex, Opencode, etc.). Used by interactive
+/// flows that would otherwise bail because stdout isn't a TTY: in an
+/// agent harness there is still a real human present who can complete
+/// a browser OAuth, even though the CLI's stdout is piped.
+///
+/// Checks strong env fingerprints first (cheap), then falls back to a
+/// process-tree walk. The env fallback matters because some harnesses
+/// (e.g. Factory Droid, whose `droid exec` parent is detectable in the
+/// ancestry) do not reliably export an identifying env var into every
+/// spawned shell, so env-only detection misses them.
+pub fn is_agent_harness() -> bool {
+    agent_from_strong_env().is_some() || agent_from_process_tree().is_some()
+}
+
 fn agent_from_strong_env() -> Option<&'static str> {
     // `AGENT=amp` is what Sourcegraph Amp sets as a generic marker.
     if std::env::var("AGENT")
@@ -200,6 +250,16 @@ fn agent_from_strong_env() -> Option<&'static str> {
     STRONG_AGENT_ENV
         .iter()
         .find_map(|(name, caller)| std::env::var(name).ok().map(|_| *caller))
+        .or_else(|| {
+            // Any `FACTORY_DROID*` var indicates a Factory Droid harness,
+            // covering future suffixes beyond `FACTORY_DROID_BINARY`.
+            std::env::vars_os()
+                .any(|(name, _)| {
+                    name.to_str()
+                        .is_some_and(|name| name.starts_with("FACTORY_DROID"))
+                })
+                .then_some("factory_droid")
+        })
         .or_else(|| {
             // `AI_AGENT` is set by Claude Code (e.g. `claude-code_2-1-133_agent`).
             std::env::var("AI_AGENT").ok().and_then(|value| {
@@ -1193,47 +1253,7 @@ impl TelemetryContext {
             .or_else(|| MCP_CLIENT_CALLER.get().cloned())
             .unwrap_or_else(detect_caller);
         let linked_project = configs.get_local_linked_project().ok();
-        let agent_session_id = safe_env(RAILWAY_AGENT_SESSION_ENV)
-            .or_else(|| safe_env("COPILOT_AGENT_SESSION_ID"))
-            .or_else(|| safe_env("CLAUDE_CODE_SESSION_ID"))
-            // Verified 2026-05-11 via live env capture: Codex exports
-            // CODEX_THREAD_ID as a UUID v7 in every spawned bash; previous
-            // CODEX_SESSION_ID guess did not exist in the env at all (which
-            // matched the 100% per-process fallback observed in the warehouse).
-            .or_else(|| safe_env("CODEX_THREAD_ID"))
-            // Verified 2026-05-11 via live env capture: OpenCode exports
-            // OPENCODE_RUN_ID as a UUID v4. The previous OPENCODE_SESSION_ID
-            // entry was checking for a variable that does not exist, which
-            // matched the ~100% per-process fallback observed for opencode.
-            .or_else(|| safe_env("OPENCODE_RUN_ID"))
-            // Verified 2026-05-11 via a live interactive Amp session.
-            .or_else(|| safe_env("AMP_CURRENT_THREAD_ID"))
-            // Verified 2026-05-11: Cursor does NOT propagate a session
-            // identifier into its bash tool — only CURSOR_AGENT=1 (presence
-            // flag, used for caller detection) and CURSOR_SANDBOX metadata.
-            // CURSOR_TRACE_ID is documented for the IDE but does not appear
-            // in the agent's spawned subprocess env. Kept here as a no-cost
-            // forward-compat hook in case Cursor adds propagation later.
-            .or_else(|| safe_env("CURSOR_TRACE_ID"))
-            // Cross-agent convention exposed by Amp (verified) and observed
-            // in some other harnesses' docs. Late in the precedence chain
-            // so harness-specific IDs win when both are set; catches any
-            // future agent that adopts this generic name.
-            .or_else(|| safe_env("AGENT_THREAD_ID"))
-            .or_else(|| {
-                if is_agent_caller(&caller) {
-                    // Try the persistent session-file fallback first. It
-                    // recovers a stable UUID across `railway` invocations
-                    // spawned by the same parent process when the harness
-                    // doesn't propagate its session env var (e.g. when an
-                    // agent's bash tool doesn't whitelist its own session
-                    // ID). Falls through to the per-process mint when
-                    // parent identity can't be determined (non-unix, etc.).
-                    persistent_agent_session_id().or(Some(session_id.clone()))
-                } else {
-                    None
-                }
-            });
+        let agent_session_id = resolve_agent_session_id(&caller);
 
         Self {
             session_id,
@@ -1265,6 +1285,73 @@ impl TelemetryContext {
                 }),
         }
     }
+}
+
+/// Resolve the agent session id for the current invocation: the harness's
+/// own session env var when propagated, otherwise (for agent callers) the
+/// persistent session-file fallback or the per-process id. Shared by the
+/// telemetry event context and the deploy-upload attribution headers so
+/// the same id lands in both streams and warehouse joins line up.
+fn resolve_agent_session_id(caller: &str) -> Option<String> {
+    safe_env(RAILWAY_AGENT_SESSION_ENV)
+        .or_else(|| safe_env("COPILOT_AGENT_SESSION_ID"))
+        .or_else(|| safe_env("CLAUDE_CODE_SESSION_ID"))
+        // Verified 2026-05-11 via live env capture: Codex exports
+        // CODEX_THREAD_ID as a UUID v7 in every spawned bash; previous
+        // CODEX_SESSION_ID guess did not exist in the env at all (which
+        // matched the 100% per-process fallback observed in the warehouse).
+        .or_else(|| safe_env("CODEX_THREAD_ID"))
+        // Verified 2026-05-11 via live env capture: OpenCode exports
+        // OPENCODE_RUN_ID as a UUID v4. The previous OPENCODE_SESSION_ID
+        // entry was checking for a variable that does not exist, which
+        // matched the ~100% per-process fallback observed for opencode.
+        .or_else(|| safe_env("OPENCODE_RUN_ID"))
+        // Verified 2026-05-11 via a live interactive Amp session.
+        .or_else(|| safe_env("AMP_CURRENT_THREAD_ID"))
+        // Verified 2026-05-11: Cursor does NOT propagate a session
+        // identifier into its bash tool — only CURSOR_AGENT=1 (presence
+        // flag, used for caller detection) and CURSOR_SANDBOX metadata.
+        // CURSOR_TRACE_ID is documented for the IDE but does not appear
+        // in the agent's spawned subprocess env. Kept here as a no-cost
+        // forward-compat hook in case Cursor adds propagation later.
+        .or_else(|| safe_env("CURSOR_TRACE_ID"))
+        // Cross-agent convention exposed by Amp (verified) and observed
+        // in some other harnesses' docs. Late in the precedence chain
+        // so harness-specific IDs win when both are set; catches any
+        // future agent that adopts this generic name.
+        .or_else(|| safe_env("AGENT_THREAD_ID"))
+        .or_else(|| {
+            if is_agent_caller(caller) {
+                // Try the persistent session-file fallback first. It
+                // recovers a stable UUID across `railway` invocations
+                // spawned by the same parent process when the harness
+                // doesn't propagate its session env var (e.g. when an
+                // agent's bash tool doesn't whitelist its own session
+                // ID). Falls through to the per-process mint when
+                // parent identity can't be determined (non-unix, etc.).
+                persistent_agent_session_id().or_else(|| Some(session_id()))
+            } else {
+                None
+            }
+        })
+}
+
+/// Attribution for the deploy tarball upload (`x-railway-caller` /
+/// `x-railway-agent-session` headers). Returns `Some` only when the CLI
+/// detects an agent harness driving it — backboard treats header presence
+/// as the agent signal (`platform_create_deployment.source = "CLI Agent"`),
+/// so human-driven runs send nothing. Values mirror the telemetry event
+/// context exactly so the deploy event joins against the auth funnel.
+pub(crate) fn deploy_attribution() -> Option<(String, Option<String>)> {
+    let caller = MCP_CLIENT_CALLER
+        .get()
+        .cloned()
+        .unwrap_or_else(detect_caller);
+    if !is_agent_caller(&caller) {
+        return None;
+    }
+    let agent_session_id = resolve_agent_session_id(&caller);
+    Some((caller, agent_session_id))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -1486,11 +1573,56 @@ pub async fn send_setup_agent(event: SetupAgentTrackEvent) {
     let _ = post_telemetry_body(&client, configs.get_backboard(), body).await;
 }
 
+pub async fn send_auth_event(event: CliAuthTrackEvent) {
+    if is_telemetry_disabled() {
+        return;
+    }
+
+    let configs = match Configs::new() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Public-capable client: the attempt may have failed or timed out
+    // with no token yet, so fall back to an unauthenticated client. On
+    // success a token exists and the backend attaches the user.
+    let client = GQLClient::new_authorized(&configs)
+        .or_else(|_| GQLClient::new_public())
+        .ok();
+    let Some(client) = client else {
+        return;
+    };
+
+    let context = TelemetryContext::current(&configs);
+    let input = CliAuthEventTrackInput {
+        transport: event.transport,
+        outcome: event.outcome,
+        success: event.success,
+        error_message: event.error_message,
+        session_id: context.session_id,
+        caller: context.caller,
+        agent_session_id: context.agent_session_id,
+        install_request_id: context.install_request_id,
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        is_ci: Configs::env_is_ci(),
+    };
+
+    let body = json!({
+        "query": "mutation CliAuthEventTrack($input: CliAuthEventTrackInput!) { cliAuthEventTrack(input: $input) }",
+        "variables": { "input": input },
+    });
+
+    let _ = post_telemetry_body(&client, configs.get_backboard(), body).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcessNode, agent_ancestor_pid, caller_from_mcp_client_name, caller_from_process_name,
-        is_agent_caller, new_session_uuid, parent_kind_from_command,
+        ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
+        caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, is_agent_harness,
+        new_session_uuid, parent_kind_from_command, walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -1567,6 +1699,46 @@ mod tests {
             Some("factory_droid")
         );
         assert_eq!(caller_from_process_name("droid run"), Some("factory_droid"));
+    }
+
+    #[test]
+    fn detects_factory_droid_via_binary_env_var() {
+        // Factory Droid sets `FACTORY_DROID_BINARY` (not the bare
+        // `FACTORY_DROID`) in every spawned shell. An ambient agent
+        // harness running this suite (e.g. Claude Code) exports its own
+        // STRONG_AGENT_ENV vars, which win by array order — clear every
+        // strong signal first so the var this test sets is the only one
+        // present. No other test reads these vars, so mutating them here
+        // is race-safe.
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = STRONG_AGENT_ENV
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once("AGENT"))
+            .map(|name| {
+                let prev = std::env::var_os(name);
+                unsafe { std::env::remove_var(name) };
+                (name, prev)
+            })
+            .collect();
+
+        unsafe { std::env::set_var("FACTORY_DROID_BINARY", "/tmp/droid-preserved-xxxx/droid") };
+        let detected = agent_from_strong_env();
+        let harness = is_agent_harness();
+
+        // Restore the original environment before asserting so a failure
+        // doesn't leak a mutated env into other tests.
+        unsafe {
+            std::env::remove_var("FACTORY_DROID_BINARY");
+            for (name, prev) in saved {
+                match prev {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+
+        assert_eq!(detected, Some("factory_droid"));
+        assert!(harness);
     }
 
     #[test]
@@ -1724,6 +1896,29 @@ mod tests {
         snap.insert(7300, node(7000, "sh -c 'railway logs'"));
         snap.insert(7000, node(1, "/usr/local/bin/codex"));
         assert_eq!(agent_ancestor_pid(&snap, 7300), Some(7000));
+    }
+
+    #[test]
+    fn process_tree_detects_factory_droid_exec_parent() {
+        // Mirrors a real Factory Droid session where no identifying env var
+        // is exported but `droid exec` sits in the ancestry:
+        // droid exec (4000) -> bash -c (4100) -> railway (4200).
+        // This is what `agent_from_process_tree` walks internally, so the
+        // harness must be detected even with env-only signals absent.
+        let mut snap = HashMap::new();
+        snap.insert(4200, node(4100, "railway up --detach"));
+        snap.insert(4100, node(4000, "bash -c 'railway up --detach'"));
+        snap.insert(
+            4000,
+            node(
+                1,
+                "/users/x/.local/bin/droid exec --input-format stream-jsonrpc",
+            ),
+        );
+        assert_eq!(
+            walk_ancestors(&snap, 4200, 15, |n| caller_from_process_name(&n.command)),
+            Some("factory_droid")
+        );
     }
 
     #[test]

@@ -189,9 +189,16 @@ impl Configs {
         Self::get_railway_token().is_some() || Self::get_railway_api_token().is_some()
     }
 
+    /// True when the `CI` env var is set to any truthy value (`true`,
+    /// `1`, `yes`, ...). Runners differ on the value they export, so
+    /// treat anything except empty / `false` / `0` as CI — consistent
+    /// with `is_likely_headless`, which keys off `CI` being set at all.
     pub fn env_is_ci() -> bool {
         std::env::var("CI")
-            .map(|val| val.trim().to_lowercase() == "true")
+            .map(|val| {
+                let val = val.trim().to_lowercase();
+                !val.is_empty() && val != "false" && val != "0"
+            })
             .unwrap_or(false)
     }
 
