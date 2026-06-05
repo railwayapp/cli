@@ -309,16 +309,10 @@ async fn invoke_runner(
     auth_type: &str,
     command: &str,
 ) -> Result<RunnerResponse> {
-    let runner = args
-        .runner
-        .clone()
-        .or_else(|| env::var("RAILWAY_IAC_TS_BIN").ok())
-        .unwrap_or_else(|| "railway-iac-ts".to_string());
+    let cwd_path = env::current_dir().context("Unable to get current working directory")?;
+    let runner = resolve_runner(args.runner.as_deref(), &cwd_path);
 
-    let cwd = env::current_dir()
-        .context("Unable to get current working directory")?
-        .to_string_lossy()
-        .to_string();
+    let cwd = cwd_path.to_string_lossy().to_string();
 
     let request = serde_json::json!({
         "command": command,
@@ -344,8 +338,8 @@ async fn invoke_runner(
         }
     });
 
-    let mut command = Command::new(&runner);
-    if let Some(runner_cwd) = runner_cwd(&runner) {
+    let mut command = Command::new(&runner.path);
+    if let Some(runner_cwd) = runner_cwd(&runner.path) {
         command.current_dir(runner_cwd);
     }
     if matches!(Configs::get_environment_id(), Environment::Dev) {
@@ -357,7 +351,7 @@ async fn invoke_runner(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("Failed to spawn IaC runner `{runner}`. Install/link the railway TypeScript SDK or pass --runner."))?;
+        .with_context(|| runner_not_found_message(&runner))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(request.to_string().as_bytes()).await?;
@@ -372,6 +366,73 @@ async fn invoke_runner(
     })?;
 
     Ok(response)
+}
+
+struct ResolvedRunner {
+    path: String,
+    source: RunnerSource,
+}
+
+enum RunnerSource {
+    Explicit,
+    Env,
+    ProjectDependency,
+    Path,
+}
+
+fn resolve_runner(explicit_runner: Option<&str>, cwd: &std::path::Path) -> ResolvedRunner {
+    if let Some(runner) = explicit_runner {
+        return ResolvedRunner {
+            path: runner.to_string(),
+            source: RunnerSource::Explicit,
+        };
+    }
+
+    if let Ok(runner) = env::var("RAILWAY_IAC_TS_BIN") {
+        return ResolvedRunner {
+            path: runner,
+            source: RunnerSource::Env,
+        };
+    }
+
+    if let Some(runner) = find_project_runner(cwd) {
+        return ResolvedRunner {
+            path: runner.to_string_lossy().to_string(),
+            source: RunnerSource::ProjectDependency,
+        };
+    }
+
+    ResolvedRunner {
+        path: "railway-iac-ts".to_string(),
+        source: RunnerSource::Path,
+    }
+}
+
+fn find_project_runner(start: &std::path::Path) -> Option<PathBuf> {
+    let binary = if cfg!(windows) {
+        "railway-iac-ts.cmd"
+    } else {
+        "railway-iac-ts"
+    };
+
+    for dir in start.ancestors() {
+        let candidate = dir.join("node_modules").join(".bin").join(binary);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn runner_not_found_message(runner: &ResolvedRunner) -> String {
+    match runner.source {
+        RunnerSource::Explicit | RunnerSource::Env => format!(
+            "Could not start Railway configuration support from `{}`. Check that the path exists and is executable.",
+            runner.path
+        ),
+        RunnerSource::ProjectDependency | RunnerSource::Path => "Could not find Railway configuration support for this project. Install the Railway TypeScript package with your package manager, then run this command again. For example: `npm install railway`.".to_string(),
+    }
 }
 
 fn runner_cwd(runner: &str) -> Option<PathBuf> {
