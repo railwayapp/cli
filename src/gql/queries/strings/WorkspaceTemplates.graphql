@@ -1,0 +1,22 @@
+query WorkspaceTemplates($workspaceId: String!, $first: Int, $after: String) {
+  workspaceTemplates(workspaceId: $workspaceId, first: $first, after: $after) {
+    edges {
+      node {
+        id
+        code
+        name
+        description
+        image
+        category
+        readme
+        demoProjectId
+        status
+        workspaceId
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

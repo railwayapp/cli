@@ -48,19 +48,18 @@ pub enum RailwayError {
     #[error("Environment is deleted. Run `railway environment` to connect to an environment.")]
     EnvironmentDeleted,
 
+    #[error(
+        "Environment \"{0}\" is restricted. Ask a workspace admin for access, or choose an unrestricted environment."
+    )]
+    EnvironmentRestricted(String),
+
     #[error("No projects found. Run `railway init` to create a new project")]
     NoProjects,
-
-    #[error("Project does not have any services")]
-    NoServices,
 
     #[error(
         "Environment \"{0}\" not found.\nRun `railway environment` to connect to an environment."
     )]
     EnvironmentNotFound(String),
-
-    #[error("Project \"{0}\" was not found in the \"{1}\" workspace.")]
-    ProjectNotFoundInWorkspace(String, String),
 
     #[error("Workspace \"{0}\" not found.")]
     WorkspaceNotFound(String),
@@ -83,6 +82,12 @@ pub enum RailwayError {
     #[error("Volume {0} not found.")]
     VolumeNotFound(String),
 
+    #[error("Bucket \"{0}\" not found.")]
+    BucketNotFound(String),
+
+    #[error("Bucket \"{0}\" is not deployed in environment \"{1}\".")]
+    BucketNotInEnvironment(String, String),
+
     #[error("2FA code is incorrect. Please try again.")]
     InvalidTwoFactorCode,
 
@@ -97,4 +102,16 @@ pub enum RailwayError {
 
     #[error("You are being ratelimited. Please try again later")]
     Ratelimited,
+
+    #[error("Device code expired. Please run `railway login` again.")]
+    OAuthDeviceCodeExpired,
+
+    #[error("Authorization was denied by the user.")]
+    OAuthAccessDenied,
+
+    #[error("Token refresh failed: {0}. Please run `railway login` again.")]
+    OAuthRefreshFailed(String),
+
+    #[error("OAuth error: {0}")]
+    OAuthError(String),
 }

@@ -21,7 +21,8 @@ pub async fn command(args: Args) -> Result<()> {
 
     let url = format!(
         "https://{hostname}/project/{}?environmentId={}",
-        linked_project.project, linked_project.environment
+        linked_project.project,
+        linked_project.environment_id()?
     );
 
     if args.print || !std::io::stdout().is_terminal() {

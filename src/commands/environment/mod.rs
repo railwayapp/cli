@@ -3,12 +3,9 @@ use std::fmt::Display;
 use crate::{
     controllers::project::get_project,
     errors::RailwayError,
-    util::{
-        prompt::{
-            PromptServiceInstance, fake_select, prompt_multi_options, prompt_options_skippable,
-            prompt_text,
-        },
-        retry::{RetryConfig, retry_with_backoff},
+    util::prompt::{
+        PromptServiceInstance, fake_select, prompt_multi_options, prompt_options_skippable,
+        prompt_text,
     },
 };
 use anyhow::bail;
@@ -21,10 +18,14 @@ mod config;
 mod delete;
 mod edit;
 mod link;
+mod list;
 mod new;
 
 /// Create, delete or link an environment
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway environment list --json\n  railway environment new staging --json\n  railway environment create staging --duplicate production --json\n  railway environment delete staging --yes --json\n  railway environment config --environment production --json\n\nAutomation notes:\n  After creating an environment, verify the linked target with `railway status --json`.\n  Destructive non-interactive runs must pass the environment and --yes."
+)]
 pub struct Args {
     /// The environment to link to
     pub environment: Option<String>,
@@ -52,6 +53,7 @@ structstruck::strike! {
         }),
 
         /// Create a new environment
+        #[clap(visible_alias = "create", visible_alias = "add")]
         New(pub struct {
             /// The name of the environment to create
             pub name: Option<String>,
@@ -69,6 +71,7 @@ structstruck::strike! {
         }),
 
         /// Delete an environment
+        #[clap(visible_alias = "rm", visible_alias = "remove")]
         Delete(pub struct {
             /// Skip confirmation dialog
             #[clap(short = 'y', long = "yes")]
@@ -77,17 +80,22 @@ structstruck::strike! {
             /// The environment to delete
             pub environment: Option<String>,
 
-            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
-            #[clap(long = "2fa-code")]
-            pub two_factor_code: Option<String>,
-
             /// Output in JSON format
             #[clap(long)]
             pub json: bool,
+
+            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+            #[clap(long = "2fa-code")]
+            pub two_factor_code: Option<String>,
         }),
 
         /// Edit an environment's configuration
+        #[clap(visible_alias = "update")]
         Edit(pub struct {
+            /// Project ID/name to edit (defaults to linked project)
+            #[clap(long, short = 'p')]
+            pub project: Option<String>,
+
             /// The environment to edit (defaults to linked environment)
             #[clap(long, short)]
             pub environment: Option<String>,
@@ -109,10 +117,27 @@ structstruck::strike! {
         }),
 
         /// Show environment configuration
+        #[clap(visible_alias = "show", visible_alias = "info")]
         Config(pub struct {
             /// Environment to show config for (defaults to linked)
             #[clap(long, short)]
             pub environment: Option<String>,
+
+            /// Output in JSON format
+            #[clap(long)]
+            pub json: bool,
+        }),
+
+        /// List all environments in the project
+        #[clap(visible_alias = "ls")]
+        List(pub struct {
+            /// Show only ephemeral (PR) environments
+            #[clap(long, conflicts_with = "no_ephemeral")]
+            pub ephemeral: bool,
+
+            /// Hide ephemeral (PR) environments
+            #[clap(long, conflicts_with = "ephemeral")]
+            pub no_ephemeral: bool,
 
             /// Output in JSON format
             #[clap(long)]
@@ -178,6 +203,7 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Commands::Delete(args)) => delete::delete_environment(args).await,
         Some(Commands::Edit(args)) => edit::edit_environment(args).await,
         Some(Commands::Config(args)) => config::command(args).await,
+        Some(Commands::List(args)) => list::command(args).await,
         // Legacy: `railway environment <name>` without subcommand
         None => link::link_environment(args.environment, args.json).await,
     }

@@ -1,0 +1,7 @@
+mutation BucketUpdate($id: String!, $input: BucketUpdateInput!) {
+  bucketUpdate(id: $id, input: $input) {
+    id
+    name
+    projectId
+  }
+}

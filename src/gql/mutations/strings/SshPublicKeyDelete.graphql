@@ -1,0 +1,3 @@
+mutation SshPublicKeyDelete($id: String!) {
+  sshPublicKeyDelete(id: $id)
+}

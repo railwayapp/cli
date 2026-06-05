@@ -109,10 +109,11 @@ pub async fn fetch_and_create(
     options: FetchAndCreateOptions,
 ) -> Result<(), anyhow::Error> {
     if verbose {
-        println!("fetching details for template")
+        eprintln!("fetching details for template")
     }
+    let public_client = GQLClient::new_public()?;
     let details = post_graphql::<queries::TemplateDetail, _>(
-        client,
+        &public_client,
         configs.get_backboard(),
         queries::template_detail::Variables {
             code: template.clone(),
@@ -128,7 +129,7 @@ pub async fn fetch_and_create(
 
     ensure_project_and_environment_exist(client, configs, linked_project).await?;
     if verbose {
-        println!("Project and environment in config exist");
+        eprintln!("Project and environment in config exist");
     }
 
     // Get current services before the mutation
@@ -172,12 +173,12 @@ pub async fn fetch_and_create(
 
     let mutation_vars = mutations::template_deploy::Variables {
         project_id: linked_project.project.clone(),
-        environment_id: linked_project.environment.clone(),
+        environment_id: linked_project.environment_id()?.to_string(),
         template_id: details.template.id.clone(),
         serialized_config: serde_json::to_value(&config).context("Failed to serialize config")?,
     };
     if verbose {
-        println!("deploying template");
+        eprintln!("deploying template");
     }
     let response = post_graphql::<mutations::TemplateDeploy, _>(
         client,
@@ -189,7 +190,7 @@ pub async fn fetch_and_create(
     // Wait for workflow to complete
     if let Some(workflow_id) = response.template_deploy_v2.workflow_id {
         if verbose {
-            println!("waiting for workflow {workflow_id} to complete");
+            eprintln!("waiting for workflow {workflow_id} to complete");
         }
         wait_for_workflow(client, configs, workflow_id)
             .await
@@ -218,7 +219,7 @@ pub async fn fetch_and_create(
             configs.link_service(service.node.id.clone())?;
             configs.write()?;
             if verbose {
-                println!("linked to service {}", service.node.name);
+                eprintln!("linked to service {}", service.node.name);
             }
         }
     }
@@ -246,7 +247,7 @@ pub async fn fetch_and_create(
         spinner.finish_with_message(msg);
     }
     if verbose {
-        println!("template deployed");
+        eprintln!("template deployed");
     }
 
     Ok(())

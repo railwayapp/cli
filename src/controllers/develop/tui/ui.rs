@@ -207,7 +207,11 @@ fn render_log_line<'a>(
     let line_len = chars.len();
 
     // Calculate selection bounds for this row
-    let sel_start = if vis_row == start_row { start_col } else { 0 };
+    let sel_start = if vis_row == start_row {
+        start_col.min(line_len)
+    } else {
+        0
+    };
     let sel_end = if vis_row == end_row {
         (end_col + 1).min(line_len)
     } else {

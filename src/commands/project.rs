@@ -10,14 +10,14 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// List all projects in your Railway account
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(crate::commands::list::Args),
 
     /// Link a project to the current directory
     Link(crate::commands::link::Args),
 
     /// Delete a project
-    #[clap(alias = "rm", alias = "remove")]
+    #[clap(visible_alias = "rm", visible_alias = "remove")]
     Delete(crate::commands::delete::Args),
 }
 

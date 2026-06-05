@@ -11,7 +11,7 @@ pub trait LogLike {
 }
 
 /// Format log line with attributes into a colored string for display to a string
-pub fn format_attr_log_string<T: LogLike>(log: &T) -> String {
+pub fn format_attr_log_string<T: LogLike>(log: &T, show_all_attributes: bool) -> String {
     let timestamp = log.timestamp();
     let message = log.message();
     let attributes = log.attributes();
@@ -30,43 +30,60 @@ pub fn format_attr_log_string<T: LogLike>(log: &T) -> String {
     for (key, value) in attributes {
         match key.to_lowercase().as_str() {
             "level" | "lvl" | "severity" => level = Some(value.to_string()),
-            _ => others.push(format!(
-                "{}{}{}",
-                key.magenta(),
-                "=",
-                value
-                    .normal()
-                    .replace('"', "\"".dimmed().to_string().as_str())
-            )),
+            _ => {
+                if show_all_attributes {
+                    others.push(format!(
+                        "{}{}{}",
+                        key.magenta(),
+                        "=",
+                        value
+                            .normal()
+                            .replace('"', "\"".dimmed().to_string().as_str())
+                    ));
+                }
+            }
         }
     }
-    // format the level as a color
-    let level = level
-        .map(|level| {
-            // make it uppercase so we dont have to make another variable
-            // for some reason, .uppercase() removes formatting
 
-            match level.replace('"', "").to_lowercase().as_str() {
-                "info" => "[INFO]".blue(),
-                "error" | "err" => "[ERRO]".red(),
-                "warn" => "[WARN]".yellow(),
-                "debug" => "[DBUG]".dimmed(),
-                _ => format!("[{level}]").normal(),
-            }
-            .bold()
-        })
-        .unwrap();
-    format!(
-        "{} {} {} {}",
-        timestamp.replace('"', "").normal(),
-        level,
-        message,
-        others.join(" ")
-    )
+    // If we have a level, format with level indicator
+    if let Some(level) = level {
+        let level_str = match level.replace('"', "").to_lowercase().as_str() {
+            "info" => "[INFO]".blue(),
+            "error" | "err" => "[ERRO]".red(),
+            "warn" => "[WARN]".yellow(),
+            "debug" => "[DBUG]".dimmed(),
+            _ => format!("[{level}]").normal(),
+        }
+        .bold();
+
+        if others.is_empty() {
+            format!("{} {}", level_str, message)
+        } else {
+            format!(
+                "{} {} {} {}",
+                timestamp.replace('"', "").normal(),
+                level_str,
+                message,
+                others.join(" ")
+            )
+        }
+    } else {
+        // No level attribute, just return the message
+        message.to_string()
+    }
+}
+
+/// Formatting mode for log output
+#[derive(Clone, Copy)]
+pub enum LogFormat {
+    /// Level indicator only (e.g. [ERRO]), no other attributes - good for build logs
+    LevelOnly,
+    /// Full formatting with all attributes - good for deploy logs
+    Full,
 }
 
 /// Format a log entry as a string based
-pub fn format_log_string<T>(log: T, json: bool, use_formatted: bool) -> String
+pub fn format_log_string<T>(log: T, json: bool, format: LogFormat) -> String
 where
     T: LogLike + serde::Serialize,
 {
@@ -93,21 +110,58 @@ where
         }
 
         serde_json::to_string(&map).unwrap()
-    } else if use_formatted {
-        // For formatted non-JSON output
-        format_attr_log_string(&log)
     } else {
-        // Simple output (just the message)
-        log.message().to_string()
+        match format {
+            LogFormat::LevelOnly => format_attr_log_string(&log, false),
+            LogFormat::Full => format_attr_log_string(&log, true),
+        }
     }
 }
 
 /// Format a log entry as a string based and print it
-pub fn print_log<T>(log: T, json: bool, use_formatted: bool)
+pub fn print_log<T>(log: T, json: bool, format: LogFormat)
 where
     T: LogLike + serde::Serialize,
 {
-    println!("{}", format_log_string(log, json, use_formatted));
+    println!("{}", format_log_string(log, json, format));
+}
+
+pub trait HttpLogLike: serde::Serialize {
+    fn timestamp(&self) -> &str;
+    fn method(&self) -> &str;
+    fn path(&self) -> &str;
+    fn http_status(&self) -> i64;
+    fn total_duration(&self) -> i64;
+    fn request_id(&self) -> &str;
+}
+
+pub fn format_http_log_string<T: HttpLogLike>(log: &T, json: bool) -> String {
+    if json {
+        serde_json::to_string(log).unwrap()
+    } else {
+        let status = log.http_status();
+        let status = match status {
+            200..=299 => status.to_string().green(),
+            300..=399 => status.to_string().cyan(),
+            400..=499 => status.to_string().yellow(),
+            500..=599 => status.to_string().red(),
+            _ => status.to_string().normal(),
+        };
+
+        format!(
+            "{} {} {} {} {} {}",
+            log.timestamp().dimmed(),
+            log.method().bold(),
+            log.path(),
+            status.bold(),
+            format!("{}ms", log.total_duration()).dimmed(),
+            log.request_id().dimmed()
+        )
+    }
+}
+
+pub fn print_http_log<T: HttpLogLike>(log: T, json: bool) {
+    println!("{}", format_http_log_string(&log, json));
 }
 
 // Implementations for all the generated GraphQL log types
@@ -171,6 +225,48 @@ impl LogLike for queries::build_logs::LogFields {
     }
 }
 
+impl HttpLogLike for queries::http_logs::HttpLogFields {
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn method(&self) -> &str {
+        &self.method
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn http_status(&self) -> i64 {
+        self.http_status
+    }
+    fn total_duration(&self) -> i64 {
+        self.total_duration
+    }
+    fn request_id(&self) -> &str {
+        &self.request_id
+    }
+}
+
+impl HttpLogLike for subscriptions::http_logs::HttpLogFields {
+    fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+    fn method(&self) -> &str {
+        &self.method
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn http_status(&self) -> i64 {
+        self.http_status
+    }
+    fn total_duration(&self) -> i64 {
+        self.total_duration
+    }
+    fn request_id(&self) -> &str {
+        &self.request_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,7 +303,7 @@ mod tests {
         };
 
         // Should only return the message
-        let output = format_attr_log_string(&log);
+        let output = format_attr_log_string(&log, false);
         assert_eq!(output, "Test message");
     }
 
@@ -220,12 +316,12 @@ mod tests {
         };
 
         // Should only return message when only attribute is level
-        let output = format_attr_log_string(&log);
+        let output = format_attr_log_string(&log, false);
         assert_eq!(output, "Test message");
     }
 
     #[test]
-    fn test_format_attr_log_with_attributes() {
+    fn test_format_attr_log_with_attributes_level_only() {
         let log = TestLog {
             message: "Test message".to_string(),
             timestamp: "2025-01-01T00:00:00Z".to_string(),
@@ -236,12 +332,30 @@ mod tests {
             ],
         };
 
-        // Should format with all attributes
-        let output = format_attr_log_string(&log);
-        // Check that output contains expected parts
+        // With show_all_attributes=false, should only show level + message
+        let output = format_attr_log_string(&log, false);
+        assert!(output.contains("Test message"));
+        // Should NOT contain the extra attributes
+        assert!(!output.contains("service"));
+        assert!(!output.contains("api"));
+    }
+
+    #[test]
+    fn test_format_attr_log_with_attributes_full() {
+        let log = TestLog {
+            message: "Test message".to_string(),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            attributes: vec![
+                ("level".to_string(), "error".to_string()),
+                ("service".to_string(), "api".to_string()),
+                ("replica".to_string(), "xyz123".to_string()),
+            ],
+        };
+
+        // With show_all_attributes=true, should format with all attributes
+        let output = format_attr_log_string(&log, true);
         assert!(output.contains("Test message"));
         assert!(output.contains("2025-01-01T00:00:00Z"));
-        // The colored output makes exact matching harder, but we can check structure
         assert!(output.contains("service"));
         assert!(output.contains("api"));
         assert!(output.contains("replica"));
@@ -259,25 +373,12 @@ mod tests {
             ],
         };
 
-        // Test JSON output mode
-        let output = format_log_string(log, true, false);
+        // Test JSON output mode (format param is ignored for JSON)
+        let output = format_log_string(log, true, LogFormat::Full);
         let json: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(json["message"], "Test message");
         assert_eq!(json["timestamp"], "2025-01-01T00:00:00Z");
         assert_eq!(json["level"], "warn");
         assert_eq!(json["count"], 42); // This parses as a number
-    }
-
-    #[test]
-    fn test_print_log_simple_mode() {
-        let log = TestLog {
-            message: "Test message".to_string(),
-            timestamp: "2025-01-01T00:00:00Z".to_string(),
-            attributes: vec![("level".to_string(), "info".to_string())],
-        };
-
-        // Test simple output mode (json=false, use_formatted=false)
-        let output = format_log_string(log, false, false);
-        assert_eq!(output, "Test message");
     }
 }

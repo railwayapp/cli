@@ -1,20 +1,43 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
 use serde::Serialize;
+use std::fmt::Display;
 
 use crate::{
+    client::post_graphql,
+    commands::output::service_summary::{ServiceOutput, build_service_output, print_service_card},
     controllers::{
         environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project, get_service_ids_in_env},
+        github::{resolve_repo_branch, validate_repo_name},
+        project::{
+            ensure_project_and_environment_exist, ensure_service_has_active_deployment,
+            find_service_instance, get_environment_instances, get_project, get_service_ids_in_env,
+            resolve_service_context, service_instances_in_env, volume_instances_in_env,
+        },
+        regions::fetch_region_locations,
     },
     errors::RailwayError,
-    util::prompt::{PromptService, prompt_options},
+    util::{
+        progress::create_spinner_if,
+        prompt::{PromptService, fake_select, prompt_confirm_with_default, prompt_options},
+        two_factor::validate_two_factor_if_enabled,
+    },
 };
 
 use super::*;
 
+pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
+    cmd.mut_subcommand(
+        "scale",
+        crate::commands::scale::get_dynamic_args_for_service_subcommand,
+    )
+}
+
 /// Manage services
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway service list --json\n  railway service delete --service api --environment production --yes --json\n  railway service link api\n  railway service source connect --repo owner/repo --branch main --service api\n  railway service source disconnect --service api\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Destructive non-interactive runs must pass exact selectors and --yes.\n  Prefer service IDs from `railway service list --json` when names may collide."
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Option<Commands>,
@@ -25,8 +48,19 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
+    /// List services in the current environment
+    #[clap(visible_alias = "ls")]
+    List(ListArgs),
+
+    /// Delete a service from an environment
+    #[clap(visible_alias = "remove", visible_alias = "rm")]
+    Delete(DeleteArgs),
+
     /// Link a service to the current project
     Link(LinkArgs),
+
+    /// Connect or disconnect a service source
+    Source(SourceArgs),
 
     /// Show deployment status for services
     Status(StatusArgs),
@@ -42,6 +76,31 @@ enum Commands {
 
     /// Scale a service across regions
     Scale(crate::commands::scale::Args),
+
+    /// Manage files in a service filesystem
+    #[clap(visible_alias = "file")]
+    Files(FilesArgs),
+}
+
+#[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway service files list /app --json\n  railway service files browse /app\n  railway service files browser /app\n  railway service files download /app/data.db ./data.db --json\n  railway service files upload ./seed.db /app/seed.db --json\n  railway service files delete /app/data.db --yes --json\n  railway service files rename /app/data.db /app/data-old.db --json\n\nAutomation notes:\n  Uses the linked service by default. Pass --service, --environment, or --project only when selecting a different target."
+)]
+struct FilesArgs {
+    /// Service name or ID (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment to use (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    #[clap(subcommand)]
+    command: crate::commands::volume::files::Commands,
 }
 
 #[derive(Parser)]
@@ -51,13 +110,151 @@ struct LinkArgs {
 }
 
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway service source connect --repo owner/repo --branch main --service web\n  railway service source connect --repo owner/repo --service web --json\n  railway service source connect --image nginx:latest --service web\n  railway service source disconnect --service web\n\nAutomation notes:\n  Use --branch for repos that are not visible through the Railway GitHub App.\n  GitHub sources are connected at the service level and create deployment triggers for matching project environments."
+)]
+struct SourceArgs {
+    #[clap(subcommand)]
+    command: SourceCommands,
+}
+
+#[derive(Parser)]
+enum SourceCommands {
+    /// Connect a service to a GitHub repo or Docker image
+    Connect(SourceConnectArgs),
+
+    /// Disconnect the service from its current source
+    Disconnect(SourceDisconnectArgs),
+}
+
+#[derive(Parser)]
+#[clap(group(clap::ArgGroup::new("source").args(["repo", "image"]).required(true).multiple(false)))]
+struct SourceConnectArgs {
+    /// Service name or ID (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment to use for resolving the service (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// GitHub repo to connect, in owner/repo format
+    #[clap(long)]
+    repo: Option<String>,
+
+    /// Branch to deploy from when connecting a GitHub repo
+    #[clap(long, requires = "repo")]
+    branch: Option<String>,
+
+    /// Docker image to connect, e.g. nginx:latest
+    #[clap(long)]
+    image: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct SourceDisconnectArgs {
+    /// Service name or ID (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment to use for resolving the service (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct ListArgs {
+    /// Environment to list services from (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct DeleteArgs {
+    /// Service name or ID to delete (defaults to linked service)
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// Environment to delete the service from (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// Skip confirmation dialog
+    #[clap(short = 'y', long = "yes")]
+    yes: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+
+    /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+    #[clap(long = "2fa-code")]
+    two_factor_code: Option<String>,
+}
+
+/// Legacy `status --all` output shape. Preserved so scripts parsing the
+/// deprecated command's JSON don't break.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceStatusOutput {
+    id: String,
+    name: String,
+    deployment_id: Option<String>,
+    status: Option<String>,
+    stopped: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceSourceOutput {
+    id: String,
+    name: String,
+    repo: Option<String>,
+    branch: Option<String>,
+    image: Option<String>,
+    disconnected: bool,
+}
+
+#[derive(Parser)]
 struct StatusArgs {
     /// Service name or ID to show status for (defaults to linked service)
     #[clap(short, long)]
     service: Option<String>,
 
-    /// Show status for all services in the environment
-    #[clap(short, long)]
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// Deprecated: use `railway service list` instead. Kept for backwards compatibility.
+    #[clap(short, long, hide = true)]
     all: bool,
 
     /// Environment to check status in (defaults to linked environment)
@@ -67,16 +264,6 @@ struct StatusArgs {
     /// Output in JSON format
     #[clap(long)]
     json: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ServiceStatusOutput {
-    id: String,
-    name: String,
-    deployment_id: Option<String>,
-    status: Option<String>,
-    stopped: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -92,7 +279,10 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Commands::List(list_args)) => list_command(list_args).await,
+        Some(Commands::Delete(delete_args)) => delete_command(delete_args).await,
         Some(Commands::Link(link_args)) => link_command(link_args).await,
+        Some(Commands::Source(source_args)) => source_command(source_args).await,
         Some(Commands::Status(status_args)) => status_command(status_args).await,
         Some(Commands::Logs(logs_args)) => crate::commands::logs::command(logs_args).await,
         Some(Commands::Redeploy(redeploy_args)) => {
@@ -102,8 +292,520 @@ pub async fn command(args: Args) -> Result<()> {
             crate::commands::restart::command(restart_args).await
         }
         Some(Commands::Scale(scale_args)) => crate::commands::scale::command(scale_args).await,
+        Some(Commands::Files(files_args)) => files_command(files_args).await,
         None => unreachable!(),
     }
+}
+
+async fn source_command(args: SourceArgs) -> Result<()> {
+    match args.command {
+        SourceCommands::Connect(connect_args) => source_connect_command(connect_args).await,
+        SourceCommands::Disconnect(disconnect_args) => {
+            source_disconnect_command(disconnect_args).await
+        }
+    }
+}
+
+async fn source_connect_command(args: SourceConnectArgs) -> Result<()> {
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+
+    let (repo, branch, image) = if let Some(repo) = args.repo {
+        validate_repo_name(&repo)?;
+        let branch = resolve_repo_branch(&ctx.client, &ctx.configs, &repo, args.branch).await?;
+        (Some(repo), Some(branch), None)
+    } else {
+        (None, None, args.image)
+    };
+
+    let spinner = create_spinner_if(!args.json, "Connecting service source...".into());
+    let result = post_graphql::<mutations::ServiceConnect, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::service_connect::Variables {
+            id: ctx.service_id.clone(),
+            input: mutations::service_connect::ServiceConnectInput {
+                repo: repo.clone(),
+                branch: branch.clone(),
+                image: image.clone(),
+            },
+        },
+    )
+    .await?;
+
+    let output = ServiceSourceOutput {
+        id: result.service_connect.id,
+        name: result.service_connect.name,
+        repo,
+        branch,
+        image,
+        disconnected: false,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if let Some(spinner) = spinner {
+        let source = match (&output.repo, &output.branch, &output.image) {
+            (Some(repo), Some(branch), _) => format!("{repo}@{branch}"),
+            (_, _, Some(image)) => image.clone(),
+            _ => "source".to_string(),
+        };
+        spinner.finish_with_message(format!(
+            "Connected service \"{}\" to {}",
+            output.name.blue(),
+            source.blue()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn source_disconnect_command(args: SourceDisconnectArgs) -> Result<()> {
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+    let spinner = create_spinner_if(!args.json, "Disconnecting service source...".into());
+
+    let result = post_graphql::<mutations::ServiceDisconnect, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::service_disconnect::Variables {
+            id: ctx.service_id.clone(),
+        },
+    )
+    .await?;
+
+    let output = ServiceSourceOutput {
+        id: result.service_disconnect.id,
+        name: result.service_disconnect.name,
+        repo: None,
+        branch: None,
+        image: None,
+        disconnected: true,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "Disconnected source from service \"{}\"",
+            output.name.blue()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn files_command(args: FilesArgs) -> Result<()> {
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+    let environment_instances = get_environment_instances(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+    )
+    .await?;
+    let service_instance = find_service_instance(&environment_instances, &ctx.service_id)
+        .with_context(|| format!("No service instance found for {}", ctx.service_name))?;
+    ensure_service_has_active_deployment(service_instance, &ctx.environment_name)?;
+
+    let service_target = crate::commands::volume::files::FileTarget {
+        service_instance_id: service_instance.id.clone(),
+        mount_path: "/".to_string(),
+        label: crate::commands::volume::files::FileTargetLabel::Service {
+            id: ctx.service_id.clone(),
+            name: ctx.service_name.clone(),
+        },
+    };
+
+    let command = args.command;
+    let target = if matches!(command, crate::commands::volume::files::Commands::Browse(_)) {
+        service_file_browse_target(service_target, &environment_instances, &ctx.service_id)?
+    } else {
+        service_target
+    };
+
+    crate::commands::volume::files::command_from_parts(target, command).await
+}
+
+fn service_file_browse_target(
+    service_target: crate::commands::volume::files::FileTarget,
+    environment_instances: &crate::controllers::project::ProjectEnvironmentInstances,
+    service_id: &str,
+) -> Result<crate::commands::volume::files::FileTarget> {
+    if !std::io::stdout().is_terminal() {
+        return Ok(service_target);
+    }
+
+    let volume_targets: Vec<crate::commands::volume::files::FileTarget> =
+        volume_instances_in_env(environment_instances)
+            .iter()
+            .filter(|volume| volume.node.service_id.as_deref() == Some(service_id))
+            .map(|volume| crate::commands::volume::files::FileTarget {
+                service_instance_id: service_target.service_instance_id.clone(),
+                mount_path: volume.node.mount_path.clone(),
+                label: crate::commands::volume::files::FileTargetLabel::Volume {
+                    id: volume.node.volume.id.clone(),
+                    name: volume.node.volume.name.clone(),
+                    mount_path: volume.node.mount_path.clone(),
+                },
+            })
+            .collect();
+
+    if volume_targets.is_empty() {
+        return Ok(service_target);
+    }
+
+    if !prompt_confirm_with_default("Browse the attached volume?", true)? {
+        return Ok(service_target);
+    }
+
+    if volume_targets.len() == 1 {
+        return Ok(volume_targets[0].clone());
+    }
+
+    let choices = volume_targets
+        .into_iter()
+        .map(VolumeFileBrowseChoice)
+        .collect();
+    Ok(prompt_options("Select a volume", choices)?.0)
+}
+
+struct VolumeFileBrowseChoice(crate::commands::volume::files::FileTarget);
+
+impl Display for VolumeFileBrowseChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0.label {
+            crate::commands::volume::files::FileTargetLabel::Volume {
+                name, mount_path, ..
+            } => write!(f, "{name} ({mount_path})"),
+            crate::commands::volume::files::FileTargetLabel::Service { name, .. } => {
+                write!(f, "{name}")
+            }
+        }
+    }
+}
+
+async fn list_command(args: ListArgs) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let (project, region_locations) = tokio::join!(
+        get_project(&client, &configs, project_id.clone()),
+        fetch_region_locations(&client, &configs),
+    );
+    let project = project?;
+
+    let env_id = if let Some(env_name) = args.environment {
+        get_matched_environment(&project, env_name)?.id
+    } else {
+        linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string()
+    };
+    let env_name = project
+        .environments
+        .edges
+        .iter()
+        .find(|env| env.node.id == env_id)
+        .map(|env| env.node.name.clone())
+        .expect("environment resolved above");
+
+    let environment_instances =
+        get_environment_instances(&client, &configs, &project_id, &env_id).await?;
+    let service_ids_in_env = get_service_ids_in_env(&environment_instances);
+    let linked_service_id = linked_project.as_ref().and_then(|lp| lp.service.as_deref());
+
+    let mut services: Vec<_> = project
+        .services
+        .edges
+        .iter()
+        .filter(|edge| service_ids_in_env.contains(&edge.node.id))
+        .collect();
+    services.sort_by(|a, b| a.node.name.to_lowercase().cmp(&b.node.name.to_lowercase()));
+
+    let rows: Vec<ServiceOutput> = services
+        .iter()
+        .map(|edge| {
+            build_service_output(
+                &environment_instances,
+                &edge.node,
+                linked_service_id,
+                &region_locations,
+            )
+        })
+        .collect();
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No services found in environment '{env_name}'");
+        return Ok(());
+    }
+
+    println!();
+    println!("{} {}", "Services in".bold(), env_name.blue().bold());
+    println!();
+
+    for row in &rows {
+        print_service_card(row, true);
+    }
+
+    Ok(())
+}
+
+async fn delete_command(args: DeleteArgs) -> Result<()> {
+    let mut configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+    let local_linked_project = configs.get_local_linked_project().ok();
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
+    let is_terminal = std::io::stdout().is_terminal();
+    let environment = if let Some(environment_arg) = args.environment.as_deref() {
+        get_matched_environment(&project, environment_arg.to_string())?
+    } else {
+        resolve_environment_to_delete(
+            &project,
+            linked_project
+                .as_ref()
+                .context("No environment linked. Use --environment when using --project")?,
+            None,
+        )?
+    };
+    let environment_id = environment.id.clone();
+    let environment_name = environment.name.clone();
+
+    let environment_instances =
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
+    let service_ids_in_env = get_service_ids_in_env(&environment_instances);
+    let services_in_env: Vec<_> = project
+        .services
+        .edges
+        .iter()
+        .filter(|edge| service_ids_in_env.contains(&edge.node.id))
+        .map(|edge| &edge.node)
+        .collect();
+
+    let service = select_service_to_delete(
+        services_in_env,
+        args.service.as_deref(),
+        linked_project.as_ref().and_then(|lp| lp.service.as_deref()),
+        &environment_name,
+        !args.json,
+        is_terminal,
+    )?;
+    let service_id = service.id.clone();
+    let service_name = service.name.clone();
+
+    let confirmed = if args.yes {
+        true
+    } else if is_terminal {
+        prompt_confirm_with_default(
+            format!(
+                "Are you sure you want to delete service \"{}\" from environment \"{}\"? This will permanently delete all its deployments.",
+                service_name, environment_name
+            )
+            .as_str(),
+            false,
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
+
+    if !confirmed {
+        if !args.json {
+            println!("Deletion cancelled.");
+        }
+        return Ok(());
+    }
+
+    validate_two_factor_if_enabled(&client, &configs, is_terminal, args.two_factor_code).await?;
+
+    let spinner = create_spinner_if(!args.json, format!("Deleting service {}...", service_name));
+
+    post_graphql::<mutations::ServiceDelete, _>(
+        &client,
+        configs.get_backboard(),
+        mutations::service_delete::Variables {
+            service_id: service_id.clone(),
+            environment_id: environment_id.clone(),
+        },
+    )
+    .await?;
+
+    let unlink_path = local_linked_project.as_ref().and_then(|project| {
+        (project.project == project_id
+            && project.service.as_deref() == Some(service_id.as_str())
+            && project.environment_id().ok() == Some(environment_id.as_str()))
+        .then(|| project.project_path.clone())
+    });
+    let should_unlink = unlink_path.is_some();
+    if let Some(path) = unlink_path {
+        let linked_project = configs
+            .root_config
+            .projects
+            .get_mut(&path)
+            .ok_or(RailwayError::ProjectNotFound)?;
+        linked_project.service = None;
+        configs.write()?;
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": service_id,
+                "name": service_name,
+                "environmentId": environment_id,
+                "environmentName": environment_name,
+                "unlinked": should_unlink,
+            }))?
+        );
+    } else if let Some(spinner) = spinner {
+        spinner.finish_with_message(format!(
+            "Deleted service {} from {}",
+            service_name.green(),
+            environment_name.blue()
+        ));
+    }
+
+    Ok(())
+}
+
+fn resolve_environment_to_delete(
+    project: &crate::gql::queries::project::ProjectProject,
+    linked_project: &crate::LinkedProject,
+    environment_arg: Option<&str>,
+) -> Result<crate::gql::queries::project::ProjectProjectEnvironmentsEdgesNode> {
+    if project.deleted_at.is_some() {
+        bail!(RailwayError::ProjectDeleted);
+    }
+
+    let environment = if let Some(environment_arg) = environment_arg {
+        get_matched_environment(project, environment_arg.to_string())?
+    } else {
+        let linked_environment = match linked_project
+            .environment_name
+            .clone()
+            .or_else(|| linked_project.environment.clone())
+        {
+            Some(environment) => environment,
+            None => linked_project.environment_id()?.to_string(),
+        };
+
+        get_matched_environment(project, linked_environment)?
+    };
+
+    if environment.deleted_at.is_some() {
+        bail!(RailwayError::EnvironmentDeleted);
+    }
+
+    Ok(environment)
+}
+
+fn select_service_to_delete<'a>(
+    services_in_env: Vec<&'a crate::gql::queries::project::ProjectProjectServicesEdgesNode>,
+    service_arg: Option<&str>,
+    linked_service_id: Option<&str>,
+    environment_name: &str,
+    echo_selection: bool,
+    is_terminal: bool,
+) -> Result<&'a crate::gql::queries::project::ProjectProjectServicesEdgesNode> {
+    if services_in_env.is_empty() {
+        bail!("No services found in environment '{}'", environment_name);
+    }
+
+    if let Some(service_arg) = service_arg {
+        let service = services_in_env
+            .iter()
+            .copied()
+            .find(|service| {
+                service.id.eq_ignore_ascii_case(service_arg)
+                    || service.name.eq_ignore_ascii_case(service_arg)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Service \"{}\" not found in environment '{}'",
+                    service_arg,
+                    environment_name
+                )
+            })?;
+        if echo_selection {
+            fake_select("Select a service to delete", &service.name);
+        }
+        return Ok(service);
+    }
+
+    if let Some(linked_service_id) = linked_service_id {
+        if let Some(service) = services_in_env
+            .iter()
+            .copied()
+            .find(|service| service.id == linked_service_id)
+        {
+            return Ok(service);
+        }
+    }
+
+    if !is_terminal {
+        bail!(
+            "Service must be specified when not running in a terminal. Use --service <id or name>"
+        );
+    }
+
+    let service = prompt_options(
+        "Select a service to delete",
+        services_in_env.iter().copied().map(PromptService).collect(),
+    )?;
+
+    Ok(service.0)
 }
 
 async fn link_command(args: LinkArgs) -> Result<()> {
@@ -114,7 +816,14 @@ async fn link_command(args: LinkArgs) -> Result<()> {
 
     ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
 
-    let service_ids_in_env = get_service_ids_in_env(&project, &linked_project.environment);
+    let environment_instances = get_environment_instances(
+        &client,
+        &configs,
+        &linked_project.project,
+        linked_project.environment_id()?,
+    )
+    .await?;
+    let service_ids_in_env = get_service_ids_in_env(&environment_instances);
     let services: Vec<_> = project
         .services
         .edges
@@ -143,20 +852,56 @@ async fn link_command(args: LinkArgs) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn link_current_project_service(service: Option<String>) -> Result<()> {
+    link_command(LinkArgs { service }).await
+}
+
 async fn status_command(args: StatusArgs) -> Result<()> {
+    if args.all {
+        eprintln!(
+            "{}",
+            "Warning: `railway service status --all` is deprecated. Please use `railway service list` instead."
+                .yellow()
+        );
+    }
+
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
 
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
 
     // Determine which environment to use
     let environment_id = if let Some(env_name) = args.environment {
         let env = get_matched_environment(&project, env_name)?;
         env.id
     } else {
-        linked_project.environment.clone()
+        linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string()
     };
 
     let environment_name = project
@@ -169,15 +914,10 @@ async fn status_command(args: StatusArgs) -> Result<()> {
 
     // Collect service instances for the environment
     let mut service_statuses: Vec<ServiceStatusOutput> = Vec::new();
+    let environment_instances =
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
 
-    let env = project
-        .environments
-        .edges
-        .iter()
-        .find(|e| e.node.id == environment_id)
-        .context("Environment not found")?;
-
-    for instance_edge in &env.node.service_instances.edges {
+    for instance_edge in service_instances_in_env(&environment_instances) {
         let instance = &instance_edge.node;
         let deployment = &instance.latest_deployment;
 
@@ -226,8 +966,8 @@ async fn status_command(args: StatusArgs) -> Result<()> {
         } else {
             // Use linked service
             let linked_service_id = linked_project
-                .service
                 .as_ref()
+                .and_then(|lp| lp.service.as_ref())
                 .context("No service linked. Use --service flag or --all to see all services")?;
 
             service_statuses

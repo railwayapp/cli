@@ -15,13 +15,6 @@ query UserProjects {
             id
             name
             canAccess
-            serviceInstances {
-              edges {
-                node {
-                  serviceId
-                }
-              }
-            }
           }
         }
       }
@@ -56,13 +49,6 @@ query UserProjects {
                   id
                   name
                   canAccess
-                  serviceInstances {
-                    edges {
-                      node {
-                        serviceId
-                      }
-                    }
-                  }
                 }
               }
             }

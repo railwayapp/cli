@@ -1,6 +1,12 @@
 use super::*;
 use crate::{
-    client::GQLClient, config::Configs, controllers::project::get_project, errors::RailwayError,
+    client::GQLClient,
+    config::Configs,
+    controllers::{
+        environment::ensure_environment_accessible,
+        project::{get_environment_instances, get_project},
+    },
+    errors::RailwayError,
 };
 use std::path::PathBuf;
 
@@ -31,7 +37,7 @@ structstruck::strike! {
         List,
 
         /// Add a new function
-        #[clap(visible_alias = "create")]
+        #[clap(visible_alias = "create", visible_alias = "add")]
         New(struct {
             /// The path to the function locally
             #[clap(long, short)]
@@ -67,11 +73,15 @@ structstruck::strike! {
 
             /// Skip confirmation for deleting
             #[clap(long, short, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
-            yes: Option<bool>
+            yes: Option<bool>,
+
+            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+            #[clap(long = "2fa-code")]
+            two_factor_code: Option<String>
         }),
 
         /// Push a new change to the function
-        #[clap(visible_alias = "up")]
+        #[clap(visible_alias = "up", visible_alias = "deploy")]
         Push(struct {
             /// The path to the function
             #[clap(long, short)]
@@ -107,10 +117,10 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let linked_project = configs.get_linked_project().await?;
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let environment_input = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
+    let environment_input = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
     let environment = project
         .environments
         .edges
@@ -120,14 +130,27 @@ pub async fn command(args: Args) -> Result<()> {
                 || (e.node.name.to_lowercase() == environment_input.to_lowercase())
         })
         .ok_or_else(|| RailwayError::EnvironmentNotFound(environment_input))?;
+    ensure_environment_accessible(&environment.node)?;
+
+    let environment_instances = get_environment_instances(
+        &client,
+        &configs,
+        &linked_project.project,
+        &environment.node.id,
+    )
+    .await?;
 
     match args.command {
-        Commands::List => list::list(environment, project.clone()).await,
-        Commands::New(args) => new::new(environment, project.clone(), args).await,
-        Commands::Delete(args) => delete::delete(environment, args).await,
-        Commands::Link(link) => link::link(environment, link).await,
-        Commands::Pull(pull) => pull::pull(environment, pull).await,
-        Commands::Push(push) => push::push(environment, project.clone(), push).await,
+        Commands::List => list::list(environment, &environment_instances, project.clone()).await,
+        Commands::New(args) => {
+            new::new(environment, &environment_instances, project.clone(), args).await
+        }
+        Commands::Delete(args) => delete::delete(environment, &environment_instances, args).await,
+        Commands::Link(link) => link::link(&environment_instances, link).await,
+        Commands::Pull(pull) => pull::pull(&environment_instances, pull).await,
+        Commands::Push(push) => {
+            push::push(environment, &environment_instances, project.clone(), push).await
+        }
     }?;
 
     Ok(())

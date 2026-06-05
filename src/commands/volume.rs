@@ -1,13 +1,17 @@
 use super::*;
 use crate::{
-    controllers::project::{ensure_project_and_environment_exist, get_project},
-    errors::RailwayError,
-    queries::project::{
-        ProjectProject, ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode,
+    controllers::environment::get_matched_environment,
+    controllers::project::{
+        ProjectEnvironmentInstances, ProjectVolumeInstanceNode,
+        ensure_project_and_environment_exist, ensure_service_has_active_deployment,
+        find_service_instance, get_environment_instances, get_project, volume_instances_in_env,
     },
+    errors::RailwayError,
+    queries::{environment_instances::VolumeState, project::ProjectProject},
     util::{
         progress::create_spinner,
         prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+        two_factor::validate_two_factor_if_enabled,
     },
 };
 use anyhow::{anyhow, bail};
@@ -15,8 +19,14 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 use std::fmt::Display;
 
+pub(crate) mod files;
+pub(crate) mod sftp;
+
 /// Manage project volumes
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway volume list --json\n  railway volume add --service api --mount-path /data --json\n  railway volume update --volume volume-id --name data --json\n  railway volume delete --volume data --yes --json\n  railway volume browse /\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAliases:\n  list: ls\n  add: create, new\n  delete: remove, rm\n  update: edit, rename\n  browse: browser\n\nAutomation notes:\n  Mount paths must start with `/`. Use volume IDs from `railway volume list --json` when names may collide.\n  Downloads fail if LOCAL_PATH exists unless --overwrite or --override is passed. Uploads fail if REMOTE_PATH exists unless --overwrite is passed. Use --json for machine-readable file operation details."
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -28,12 +38,16 @@ pub struct Args {
     /// Environment ID
     #[clap(long, short)]
     environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
 }
 structstruck::strike! {
     #[strikethrough[derive(Parser)]]
     enum Commands {
         /// List volumes
-        #[clap(alias = "ls")]
+        #[clap(visible_alias = "ls")]
         List(struct {
             /// Output in JSON format
             #[clap(long)]
@@ -41,7 +55,7 @@ structstruck::strike! {
         }),
 
         /// Add a new volume
-        #[clap(alias = "create")]
+        #[clap(visible_alias = "create", visible_alias = "new")]
         Add(struct {
             /// The mount path of the volume
             #[clap(long, short)]
@@ -53,7 +67,7 @@ structstruck::strike! {
         }),
 
         /// Delete a volume
-        #[clap(alias = "remove", alias = "rm")]
+        #[clap(visible_alias = "remove", visible_alias = "rm")]
         Delete(struct {
             /// The ID/name of the volume you wish to delete
             #[clap(long, short)]
@@ -63,17 +77,17 @@ structstruck::strike! {
             #[clap(short = 'y', long = "yes")]
             yes: bool,
 
-            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
-            #[clap(long = "2fa-code")]
-            two_factor_code: Option<String>,
-
             /// Output in JSON format
             #[clap(long)]
             json: bool,
+
+            /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+            #[clap(long = "2fa-code")]
+            two_factor_code: Option<String>,
         }),
 
         /// Update a volume
-        #[clap(alias = "edit")]
+        #[clap(visible_alias = "edit", visible_alias = "rename")]
         Update(struct {
             /// The ID/name of the volume you wish to update
             #[clap(long, short)]
@@ -107,6 +121,40 @@ structstruck::strike! {
             json: bool,
         })
 
+        /// Manage files in a volume
+        #[clap(
+            visible_alias = "file",
+            after_help = "Examples:\n\n  railway volume files list / --json\n  railway volume files browse /\n  railway volume files browser /\n  railway volume files download /backup.tar ./backup.tar --json\n  railway volume files upload ./backup.tar /backup.tar --json\n  railway volume files delete /backup.tar --yes --json\n  railway volume files rename /backup.tar /backup-old.tar --json\n\nAutomation notes:\n  Prompts for a volume by default. Pass --volume when selecting a specific target or running non-interactively."
+        )]
+        Files(struct {
+            /// The ID/name of the volume whose files you wish to manage
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            #[clap(subcommand)]
+            command: files::Commands,
+        })
+
+        /// Browse files in a volume interactively
+        #[clap(visible_alias = "browser")]
+        Browse(struct {
+            /// The ID/name of the volume you wish to browse
+            #[clap(long, short)]
+            volume: Option<String>,
+
+            /// The directory path on the remote server to open
+            #[clap(value_name = "REMOTE_PATH", default_value = "/")]
+            remote_path: String,
+
+            /// Editor command to use when editing files
+            #[clap(long, value_name = "COMMAND")]
+            editor: Option<String>,
+
+            /// Concurrent file downloads
+            #[clap(long, value_name = "N", default_value_t = sftp::DEFAULT_TRANSFER_CONCURRENCY)]
+            concurrency: usize,
+        })
+
         /// Attach a volume to a service
         Attach(struct {
             /// The ID/name of the volume you wish to attach
@@ -127,45 +175,177 @@ structstruck::strike! {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
 
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
 
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let service = args.service.or_else(|| linked_project.service.clone());
-    let environment = args
-        .environment
+    let project_id = args
+        .project
         .clone()
-        .unwrap_or(linked_project.environment.clone());
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+    let project = get_project(&client, &configs, project_id.clone()).await?;
+    let service = args
+        .service
+        .or_else(|| linked_project.as_ref().and_then(|lp| lp.service.clone()));
+    let environment_input = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string(),
+    };
+    let environment = get_matched_environment(&project, environment_input)?.id;
+    let environment_instances =
+        get_environment_instances(&client, &configs, &project_id, &environment).await?;
 
     match args.command {
-        Commands::Add(a) => add(service, environment, a.mount_path, project, a.json).await?,
-        Commands::List(l) => list(environment, project, l.json).await?,
+        Commands::Files(f) => {
+            let target =
+                volume_file_target(&environment, &environment_instances, f.volume, project)?;
+            files::command_from_parts(target, f.command).await?
+        }
+        Commands::Browse(b) => {
+            let target =
+                volume_file_target(&environment, &environment_instances, b.volume, project)?;
+            files::browse(
+                target,
+                files::BrowseArgs {
+                    remote_path: b.remote_path,
+                    editor: b.editor,
+                    concurrency: b.concurrency,
+                },
+            )
+            .await?
+        }
+        Commands::Add(a) => {
+            add(
+                service,
+                environment,
+                &environment_instances,
+                project,
+                a.mount_path,
+                a.json,
+            )
+            .await?
+        }
+        Commands::List(l) => list(environment, &environment_instances, project, l.json).await?,
         Commands::Delete(d) => {
             delete(
                 environment,
+                &environment_instances,
                 d.volume,
                 project,
                 d.yes,
-                d.two_factor_code,
                 d.json,
+                d.two_factor_code,
             )
             .await?
         }
         Commands::Update(u) => {
-            update(environment, u.volume, u.mount_path, u.name, project, u.json).await?
+            update(
+                environment,
+                &environment_instances,
+                u.volume,
+                u.mount_path,
+                u.name,
+                project,
+                u.json,
+            )
+            .await?
         }
-        Commands::Detach(d) => detach(environment, d.volume, project, d.yes, d.json).await?,
+        Commands::Detach(d) => {
+            detach(
+                environment,
+                &environment_instances,
+                d.volume,
+                project,
+                d.yes,
+                d.json,
+            )
+            .await?
+        }
         Commands::Attach(a) => {
-            attach(environment, a.volume, service, project, a.yes, a.json).await?
+            attach(
+                environment,
+                &environment_instances,
+                a.volume,
+                service,
+                project,
+                a.yes,
+                a.json,
+            )
+            .await?
         }
     }
 
     Ok(())
 }
 
+fn volume_file_target(
+    environment: &str,
+    environment_instances: &ProjectEnvironmentInstances,
+    volume: Option<String>,
+    project: ProjectProject,
+) -> Result<files::FileTarget> {
+    let is_terminal = std::io::stdout().is_terminal();
+    let environment_name = project
+        .environments
+        .edges
+        .iter()
+        .find(|edge| edge.node.id == environment)
+        .map(|edge| edge.node.name.as_str())
+        .unwrap_or(environment)
+        .to_string();
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment,
+        volume,
+        is_terminal,
+    )?;
+
+    let service_id = volume.0.service_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Volume {} is not attached to any service",
+            volume.0.volume.name
+        )
+    })?;
+    let service_instance =
+        find_service_instance(environment_instances, service_id).ok_or_else(|| {
+            anyhow!(
+                "No service instance found for volume {}",
+                volume.0.volume.name
+            )
+        })?;
+    ensure_service_has_active_deployment(service_instance, &environment_name)?;
+
+    Ok(files::FileTarget {
+        service_instance_id: service_instance.id.clone(),
+        mount_path: volume.0.mount_path.clone(),
+        label: files::FileTargetLabel::Volume {
+            id: volume.0.volume.id.clone(),
+            name: volume.0.volume.name.clone(),
+            mount_path: volume.0.mount_path.clone(),
+        },
+    })
+}
+
 async fn attach(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     service: Option<String>,
     project: ProjectProject,
@@ -175,7 +355,14 @@ async fn attach(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project.clone(), environment.as_str(), volume, is_terminal)?.0;
+    let volume = select_volume(
+        project.clone(),
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?
+    .0;
     let service = service.ok_or_else(|| anyhow!("No service found. Please link one via `railway link` or specify one via the `--service` flag."))?;
     let service_name = &project
         .services
@@ -249,6 +436,7 @@ async fn attach(
 
 async fn detach(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     project: ProjectProject,
     yes: bool,
@@ -257,7 +445,14 @@ async fn detach(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project.clone(), environment.as_str(), volume, is_terminal)?.0;
+    let volume = select_volume(
+        project.clone(),
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?
+    .0;
 
     if volume.service_id.is_none() {
         bail!(
@@ -320,6 +515,7 @@ async fn detach(
 
 async fn update(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     mount_path: Option<String>,
     name: Option<String>,
@@ -329,7 +525,13 @@ async fn update(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project, environment.as_str(), volume, is_terminal)?;
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?;
 
     if mount_path.is_none() && name.is_none() {
         bail!(
@@ -398,16 +600,23 @@ async fn update(
 
 async fn delete(
     environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
     volume: Option<String>,
     project: ProjectProject,
     yes: bool,
-    two_factor_code: Option<String>,
     json: bool,
+    two_factor_code: Option<String>,
 ) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let is_terminal = std::io::stdout().is_terminal();
-    let volume = select_volume(project, environment.as_str(), volume, is_terminal)?;
+    let volume = select_volume(
+        project,
+        environment_instances,
+        environment.as_str(),
+        volume,
+        is_terminal,
+    )?;
 
     let confirm = if yes {
         true
@@ -426,41 +635,8 @@ async fn delete(
         );
     };
     if confirm {
-        let is_two_factor_enabled = {
-            let vars = queries::two_factor_info::Variables {};
+        validate_two_factor_if_enabled(&client, &configs, is_terminal, two_factor_code).await?;
 
-            let info =
-                post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-                    .await?
-                    .two_factor_info;
-
-            info.is_verified
-        };
-
-        if is_two_factor_enabled {
-            let token = if let Some(code) = two_factor_code {
-                code
-            } else if is_terminal {
-                prompt_text("Enter your 2FA code")?
-            } else {
-                bail!(
-                    "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
-                );
-            };
-            let vars = mutations::validate_two_factor::Variables { token };
-
-            let valid = post_graphql::<mutations::ValidateTwoFactor, _>(
-                &client,
-                configs.get_backboard(),
-                vars,
-            )
-            .await?
-            .two_factor_info_validate;
-
-            if !valid {
-                return Err(RailwayError::InvalidTwoFactorCode.into());
-            }
-        }
         let volume_id = volume.0.volume.id.clone();
         let p = post_graphql::<mutations::VolumeDelete, _>(
             &client,
@@ -483,16 +659,54 @@ async fn delete(
     Ok(())
 }
 
-async fn list(environment: String, project: ProjectProject, json: bool) -> Result<()> {
-    let env = project
+/// A human-readable label for a volume's state, used in JSON output.
+fn volume_state_label(state: &Option<VolumeState>) -> String {
+    match state {
+        Some(VolumeState::READY) => "Ready".to_string(),
+        Some(VolumeState::DELETING) => "Deleting".to_string(),
+        Some(VolumeState::DELETED) => "Deleted".to_string(),
+        Some(VolumeState::ERROR) => "Error".to_string(),
+        Some(VolumeState::MIGRATING) => "Migrating".to_string(),
+        Some(VolumeState::MIGRATION_PENDING) => "Migration pending".to_string(),
+        Some(VolumeState::RESTORING) => "Restoring".to_string(),
+        Some(VolumeState::UPDATING) => "Updating".to_string(),
+        Some(VolumeState::Other(s)) => s.clone(),
+        None => "Unknown".to_string(),
+    }
+}
+
+/// A colored label for a volume's state, used in the human-readable output.
+fn colored_volume_state(state: &Option<VolumeState>) -> colored::ColoredString {
+    let label = volume_state_label(state);
+    match state {
+        Some(VolumeState::READY) => label.green(),
+        Some(VolumeState::DELETING | VolumeState::DELETED | VolumeState::ERROR) => label.red(),
+        Some(
+            VolumeState::MIGRATING
+            | VolumeState::MIGRATION_PENDING
+            | VolumeState::RESTORING
+            | VolumeState::UPDATING,
+        ) => label.yellow(),
+        Some(VolumeState::Other(_)) => label.normal(),
+        None => label.dimmed(),
+    }
+}
+
+async fn list(
+    environment: String,
+    environment_instances: &ProjectEnvironmentInstances,
+    project: ProjectProject,
+    json: bool,
+) -> Result<()> {
+    let environment_name = project
         .environments
         .edges
         .iter()
         .find(|e| e.node.id == environment)
+        .map(|e| e.node.name.clone())
         .ok_or_else(|| anyhow!("Environment not found"))?;
-    let environment_name = env.node.name.clone();
 
-    let volumes = &env.node.volume_instances.edges;
+    let volumes = volume_instances_in_env(environment_instances);
 
     if volumes.is_empty() {
         if json {
@@ -524,6 +738,9 @@ async fn list(environment: String, project: ProjectProject, json: bool) -> Resul
                     "serviceName": service_name,
                     "currentSizeMB": volume.current_size_mb,
                     "sizeMB": volume.size_mb,
+                    "status": volume_state_label(&volume.state),
+                    "isPendingDeletion": volume.is_pending_deletion,
+                    "deletedAt": volume.deleted_at.map(|dt| dt.to_rfc3339()),
                 })
             })
             .collect();
@@ -562,7 +779,22 @@ async fn list(environment: String, project: ProjectProject, json: bool) -> Resul
                 "MB".blue(),
                 volume.size_mb.to_string().red(),
                 "MB".red()
-            )
+            );
+            println!("Status: {}", colored_volume_state(&volume.state));
+            if volume.is_pending_deletion {
+                if let Some(deleted_at) = volume.deleted_at {
+                    let local_time: chrono::DateTime<chrono::Local> =
+                        chrono::DateTime::from(deleted_at);
+                    println!(
+                        "{} {}",
+                        "Deletes on:".red().bold(),
+                        local_time
+                            .format("%b %-d %Y %-I:%M %p %Z")
+                            .to_string()
+                            .red()
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -571,8 +803,9 @@ async fn list(environment: String, project: ProjectProject, json: bool) -> Resul
 async fn add(
     service: Option<String>,
     environment: String,
-    mount: Option<String>,
+    environment_instances: &ProjectEnvironmentInstances,
     project: ProjectProject,
+    mount: Option<String>,
     json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
@@ -610,16 +843,15 @@ async fn add(
         .unwrap();
 
     // check if there is a volume already mounted on the service in that environment
-    let env = project
+    if !project
         .environments
         .edges
         .iter()
-        .find(|e| e.node.id == environment)
-        .ok_or_else(|| anyhow!("Environment not found"))?;
-    if env
-        .node
-        .volume_instances
-        .edges
+        .any(|e| e.node.id == environment)
+    {
+        bail!("Environment not found");
+    }
+    if volume_instances_in_env(environment_instances)
         .iter()
         .any(|a| a.node.service_id == Some(service.clone()))
     {
@@ -681,20 +913,18 @@ async fn add(
 
 fn select_volume(
     project: ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment: &str,
     volume: Option<String>,
     is_terminal: bool,
 ) -> Result<Volume, anyhow::Error> {
-    let env = project
+    project
         .environments
         .edges
         .iter()
         .find(|e| e.node.id == environment)
         .ok_or_else(|| anyhow!("Environment not found"))?;
-    let volumes: Vec<Volume> = env
-        .node
-        .volume_instances
-        .edges
+    let volumes: Vec<Volume> = volume_instances_in_env(environment_instances)
         .iter()
         .map(|a| Volume(a.node.clone()))
         .collect();
@@ -719,7 +949,7 @@ fn select_volume(
 }
 
 #[derive(Debug, Clone)]
-struct Volume(ProjectProjectEnvironmentsEdgesNodeVolumeInstancesEdgesNode);
+struct Volume(ProjectVolumeInstanceNode);
 
 impl Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

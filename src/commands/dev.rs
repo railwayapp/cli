@@ -32,6 +32,9 @@ use super::*;
 
 /// Run Railway services locally
 #[derive(Debug, Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway dev up --dry-run --no-tui\n  railway dev start --no-https\n  railway dev configure\n  railway dev stop\n\nAliases:\n  up: start\n  down: stop\n  configure: config\n  clean: reset"
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Option<DevelopCommand>,
@@ -44,12 +47,16 @@ pub struct Args {
 #[derive(Debug, Subcommand)]
 enum DevelopCommand {
     /// Start services (default when no subcommand provided)
+    #[clap(visible_alias = "start")]
     Up(UpArgs),
     /// Stop services
+    #[clap(visible_alias = "stop")]
     Down(DownArgs),
     /// Stop services and remove volumes/data
+    #[clap(visible_alias = "reset")]
     Clean(CleanArgs),
     /// Configure local code services
+    #[clap(visible_alias = "config")]
     Configure(ConfigureArgs),
 }
 
@@ -260,7 +267,7 @@ async fn configure_command(args: ConfigureArgs) -> Result<()> {
         .collect();
 
     let project_id = linked_project.project.clone();
-    let environment_id = linked_project.environment.clone();
+    let environment_id = linked_project.environment_id()?.to_string();
 
     let env_response = fetch_environment_config(&client, &configs, &environment_id, false).await?;
     let config = env_response.config;
@@ -841,10 +848,10 @@ async fn up_command(args: UpArgs) -> Result<()> {
         .collect();
 
     let project_id = linked_project.project.clone();
-    let environment_id = args
-        .environment
-        .clone()
-        .unwrap_or(linked_project.environment.clone());
+    let environment_id = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
 
     let env_response = fetch_environment_config(&client, &configs, &environment_id, true).await?;
     let env_name = env_response.name;

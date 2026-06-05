@@ -7,7 +7,8 @@ use crate::{
     errors::RailwayError,
     util::{
         progress::create_spinner_if,
-        prompt::{fake_select, prompt_confirm_with_default, prompt_options, prompt_text},
+        prompt::{fake_select, prompt_confirm_with_default, prompt_options},
+        two_factor::validate_two_factor_if_enabled,
     },
     workspace::{Project, Workspace, workspaces},
 };
@@ -16,6 +17,9 @@ use super::*;
 
 /// Delete a project
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway delete --project project-id --yes --json\n  railway rm --project project-id --yes --json\n  railway project delete --project project-id --yes --json\n\nAutomation notes:\n  Project deletion is scheduled by Railway. Treat a successful response as the deletion request being accepted.\n  Non-interactive deletion requires --yes. Use --2fa-code when your account requires 2FA."
+)]
 pub struct Args {
     /// The project ID or name to delete
     #[clap(short, long)]
@@ -25,13 +29,13 @@ pub struct Args {
     #[clap(short = 'y', long = "yes")]
     yes: bool,
 
-    /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
-    #[clap(long = "2fa-code")]
-    two_factor_code: Option<String>,
-
     /// Output in JSON format
     #[clap(long)]
     json: bool,
+
+    /// 2FA code for verification (required if 2FA is enabled in non-interactive mode)
+    #[clap(long = "2fa-code")]
+    two_factor_code: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -64,46 +68,16 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    let is_two_factor_enabled = {
-        let vars = queries::two_factor_info::Variables {};
-
-        let info =
-            post_graphql::<queries::TwoFactorInfo, _>(&client, configs.get_backboard(), vars)
-                .await?
-                .two_factor_info;
-
-        info.is_verified
-    };
-
-    if is_two_factor_enabled {
-        let token = if let Some(code) = args.two_factor_code {
-            code
-        } else if is_terminal {
-            prompt_text("Enter your 2FA code")?
-        } else {
-            bail!(
-                "2FA is enabled. Use --2fa-code <CODE> to provide your verification code in non-interactive mode."
-            );
-        };
-        let vars = mutations::validate_two_factor::Variables { token };
-
-        let valid =
-            post_graphql::<mutations::ValidateTwoFactor, _>(&client, configs.get_backboard(), vars)
-                .await?
-                .two_factor_info_validate;
-
-        if !valid {
-            return Err(RailwayError::InvalidTwoFactorCode.into());
-        }
-    }
+    validate_two_factor_if_enabled(&client, &configs, is_terminal, args.two_factor_code).await?;
 
     let spinner = create_spinner_if(!args.json, "Deleting project...".into());
 
-    let vars = mutations::project_delete::Variables {
+    let vars = mutations::project_schedule_delete::Variables {
         id: project_id.clone(),
     };
 
-    post_graphql::<mutations::ProjectDelete, _>(&client, &configs.get_backboard(), vars).await?;
+    post_graphql::<mutations::ProjectScheduleDelete, _>(&client, &configs.get_backboard(), vars)
+        .await?;
 
     if args.json {
         println!("{}", serde_json::json!({"id": project_id}));

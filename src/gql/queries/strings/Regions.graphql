@@ -1,8 +1,15 @@
-query Regions {
-    regions {
+query Regions($projectId: String) {
+    regions(projectId: $projectId) {
         name
+        region
         country
-        railwayMetal
         location
+        workspaceId
+        deploymentConstraints {
+            deprecationInfo {
+                isDeprecated
+                replacementRegion
+            }
+        }
     }
 }

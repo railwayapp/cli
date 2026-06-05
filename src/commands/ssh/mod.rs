@@ -1,198 +1,152 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Parser;
-use indicatif::ProgressBar;
 
-use crate::{
-    client::{GQLClient, auth_failure_error},
-    config::Configs,
-    controllers::terminal::{self, TerminalClient},
-    util::progress::{create_spinner, fail_spinner},
-};
-
-pub const SSH_CONNECTION_TIMEOUT_SECS: u64 = 30;
-pub const SSH_MESSAGE_TIMEOUT_SECS: u64 = 10;
-pub const SSH_CONNECT_DELAY_SECS: u64 = 5;
-pub const SSH_MAX_EMPTY_MESSAGES: usize = 100;
-
-pub const SSH_MAX_CONNECT_ATTEMPTS: u32 = 3;
-pub const SSH_MAX_CONNECT_ATTEMPTS_PERSISTENT: u32 = 20;
+use crate::{client::GQLClient, config::Configs};
 
 mod common;
-mod platform;
+mod config;
+mod keys;
+mod native;
+// `pub(crate)` so `sandbox ssh` can emit the same stage-failure telemetry.
+pub(crate) mod tel;
 
 use common::*;
-use platform::*;
 
-/// Connect to a service via SSH
+// Re-exported for the `sandbox` command, which reuses the same native SSH
+// transport (key registration + `ssh <target>@<env relay host>`).
+pub use native::{ensure_ssh_key, run_native_ssh};
+
+/// Connect to a service via SSH or manage SSH keys
 #[derive(Parser, Clone)]
 pub struct Args {
+    #[clap(subcommand)]
+    subcommand: Option<Commands>,
+
     /// Project to connect to (defaults to linked project)
     #[clap(short, long)]
     project: Option<String>,
 
-    #[clap(short, long)]
     /// Service to connect to (defaults to linked service)
+    #[clap(short, long)]
     service: Option<String>,
 
-    #[clap(short, long)]
     /// Environment to connect to (defaults to linked environment)
+    #[clap(short, long)]
     environment: Option<String>,
 
-    #[clap(short, long)]
     /// Deployment instance ID to connect to (defaults to first active instance)
+    #[clap(short, long)]
     #[arg(long = "deployment-instance", value_name = "deployment-instance-id")]
     deployment_instance: Option<String>,
 
-    /// SSH into the service inside a tmux session. Installs tmux if it's not installed. Optionally, provide a session name (--session name)
+    /// SSH into the service inside a tmux session. Installs tmux if not present. Optionally provide a session name (--session name)
     #[clap(long, value_name = "SESSION_NAME", default_missing_value = "railway", num_args = 0..=1)]
     session: Option<String>,
+
+    /// Deprecated: native SSH is now the default, this flag has no effect
+    #[clap(long, hide = true)]
+    native: bool,
+
+    /// Path to identity (private key) file to use, like `ssh -i`.
+    /// Skips the local ~/.ssh scan; forwarded directly to ssh.
+    #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
+    identity_file: Option<PathBuf>,
 
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
 }
 
+#[derive(Parser, Clone)]
+enum Commands {
+    /// Add, preview, or remove an OpenSSH config block for a service
+    Config(config::Args),
+
+    /// Manage SSH keys registered with Railway
+    Keys(keys::Args),
+}
+
 pub async fn command(args: Args) -> Result<()> {
+    match args.subcommand {
+        Some(Commands::Config(config_args)) => return config::command(config_args).await,
+        Some(Commands::Keys(keys_args)) => return keys::command(keys_args).await,
+        None => {}
+    }
+
+    if args.native {
+        eprintln!(
+            "Warning: --native flag is deprecated and has no effect; native SSH is now the default."
+        );
+    }
+
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let params = get_ssh_connect_params(args.clone(), &configs, &client).await?;
-
-    if let Some(name) = args.session {
-        run_persistent_session(&params, name).await?;
-        return Ok(());
+    let mut auto_ssh_identity = None;
+    if args.identity_file.is_none() {
+        auto_ssh_identity =
+            tel::track("key_setup", ensure_ssh_key(&client, &configs).await).await?;
     }
 
-    // Determine if we're running a command or interactive shell
-    let running_command = !args.command.is_empty();
-
-    let mut spinner = create_spinner("Connecting to service...".to_string());
-    let mut terminal_client = create_client(&params, &mut spinner, None).await?;
-
-    if running_command {
-        // Run single command
-        execute_command(&mut terminal_client, args.command.join(" "), spinner).await?;
+    let ssh_target = if let Some(ref instance_id) = args.deployment_instance {
+        instance_id.clone()
     } else {
-        // Initialize interactive shell (default to bash)
-        initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
-
-        // Run the platform-specific event loop (unix/windows implements terminals differently)
-        match run_interactive_session(terminal_client).await? {
-            SessionTermination::Complete => {}
-            term => {
-                eprintln!("{}", term.message());
-                std::process::exit(term.exit_code());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn run_persistent_session(params: &terminal::SSHConnectParams, name: String) -> Result<()> {
-    ensure_tmux_is_installed(params).await?;
-
-    loop {
-        let mut spinner = create_spinner("Connecting to service...".to_string());
-
-        let mut terminal_client = match create_client(
-            params,
-            &mut spinner,
-            Some(SSH_MAX_CONNECT_ATTEMPTS_PERSISTENT),
+        let params = tel::track(
+            "resolve_target",
+            get_ssh_connect_params(args.clone(), &configs, &client).await,
         )
-        .await
-        {
-            Ok(tc) => tc,
-            Err(e) => {
-                fail_spinner(&mut spinner, format!("{e}"));
-                std::process::exit(1);
-            }
-        };
-
-        // Start tmux session
-        initialize_shell(&mut terminal_client, Some("bash".to_string()), &mut spinner).await?;
-
-        terminal_client
-            .send_data(
-                format!("exec tmux new-session -A -s {name} \\; set -g mouse on \n").as_str(),
+        .await?;
+        tel::track(
+            "instance_lookup",
+            native::get_service_instance_id(
+                &client,
+                &configs,
+                &params.environment_id,
+                &params.service_id,
             )
-            .await?;
-
-        // Resend the window size after starting a tmux session
-        send_window_size(&mut terminal_client).await?;
-
-        let termination = run_interactive_session(terminal_client).await?;
-
-        match termination {
-            SessionTermination::Complete => {
-                break;
-            }
-            SessionTermination::ConnectionReset => {
-                // Clean up terminal screen before reconnecting
-                reset_terminal(true)?;
-
-                // Add a small delay before reconnecting
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                println!("Connection reset. Reconnecting...");
-                continue;
-            }
-            SessionTermination::SendError(e)
-            | SessionTermination::StdinError(e)
-            | SessionTermination::ServerError(e) => {
-                println!("Session error: {e}. Reconnecting...");
-                continue;
-            }
-        };
-    }
-
-    reset_terminal(false)?;
-
-    Ok(())
-}
-
-/// Installs tmux with apt-get if not already installed
-async fn ensure_tmux_is_installed(params: &terminal::SSHConnectParams) -> Result<()> {
-    let command = "which tmux || (apt-get update && apt-get install -y tmux)";
-
-    let mut spinner = create_spinner("Installing tmux...".to_string());
-    let mut terminal_client = create_client(params, &mut spinner, None).await?;
-
-    let result =
-        execute_command_with_result(&mut terminal_client, command.to_string(), &mut spinner).await;
-
-    if let Err(err) = result {
-        fail_spinner(&mut spinner, format!("Error installing tmux: {err}"));
-        std::process::exit(1);
-    }
-
-    Ok(())
-}
-
-#[derive(Clone, Debug)]
-pub enum AuthKind {
-    Bearer(String),
-    ProjectAccessToken(String),
-}
-
-async fn create_client(
-    params: &terminal::SSHConnectParams,
-    spinner: &mut ProgressBar,
-    max_attempts: Option<u32>,
-) -> Result<TerminalClient> {
-    let configs = Configs::new()?;
-    let token = match (
-        configs.get_railway_auth_token(),
-        Configs::get_railway_token(),
-    ) {
-        (Some(token), _) => AuthKind::Bearer(token),
-        (None, Some(token)) => AuthKind::ProjectAccessToken(token),
-        (None, None) => return Err(auth_failure_error().into()),
+            .await,
+        )
+        .await?
     };
 
-    let ws_url = format!("wss://{}", configs.get_relay_host_path());
-    let terminal_client =
-        create_terminal_client(&ws_url, token, params, spinner, max_attempts).await?;
+    let effective_identity = args
+        .identity_file
+        .as_deref()
+        .or(auto_ssh_identity.as_deref());
 
-    Ok(terminal_client)
+    if let Some(session_name) = args.session {
+        tel::track(
+            "tmux_install",
+            native::ensure_tmux_installed(&ssh_target, effective_identity),
+        )
+        .await?;
+        return tel::track(
+            "session_connect",
+            native::run_tmux_session(&ssh_target, &session_name, effective_identity),
+        )
+        .await;
+    }
+
+    let command = if args.command.is_empty() {
+        None
+    } else {
+        Some(args.command.as_slice())
+    };
+    let exit_code = tel::track(
+        "spawn",
+        native::run_native_ssh(&ssh_target, command, effective_identity),
+    )
+    .await?;
+    if exit_code != 0 {
+        // ssh::command is about to std::process::exit, which bypasses the
+        // global telemetry hook in the commands! macro. Report the failure
+        // here so connection errors (ssh's 255, auth failures, remote command
+        // exits) still show up in CLI telemetry.
+        tel::report_failure("exit_nonzero", &format!("ssh exited with code {exit_code}")).await;
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
 }

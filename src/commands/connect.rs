@@ -8,7 +8,7 @@ use which::which;
 use crate::controllers::{
     database::DatabaseType,
     environment::get_matched_environment,
-    project::{find_service_instance, get_project},
+    project::{find_service_instance, get_environment_instances, get_project},
     variables::get_service_variables,
 };
 use crate::errors::RailwayError;
@@ -19,6 +19,9 @@ use super::*;
 
 /// Connect to a database's shell (psql for Postgres, mongosh for MongoDB, etc.)
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway connect postgres\n  railway connect redis --environment production\n\nAutomation notes:\n  Non-interactive runs must pass the database service name.\n  The local database client must be installed before connecting."
+)]
 pub struct Args {
     /// The name of the database to connect to
     service_name: Option<String>,
@@ -26,6 +29,10 @@ pub struct Args {
     /// Environment to pull variables from (defaults to linked environment)
     #[clap(short, long)]
     environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
 }
 
 impl Display for ProjectProjectServicesEdgesNode {
@@ -37,13 +44,31 @@ impl Display for ProjectProjectServicesEdgesNode {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-    let environment = args
-        .environment
+    if args.project.is_some() && args.environment.is_none() {
+        bail!("--environment is required when using --project");
+    }
+    let linked_project = if args.project.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+    let project_id = args
+        .project
         .clone()
-        .unwrap_or(linked_project.environment.clone());
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+    let environment = match args.environment.clone() {
+        Some(env) => env,
+        None => linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string(),
+    };
 
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let project = get_project(&client, &configs, project_id.clone()).await?;
 
     let service = if let Some(name) = args.service_name.clone() {
         get_service(&project, name)?
@@ -68,16 +93,18 @@ pub async fn command(args: Args) -> Result<()> {
 
     let environment_id = get_matched_environment(&project, environment)?.id;
     let service_id = service.id.clone();
+    let environment_instances =
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
     let variables = get_service_variables(
         &client,
         &configs,
-        linked_project.project,
+        project_id,
         environment_id.clone(),
         service_id.clone(),
     )
     .await?;
     let database_type = {
-        let service_instance = find_service_instance(&project, &environment_id, &service_id);
+        let service_instance = find_service_instance(&environment_instances, &service_id);
 
         service_instance
             .and_then(|si| si.source.clone())

@@ -19,10 +19,11 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// List deployments for a service with IDs, statuses and other metadata
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(ListArgs),
 
     /// Upload and deploy project from the current directory
+    #[clap(visible_alias = "deploy")]
     Up(crate::commands::up::Args),
 
     /// Redeploy the latest deployment of a service
@@ -108,7 +109,10 @@ async fn list_deployments(
     };
 
     let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let environment = environment.unwrap_or(linked_project.environment.clone());
+    let environment = match environment {
+        Some(env) => env,
+        None => linked_project.environment_id()?.to_string(),
+    };
     let environment_id = get_matched_environment(&project, environment)?.id;
 
     let service_id = if let Some(service_name_or_id) = service {

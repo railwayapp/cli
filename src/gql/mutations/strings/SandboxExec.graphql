@@ -1,0 +1,19 @@
+mutation SandboxExec(
+  $id: String!
+  $environmentId: String!
+  $command: String!
+  $timeoutSec: Int
+) {
+  sandboxExec(
+    id: $id
+    environmentId: $environmentId
+    command: $command
+    timeoutSec: $timeoutSec
+  ) {
+    exitCode
+    stdout
+    stderr
+    truncated
+    timedOut
+  }
+}

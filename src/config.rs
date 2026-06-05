@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
 use serde::{Deserialize, Serialize};
@@ -24,26 +24,82 @@ pub struct LinkedProject {
     pub project_path: String,
     pub name: Option<String>,
     pub project: String,
-    pub environment: String,
+    pub environment: Option<String>,
     pub environment_name: Option<String>,
     pub service: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl LinkedProject {
+    /// Returns the environment ID, or an error if no environment is linked.
+    pub fn environment_id(&self) -> Result<&str> {
+        self.environment.as_deref().ok_or_else(|| {
+            anyhow!(
+                "No environment specified. Set RAILWAY_ENVIRONMENT_ID, use --environment, or run `railway environment` to link one."
+            )
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayUser {
+    pub id: Option<String>,
     pub token: Option<String>,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<i64>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// A sandbox the CLI has created or seen, cached locally so `railway sandbox
+/// ssh`/`exec`/`destroy` can recover its environment (the connection string is
+/// `sbx:<environmentId>:<id>`) without re-specifying `--environment`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde_with::skip_serializing_none]
+#[serde(rename_all = "camelCase")]
+pub struct StoredSandbox {
+    pub id: String,
+    pub environment_id: String,
+    pub project_id: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// A sandbox template recipe the CLI has built. Templates are
+/// content-addressed server-side (the id is a hash of the recipe) and
+/// `sandboxCreate` needs the full recipe — not just the id — so the CLI keeps
+/// the instructions locally to make `railway sandbox create --template <name>`
+/// possible.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde_with::skip_serializing_none]
+#[serde(rename_all = "camelCase")]
+pub struct StoredSandboxTemplate {
+    /// Server-side template id (sha256 of the recipe).
+    pub id: String,
+    /// Optional local-only name for friendlier lookup.
+    pub name: Option<String>,
+    pub environment_id: String,
+    pub instructions: Vec<String>,
+    pub base_image_digest: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
 pub struct RailwayConfig {
     pub projects: BTreeMap<String, LinkedProject>,
     pub user: RailwayUser,
+    pub editor: Option<String>,
     /// (path, id)
     pub linked_functions: Option<Vec<(String, String)>>,
+    /// Sandboxes the CLI knows about (id -> environment cache).
+    pub sandboxes: Option<Vec<StoredSandbox>>,
+    /// The most recently created/used sandbox; the default target for
+    /// `railway sandbox ssh` when no id is given.
+    pub active_sandbox: Option<String>,
+    /// Sandbox template recipes the CLI has built (id is server-side hash;
+    /// instructions kept locally because sandboxCreate needs the full recipe).
+    pub sandbox_templates: Option<Vec<StoredSandboxTemplate>>,
 }
 
 #[derive(Debug)]
@@ -78,11 +134,7 @@ impl Configs {
             let root_config: RailwayConfig = serde_json::from_slice(&serialized_config)
                 .unwrap_or_else(|_| {
                     eprintln!("{}", "Unable to parse config file, regenerating".yellow());
-                    RailwayConfig {
-                        projects: BTreeMap::new(),
-                        user: RailwayUser { token: None },
-                        linked_functions: None,
-                    }
+                    RailwayConfig::default()
                 });
 
             let config = Self {
@@ -95,20 +147,12 @@ impl Configs {
 
         Ok(Self {
             root_config_path,
-            root_config: RailwayConfig {
-                projects: BTreeMap::new(),
-                user: RailwayUser { token: None },
-                linked_functions: None,
-            },
+            root_config: RailwayConfig::default(),
         })
     }
 
     pub fn reset(&mut self) -> Result<()> {
-        self.root_config = RailwayConfig {
-            projects: BTreeMap::new(),
-            user: RailwayUser { token: None },
-            linked_functions: None,
-        };
+        self.root_config = RailwayConfig::default();
         Ok(())
     }
 
@@ -120,6 +164,31 @@ impl Configs {
         std::env::var(consts::RAILWAY_API_TOKEN_ENV).ok()
     }
 
+    pub fn get_railway_project_id() -> Option<String> {
+        std::env::var(consts::RAILWAY_PROJECT_ID_ENV).ok()
+    }
+
+    pub fn get_railway_environment_id() -> Option<String> {
+        std::env::var(consts::RAILWAY_ENVIRONMENT_ID_ENV).ok()
+    }
+
+    pub fn get_railway_service_id() -> Option<String> {
+        std::env::var(consts::RAILWAY_SERVICE_ID_ENV).ok()
+    }
+
+    /// Returns true if either RAILWAY_PROJECT_ID or RAILWAY_ENVIRONMENT_ID env vars are set,
+    /// indicating the user intends to use env-var-based project targeting.
+    pub fn has_env_var_project_config() -> bool {
+        Self::get_railway_project_id().is_some() || Self::get_railway_environment_id().is_some()
+    }
+
+    /// Returns true if using token-based auth (RAILWAY_TOKEN or RAILWAY_API_TOKEN)
+    /// rather than session-based auth from `railway login`.
+    /// Token-based auth bypasses 2FA on the backend, so client-side 2FA checks are unnecessary.
+    pub fn is_using_token_auth() -> bool {
+        Self::get_railway_token().is_some() || Self::get_railway_api_token().is_some()
+    }
+
     pub fn env_is_ci() -> bool {
         std::env::var("CI")
             .map(|val| val.trim().to_lowercase() == "true")
@@ -128,12 +197,59 @@ impl Configs {
 
     /// tries the environment variable and the config file
     pub fn get_railway_auth_token(&self) -> Option<String> {
-        Self::get_railway_api_token().or(self
-            .root_config
-            .user
-            .token
-            .clone()
-            .filter(|t| !t.is_empty()))
+        Self::get_railway_api_token()
+            .or(self
+                .root_config
+                .user
+                .access_token
+                .clone()
+                .filter(|t| !t.is_empty()))
+            .or(self
+                .root_config
+                .user
+                .token
+                .clone()
+                .filter(|t| !t.is_empty()))
+    }
+
+    pub fn has_oauth_token(&self) -> bool {
+        self.root_config.user.access_token.is_some()
+    }
+
+    pub fn get_refresh_token(&self) -> Option<&str> {
+        self.root_config.user.refresh_token.as_deref()
+    }
+
+    pub fn is_token_expired(&self) -> bool {
+        match self.root_config.user.token_expires_at {
+            Some(expires_at) => {
+                let now = chrono::Utc::now().timestamp();
+                now >= (expires_at - 60) // 60s buffer
+            }
+            None => false,
+        }
+    }
+
+    pub fn save_oauth_tokens(
+        &mut self,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_in: i64,
+    ) -> Result<()> {
+        anyhow::ensure!(!access_token.is_empty(), "access_token cannot be empty");
+        anyhow::ensure!(expires_in > 0, "Server returned non-positive expires_in");
+        let expires_at = chrono::Utc::now().timestamp() + expires_in;
+        self.root_config.user.access_token = Some(access_token.to_string());
+        self.root_config.user.refresh_token = refresh_token.map(|s| s.to_string());
+        self.root_config.user.token_expires_at = Some(expires_at);
+        self.root_config.user.token = None; // Clear legacy token
+        self.write()
+    }
+
+    pub fn save_user_id(&mut self, id: &str) -> Result<()> {
+        anyhow::ensure!(!id.is_empty(), "user id cannot be empty");
+        self.root_config.user.id = Some(id.to_string());
+        self.write()
     }
 
     pub fn get_environment_id() -> Environment {
@@ -157,14 +273,19 @@ impl Configs {
         }
     }
 
-    /// Returns the host and path for relay server without protocol (e.g. "backboard.railway.com/relay")
-    /// Protocol is omitted to allow flexibility between https:// and wss:// usage
-    pub fn get_relay_host_path(&self) -> String {
-        format!("backboard.{}/relay", self.get_host())
-    }
-
     pub fn get_backboard(&self) -> String {
         format!("https://backboard.{}/graphql/v2", self.get_host())
+    }
+
+    /// SSH relay host and non-default port for the current environment.
+    /// Mirrors backboard's `controllers/ssh` mapping: only the develop relay
+    /// is separate (and listens on 2222); staging falls through to the
+    /// production relay, same as backboard's IS_DEV-only branch.
+    pub fn get_ssh_relay() -> (&'static str, Option<u16>) {
+        match Self::get_environment_id() {
+            Environment::Dev => ("ssh.railway-develop.com", Some(2222)),
+            Environment::Production | Environment::Staging => ("ssh.railway.com", None),
+        }
     }
 
     pub fn get_current_directory(&self) -> Result<String> {
@@ -176,7 +297,7 @@ impl Configs {
     }
 
     pub fn get_closest_linked_project_directory(&self) -> Result<String> {
-        if Self::get_railway_token().is_some() {
+        if Self::has_env_var_project_config() || Self::get_railway_token().is_some() {
             return self.get_current_directory();
         }
 
@@ -199,6 +320,24 @@ impl Configs {
         Err(RailwayError::NoLinkedProject.into())
     }
 
+    /// Returns the locally-linked project from disk config, ignoring any RAILWAY_TOKEN override.
+    pub fn get_local_linked_project(&self) -> Result<LinkedProject> {
+        let mut current_path = std::env::current_dir()?;
+        loop {
+            let path = current_path
+                .to_str()
+                .context("Unable to get current working directory")?
+                .to_owned();
+            if let Some(project) = self.root_config.projects.get(&path) {
+                return Ok(project.clone());
+            }
+            if !current_path.pop() {
+                break;
+            }
+        }
+        Err(RailwayError::NoLinkedProject.into())
+    }
+
     pub async fn get_linked_project(&self) -> Result<LinkedProject> {
         let path = self.get_closest_linked_project_directory()?;
         let project = self.root_config.projects.get(&path);
@@ -215,11 +354,49 @@ impl Configs {
                 project_path: self.get_current_directory()?,
                 name: Some(data.project_token.project.name),
                 project: data.project_token.project.id,
-                environment: data.project_token.environment.id,
+                environment: Some(data.project_token.environment.id),
                 environment_name: Some(data.project_token.environment.name),
                 service: project.cloned().and_then(|p| p.service),
             };
             return Ok(project);
+        }
+
+        if let Some(resolved) = Self::resolve_env_var_project()? {
+            if self.get_railway_auth_token().is_none() {
+                bail!(RailwayError::Unauthorized);
+            }
+
+            // Only merge local config when it targets the same project,
+            // to avoid silently mixing project A's environment with project B.
+            // Walk ancestor directories so nested dirs still find the local link.
+            let local = self
+                .get_local_linked_project()
+                .ok()
+                .filter(|p| p.project == resolved.project_id);
+            let service_id = Self::get_railway_service_id()
+                .or_else(|| local.as_ref().and_then(|p| p.service.clone()));
+
+            let env_from_override = resolved.environment_id.is_some();
+            let environment = resolved
+                .environment_id
+                .or_else(|| local.as_ref().and_then(|p| p.environment.clone()));
+            // Only carry the local environment name when we fell back to the
+            // local environment ID. If the override supplied its own ID, the
+            // local name would refer to a different environment.
+            let environment_name = if !env_from_override && environment.is_some() {
+                local.as_ref().and_then(|p| p.environment_name.clone())
+            } else {
+                None
+            };
+
+            return Ok(LinkedProject {
+                project_path: self.get_current_directory()?,
+                name: None,
+                project: resolved.project_id,
+                environment,
+                environment_name,
+                service: service_id,
+            });
         }
 
         project
@@ -246,13 +423,130 @@ impl Configs {
             project_path: path.clone(),
             name,
             project: project_id,
-            environment: environment_id,
+            environment: Some(environment_id),
             environment_name,
             service: None,
         };
 
         self.root_config.projects.insert(path, project);
         Ok(())
+    }
+
+    /// Record a sandbox the CLI created/saw. When `set_active` is true it also
+    /// becomes the default target for `railway sandbox ssh`. Caller persists
+    /// with `write()`.
+    pub fn upsert_sandbox(&mut self, sandbox: StoredSandbox, set_active: bool) {
+        let id = sandbox.id.clone();
+        let sandboxes = self.root_config.sandboxes.get_or_insert_with(Vec::new);
+        match sandboxes.iter_mut().find(|s| s.id == sandbox.id) {
+            Some(existing) => *existing = sandbox,
+            None => sandboxes.push(sandbox),
+        }
+        if set_active {
+            self.root_config.active_sandbox = Some(id);
+        }
+    }
+
+    /// The active sandbox (most recently created/used), if it is still known.
+    pub fn get_active_sandbox(&self) -> Option<StoredSandbox> {
+        let id = self.root_config.active_sandbox.as_ref()?;
+        self.get_sandbox(id)
+    }
+
+    /// Look up a known sandbox by id.
+    pub fn get_sandbox(&self, id: &str) -> Option<StoredSandbox> {
+        self.root_config
+            .sandboxes
+            .as_ref()?
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+    }
+
+    /// Mark a known sandbox active. Caller persists with `write()`.
+    pub fn set_active_sandbox(&mut self, id: &str) {
+        self.root_config.active_sandbox = Some(id.to_string());
+    }
+
+    /// Forget a sandbox (e.g. after destroy), clearing the active pointer if it
+    /// referenced this id. Caller persists with `write()`.
+    pub fn remove_sandbox(&mut self, id: &str) {
+        if let Some(sandboxes) = self.root_config.sandboxes.as_mut() {
+            sandboxes.retain(|s| s.id != id);
+        }
+        if self.root_config.active_sandbox.as_deref() == Some(id) {
+            self.root_config.active_sandbox = None;
+        }
+    }
+
+    /// Record a sandbox template recipe (upsert by template id within the same
+    /// environment). When a name is given, any other template in the
+    /// environment holding that name loses it — names are unique handles.
+    /// Caller persists with `write()`.
+    pub fn upsert_sandbox_template(&mut self, template: StoredSandboxTemplate) {
+        let templates = self
+            .root_config
+            .sandbox_templates
+            .get_or_insert_with(Vec::new);
+        if let Some(name) = &template.name {
+            for other in templates.iter_mut() {
+                if other.environment_id == template.environment_id
+                    && other.id != template.id
+                    && other.name.as_deref() == Some(name)
+                {
+                    other.name = None;
+                }
+            }
+        }
+        match templates
+            .iter_mut()
+            .find(|t| t.id == template.id && t.environment_id == template.environment_id)
+        {
+            Some(existing) => *existing = template,
+            None => templates.push(template),
+        }
+    }
+
+    /// Look up a stored template by local name or id (exact or unambiguous id
+    /// prefix), optionally scoped to an environment.
+    pub fn find_sandbox_template(
+        &self,
+        name_or_id: &str,
+        environment_id: Option<&str>,
+    ) -> Option<StoredSandboxTemplate> {
+        let templates = self.root_config.sandbox_templates.as_ref()?;
+        let in_env =
+            |t: &&StoredSandboxTemplate| environment_id.is_none_or(|env| t.environment_id == env);
+        if let Some(t) = templates
+            .iter()
+            .filter(in_env)
+            .find(|t| t.name.as_deref() == Some(name_or_id))
+        {
+            return Some(t.clone());
+        }
+        let mut matches = templates
+            .iter()
+            .filter(in_env)
+            .filter(|t| t.id.starts_with(name_or_id));
+        match (matches.next(), matches.next()) {
+            (Some(t), None) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    /// All stored templates, optionally scoped to an environment.
+    pub fn list_sandbox_templates(
+        &self,
+        environment_id: Option<&str>,
+    ) -> Vec<StoredSandboxTemplate> {
+        self.root_config
+            .sandbox_templates
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|t| environment_id.is_none_or(|env| t.environment_id == env))
+            .cloned()
+            .collect()
     }
 
     pub fn link_service(&mut self, service_id: String) -> Result<()> {
@@ -393,5 +687,94 @@ impl Configs {
         fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
 
         Ok(())
+    }
+
+    /// Resolves env-var-based project targeting. Returns:
+    /// - `Ok(Some(...))` if RAILWAY_PROJECT_ID is set (with optional environment)
+    /// - `Ok(None)` if neither env var is set (fall through to local config)
+    /// - `Err(...)` if RAILWAY_ENVIRONMENT_ID is set without RAILWAY_PROJECT_ID
+    fn resolve_env_var_project() -> Result<Option<ResolvedEnvVarProject>> {
+        let project_id = Self::get_railway_project_id();
+        let environment_id = Self::get_railway_environment_id();
+
+        match (project_id, environment_id) {
+            (Some(project_id), env_id) => Ok(Some(ResolvedEnvVarProject {
+                project_id,
+                environment_id: env_id,
+            })),
+            (None, Some(_)) => {
+                bail!("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID.")
+            }
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedEnvVarProject {
+    project_id: String,
+    environment_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Env var tests must run sequentially to avoid races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_vars<F, R>(vars: &[(&str, Option<&str>)], f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: tests run sequentially under ENV_LOCK, so no concurrent mutation.
+        unsafe {
+            for (key, val) in vars {
+                match val {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let result = f();
+        unsafe {
+            for (key, _) in vars {
+                std::env::remove_var(key);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn env_var_project_id_only_returns_none_environment() {
+        let result = with_env_vars(
+            &[
+                ("RAILWAY_PROJECT_ID", Some("proj-123")),
+                ("RAILWAY_ENVIRONMENT_ID", None),
+            ],
+            Configs::resolve_env_var_project,
+        );
+        let resolved = result.unwrap().expect("should return Some");
+        assert_eq!(resolved.project_id, "proj-123");
+        assert!(resolved.environment_id.is_none());
+    }
+
+    #[test]
+    fn env_var_environment_id_without_project_id_is_rejected() {
+        let result = with_env_vars(
+            &[
+                ("RAILWAY_PROJECT_ID", None),
+                ("RAILWAY_ENVIRONMENT_ID", Some("env-456")),
+            ],
+            Configs::resolve_env_var_project,
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("RAILWAY_ENVIRONMENT_ID cannot be set without RAILWAY_PROJECT_ID"),
+            "unexpected error: {err}"
+        );
     }
 }

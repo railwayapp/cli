@@ -19,6 +19,14 @@ pub struct DeploymentLogs;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/subscriptions/strings/HttpLogs.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct HttpLogs;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/subscriptions/strings/Deployment.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

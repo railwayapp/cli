@@ -1,0 +1,3 @@
+mutation CliEventTrack($input: CliEventTrackInput!) {
+  cliEventTrack(input: $input)
+}

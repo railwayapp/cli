@@ -1,19 +1,13 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Result, bail};
 
 use futures::StreamExt;
-use gzp::{ZBuilder, deflate::Gzip};
-use ignore::WalkBuilder;
-use indicatif::{ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle};
+use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use is_terminal::IsTerminal;
-use serde::{Deserialize, Serialize};
-use synchronized_writer::SynchronizedWriter;
-use tar::Builder;
 
 use crate::{
     consts::TICK_STRING,
@@ -22,17 +16,23 @@ use crate::{
         environment::get_matched_environment,
         project::get_project,
         service::get_or_prompt_service,
+        upload::{create_deploy_tarball, upload_deploy_tarball},
     },
-    errors::RailwayError,
     subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
-    util::{logs::print_log, prompt::prompt_confirm_with_default},
+    util::{
+        logs::{LogFormat, print_log},
+        prompt::prompt_confirm_with_default,
+    },
 };
 
 use super::*;
 
 /// Upload and deploy project from the current directory
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway up --service api --environment production\n  railway up ./apps/api --path-as-root --service api\n  railway up --detach --json --message \"deploy api\"\n\nAutomation notes:\n  `railway up --detach --json` starts an upload and deployment, but it does not wait for the deployment to become healthy.\n  Poll with `railway deployment list --json` and inspect logs with `railway logs --json --lines 100`.\n  To switch a locally uploaded service to GitHub autodeploys, run `railway service source connect --repo owner/repo --branch main --service api`."
+)]
 pub struct Args {
     path: Option<PathBuf>,
 
@@ -83,20 +83,10 @@ pub struct Args {
     #[clap(long)]
     /// Confirm Railway configuration prompts
     yes: bool,
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpResponse {
-    pub deployment_id: String,
-    pub url: String,
-    pub logs_url: String,
-    pub deployment_domain: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpErrorResponse {
-    pub message: String,
+    #[clap(short, long)]
+    /// Message to attach to the deployment
+    message: Option<String>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -132,24 +122,30 @@ pub async fn command(args: Args) -> Result<()> {
     let environment = args
         .environment
         .clone()
-        .or_else(|| linked_project.as_ref().map(|lp| lp.environment.clone()))
+        .or_else(|| {
+            linked_project
+                .as_ref()
+                .and_then(|lp| lp.environment.clone())
+        })
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No environment specified. Use --environment or run `railway link` first"
+                "No environment specified. Set RAILWAY_ENVIRONMENT_ID, use --environment, or run `railway environment` to link one."
             )
         })?;
     let environment_id = get_matched_environment(&project, environment)?.id;
 
     let service = get_or_prompt_service(linked_project, project, args.service.clone().or(iac_service)).await?;
 
-    let spinner = if std::io::stdout().is_terminal() && !args.json {
+    let is_tty = std::io::stdout().is_terminal() && !args.json;
+
+    let spinner = if is_tty {
         let spinner = ProgressBar::new_spinner()
             .with_style(
                 ProgressStyle::default_spinner()
                     .tick_chars(TICK_STRING)
                     .template("{spinner:.green} {msg:.cyan.bold}")?,
             )
-            .with_message("Indexing".to_string());
+            .with_message("Indexing");
         spinner.enable_steady_tick(Duration::from_millis(100));
         Some(spinner)
     } else if !args.json {
@@ -159,103 +155,47 @@ pub async fn command(args: Args) -> Result<()> {
         None
     };
 
-    // Explanation for the below block
-    // arc is a reference counted pointer to a mutexed vector of bytes, which
-    // stores the actual tarball in memory.
-    //
-    // parz is a parallelized gzip writer, which writes to the arc (still in memory)
-    //
-    // archive is a tar archive builder, which writes to the parz writer `new(&mut parz)
-    //
-    // builder is a directory walker which returns an iterable that we loop over to add
-    // files to the tarball (archive)
-    //
-    // during the iteration of `builder`, we ignore all files that match the patterns found in
-    // .railwayignore
-    // .gitignore
-    // .git/**
-    // node_modules/**
-    let bytes = Vec::<u8>::new();
-    let arc = Arc::new(Mutex::new(bytes));
-    let mut parz = ZBuilder::<Gzip, _>::new()
-        .num_threads(num_cpus::get())
-        .from_writer(SynchronizedWriter::new(arc.clone()));
-
-    // list of all paths to ignore by default
-    let ignore_paths = [".git", "node_modules"];
-    let ignore_paths: Vec<&std::ffi::OsStr> =
-        ignore_paths.iter().map(std::ffi::OsStr::new).collect();
-
-    {
-        let mut archive = Builder::new(&mut parz);
-        let mut builder = WalkBuilder::new(deploy_paths.project_path);
-        builder.add_custom_ignore_filename(".railwayignore");
-        if args.no_gitignore {
-            builder.git_ignore(false);
-        }
-
-        let walker = builder.follow_links(true).hidden(false);
-        let walked = walker.build().collect::<Vec<_>>();
-        if let Some(spinner) = spinner {
-            spinner.finish_with_message("Indexed");
-        }
-        if std::io::stdout().is_terminal() && !args.json {
-            let pg = ProgressBar::new(walked.len() as u64)
-                .with_style(
-                    ProgressStyle::default_bar()
-                        .template("{spinner:.green} {msg:.cyan.bold} [{bar:20}] {percent}% ")?
-                        .progress_chars("=> ")
-                        .tick_chars(TICK_STRING),
-                )
-                .with_message("Compressing")
-                .with_finish(ProgressFinish::WithMessage("Compressed".into()));
-            pg.enable_steady_tick(Duration::from_millis(100));
-
-            for entry in walked.into_iter().progress_with(pg) {
-                let entry = entry?;
-                let path = entry.path();
-                if path
-                    .components()
-                    .any(|c| ignore_paths.contains(&c.as_os_str()))
-                {
-                    continue;
+    let mut progress_bar: Option<ProgressBar> = None;
+    let body = create_deploy_tarball(
+        &deploy_paths.project_path,
+        &deploy_paths.archive_prefix_path,
+        args.no_gitignore,
+        |current, total| {
+            if current == 0 {
+                // Indexing complete
+                if let Some(s) = &spinner {
+                    s.finish_with_message("Indexed");
                 }
-                let stripped =
-                    PathBuf::from(".").join(path.strip_prefix(&deploy_paths.archive_prefix_path)?);
-                archive.append_path_with_name(path, stripped)?;
-            }
-        } else {
-            for entry in walked.into_iter() {
-                let entry = entry?;
-                let path = entry.path();
-                if path
-                    .components()
-                    .any(|c| ignore_paths.contains(&c.as_os_str()))
-                {
-                    continue;
+                if is_tty {
+                    let pg = ProgressBar::new(total as u64)
+                        .with_style(
+                            ProgressStyle::default_bar()
+                                .template(
+                                    "{spinner:.green} {msg:.cyan.bold} [{bar:20}] {percent}% ",
+                                )
+                                .unwrap()
+                                .progress_chars("=> ")
+                                .tick_chars(TICK_STRING),
+                        )
+                        .with_message("Compressing")
+                        .with_finish(ProgressFinish::WithMessage("Compressed".into()));
+                    pg.enable_steady_tick(Duration::from_millis(100));
+                    progress_bar = Some(pg);
                 }
-                let stripped =
-                    PathBuf::from(".").join(path.strip_prefix(&deploy_paths.archive_prefix_path)?);
-                archive.append_path_with_name(path, stripped)?;
+            } else if let Some(pg) = &progress_bar {
+                pg.inc(1);
             }
-        }
-    }
-    parz.finish()?;
+        },
+    )?;
 
-    let url = format!(
-        "https://backboard.{hostname}/project/{}/environment/{}/up?serviceId={}",
-        project_id,
-        environment_id,
-        service.clone().unwrap_or_default(),
-    );
+    // Ensure progress bar finishes if no entries were processed
+    drop(progress_bar);
 
     if args.verbose {
-        let bytes_len = arc.lock().unwrap().len();
         println!("railway up");
-        println!("service: {}", service.clone().unwrap_or_default());
+        println!("service: {}", service.as_deref().unwrap_or_default());
         println!("environment: {environment_id}");
-        println!("bytes: {bytes_len}");
-        println!("url: {url}");
+        println!("bytes: {}", body.len());
     }
 
     let spinner = if std::io::stdout().is_terminal() && !args.json {
@@ -275,53 +215,31 @@ pub async fn command(args: Args) -> Result<()> {
         None
     };
 
-    let body = arc.lock().unwrap().clone();
+    let up_result = upload_deploy_tarball(
+        &client,
+        hostname,
+        &project_id,
+        &environment_id,
+        service.as_deref(),
+        args.message.as_deref(),
+        body,
+    )
+    .await;
 
-    let mut upload_attempt = 0;
-    let res = loop {
-        let res = client
-            .post(url.clone())
-            .header("Content-Type", "multipart/form-data")
-            .body(body.clone())
-            .send()
-            .await?;
-        if res.status() != 404 || upload_attempt >= 10 {
-            break res;
+    let body = match up_result {
+        Err(e) => {
+            if let Some(spinner) = spinner {
+                spinner.finish_with_message("Failed");
+            }
+            return Err(e);
         }
-        upload_attempt += 1;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        Ok(body) => {
+            if let Some(spinner) = spinner {
+                spinner.finish_with_message("Uploaded");
+            }
+            body
+        }
     };
-
-    let status = res.status();
-    if status != 200 {
-        if let Some(spinner) = spinner {
-            spinner.finish_with_message("Failed");
-        }
-
-        // If a user error, parse the response
-        if status == 400 {
-            let body = res.json::<UpErrorResponse>().await?;
-            return Err(RailwayError::FailedToUpload(body.message).into());
-        }
-
-        if status == 413 {
-            let err = res.text().await?;
-            let filesize = arc.lock().unwrap().len();
-            return Err(RailwayError::FailedToUpload(format!(
-                "Failed to upload code. File too large ({filesize} bytes): {err}",
-            )))?;
-        }
-
-        return Err(RailwayError::FailedToUpload(format!(
-            "Failed to upload code with status code {status}"
-        ))
-        .into());
-    }
-
-    let body = res.json::<UpResponse>().await?;
-    if let Some(spinner) = spinner {
-        spinner.finish_with_message("Uploaded");
-    }
 
     let deployment_id = body.deployment_id;
 
@@ -364,7 +282,7 @@ pub async fn command(args: Args) -> Result<()> {
             let should_exit =
                 ci_flag && log.message.starts_with("No changed files matched patterns");
             if json_mode {
-                print_log(log, true, false);
+                print_log(log, true, LogFormat::LevelOnly);
             } else {
                 println!("{}", log.message);
             }
@@ -387,7 +305,7 @@ pub async fn command(args: Args) -> Result<()> {
         let deploy_deployment_id = deployment_id.clone();
         tasks.push(tokio::task::spawn(async move {
             if let Err(e) = stream_deploy_logs(deploy_deployment_id, None, |log| {
-                print_log(log, false, true)
+                print_log(log, false, LogFormat::Full)
             })
             .await
             {

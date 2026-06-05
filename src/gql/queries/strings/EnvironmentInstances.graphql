@@ -1,0 +1,92 @@
+query EnvironmentInstances(
+  $environmentId: String!
+  $projectId: String!
+  $serviceInstancesFirst: Int
+  $serviceInstancesAfter: String
+  $volumeInstancesFirst: Int
+  $volumeInstancesAfter: String
+) {
+  environment(id: $environmentId, projectId: $projectId) {
+    id
+    name
+    serviceInstances(first: $serviceInstancesFirst, after: $serviceInstancesAfter) {
+      edges {
+        node {
+          id
+          serviceId
+          serviceName
+          environmentId
+          numReplicas
+          latestDeployment {
+            canRedeploy
+            id
+            meta
+            status
+            createdAt
+            deploymentStopped
+            instances {
+              id
+              status
+            }
+          }
+          activeDeployments {
+            id
+            status
+            createdAt
+            meta
+            deploymentStopped
+            instances {
+              id
+              status
+            }
+          }
+          source {
+            repo
+            image
+          }
+          domains {
+            serviceDomains {
+              id
+              domain
+              targetPort
+            }
+            customDomains {
+              id
+              domain
+              targetPort
+            }
+          }
+          cronSchedule
+          nextCronRunAt
+          startCommand
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    volumeInstances(first: $volumeInstancesFirst, after: $volumeInstancesAfter) {
+      edges {
+        node {
+          serviceId
+          mountPath
+          environmentId
+          currentSizeMB
+          sizeMB
+          state
+          deletedAt
+          isPendingDeletion
+          volume {
+            name
+            id
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}

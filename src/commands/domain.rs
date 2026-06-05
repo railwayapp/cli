@@ -6,11 +6,7 @@ use is_terminal::IsTerminal;
 use queries::domains::DomainsDomains;
 use serde_json::json;
 
-use crate::{
-    consts::TICK_STRING,
-    controllers::project::{ensure_project_and_environment_exist, get_project},
-    errors::RailwayError,
-};
+use crate::{consts::TICK_STRING, controllers::project::resolve_service_context};
 
 use super::*;
 
@@ -27,6 +23,14 @@ pub struct Args {
     #[clap(short, long)]
     service: Option<String>,
 
+    /// Environment to use (defaults to linked environment)
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Optionally, specify a custom domain to use. If not specified, a domain will be generated.
     ///
     /// Specifying a custom domain will also return the required DNS records
@@ -40,29 +44,36 @@ pub struct Args {
 
 pub async fn command(args: Args) -> Result<()> {
     if let Some(domain) = args.domain {
-        create_custom_domain(domain, args.port, args.service, args.json).await?;
+        create_custom_domain(
+            domain,
+            args.port,
+            args.project,
+            args.service,
+            args.environment,
+            args.json,
+        )
+        .await?;
     } else {
-        create_service_domain(args.service, args.json).await?;
+        create_service_domain(args.project, args.service, args.environment, args.json).await?;
     }
     Ok(())
 }
 
-async fn create_service_domain(service_name: Option<String>, json: bool) -> Result<()> {
+async fn create_service_domain(
+    project: Option<String>,
+    service_name: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let service = get_service(&linked_project, &project, service_name)?;
+    let ctx = resolve_service_context(project, service_name, environment).await?;
 
     let vars = queries::domains::Variables {
-        project_id: linked_project.project.clone(),
-        environment_id: linked_project.environment.clone(),
-        service_id: service.id.clone(),
+        project_id: ctx.project_id.clone(),
+        environment_id: ctx.environment_id.clone(),
+        service_id: ctx.service_id.clone(),
     };
 
     let domains = post_graphql::<queries::Domains, _>(&client, configs.get_backboard(), vars)
@@ -79,8 +90,8 @@ async fn create_service_domain(service_name: Option<String>, json: bool) -> Resu
         .and_then(|s| s.ok());
 
     let vars = mutations::service_domain_create::Variables {
-        service_id: service.id.clone(),
-        environment_id: linked_project.environment.clone(),
+        service_id: ctx.service_id.clone(),
+        environment_id: ctx.environment_id.clone(),
     };
     let domain =
         post_graphql::<mutations::ServiceDomainCreate, _>(&client, configs.get_backboard(), vars)
@@ -162,50 +173,6 @@ fn print_existing_domains(domains: &DomainsDomains, json: bool) -> Result<()> {
     Ok(())
 }
 
-// Returns a reference to save on Heap allocations
-pub fn get_service<'a>(
-    linked_project: &'a LinkedProject,
-    project: &'a queries::project::ProjectProject,
-    service_name: Option<String>,
-) -> anyhow::Result<&'a queries::project::ProjectProjectServicesEdgesNode> {
-    let services = project.services.edges.iter().collect::<Vec<_>>();
-
-    if services.is_empty() {
-        bail!(RailwayError::NoServices);
-    }
-
-    if project.services.edges.len() == 1 {
-        return Ok(&project.services.edges[0].node);
-    }
-
-    if let Some(service_name) = service_name {
-        if let Some(service) = project
-            .services
-            .edges
-            .iter()
-            .find(|s| s.node.name == service_name)
-        {
-            return Ok(&service.node);
-        }
-
-        bail!(RailwayError::ServiceNotFound(service_name));
-    }
-
-    if let Some(service) = linked_project.service.clone() {
-        if project.services.edges.iter().any(|s| s.node.id == service) {
-            return Ok(&project
-                .services
-                .edges
-                .iter()
-                .find(|s| s.node.id == service)
-                .unwrap()
-                .node);
-        }
-    }
-
-    bail!(RailwayError::NoServices);
-}
-
 pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicatif::ProgressBar> {
     let spinner = indicatif::ProgressBar::new_spinner()
         .with_style(
@@ -222,25 +189,21 @@ pub fn creating_domain_spiner(message: Option<String>) -> anyhow::Result<indicat
 async fn create_custom_domain(
     domain: String,
     port: Option<u16>,
+    project: Option<String>,
     service_name: Option<String>,
+    environment: Option<String>,
     json: bool,
 ) -> Result<()> {
     let configs = Configs::new()?;
 
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-
-    let service = get_service(&linked_project, &project, service_name)?;
+    let ctx = resolve_service_context(project, service_name, environment).await?;
 
     let spinner = (std::io::stdout().is_terminal() && !json)
         .then(|| {
             creating_domain_spiner(Some(format!(
                 "Creating custom domain for service {}{}...",
-                service.name,
+                ctx.service_name,
                 port.map(|p| format!(" on port {p}")).unwrap_or_default()
             )))
         })
@@ -264,9 +227,9 @@ async fn create_custom_domain(
     let vars = mutations::custom_domain_create::Variables {
         input: mutations::custom_domain_create::CustomDomainCreateInput {
             domain: domain.clone(),
-            environment_id: linked_project.environment.clone(),
-            project_id: linked_project.project.clone(),
-            service_id: service.id.clone(),
+            environment_id: ctx.environment_id.clone(),
+            project_id: ctx.project_id.clone(),
+            service_id: ctx.service_id.clone(),
             target_port: port.map(|p| p as i64),
         },
     };
@@ -294,17 +257,26 @@ async fn create_custom_domain(
         bail!("No DNS records found. Please check the Railway dashboard for more information.");
     }
 
+    let zone = response.custom_domain_create.status.dns_records[0]
+        .zone
+        .clone();
     println!(
         "To finish setting up your custom domain, add the following DNS records to {}:\n",
-        &response.custom_domain_create.status.dns_records[0].zone
+        &zone
     );
 
-    print_dns(response.custom_domain_create.status.dns_records);
+    print_dns(
+        response.custom_domain_create.status.dns_records,
+        &response.custom_domain_create.status.verification_dns_host,
+        &response.custom_domain_create.status.verification_token,
+        response.custom_domain_create.status.verified,
+        &zone,
+    );
 
     println!(
         "\nNote: if the Name is \"@\", the DNS record should be created for the root of the domain."
     );
-    println!("*DNS changes can take up to 72 hours to propagate worldwide.");
+    println!("DNS changes can take up to 72 hours to propagate worldwide.");
 
     Ok(())
 }
@@ -313,7 +285,25 @@ fn print_dns(
     domains: Vec<
         mutations::custom_domain_create::CustomDomainCreateCustomDomainCreateStatusDnsRecords,
     >,
+    verification_dns_host: &Option<String>,
+    verification_token: &Option<String>,
+    verified: bool,
+    zone: &str,
 ) {
+    // Build the TXT verification value if needed
+    let txt_verification = if !verified {
+        match (verification_dns_host, verification_token) {
+            (Some(host), Some(token)) => {
+                // Strip the zone suffix from the verification DNS host (e.g., "_railway-verify.example.com" -> "_railway-verify")
+                let host_label = host.strip_suffix(&format!(".{}", zone)).unwrap_or(host);
+                Some((host_label.to_string(), format!("railway-verify={}", token)))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // I benchmarked this iter().fold() and it's faster than using 3x iter().map()
     let (padding_type, padding_hostlabel, padding_value) = domains
         .iter()
@@ -325,6 +315,18 @@ fn print_dns(
                 max(max_value, d.required_value.len()),
             )
         });
+
+    // Include TXT verification record in padding calculation
+    let (padding_type, padding_hostlabel, padding_value) =
+        if let Some((host, value)) = &txt_verification {
+            (
+                max(padding_type, 3), // "TXT".len()
+                max(padding_hostlabel, host.len()),
+                max(padding_value, value.len()),
+            )
+        } else {
+            (padding_type, padding_hostlabel, padding_value)
+        };
 
     // Add extra minimum padding to each length
     let [padding_type, padding_hostlabel, padding_value] =
@@ -352,6 +354,19 @@ fn print_dns(
                 &domain.hostlabel
             },
             domain.required_value,
+            width_type = padding_type,
+            width_host = padding_hostlabel,
+            width_value = padding_value
+        );
+    }
+
+    // Print TXT verification record if domain is not yet verified
+    if let Some((host, value)) = txt_verification {
+        println!(
+            "\t{:<width_type$}{:<width_host$}{:<width_value$}",
+            "TXT",
+            host,
+            value,
             width_type = padding_type,
             width_host = padding_hostlabel,
             width_value = padding_value

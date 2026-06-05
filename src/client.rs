@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use colored::Colorize;
 use graphql_client::GraphQLQuery;
 use reqwest::{
     Client,
@@ -11,6 +12,7 @@ use crate::{
     config::Configs,
     consts::{self, RAILWAY_API_TOKEN_ENV, RAILWAY_TOKEN_ENV},
     errors::RailwayError,
+    oauth,
 };
 use anyhow::Result;
 
@@ -19,6 +21,16 @@ use graphql_client::Response as GraphQLResponse;
 pub struct GQLClient;
 
 impl GQLClient {
+    pub fn new_public() -> Result<Client, RailwayError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-source",
+            HeaderValue::from_static(consts::get_user_agent()),
+        );
+
+        Ok(Self::build_client(headers))
+    }
+
     pub fn new_authorized(configs: &Configs) -> Result<Client, RailwayError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &Configs::get_railway_token() {
@@ -35,28 +47,75 @@ impl GQLClient {
             "x-source",
             HeaderValue::from_static(consts::get_user_agent()),
         );
-        let client = Client::builder()
-            .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
-            .user_agent(consts::get_user_agent())
-            .default_headers(headers)
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
-        Ok(client)
+        Ok(Self::build_client(headers))
     }
 
-    pub fn new_unauthorized() -> Result<Client> {
+    pub fn new_user_authorized(configs: &Configs) -> Result<Client, RailwayError> {
         let mut headers = HeaderMap::new();
+        if let Some(token) = configs.get_railway_auth_token() {
+            headers.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {token}"))?,
+            );
+        } else {
+            return Err(RailwayError::Unauthorized);
+        }
         headers.insert(
             "x-source",
             HeaderValue::from_static(consts::get_user_agent()),
         );
-        let client = Client::builder()
+        Ok(Self::build_client(headers))
+    }
+
+    fn build_client(headers: HeaderMap) -> Client {
+        Client::builder()
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())
             .default_headers(headers)
-            .build()?;
-        Ok(client)
+            .timeout(Duration::from_secs(resolve_timeout_secs()))
+            .build()
+            .unwrap()
+    }
+}
+
+/// Resolve the HTTP request timeout (in seconds).
+///
+/// Reads the `RAILWAY_HTTP_TIMEOUT` env var as an escape hatch for long-running
+/// operations (e.g. duplicating a large environment). Falls back to
+/// [`consts::DEFAULT_HTTP_TIMEOUT_SECS`] when unset, and surfaces a warning
+/// (rather than silently ignoring) when the value can't be parsed as a positive
+/// integer number of seconds.
+fn resolve_timeout_secs() -> u64 {
+    parse_timeout_secs(
+        std::env::var(consts::RAILWAY_HTTP_TIMEOUT_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Parse a `RAILWAY_HTTP_TIMEOUT` value into a timeout in seconds.
+///
+/// `None` (env var unset) falls back to the default. A value that can't be parsed
+/// as a positive integer is surfaced as a warning (rather than silently ignored)
+/// and also falls back to the default.
+fn parse_timeout_secs(raw: Option<&str>) -> u64 {
+    let Some(raw) = raw else {
+        return consts::DEFAULT_HTTP_TIMEOUT_SECS;
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => secs,
+        _ => {
+            eprintln!(
+                "{}",
+                format!(
+                    "Warning: ignoring invalid {}={raw:?}; expected a positive number of seconds, using {}s",
+                    consts::RAILWAY_HTTP_TIMEOUT_ENV,
+                    consts::DEFAULT_HTTP_TIMEOUT_SECS
+                )
+                .yellow()
+            );
+            consts::DEFAULT_HTTP_TIMEOUT_SECS
+        }
     }
 }
 
@@ -133,6 +192,33 @@ pub(crate) fn auth_failure_error() -> RailwayError {
     }
 }
 
+/// Ensures the OAuth access token is still valid, refreshing if needed.
+pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
+    // Env var tokens are not managed by us
+    if Configs::get_railway_token().is_some() || Configs::get_railway_api_token().is_some() {
+        return Ok(());
+    }
+
+    if !configs.has_oauth_token() || !configs.is_token_expired() {
+        return Ok(());
+    }
+
+    let refresh_token = configs.get_refresh_token().ok_or_else(|| {
+        RailwayError::OAuthRefreshFailed("No refresh token available".to_string())
+    })?;
+
+    let host = configs.get_host();
+    let token_resp = oauth::refresh_access_token(host, refresh_token).await?;
+
+    configs.save_oauth_tokens(
+        &token_resp.access_token,
+        token_resp.refresh_token.as_deref(),
+        token_resp.expires_in,
+    )?;
+
+    Ok(())
+}
+
 /// Like post_graphql, but removes null values from the variables object before sending.
 ///
 /// This is needed because graphql-client 0.14.0 has a bug where skip_serializing_none
@@ -195,5 +281,117 @@ pub async fn post_graphql_skip_none<Q: GraphQLQuery, U: reqwest::IntoUrl>(
         Ok(data)
     } else {
         Err(RailwayError::MissingResponseData)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    use super::*;
+    use crate::gql::queries;
+
+    #[test]
+    fn timeout_defaults_when_unset() {
+        assert_eq!(parse_timeout_secs(None), consts::DEFAULT_HTTP_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn timeout_uses_valid_override() {
+        assert_eq!(parse_timeout_secs(Some("300")), 300);
+        assert_eq!(parse_timeout_secs(Some("  90  ")), 90);
+    }
+
+    #[test]
+    fn timeout_falls_back_on_invalid_values() {
+        for bad in ["0", "-5", "abc", "12.5", ""] {
+            assert_eq!(
+                parse_timeout_secs(Some(bad)),
+                consts::DEFAULT_HTTP_TIMEOUT_SECS,
+                "expected fallback for {bad:?}"
+            );
+        }
+    }
+
+    fn spawn_graphql_server(
+        response_for_request: impl FnOnce(String) -> String + Send + 'static,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let mut content_length = 0usize;
+
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                request.push_str(&line);
+
+                if let Some(value) = line.strip_prefix("Content-Length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+
+                if line == "\r\n" {
+                    break;
+                }
+            }
+
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            request.push_str(std::str::from_utf8(&body).unwrap());
+
+            let response_body = response_for_request(request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn public_client_can_query_templates_without_auth_headers() {
+        let server_url = spawn_graphql_server(|request| {
+            assert!(
+                !request.to_ascii_lowercase().contains("authorization:"),
+                "public template lookup should not send auth headers"
+            );
+
+            serde_json::json!({
+                "data": {
+                    "template": {
+                        "id": "template-id",
+                        "name": "PostgreSQL",
+                        "serializedConfig": null
+                    }
+                }
+            })
+            .to_string()
+        });
+
+        let client = GQLClient::new_public().unwrap();
+        let response = post_graphql::<queries::TemplateDetail, _>(
+            &client,
+            server_url,
+            queries::template_detail::Variables {
+                code: "postgres".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.template.id, "template-id");
+        assert_eq!(response.template.name, "PostgreSQL");
+        assert_eq!(response.template.serialized_config, None);
     }
 }

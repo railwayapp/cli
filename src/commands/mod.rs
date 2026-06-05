@@ -9,6 +9,8 @@ pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
 }
 
 pub mod add;
+pub mod autoupdate;
+pub mod bucket;
 pub mod completion;
 pub mod config_command;
 pub mod connect;
@@ -27,18 +29,26 @@ pub mod list;
 pub mod login;
 pub mod logout;
 pub mod logs;
+pub mod mcp;
+pub mod metrics;
 pub mod open;
+mod output;
 pub mod project;
 pub mod redeploy;
 pub mod restart;
 pub mod run;
+pub mod sandbox;
 pub mod scale;
 pub mod service;
+pub mod setup;
 pub mod shell;
+pub mod skills;
 pub mod ssh;
 pub mod starship;
 pub mod status;
 pub mod sync;
+pub mod telemetry_cmd;
+pub mod templates;
 pub mod unlink;
 pub mod up;
 pub mod upgrade;
@@ -46,4 +56,5 @@ pub mod variable;
 pub mod volume;
 pub mod whoami;
 
+pub mod agent;
 pub mod check_updates;

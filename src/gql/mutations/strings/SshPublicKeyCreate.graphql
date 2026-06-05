@@ -1,0 +1,10 @@
+mutation SshPublicKeyCreate($input: SshPublicKeyCreateInput!) {
+  sshPublicKeyCreate(input: $input) {
+    id
+    name
+    publicKey
+    fingerprint
+    userId
+    workspaceId
+  }
+}

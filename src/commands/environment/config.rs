@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
 use super::{Config as Args, *};
-use crate::controllers::{config::environment::fetch_environment_config, project::get_project};
+use crate::controllers::{
+    config::environment::{RegionConfig, fetch_environment_config},
+    project::get_project,
+    regions::{fetch_region_locations, region_display_name},
+};
 
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
@@ -26,6 +30,8 @@ pub async fn command(args: Args) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&config)?);
     } else {
+        let region_locations = fetch_region_locations(&client, &configs).await;
+
         // Services
         let active_services: Vec<_> = config
             .services
@@ -74,17 +80,14 @@ pub async fn command(args: Args) -> Result<()> {
                         }
                     }
                     if let Some(ref regions) = deploy.multi_region_config {
-                        let region_list: Vec<_> = regions.keys().collect();
+                        let region_list: Vec<_> = regions
+                            .iter()
+                            .map(|(region, config)| {
+                                format_region_config(region, config.as_ref(), &region_locations)
+                            })
+                            .collect();
                         if !region_list.is_empty() {
-                            println!(
-                                "  {} {}",
-                                "regions:".dimmed(),
-                                region_list
-                                    .iter()
-                                    .map(|s| s.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
+                            println!("  {} {}", "regions:".dimmed(), region_list.join(", "));
                         }
                     }
                 }
@@ -137,7 +140,10 @@ pub async fn command(args: Args) -> Result<()> {
             let region_str = if regions.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", regions.first().unwrap())
+                format!(
+                    " ({})",
+                    region_display_name(regions.first().unwrap(), &region_locations)
+                )
             };
             println!(
                 "\n{} {}{}",
@@ -178,7 +184,7 @@ fn resolve_environment(
             bail!(RailwayError::EnvironmentNotFound(env_input.clone()))
         }
     } else {
-        let env_id = linked_project.environment.clone();
+        let env_id = linked_project.environment_id()?.to_string();
         let env_name = project
             .environments
             .edges
@@ -190,5 +196,17 @@ fn resolve_environment(
             fake_select("Environment", &env_name);
         }
         Ok(env_id)
+    }
+}
+
+fn format_region_config(
+    region: &str,
+    config: Option<&RegionConfig>,
+    region_locations: &HashMap<String, String>,
+) -> String {
+    let label = region_display_name(region, region_locations);
+    match config.and_then(|config| config.num_replicas) {
+        Some(replicas) => format!("{label} ({replicas})"),
+        None => format!("{label} (0)"),
     }
 }

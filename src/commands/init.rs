@@ -8,7 +8,10 @@ use super::*;
 
 /// Create a new project
 #[derive(Parser)]
-#[clap(alias = "new")]
+#[clap(
+    visible_alias = "new",
+    after_help = "Examples:\n\n  railway init --name api --json\n  railway init --name api --workspace workspace-id --json\n\nAutomation notes:\n  This creates a project and links the current directory to the project's default environment.\n  Use an exact workspace ID or name when running outside a terminal."
+)]
 pub struct Args {
     /// Project name
     #[clap(short, long)]

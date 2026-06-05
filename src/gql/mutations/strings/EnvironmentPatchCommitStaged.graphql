@@ -1,3 +1,0 @@
-mutation EnvironmentPatchCommitStaged($environmentId: String!, $commitMessage: String, $skipDeploys: Boolean) {
-  environmentPatchCommitStaged(environmentId: $environmentId, commitMessage: $commitMessage, skipDeploys: $skipDeploys)
-}

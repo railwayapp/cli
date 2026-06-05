@@ -3,7 +3,12 @@ use strum::IntoEnumIterator;
 use super::{New as Args, changes::Change, *};
 use crate::{
     controllers::config::{
-        self, EnvironmentConfig, PatchEntry, environment::fetch_environment_config,
+        self, EnvironmentConfig, PatchEntry,
+        environment::{fetch_environment_config, prepare_config_for_duplication},
+    },
+    controllers::project::{
+        ProjectEnvironmentInstances, ProjectServiceInstanceEdge, get_environment_instances,
+        service_instances_in_env,
     },
     util::progress::create_spinner_if,
 };
@@ -20,19 +25,12 @@ pub async fn new_environment(args: Args) -> Result<()> {
     let name = select_name_new(&args, is_terminal)?;
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
 
-    let env_config = if let Some(ref duplicate_id) = duplicate_id {
-        edit_services_select(&args, &client, &configs, &project, duplicate_id.clone()).await?
-    } else {
-        EnvironmentConfig::default()
-    };
-    let has_config_changes = !config::is_empty(&env_config);
-
+    // Step 1: Create a new empty environment (no sourceEnvironmentId)
     let vars = mutations::environment_create::Variables {
         project_id: project.id.clone(),
         name,
-        source_id: duplicate_id.clone(),
-        // Apply duplication in background if we're duplicating, we'll wait for it
-        apply_changes_in_background: duplicate_id.as_ref().map(|_| true),
+        source_id: None,
+        apply_changes_in_background: None,
     };
 
     let spinner = create_spinner_if(!json, "Creating environment...".into());
@@ -44,21 +42,44 @@ pub async fn new_environment(args: Args) -> Result<()> {
     let env_id = response.environment_create.id.clone();
     let env_name = response.environment_create.name.clone();
 
-    if duplicate_id.is_some() {
-        // Wait for background duplication to complete before applying config changes
+    // Step 2: If duplicating, fetch source config and merge with overrides
+    if let Some(ref source_env_id) = duplicate_id {
         if let Some(ref s) = spinner {
-            s.set_message("Waiting for environment to duplicate...");
+            s.set_message("Fetching source environment config...");
         }
-        let _ = wait_for_environment_creation(&client, &configs, env_id.clone()).await;
-    }
 
-    // Apply config changes if any
-    if has_config_changes {
-        if let Some(ref s) = spinner {
-            s.set_message("Applying configuration...");
+        // Fetch the source environment's full config
+        let source_config = fetch_environment_config(&client, &configs, source_env_id, true)
+            .await?
+            .config;
+
+        // Prepare config for duplication: mark services/volumes/buckets for creation
+        let source_config = prepare_config_for_duplication(source_config);
+
+        // Get any --service-config overrides
+        let source_instances =
+            get_environment_instances(&client, &configs, &project.id, source_env_id).await?;
+        let override_config = edit_services_select(
+            &args,
+            &client,
+            &configs,
+            &source_instances,
+            source_env_id.clone(),
+            source_config.clone(),
+        )
+        .await?;
+
+        // Merge source config with overrides (overrides take precedence)
+        let merged_config = merge_configs(source_config, override_config);
+
+        if !config::is_empty(&merged_config) {
+            if let Some(ref s) = spinner {
+                s.set_message("Applying configuration...");
+            }
+            apply_environment_config(&client, &configs, &env_id, merged_config).await?;
         }
-        apply_environment_config(&client, &configs, &env_id, env_config).await?;
     }
+    // No duplication = empty environment, nothing to configure
 
     if json {
         println!("{}", serde_json::json!({"id": env_id, "name": env_name}));
@@ -77,6 +98,7 @@ pub async fn new_environment(args: Args) -> Result<()> {
         env_id,
         Some(env_name),
     )?;
+    configs.write()?;
 
     Ok(())
 }
@@ -87,8 +109,9 @@ pub async fn edit_services_select(
     args: &Args,
     client: &reqwest::Client,
     configs: &Configs,
-    project: &queries::project::ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment_id: String,
+    exisiting_config: EnvironmentConfig,
 ) -> Result<EnvironmentConfig> {
     let is_terminal = std::io::stdout().is_terminal();
 
@@ -98,7 +121,7 @@ pub async fn edit_services_select(
 
     if has_non_interactive {
         // Non-interactive: parse --service-config and --service-variable flags
-        return parse_non_interactive_configs(&all_configs, project, &environment_id);
+        return parse_non_interactive_configs(&all_configs, environment_instances);
     }
 
     if !is_terminal {
@@ -107,16 +130,22 @@ pub async fn edit_services_select(
     }
 
     // Interactive flow
-    parse_interactive_configs(client, configs, project, &environment_id, None).await
+    parse_interactive_configs(
+        client,
+        configs,
+        environment_instances,
+        &environment_id,
+        Some(exisiting_config),
+    )
+    .await
 }
 
 /// Parse --service-config flags into EnvironmentConfig
 pub fn parse_non_interactive_configs(
     service_configs: &[String],
-    project: &queries::project::ProjectProject,
-    environment_id: &str,
+    environment_instances: &ProjectEnvironmentInstances,
 ) -> Result<EnvironmentConfig> {
-    let services = get_environment_services(project, environment_id)?;
+    let services = get_environment_services(environment_instances);
     let mut entries: Vec<PatchEntry> = Vec::new();
     let mut configured_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -187,11 +216,11 @@ fn get_config_display_field(path: &str) -> String {
 pub async fn parse_interactive_configs(
     client: &reqwest::Client,
     configs: &Configs,
-    project: &queries::project::ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment_id: &str,
     existing_config: Option<EnvironmentConfig>,
 ) -> Result<EnvironmentConfig> {
-    let services = get_environment_services(project, environment_id)?;
+    let services = get_environment_services(environment_instances);
 
     // Use provided config or fetch existing environment config for placeholders
     let existing_config = match existing_config {
@@ -246,17 +275,11 @@ pub async fn parse_interactive_configs(
 
 /// Get service instances for an environment
 pub fn get_environment_services<'a>(
-    project: &'a queries::project::ProjectProject,
-    environment_id: &str,
-) -> Result<&'a Vec<queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdges>> {
-    let environment = project
-        .environments
-        .edges
+    environment_instances: &'a ProjectEnvironmentInstances,
+) -> Vec<&'a ProjectServiceInstanceEdge> {
+    service_instances_in_env(environment_instances)
         .iter()
-        .find(|env| env.node.id == environment_id)
-        .ok_or_else(|| anyhow::anyhow!("Environment not found: {}", environment_id))?;
-
-    Ok(&environment.node.service_instances.edges)
+        .collect()
 }
 
 fn select_duplicate_id_new(
@@ -270,6 +293,9 @@ fn select_duplicate_id_new(
                 || (env.node.id == *duplicate)
         });
         if let Some(env) = env {
+            if !env.node.can_access {
+                bail!(RailwayError::EnvironmentRestricted(env.node.name.clone()));
+            }
             fake_select("Duplicate from", &env.node.name);
             Some(env.node.id.clone())
         } else {
@@ -317,48 +343,6 @@ fn select_name_new(args: &Args, is_terminal: bool) -> Result<String, anyhow::Err
     Ok(name)
 }
 
-// Polls for environment creation completion when using background processing.
-// Returns true when the environment patch status reaches "STAGED" state.
-async fn wait_for_environment_creation(
-    client: &reqwest::Client,
-    configs: &Configs,
-    environment_id: String,
-) -> Result<bool> {
-    let env_id = environment_id;
-    let check_status = || async {
-        let vars = queries::environment_staged_changes::Variables {
-            environment_id: env_id.clone(),
-        };
-
-        let response = post_graphql::<queries::EnvironmentStagedChanges, _>(
-            client,
-            configs.get_backboard(),
-            vars,
-        )
-        .await?;
-
-        let status = &response.environment_staged_changes.status;
-
-        // Check if environment duplication has completed
-        use queries::environment_staged_changes::EnvironmentPatchStatus;
-        match status {
-            EnvironmentPatchStatus::STAGED | EnvironmentPatchStatus::COMMITTED => Ok(true),
-            EnvironmentPatchStatus::APPLYING => bail!("Still applying changes"),
-            _ => bail!("Unexpected status: {:?}", status),
-        }
-    };
-
-    let config = RetryConfig {
-        max_attempts: 40,        // ~2 minutes with exponential backoff
-        initial_delay_ms: 1000,  // Start at 1 second
-        max_delay_ms: 5000,      // Cap at 5 seconds
-        backoff_multiplier: 1.5, // Exponential backoff
-        on_retry: None,
-    };
-
-    retry_with_backoff(config, check_status).await
-}
-
 /// Apply environment configuration changes via the API
 async fn apply_environment_config(
     client: &reqwest::Client,
@@ -376,4 +360,36 @@ async fn apply_environment_config(
         .await?;
 
     Ok(())
+}
+
+/// Merge two EnvironmentConfigs, with override_config taking precedence
+fn merge_configs(base: EnvironmentConfig, overrides: EnvironmentConfig) -> EnvironmentConfig {
+    // Convert both to JSON, deep merge, then convert back
+    let base_json = serde_json::to_value(&base).unwrap_or_default();
+    let override_json = serde_json::to_value(&overrides).unwrap_or_default();
+
+    let merged = deep_merge_json(base_json, override_json);
+
+    serde_json::from_value(merged).unwrap_or(base)
+}
+
+/// Deep merge two JSON values, with right taking precedence
+fn deep_merge_json(left: serde_json::Value, right: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+
+    match (left, right) {
+        (Value::Object(mut left_map), Value::Object(right_map)) => {
+            for (key, right_val) in right_map {
+                let merged_val = if let Some(left_val) = left_map.remove(&key) {
+                    deep_merge_json(left_val, right_val)
+                } else {
+                    right_val
+                };
+                left_map.insert(key, merged_val);
+            }
+            Value::Object(left_map)
+        }
+        // For non-objects, right takes precedence
+        (_, right) => right,
+    }
 }

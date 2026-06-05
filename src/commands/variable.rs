@@ -12,6 +12,9 @@ use std::io::{IsTerminal, Read};
 
 /// Manage environment variables for a service
 #[derive(Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway variable list --service api --json\n  railway variable list --service api --kv\n  railway variable set API_URL=https://example.com --skip-deploys --json\n  echo \"secret\" | railway variable set API_KEY --stdin --skip-deploys --json\n  railway variable delete API_KEY --service api --json\n\nAutomation notes:\n  JSON and KV output include raw variable values. Avoid sharing command output from secret-bearing variable commands.\n  For idempotent deletes, list variables first, check whether the key exists, then delete it."
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Option<Commands>,
@@ -25,7 +28,11 @@ pub struct Args {
     #[clap(short, long)]
     environment: Option<String>,
 
-    /// Show variables in KV format
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// Show variables in KV format. This prints raw values.
     #[clap(short, long)]
     kv: bool,
 
@@ -37,7 +44,7 @@ pub struct Args {
     #[clap(long, value_name = "KEY")]
     set_from_stdin: Option<String>,
 
-    /// Output in JSON format
+    /// Output in JSON format. Variable list JSON includes raw values.
     #[clap(long)]
     json: bool,
 
@@ -49,14 +56,14 @@ pub struct Args {
 #[derive(Parser)]
 enum Commands {
     /// List variables for a service
-    #[clap(alias = "ls")]
+    #[clap(visible_alias = "ls")]
     List(ListArgs),
 
     /// Set a variable
     Set(SetArgs),
 
     /// Delete a variable
-    #[clap(alias = "rm", alias = "remove")]
+    #[clap(visible_alias = "rm", visible_alias = "remove")]
     Delete(DeleteArgs),
 }
 
@@ -70,11 +77,15 @@ struct ListArgs {
     #[clap(short, long)]
     environment: Option<String>,
 
-    /// Show variables in KV format
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// Show variables in KV format. This prints raw values.
     #[clap(short, long)]
     kv: bool,
 
-    /// Output in JSON format
+    /// Output in JSON format. This includes raw values.
     #[clap(long)]
     json: bool,
 }
@@ -92,6 +103,10 @@ struct SetArgs {
     /// The environment to set the variable in
     #[clap(short, long)]
     environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
 
     /// Read the value from stdin instead of the command line (only with single KEY)
     #[clap(long)]
@@ -119,6 +134,10 @@ struct DeleteArgs {
     #[clap(short, long)]
     environment: Option<String>,
 
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
     /// Output in JSON format
     #[clap(long)]
     json: bool,
@@ -141,6 +160,7 @@ pub async fn command(args: Args) -> Result<()> {
             vec![variable],
             args.service,
             args.environment,
+            args.project,
             args.skip_deploys,
         )
         .await;
@@ -148,14 +168,21 @@ pub async fn command(args: Args) -> Result<()> {
 
     // Legacy behavior: handle --set flag
     if !args.set.is_empty() {
-        return set_variables_legacy(args.set, args.service, args.environment, args.skip_deploys)
-            .await;
+        return set_variables_legacy(
+            args.set,
+            args.service,
+            args.environment,
+            args.project,
+            args.skip_deploys,
+        )
+        .await;
     }
 
     // Legacy behavior: list variables (default)
     list_variables(ListArgs {
         service: args.service,
         environment: args.environment,
+        project: args.project,
         kv: args.kv,
         json: args.json,
     })
@@ -163,7 +190,7 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 async fn list_variables(args: ListArgs) -> Result<()> {
-    let ctx = resolve_service_context(args.service, args.environment).await?;
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
 
     let variables = get_service_variables(
         &ctx.client,
@@ -224,6 +251,7 @@ async fn set_variable(args: SetArgs) -> Result<()> {
         variables,
         args.service,
         args.environment,
+        args.project,
         args.skip_deploys,
         args.json,
     )
@@ -231,7 +259,19 @@ async fn set_variable(args: SetArgs) -> Result<()> {
 }
 
 async fn delete_variable(args: DeleteArgs) -> Result<()> {
-    let ctx = resolve_service_context(args.service, args.environment).await?;
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+
+    let variables = get_service_variables(
+        &ctx.client,
+        &ctx.configs,
+        ctx.project_id.clone(),
+        ctx.environment_id.clone(),
+        ctx.service_id.clone(),
+    )
+    .await?;
+    if !variables.contains_key(&args.key) {
+        bail!("Variable '{}' not found", args.key);
+    }
 
     let spinner = create_spinner_if(!args.json, format!("Deleting {}...", args.key.bold()));
 
@@ -259,19 +299,29 @@ async fn set_variables_legacy(
     variables: Vec<Variable>,
     service: Option<String>,
     environment: Option<String>,
+    project: Option<String>,
     skip_deploys: bool,
 ) -> Result<()> {
-    set_variables_internal(variables, service, environment, skip_deploys, false).await
+    set_variables_internal(
+        variables,
+        service,
+        environment,
+        project,
+        skip_deploys,
+        false,
+    )
+    .await
 }
 
 async fn set_variables_internal(
     variables: Vec<Variable>,
     service: Option<String>,
     environment: Option<String>,
+    project: Option<String>,
     skip_deploys: bool,
     json: bool,
 ) -> Result<()> {
-    let ctx = resolve_service_context(service, environment).await?;
+    let ctx = resolve_service_context(project, service, environment).await?;
 
     let keys: Vec<String> = variables.iter().map(|v| v.key.clone()).collect();
     let fmt_keys = keys

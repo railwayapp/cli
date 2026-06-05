@@ -7,7 +7,9 @@ use crate::{
     consts::TICK_STRING,
     controllers::{
         config::environment::ServiceInstance,
-        regions::{convert_hashmap_to_map, fetch_regions, prompt_for_regions_with_data},
+        regions::{
+            convert_hashmap_to_map, fetch_regions_for_project, prompt_for_regions_with_data,
+        },
     },
 };
 use anyhow::Result;
@@ -33,7 +35,12 @@ pub fn parse_interactive(
     spinner.enable_steady_tick(Duration::from_millis(100));
 
     // Fetch regions (async, with spinner)
-    let regions = block_on(fetch_regions(&client, &configs))?;
+    let linked_project = block_on(configs.get_linked_project())?;
+    let regions = block_on(fetch_regions_for_project(
+        &client,
+        &configs,
+        Some(&linked_project.project),
+    ))?;
 
     // Clear spinner before prompting
     spinner.finish_and_clear();

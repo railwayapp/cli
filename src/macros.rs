@@ -9,7 +9,10 @@ macro_rules! commands {
                     .about("Railway CLI")
                     .author(clap::crate_authors!())
                     .propagate_version(true)
-                    .about(clap::crate_description!())
+                    .about(concat!(
+                        clap::crate_description!(),
+                        "\n\nTip: Using an AI coding agent? Run `railway setup agent -y` to install Railway skills and MCP configuration."
+                    ))
                     .long_about(None)
                     .version(clap::crate_version!());
                 $(
@@ -42,6 +45,17 @@ macro_rules! commands {
                         cmd = cmd.subcommand(sub.name(command_name));
                     }
                 )*
+                cmd = cmd
+                    .mut_subcommand("list", |cmd| cmd.visible_alias("ls"))
+                    .mut_subcommand("delete", |cmd| {
+                        cmd.visible_alias("rm").visible_alias("remove")
+                    })
+                    .mut_subcommand("project", |cmd| cmd.visible_alias("projects"))
+                    .mut_subcommand("bucket", |cmd| cmd.visible_alias("buckets"))
+                    .mut_subcommand("volume", |cmd| cmd.visible_alias("volumes"))
+                    .mut_subcommand("deployment", |cmd| cmd.visible_alias("deployments"))
+                    .mut_subcommand("templates", |cmd| cmd.visible_alias("template"))
+                    .mut_subcommand("check_updates", |cmd| cmd.visible_alias("check-updates"));
                 cmd
             }
 
@@ -50,9 +64,39 @@ macro_rules! commands {
                 match matches.subcommand() {
                     $(
                         Some((name, sub_matches)) if name == stringify!([<$module:snake>]).strip_suffix("_command").unwrap_or(stringify!([<$module:snake>])) => {
-                               let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
-                                   .map_err(anyhow::Error::from)?;
-                            $module::command(args).await?;
+                            // Walk nested subcommand levels so telemetry can
+                            // distinguish e.g. `sandbox template build` from
+                            // `sandbox template status` ("template:build").
+                            let subcommand_name = {
+                                let mut parts: Vec<&str> = Vec::new();
+                                let mut current = sub_matches;
+                                while let Some((name, next)) = current.subcommand() {
+                                    parts.push(name);
+                                    current = next;
+                                }
+                                if parts.is_empty() { None } else { Some(parts.join(":")) }
+                            };
+                            let command_name = stringify!([<$module:snake>]).strip_suffix("_command").unwrap_or(stringify!([<$module:snake>]));
+                            let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
+                                .map_err(anyhow::Error::from)?;
+                            let start = ::std::time::Instant::now();
+                            let result = $module::command(args).await;
+                            let duration = start.elapsed();
+                            $crate::telemetry::send($crate::telemetry::CliTrackEvent {
+                                command: command_name.to_string(),
+                                sub_command: subcommand_name,
+                                success: result.is_ok(),
+                                error_message: result.as_ref().err().map(|e| {
+                                    let msg = format!("{e}");
+                                    if msg.len() > 256 { msg[..256].to_string() } else { msg }
+                                }),
+                                duration_ms: duration.as_millis() as u64,
+                                cli_version: env!("CARGO_PKG_VERSION"),
+                                os: ::std::env::consts::OS,
+                                arch: ::std::env::consts::ARCH,
+                                is_ci: $crate::config::Configs::env_is_ci(),
+                            }).await;
+                            result?;
                         },
                     )*
                     _ => {

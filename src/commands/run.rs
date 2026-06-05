@@ -19,6 +19,9 @@ use super::{queries::project::ProjectProject, *};
 
 /// Run a local command using variables from the active environment
 #[derive(Debug, Parser)]
+#[clap(
+    after_help = "Examples:\n\n  railway run --service api --environment production -- npm run migrate\n  railway run --project project-id --environment production --service api -- node script.js\n  railway run --service api -- printenv PORT\n\nAutomation notes:\n  Put Railway flags before the child command. Flags after the child command are passed to the child process.\n  `railway run env` and `railway run printenv` can print secret variable values. Avoid sharing command output."
+)]
 pub struct Args {
     /// Service to pull variables from (defaults to linked service)
     #[clap(short, long)]
@@ -118,10 +121,14 @@ pub async fn command(args: Args) -> Result<()> {
     let environment = args
         .environment
         .clone()
-        .or_else(|| linked_project.as_ref().map(|lp| lp.environment.clone()))
+        .or_else(|| {
+            linked_project
+                .as_ref()
+                .and_then(|lp| lp.environment.clone())
+        })
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No environment specified. Use --environment or run `railway link` first"
+                "No environment specified. Set RAILWAY_ENVIRONMENT_ID, use --environment, or run `railway environment` to link one."
             )
         })?;
 

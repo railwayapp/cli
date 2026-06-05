@@ -6,7 +6,8 @@ use super::{Edit as Args, *};
 use crate::{
     controllers::{
         config::{self, EnvironmentConfig},
-        project::get_project,
+        environment::get_matched_environment,
+        project::{ProjectEnvironmentInstances, get_environment_instances, get_project},
     },
     errors::RailwayError,
     util::prompt::{fake_select, prompt_confirm_with_default},
@@ -19,15 +20,24 @@ use super::new::{
 pub async fn edit_environment(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    let linked_project = if args.project.is_some() {
+        None
+    } else {
+        Some(configs.get_linked_project().await?)
+    };
+    let project_id = args
+        .project
+        .clone()
+        .or_else(|| linked_project.as_ref().map(|linked| linked.project.clone()))
+        .ok_or_else(|| RailwayError::NoLinkedProject)?;
+    let project = get_project(&client, &configs, project_id.clone()).await?;
     let stdin_is_terminal = std::io::stdin().is_terminal();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let is_interactive = stdin_is_terminal && stdout_is_terminal;
     let json = args.json;
 
     // Resolve environment: --environment flag, or linked environment
-    let environment_id = resolve_environment(&args, &project, &linked_project)?;
+    let environment_id = resolve_environment(&args, &project, linked_project.as_ref())?;
 
     // Get environment name for display
     let environment_name = project
@@ -37,13 +47,15 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         .find(|e| e.node.id == environment_id)
         .map(|e| e.node.name.clone())
         .unwrap_or_else(|| environment_id.clone());
+    let environment_instances =
+        get_environment_instances(&client, &configs, &project_id, &environment_id).await?;
 
     // Get config from stdin (if piped), CLI flags, or interactive prompts
     let env_config = get_edit_config(
         &args,
         &client,
         &configs,
-        &project,
+        &environment_instances,
         &environment_id,
         stdin_is_terminal,
     )
@@ -61,20 +73,6 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    // Stage changes with merge=true to combine with any existing staged changes
-    let stage_vars = mutations::environment_stage_changes::Variables {
-        environment_id: environment_id.clone(),
-        input: env_config,
-        merge: Some(true),
-    };
-
-    post_graphql::<mutations::EnvironmentStageChanges, _>(
-        &client,
-        configs.get_backboard(),
-        stage_vars,
-    )
-    .await?;
-
     // Determine whether to stage only or apply now
     // --stage flag means stage only, --message flag implies apply now
     let should_stage_only = if args.stage {
@@ -90,6 +88,20 @@ pub async fn edit_environment(args: Args) -> Result<()> {
     };
 
     if should_stage_only {
+        // Stage only: use environmentStageChanges with merge=true
+        let stage_vars = mutations::environment_stage_changes::Variables {
+            environment_id: environment_id.clone(),
+            input: env_config,
+            merge: Some(true),
+        };
+
+        post_graphql::<mutations::EnvironmentStageChanges, _>(
+            &client,
+            configs.get_backboard(),
+            stage_vars,
+        )
+        .await?;
+
         if json {
             println!(
                 "{}",
@@ -116,14 +128,14 @@ pub async fn edit_environment(args: Args) -> Result<()> {
         .clone()
         .inspect(|msg| fake_select("Commit message", msg));
 
-    // Commit the staged changes
-    let commit_vars = mutations::environment_patch_commit_staged::Variables {
+    // Commit directly with patch (single mutation instead of stage + commit)
+    let commit_vars = mutations::environment_patch_commit::Variables {
         environment_id: environment_id.clone(),
+        patch: env_config,
         commit_message: commit_message.clone(),
-        skip_deploys: None,
     };
 
-    post_graphql::<mutations::EnvironmentPatchCommitStaged, _>(
+    post_graphql::<mutations::EnvironmentPatchCommit, _>(
         &client,
         configs.get_backboard(),
         commit_vars,
@@ -161,7 +173,7 @@ pub async fn edit_environment(args: Args) -> Result<()> {
 fn resolve_environment(
     args: &Args,
     project: &queries::project::ProjectProject,
-    linked_project: &crate::config::LinkedProject,
+    linked_project: Option<&crate::config::LinkedProject>,
 ) -> Result<String> {
     if let Some(ref env_input) = args.environment {
         // Find environment by name or ID
@@ -171,23 +183,23 @@ fn resolve_environment(
         });
 
         if let Some(env) = env {
-            fake_select("Environment", &env.node.name);
-            Ok(env.node.id.clone())
+            let environment = get_matched_environment(project, env.node.id.clone())?;
+            fake_select("Environment", &environment.name);
+            Ok(environment.id)
         } else {
             bail!(RailwayError::EnvironmentNotFound(env_input.clone()))
         }
     } else {
         // Use linked environment
-        let env_id = linked_project.environment.clone();
-        let env_name = project
-            .environments
-            .edges
-            .iter()
-            .find(|e| e.node.id == env_id)
-            .map(|e| e.node.name.clone())
-            .unwrap_or_else(|| env_id.clone());
-        fake_select("Environment", &env_name);
-        Ok(env_id)
+        let linked_project = linked_project.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No environment specified. Use --environment or run `railway link` to link one."
+            )
+        })?;
+        let env_id = linked_project.environment_id()?.to_string();
+        let environment = get_matched_environment(project, env_id)?;
+        fake_select("Environment", &environment.name);
+        Ok(environment.id)
     }
 }
 
@@ -196,7 +208,7 @@ async fn get_edit_config(
     args: &Args,
     client: &reqwest::Client,
     configs: &Configs,
-    project: &queries::project::ProjectProject,
+    environment_instances: &ProjectEnvironmentInstances,
     environment_id: &str,
     stdin_is_terminal: bool,
 ) -> Result<EnvironmentConfig> {
@@ -205,17 +217,24 @@ async fn get_edit_config(
 
     // Priority 1: Piped stdin JSON (auto-detected)
     if !stdin_is_terminal {
-        return read_config_from_stdin(project, environment_id);
+        return read_config_from_stdin(environment_instances);
     }
 
     // Priority 2: CLI flags (--service-config, --service-variable)
     if has_cli_flags {
-        return parse_non_interactive_configs(&all_configs, project, environment_id);
+        return parse_non_interactive_configs(&all_configs, environment_instances);
     }
 
     // Priority 3: Interactive prompts (terminal only)
     if std::io::stdout().is_terminal() {
-        return parse_interactive_configs(client, configs, project, environment_id, None).await;
+        return parse_interactive_configs(
+            client,
+            configs,
+            environment_instances,
+            environment_id,
+            None,
+        )
+        .await;
     }
 
     // No input available
@@ -224,8 +243,7 @@ async fn get_edit_config(
 
 /// Read and parse JSON config from stdin
 fn read_config_from_stdin(
-    project: &queries::project::ProjectProject,
-    environment_id: &str,
+    environment_instances: &ProjectEnvironmentInstances,
 ) -> Result<EnvironmentConfig> {
     let stdin = std::io::stdin();
     let mut input = String::new();
@@ -241,7 +259,7 @@ fn read_config_from_stdin(
         .context("Failed to parse stdin as JSON. Expected EnvironmentConfig format.")?;
 
     // Validate that referenced services exist
-    let services = get_environment_services(project, environment_id)?;
+    let services = get_environment_services(environment_instances);
     let service_ids: Vec<&str> = services
         .iter()
         .map(|s| s.node.service_id.as_str())

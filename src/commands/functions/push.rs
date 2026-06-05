@@ -1,4 +1,5 @@
 use crate::{
+    controllers::project::{ProjectEnvironmentInstances, ProjectServiceInstanceNode},
     queries::project::{ProjectProject, ProjectProjectEnvironmentsEdges},
     util::prompt::{fake_select, prompt_confirm_with_default},
 };
@@ -8,11 +9,12 @@ use super::*;
 
 pub async fn push(
     environment: &ProjectProjectEnvironmentsEdges,
+    environment_instances: &ProjectEnvironmentInstances,
     project: ProjectProject,
     args: Push,
 ) -> Result<()> {
     let (id, path) = common::get_function_from_path(args.path.clone())?;
-    let service = common::find_service(environment, &id)
+    let service = common::find_service(environment_instances, &id)
         .ok_or_else(|| anyhow::anyhow!("Couldn't find service"))?;
     let terminal = std::io::stdout().is_terminal();
 
@@ -26,7 +28,15 @@ pub async fn push(
             path.as_path(),
             service.cron_schedule,
         )?;
-        new::watch_for_file_changes(id.clone(), environment, info, path, terminal).await?
+        new::watch_for_file_changes(
+            id.clone(),
+            environment,
+            environment_instances,
+            info,
+            path,
+            terminal,
+        )
+        .await?
     } else {
         println!("Updating function {}", service.service_name.blue().bold());
 
@@ -104,9 +114,7 @@ fn should_watch(args: Push, terminal: bool) -> Result<bool> {
     })
 }
 
-fn domain(
-    service: &queries::project::ProjectProjectEnvironmentsEdgesNodeServiceInstancesEdgesNode,
-) -> Option<String> {
+fn domain(service: &ProjectServiceInstanceNode) -> Option<String> {
     let mut domains = service
         .domains
         .custom_domains

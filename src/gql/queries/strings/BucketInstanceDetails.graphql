@@ -1,0 +1,6 @@
+query BucketInstanceDetails($bucketId: String!, $environmentId: String!) {
+  bucketInstanceDetails(bucketId: $bucketId, environmentId: $environmentId) {
+    sizeBytes
+    objectCount
+  }
+}
