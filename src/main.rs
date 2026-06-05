@@ -64,7 +64,6 @@ commands!(
     ssh,
     starship,
     status,
-    sync,
     telemetry_cmd(telemetry),
     templates,
     unlink,
@@ -458,7 +457,6 @@ mod cli_tests {
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
-            assert_subcommand(&["sync"], "sync");
         }
 
         #[test]

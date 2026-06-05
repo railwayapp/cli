@@ -158,7 +158,7 @@ pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
     invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await
 }
 
-pub async fn command(args: Args) -> Result<()> {
+pub(super) async fn run_command(args: Args) -> Result<()> {
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
     let command = if args.stage {
         "stage"
@@ -417,10 +417,6 @@ fn runner_done_message(command: &str) -> &'static str {
         "stage" => "Checked Railway configuration",
         _ => "Checked Railway configuration",
     }
-}
-
-pub(super) fn print_response(response: &RunnerResponse) {
-    print_response_with_options(response, false);
 }
 
 pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
