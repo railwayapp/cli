@@ -6,7 +6,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::util::{progress::{create_spinner_if, fail_spinner, success_spinner}, prompt::prompt_confirm_with_default};
+use crate::util::{
+    progress::{create_spinner_if, fail_spinner, success_spinner},
+    prompt::prompt_confirm_with_default,
+};
 
 use super::*;
 
@@ -157,11 +160,21 @@ pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
 
 pub async fn command(args: Args) -> Result<()> {
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
-    let command = if args.stage { "stage" } else if args.apply || args.yes { "apply" } else { "plan" };
+    let command = if args.stage {
+        "stage"
+    } else if args.apply || args.yes {
+        "apply"
+    } else {
+        "plan"
+    };
 
     if args.stage && !args.yes {
-        let mut spinner = create_spinner_if(!args.json && std::io::stdout().is_terminal(), "Checking proposed changes".into());
-        let preview = invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
+        let mut spinner = create_spinner_if(
+            !args.json && std::io::stdout().is_terminal(),
+            "Checking proposed changes".into(),
+        );
+        let preview =
+            invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
         if let Some(spinner) = &mut spinner {
             if preview.ok {
                 success_spinner(spinner, "Checked proposed changes".into());
@@ -171,7 +184,9 @@ pub async fn command(args: Args) -> Result<()> {
         }
 
         if has_destructive_changes(&preview) {
-            bail!("These changes remove Railway resources. Re-run with --stage --yes to stage them.");
+            bail!(
+                "These changes remove Railway resources. Re-run with --stage --yes to stage them."
+            );
         }
     }
 
@@ -181,7 +196,8 @@ pub async fn command(args: Args) -> Result<()> {
         }
 
         let mut spinner = create_spinner_if(true, "Checking Railway configuration".into());
-        let preview = invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
+        let preview =
+            invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
         if let Some(spinner) = &mut spinner {
             if preview.ok {
                 success_spinner(spinner, "Checked Railway configuration".into());
@@ -194,7 +210,11 @@ pub async fn command(args: Args) -> Result<()> {
         if !preview.ok {
             bail!("IaC runner returned diagnostics");
         }
-        let changes = preview.change_set.as_ref().map(|change_set| change_set.changes.len()).unwrap_or(0);
+        let changes = preview
+            .change_set
+            .as_ref()
+            .map(|change_set| change_set.changes.len())
+            .unwrap_or(0);
         if changes == 0 {
             return Ok(());
         }
@@ -212,8 +232,12 @@ pub async fn command(args: Args) -> Result<()> {
         println!();
     }
 
-    let mut spinner = create_spinner_if(!args.json && std::io::stdout().is_terminal(), runner_message(command).into());
-    let output = invoke_runner(&args, &configs, &linked_project, &token, auth_type, command).await?;
+    let mut spinner = create_spinner_if(
+        !args.json && std::io::stdout().is_terminal(),
+        runner_message(command).into(),
+    );
+    let output =
+        invoke_runner(&args, &configs, &linked_project, &token, auth_type, command).await?;
     if let Some(spinner) = &mut spinner {
         if output.ok {
             success_spinner(spinner, runner_done_message(command).into());
@@ -272,7 +296,9 @@ fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
     configs
         .get_railway_auth_token()
         .map(|token| (token, "bearer"))
-        .context("Not authenticated. Run `railway login`, set RAILWAY_API_TOKEN, or set RAILWAY_TOKEN.")
+        .context(
+            "Not authenticated. Run `railway login`, set RAILWAY_API_TOKEN, or set RAILWAY_TOKEN.",
+        )
 }
 
 async fn invoke_runner(
@@ -401,10 +427,18 @@ pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bo
     print_response_with_options_and_next(response, verbose, true);
 }
 
-pub(super) fn print_response_with_options_and_next(response: &RunnerResponse, verbose: bool, show_next: bool) {
+pub(super) fn print_response_with_options_and_next(
+    response: &RunnerResponse,
+    verbose: bool,
+    show_next: bool,
+) {
     println!();
     println!("{}", "Railway configuration".bold());
-    println!("{} {}", "Using".dimmed(), display_file_path(&response.file).cyan());
+    println!(
+        "{} {}",
+        "Using".dimmed(),
+        display_file_path(&response.file).cyan()
+    );
 
     if let Some(environment) = &response.current_environment {
         let environment_name = environment
@@ -451,10 +485,18 @@ pub(super) fn print_response_with_options_and_next(response: &RunnerResponse, ve
         if verbose {
             println!();
             println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
-            if let Some(deployment_id) = response.deployment_id.as_ref().or(apply_result.deployment_id.as_ref()) {
+            if let Some(deployment_id) = response
+                .deployment_id
+                .as_ref()
+                .or(apply_result.deployment_id.as_ref())
+            {
                 println!("{} {}", "Deployment".dimmed(), deployment_id.dimmed());
             }
-            if let Some(staged_patch_id) = response.staged_patch_id.as_ref().or(apply_result.staged_patch_id.as_ref()) {
+            if let Some(staged_patch_id) = response
+                .staged_patch_id
+                .as_ref()
+                .or(apply_result.staged_patch_id.as_ref())
+            {
                 println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
             }
         }
@@ -462,7 +504,10 @@ pub(super) fn print_response_with_options_and_next(response: &RunnerResponse, ve
     }
 
     if changes.is_empty() {
-        println!("{}", "✓ Your Railway configuration is already up to date.".green());
+        println!(
+            "{}",
+            "✓ Your Railway configuration is already up to date.".green()
+        );
     } else {
         let total = changes.len();
         println!("{} {}", "Changes".bold(), format!("({total})").dimmed());
@@ -486,7 +531,11 @@ pub(super) fn print_response_with_options_and_next(response: &RunnerResponse, ve
         if show_next {
             println!();
             println!("{}", "Next".bold());
-            println!("  {} Run {} to apply these changes.", "•".cyan(), "railway config apply".cyan());
+            println!(
+                "  {} Run {} to apply these changes.",
+                "•".cyan(),
+                "railway config apply".cyan()
+            );
         }
     }
 }
@@ -521,7 +570,12 @@ fn print_operation_results(apply_result: &ChangeSetApplyResult, verbose: bool) {
             _ => "•".cyan(),
         };
         if verbose {
-            println!("  {} {} {}", marker, summary, format!("({})", change.status).dimmed());
+            println!(
+                "  {} {} {}",
+                marker,
+                summary,
+                format!("({})", change.status).dimmed()
+            );
         } else {
             println!("  {} {}", marker, summary);
         }
@@ -542,7 +596,12 @@ fn print_operation_outputs(value: &Value, indent: usize) {
                         println!("{}{}", " ".repeat(indent), key.dimmed());
                         print_operation_outputs(value, indent + 2);
                     }
-                    _ => println!("{}{} {}", " ".repeat(indent), key.dimmed(), format_output_value(value).cyan()),
+                    _ => println!(
+                        "{}{} {}",
+                        " ".repeat(indent),
+                        key.dimmed(),
+                        format_output_value(value).cyan()
+                    ),
                 }
             }
         }
@@ -551,7 +610,11 @@ fn print_operation_outputs(value: &Value, indent: usize) {
                 print_operation_outputs(value, indent);
             }
         }
-        _ => println!("{}{}", " ".repeat(indent), format_output_value(value).cyan()),
+        _ => println!(
+            "{}{}",
+            " ".repeat(indent),
+            format_output_value(value).cyan()
+        ),
     }
 }
 
@@ -580,7 +643,9 @@ fn print_change(change: &Change, _verbose: bool) {
 
 fn marker_for_change(change: &Change) -> colored::ColoredString {
     match change.kind.as_deref() {
-        Some("resource.create") | Some("variable.set") | Some("domain.create") => "+".green().bold(),
+        Some("resource.create") | Some("variable.set") | Some("domain.create") => {
+            "+".green().bold()
+        }
         Some("resource.delete") | Some("variable.delete") => "-".red().bold(),
         _ => "~".yellow().bold(),
     }

@@ -7,7 +7,10 @@ use std::{collections::HashSet, fmt::Display};
 use crate::{
     controllers::project::{get_environment_instances, get_service_ids_in_env},
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_options, prompt_options_skippable, prompt_select, prompt_text_with_placeholder_if_blank},
+    util::prompt::{
+        fake_select, prompt_options, prompt_options_skippable, prompt_select,
+        prompt_text_with_placeholder_if_blank,
+    },
     workspace::{Project, Workspace, workspaces},
 };
 
@@ -125,13 +128,18 @@ pub async fn link_project_without_service() -> Result<LinkedProject> {
             let workspace = select_workspace(None, None, workspaces)?;
             let project_name = prompt_new_project_name()?;
             let vars = mutations::project_create::Variables {
-                name: if project_name.is_empty() { None } else { Some(project_name) },
+                name: if project_name.is_empty() {
+                    None
+                } else {
+                    Some(project_name)
+                },
                 description: None,
                 workspace_id: Some(workspace.id().to_owned()),
             };
-            let project = post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
-                .await?
-                .project_create;
+            let project =
+                post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
+                    .await?
+                    .project_create;
             let environment = project
                 .environments
                 .edges
@@ -241,20 +249,24 @@ async fn link_command(args: Args, require_service: bool) -> Result<()> {
 fn prompt_new_project_name() -> Result<String> {
     let default_name = std::env::current_dir()
         .ok()
-        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()))
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
         .unwrap_or_else(|| "railway-project".to_string());
 
     if !std::io::stdout().is_terminal() {
         return Ok(default_name);
     }
 
-    let maybe_name = prompt_text_with_placeholder_if_blank(
-        "Project name",
-        &default_name,
-        &default_name,
-    )?;
+    let maybe_name =
+        prompt_text_with_placeholder_if_blank("Project name", &default_name, &default_name)?;
     let name = maybe_name.trim();
-    Ok(if name.is_empty() { default_name } else { name.to_string() })
+    Ok(if name.is_empty() {
+        default_name
+    } else {
+        name.to_string()
+    })
 }
 
 fn select_service(

@@ -134,7 +134,12 @@ pub async fn command(args: Args) -> Result<()> {
         })?;
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service = get_or_prompt_service(linked_project, project, args.service.clone().or(iac_service)).await?;
+    let service = get_or_prompt_service(
+        linked_project,
+        project,
+        args.service.clone().or(iac_service),
+    )
+    .await?;
 
     let is_tty = std::io::stdout().is_terminal() && !args.json;
 
@@ -409,7 +414,11 @@ async fn maybe_sync_iac_before_up(args: &Args) -> Result<Option<String>> {
         bail!("IaC runner returned diagnostics");
     }
 
-    let changes = plan.change_set.as_ref().map(|change_set| change_set.changes.len()).unwrap_or(0);
+    let changes = plan
+        .change_set
+        .as_ref()
+        .map(|change_set| change_set.changes.len())
+        .unwrap_or(0);
     if changes == 0 {
         crate::commands::sync::print_response(&plan);
         return Ok(infer_iac_deploy_service(&plan));
@@ -418,7 +427,9 @@ async fn maybe_sync_iac_before_up(args: &Args) -> Result<Option<String>> {
     if !args.yes {
         if !std::io::stdout().is_terminal() {
             if args.sync {
-                bail!("Applying Railway configuration before deploy requires --yes in non-interactive mode.");
+                bail!(
+                    "Applying Railway configuration before deploy requires --yes in non-interactive mode."
+                );
             }
             println!(
                 "Found Railway configuration at {}, skipping project changes in non-interactive mode. Use --sync --yes to apply before deploy.",
