@@ -621,6 +621,7 @@ async fn run_install(agent_filter: &[String], force: bool, quiet: bool) -> Resul
 
     let mut manifest = SkillsManifest::read(&home);
     let mut blocked = 0u32;
+    let mut installed = 0u32;
 
     for target in &targets {
         std::fs::create_dir_all(&target.skills_dir).with_context(|| {
@@ -692,6 +693,7 @@ async fn run_install(agent_filter: &[String], force: bool, quiet: bool) -> Resul
             if action {
                 let new_record = apply_skill(&skill_dir, files, record.as_ref())?;
                 manifest.set_record(&target_key, skill_name, new_record);
+                installed += 1;
                 if !quiet {
                     println!(
                         "{} {}: {} {} \u{2192} {}",
@@ -733,11 +735,34 @@ async fn run_install(agent_filter: &[String], force: bool, quiet: bool) -> Resul
             );
         }
 
-        println!("\n{}", "Skills installed successfully!".green().bold());
-        println!(
-            "{} You may need to restart your tool(s) to load skills.\n",
-            "!".yellow().bold()
-        );
+        // Summarize what actually happened: claiming success after a run
+        // that skipped everything misleads both humans and the agents
+        // parsing this output into "skills are current".
+        if installed > 0 {
+            if blocked > 0 {
+                println!(
+                    "\n{}",
+                    format!("Installed {installed} skill(s); {blocked} skipped.")
+                        .green()
+                        .bold()
+                );
+            } else {
+                println!("\n{}", "Skills installed successfully!".green().bold());
+            }
+            println!(
+                "{} You may need to restart your tool(s) to load skills.\n",
+                "!".yellow().bold()
+            );
+        } else if blocked > 0 {
+            println!(
+                "\n{}\n",
+                "No skills were installed — every pending change was skipped."
+                    .yellow()
+                    .bold()
+            );
+        } else {
+            println!("\n{}\n", "Skills already up to date.".green().bold());
+        }
     }
 
     Ok(())
