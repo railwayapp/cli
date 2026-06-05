@@ -1131,11 +1131,9 @@ async fn exec(
     configs.set_active_sandbox(&sandbox_id);
     configs.write()?;
 
-    let mut spinner = create_shimmer_spinner("Connecting");
-
     // The bridge is authorized by a short-lived shell-scoped JWT carried in
     // the WebSocket subprotocol.
-    let jwt = match tel::track_for(
+    let jwt = tel::track_for(
         "sandbox",
         "exec_mint_token",
         mint_shell_token(
@@ -1146,24 +1144,9 @@ async fn exec(
         )
         .await,
     )
-    .await
-    {
-        Ok(jwt) => jwt,
-        Err(e) => {
-            fail_spinner(&mut spinner, "Failed to authorize command".to_string());
-            return Err(e);
-        }
-    };
+    .await?;
 
-    let ws =
-        match tel::track_for("sandbox", "exec_connect", sandbox_exec::connect(&jwt).await).await {
-            Ok(ws) => ws,
-            Err(e) => {
-                fail_spinner(&mut spinner, "Failed to connect to sandbox".to_string());
-                return Err(e);
-            }
-        };
-    spinner.finish_and_clear();
+    let ws = tel::track_for("sandbox", "exec_connect", sandbox_exec::connect(&jwt).await).await?;
 
     // Keep the sandbox alive against the idle reaper while the command runs.
     let heartbeat = spawn_heartbeat(
