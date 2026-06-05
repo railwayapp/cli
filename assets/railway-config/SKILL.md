@@ -23,8 +23,9 @@ The source of desired Railway project state is:
 6. Keep secrets out of source. Prefer omitting unknown imported secrets; use `preserve()` when an existing Railway-managed value must be explicitly retained.
 7. Prefer product DSL names such as `domains`, `replicas`, and `group`; avoid internal names like `customDomains` and `multiRegionConfig`.
 8. Do not add platform defaults unless the user explicitly wants them.
-9. After editing `.railway/railway.ts`, run `railway config plan`.
-10. Do not run `railway config apply` unless the user asks.
+9. Do not manage a service from both `.railway/railway.ts` and `railway.json` / `railway.toml`; migrate the repo config first.
+10. After editing `.railway/railway.ts`, run `railway config plan`.
+11. Do not run `railway config apply` unless the user asks.
 
 ## Commands
 

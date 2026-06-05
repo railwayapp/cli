@@ -47,6 +47,7 @@ If `.railway/railway.ts` has pending project changes, `railway up` previews them
 - `railway config plan` is safe and does not change Railway.
 - `railway config apply` asks before applying unless you pass `--yes`.
 - `railway up` deploys this directory when the service has no GitHub or image source.
+- Services already managed by `railway.json` / `railway.toml` must be migrated before `.railway/railway.ts` can manage them.
 - Use `replicas` for scaling; advanced placement can still specify region names.
 - Use `group("Name", [resources])` to keep large projects organized on the Railway canvas.
 - Secrets imported from Railway may be omitted or represented with `preserve()` so they are not overwritten.
