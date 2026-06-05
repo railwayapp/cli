@@ -327,6 +327,20 @@ async fn main() -> Result<()> {
                 "railway skills update".cyan(),
             );
         }
+
+        // Railway skills on disk that this CLI isn't managing yet —
+        // installed before the manifest existed or synced externally.
+        // Nag (once per upstream SHA) toward the managed path; we never
+        // write to them without the user asking.
+        if let Some(tools) = commands::skills::orphan_skills_nag_due() {
+            eprintln!(
+                "{} ({}) — run {} to keep them current ({} overwrites local changes)",
+                "Unmanaged Railway skills found".yellow().bold(),
+                tools.join(", "),
+                "railway skills update".cyan(),
+                "--force".cyan(),
+            );
+        }
     }
 
     // Spawn the background version check for all invocations (including
