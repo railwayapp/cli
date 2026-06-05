@@ -117,7 +117,7 @@ pub async fn command(args: Args) -> Result<()> {
     // login flow, then reload configs and continue with `up`. This
     // turns the previously cryptic "no token" error path into the
     // canonical first-run experience.
-    let came_from_unauth_prompt = configs.get_railway_auth_token().is_none();
+    let came_from_unauth_prompt = !configs.has_auth_credentials();
     if came_from_unauth_prompt {
         prompt_unauth_and_login(&args).await?;
         configs = Configs::new()?;
