@@ -148,6 +148,11 @@ async fn init_config(args: InitArgs) -> Result<()> {
         println!("{}", "Initialize Railway configuration".bold());
         println!("Railway will create the files that define your project infrastructure as code.");
         println!("{} {}", "Main file".dimmed(), ".railway/railway.ts".cyan());
+        println!(
+            "{} {}",
+            "Docs".dimmed(),
+            "https://docs.railway.com/infrastructure-as-code".cyan()
+        );
         println!();
         prompt_select(
             "How should Railway start?",
@@ -216,6 +221,11 @@ async fn init_config(args: InitArgs) -> Result<()> {
         "  {} Run {} to apply them.",
         "•".cyan(),
         "railway config apply".cyan()
+    );
+    println!(
+        "  {} Read the guide and reference at {}.",
+        "•".cyan(),
+        "https://docs.railway.com/infrastructure-as-code".cyan()
     );
 
     Ok(())
