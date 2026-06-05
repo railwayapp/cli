@@ -15,7 +15,9 @@ use crate::controllers::sandbox_exec::{self, ExecOutcome};
 use crate::controllers::variables::Variable;
 use crate::gql::{mutations, queries};
 use crate::util::progress::{create_shimmer_spinner, fail_spinner};
-use crate::util::prompt::{prompt_options, prompt_options_skippable};
+use crate::util::prompt::{
+    prompt_confirm_with_default_with_cancel, prompt_options, prompt_options_skippable,
+};
 
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
@@ -335,7 +337,7 @@ impl std::fmt::Display for Choice {
 /// → an interactive picker (when attached to a TTY) → a helpful error in
 /// non-interactive contexts.
 async fn resolve_project_and_env(
-    configs: &Configs,
+    configs: &mut Configs,
     client: &reqwest::Client,
     project: Option<String>,
     environment: Option<String>,
@@ -382,12 +384,14 @@ async fn resolve_project_and_env(
 
 /// Full interactive picker: workspace → project → environment. `Esc` steps back
 /// to the previous selection (`Esc` at the workspace level cancels). Returns
-/// `(project_id, environment_id)`. Uses the OAuth-safe `UserProjects` listing
-/// (what `railway list` uses) — the `projects(workspaceId:)` root field is not
+/// `(project_id, environment_id)`. Only runs when the directory has no link,
+/// so after a selection it offers to save it as the link (declining just
+/// proceeds without one). Uses the OAuth-safe `UserProjects` listing (what
+/// `railway list` uses) — the `projects(workspaceId:)` root field is not
 /// authorized for plain user tokens.
 async fn prompt_workspace_project_env(
     client: &reqwest::Client,
-    configs: &Configs,
+    configs: &mut Configs,
 ) -> Result<(String, String)> {
     let workspaces = crate::workspace::workspaces_with_client(client, configs).await?;
     if workspaces.is_empty() {
@@ -449,11 +453,48 @@ async fn prompt_workspace_project_env(
 
             // Environment level. Esc steps back to project selection.
             match prompt_options_skippable("Select an environment", env_choices)? {
-                Some(choice) => return Ok((project_obj.id, choice.id)),
+                Some(choice) => {
+                    offer_to_link(configs, &project_obj.id, &project_obj.name, &choice)?;
+                    return Ok((project_obj.id, choice.id));
+                }
                 None => continue 'project,
             }
         }
     }
+}
+
+/// Offer to remember a picker selection as the directory's linked
+/// project/environment, so future commands (sandbox and otherwise) skip the
+/// prompts. Esc or "no" proceeds without linking.
+fn offer_to_link(
+    configs: &mut Configs,
+    project_id: &str,
+    project_name: &str,
+    environment: &Choice,
+) -> Result<()> {
+    let confirmed = prompt_confirm_with_default_with_cancel(
+        &format!(
+            "Link this directory to {project_name} ({})?",
+            environment.name
+        ),
+        true,
+    )?
+    .unwrap_or(false);
+    if !confirmed {
+        return Ok(());
+    }
+    configs.link_project(
+        project_id.to_string(),
+        Some(project_name.to_string()),
+        environment.id.clone(),
+        Some(environment.name.clone()),
+    )?;
+    configs.write()?;
+    eprintln!(
+        "Linked to {project_name} ({}). Run `railway unlink` to undo.",
+        environment.name
+    );
+    Ok(())
 }
 
 /// Interactively pick an accessible environment from a project.
@@ -478,7 +519,7 @@ fn prompt_environment(project: &queries::RailwayProject) -> Result<String> {
 /// local store / flags / linked project to recover its environment), or the
 /// active sandbox when none is given.
 async fn resolve_target(
-    configs: &Configs,
+    configs: &mut Configs,
     client: &reqwest::Client,
     explicit_id: Option<String>,
     project: Option<String>,
