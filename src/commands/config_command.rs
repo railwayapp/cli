@@ -337,7 +337,7 @@ fn render_graph_as_railway_ts(graph: &crate::commands::sync::DesiredGraph) -> St
 
     let project_name = graph.project.as_ref().map(|project| project.name.as_str()).unwrap_or("imported-project");
     out.push_str(&format!("\n  return project({:?}, {{\n", project_name));
-    out.push_str(&format!("    services: [{}],\n", names.join(", ")));
+    out.push_str(&format!("    resources: [{}],\n", names.join(", ")));
     out.push_str("  });\n");
     out.push_str("});\n");
     out
@@ -671,7 +671,7 @@ fn railway_ts_from_repo(cwd: &Path, project_name: &str) -> String {
 
     out.push_str("  });\n\n");
     out.push_str(&format!("  return project(\"{project_name}\", {{\n"));
-    out.push_str("    services: [web],\n  });\n});\n");
+    out.push_str("    resources: [web],\n  });\n});\n");
     out
 }
 
@@ -733,7 +733,7 @@ export default defineRailway(() => {{
   }});
 
   return project("{project_name}", {{
-    services: [web],
+    resources: [web],
   }});
 }});
 "#
