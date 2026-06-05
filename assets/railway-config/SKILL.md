@@ -195,7 +195,6 @@ export default defineRailway(() => {
   });
 
   return project("my-app", {
-    environments: ["production"],
     services: [db, web],
   });
 });
