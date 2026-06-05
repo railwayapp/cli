@@ -1094,7 +1094,8 @@ async fn exec(
     configs.set_active_sandbox(&sandbox_id);
     configs.write()?;
 
-    let res = post_graphql::<mutations::SandboxExec, _>(
+    let mut spinner = create_shimmer_spinner("Executing command");
+    let res = match post_graphql::<mutations::SandboxExec, _>(
         client,
         configs.get_backboard(),
         mutations::sandbox_exec::Variables {
@@ -1104,7 +1105,15 @@ async fn exec(
             timeout_sec: args.timeout,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(res) => res,
+        Err(e) => {
+            fail_spinner(&mut spinner, "Failed to run command".to_string());
+            return Err(e.into());
+        }
+    };
+    spinner.finish_and_clear();
     let result = res.sandbox_exec;
 
     print!("{}", result.stdout);
