@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use crossterm::{
     cursor::{Hide, Show},
     event::{Event, EventStream, KeyEventKind},
@@ -558,12 +559,17 @@ fn apply_optimistic_upload(app: &mut VolumeBrowserApp, local_path: &Path, remote
     let metadata = std::fs::metadata(local_path).ok();
     let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
     let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+    let modified_at = metadata
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .map(DateTime::<Utc>::from);
 
     let entry = VolumeFileEntry {
         name: name.clone(),
         path: remote_path.to_string(),
         kind: if is_dir { "directory" } else { "file" },
         size,
+        modified_at,
     };
 
     app.cache.apply_upsert(&parent, entry.clone());

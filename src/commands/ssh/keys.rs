@@ -6,9 +6,9 @@ use is_terminal::IsTerminal;
 
 use crate::client::GQLClient;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{
-    LocalSshKey, compute_fingerprint_from_pubkey, delete_ssh_key, find_local_ssh_keys,
-    get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
+use crate::controllers::ssh::keys::{
+    LocalSshKey, SshKeySource, compute_fingerprint_from_pubkey, delete_ssh_key,
+    find_local_ssh_keys, get_github_ssh_keys, get_registered_ssh_keys, register_ssh_key,
 };
 use crate::gql::queries::git_hub_ssh_keys::GitHubSshKeysGitHubSshKeys;
 use crate::gql::queries::ssh_public_keys::SshPublicKeysSshPublicKeysEdgesNode;
@@ -19,16 +19,7 @@ struct LocalKeyOption(LocalSshKey);
 
 impl fmt::Display for LocalKeyOption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ({})",
-            self.0
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy(),
-            self.0.fingerprint
-        )
+        write!(f, "{} ({})", self.0.key_name(), self.0.fingerprint)
     }
 }
 
@@ -80,7 +71,7 @@ enum Commands {
     /// Add/register a local SSH key with Railway
     #[clap(visible_alias = "create", visible_alias = "register")]
     Add {
-        /// Path to the public key file (defaults to auto-detect)
+        /// Path, fingerprint, or comment of the key to add (defaults to auto-detect)
         #[clap(long, short)]
         key: Option<String>,
 
@@ -150,7 +141,7 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
 
     let registered_keys = get_registered_ssh_keys(&client, &configs, workspace_id.clone()).await?;
-    let local_keys = find_local_ssh_keys()?;
+    let local_keys = find_local_ssh_keys().await?;
     // GitHub import is a user-only concept; skip when listing workspace keys.
     let github_keys = if workspace_id.is_none() {
         get_github_ssh_keys(&client, &configs)
@@ -176,18 +167,21 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
             // Extract comment/hostname from public key
             let parts: Vec<&str> = key.public_key.split_whitespace().collect();
             let key_type = parts.first().unwrap_or(&"");
-            let hostname = parts.get(2).unwrap_or(&"");
+            let comment = parts.get(2..).unwrap_or_default().join(" ");
 
             println!("  {}", key.name);
             println!("    Fingerprint: {}", key.fingerprint);
             if !key_type.is_empty() {
                 println!("    Type:        {}", key_type);
             }
-            if !hostname.is_empty() {
-                println!("    Hostname:    {}", hostname);
+            if !comment.is_empty() {
+                println!("    Comment:     {}", comment);
             }
             if local_match.is_some() {
-                println!("    Source:      local (~/.ssh/)");
+                println!(
+                    "    Source:      local ({})",
+                    local_match.unwrap().key_source()
+                );
             }
             println!();
         }
@@ -199,7 +193,7 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
         for key in &github_keys {
             let parts: Vec<&str> = key.key.split_whitespace().collect();
             let key_type = parts.first().unwrap_or(&"unknown");
-            let hostname = parts.get(2).unwrap_or(&"");
+            let comment = parts.get(2..).unwrap_or_default().join(" ");
             let fingerprint = compute_fingerprint_from_pubkey(&key.key).unwrap_or_default();
 
             // Check if already registered
@@ -210,8 +204,8 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
                 println!("    Fingerprint: {}", fingerprint);
             }
             println!("    Type:        {}", key_type);
-            if !hostname.is_empty() {
-                println!("    Hostname:    {}", hostname);
+            if !comment.is_empty() {
+                println!("    Comment:     {}", comment);
             }
             if is_registered {
                 println!("    Status:      registered");
@@ -257,20 +251,15 @@ async fn list_keys(workspace_id: Option<String>) -> Result<()> {
     if !unregistered.is_empty() {
         println!("Local Keys (not registered):");
         for key in unregistered {
-            // Extract hostname from public key
-            let parts: Vec<&str> = key.public_key.split_whitespace().collect();
-            let hostname = parts.get(2).unwrap_or(&"");
+            let comment = key.key_comment.as_deref().unwrap_or_default();
 
-            println!(
-                "  {}",
-                key.path.file_name().unwrap_or_default().to_string_lossy()
-            );
+            println!("  {}", key.key_name());
             println!("    Fingerprint: {}", key.fingerprint);
             println!("    Type:        {}", key.key_type);
-            if !hostname.is_empty() {
-                println!("    Hostname:    {}", hostname);
+            if !comment.is_empty() {
+                println!("    Comment:     {}", comment);
             }
-            println!("    Path:        {}", key.path.display());
+            println!("    Source:      {}", key.key_source());
             println!();
         }
         println!("Add with:\n    railway ssh keys add");
@@ -287,10 +276,10 @@ async fn add_key(
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    let local_keys = find_local_ssh_keys()?;
+    let local_keys = find_local_ssh_keys().await?;
     if local_keys.is_empty() {
         bail!(
-            "No SSH keys found in ~/.ssh/\n\n\
+            "No SSH keys found in your SSH agent or ~/.ssh/\n\n\
             Generate one with:\n  ssh-keygen -t ed25519\n\n\
             Then run this command again."
         );
@@ -314,12 +303,16 @@ async fn add_key(
     }
 
     // Select key to add
-    let key_to_add = if let Some(path) = key_path {
+    let key_to_add = if let Some(arg) = key_path {
         // Find by path
         local_keys
             .iter()
-            .find(|k| k.path.to_string_lossy().contains(&path))
-            .ok_or_else(|| anyhow::anyhow!("Key not found: {}", path))?
+            .find(|k| {
+                matches!(&k.source, SshKeySource::File(p) if p.to_string_lossy().contains(&arg))
+                    || k.fingerprint.contains(&arg)
+                    || k.key_comment.as_ref().is_some_and(|c| c.contains(&arg))
+            })
+            .ok_or_else(|| anyhow::anyhow!("Key not found: {}", arg))?
             .clone()
     } else if unregistered.len() == 1 {
         unregistered[0].clone()
@@ -336,18 +329,12 @@ async fn add_key(
     };
 
     // Determine name
-    let key_name = name.unwrap_or_else(|| {
-        key_to_add
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ssh-key")
-            .to_string()
-    });
+    let key_name = name.unwrap_or_else(|| key_to_add.key_name().to_string());
 
     println!(
-        "Registering key: {} ({})",
-        key_to_add.path.display(),
+        "Registering key from {}: {} ({})",
+        key_to_add.key_source(),
+        key_to_add.key_name(),
         key_to_add.fingerprint
     );
 
@@ -355,7 +342,7 @@ async fn add_key(
         &client,
         &configs,
         &key_name,
-        &key_to_add.public_key,
+        &key_to_add.public_key.to_string(),
         workspace_id.clone(),
     )
     .await?;

@@ -5,7 +5,10 @@ use strum::{Display, EnumIs, EnumIter, IntoEnumIterator};
 
 use crate::{
     controllers::{
-        database::DatabaseType, project::ensure_project_and_environment_exist, variables::Variable,
+        database::DatabaseType,
+        github::{resolve_repo_branch, validate_repo_name},
+        project::ensure_project_and_environment_exist,
+        variables::Variable,
     },
     util::{
         progress::create_spinner_if,
@@ -21,7 +24,7 @@ use super::*;
 /// Add a service to your project
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway add --service api --json\n  railway add --database postgres --json\n  railway add --repo railwayapp/starters --service web --json\n  railway add --image nginx:latest --service web --json\n\nAutomation notes:\n  Non-interactive runs must pass one of --service, --database, --repo, or --image.\n  Use --json for machine-readable output and read stderr separately for progress or selection echoes."
+    after_help = "Examples:\n\n  railway add --service api --json\n  railway add --database postgres --json\n  railway add --repo railwayapp/starters --branch main --service web --json\n  railway add --image nginx:latest --service web --json\n\nAutomation notes:\n  Non-interactive runs must pass one of --service, --database, --repo, or --image.\n  Use --json for machine-readable output and read stderr separately for progress or selection echoes."
 )]
 pub struct Args {
     /// The name of the database to add
@@ -35,6 +38,10 @@ pub struct Args {
     /// The repo to link to the service
     #[clap(short, long)]
     repo: Option<String>,
+
+    /// Branch to deploy from when creating a service from a GitHub repo
+    #[clap(long, requires = "repo")]
+    branch: Option<String>,
 
     /// The docker image to link to the service
     #[clap(short, long)]
@@ -73,6 +80,7 @@ pub async fn command(args: Args) -> Result<()> {
         fake_select("What do you need?", "GitHub Repo");
         CreateKind::GithubRepo {
             repo: prompt_repo(args.repo)?,
+            branch: args.branch,
             variables: prompt_variables(args.variables)?,
             name: prompt_name(args.service)?,
         }
@@ -111,6 +119,7 @@ pub async fn command(args: Args) -> Result<()> {
                 let variables = prompt_variables(args.variables)?;
                 CreateKind::GithubRepo {
                     repo,
+                    branch: args.branch,
                     variables,
                     name: prompt_name(args.service)?,
                 }
@@ -165,6 +174,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &client,
                 &mut configs,
                 None,
+                None,
                 Some(image),
                 variables,
                 verbose,
@@ -174,6 +184,7 @@ pub async fn command(args: Args) -> Result<()> {
         }
         CreateKind::GithubRepo {
             repo,
+            branch,
             variables,
             name,
         } => {
@@ -183,6 +194,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &client,
                 &mut configs,
                 Some(repo),
+                branch,
                 None,
                 variables,
                 verbose,
@@ -196,6 +208,7 @@ pub async fn command(args: Args) -> Result<()> {
                 &linked_project,
                 &client,
                 &mut configs,
+                None,
                 None,
                 None,
                 variables,
@@ -294,6 +307,7 @@ async fn create_service(
     client: &reqwest::Client,
     configs: &mut Configs,
     repo: Option<String>,
+    branch: Option<String>,
     image: Option<String>,
     variables: Variables,
     verbose: bool,
@@ -302,21 +316,11 @@ async fn create_service(
     let spinner = create_spinner_if(!json, "Creating service...".into());
     let source = mutations::service_create::ServiceSourceInput { repo, image };
     let branch = if let Some(repo) = &source.repo {
+        validate_repo_name(repo)?;
         if verbose {
             eprintln!("fetching branch for github repo {repo}")
         }
-        let repos = post_graphql::<queries::GitHubRepos, _>(
-            client,
-            &configs.get_backboard(),
-            queries::git_hub_repos::Variables {},
-        )
-        .await?
-        .github_repos;
-        let repo = repos
-            .iter()
-            .find(|r| r.full_name == *repo)
-            .ok_or(anyhow::anyhow!("repo not found"))?;
-        Some(repo.default_branch.clone())
+        Some(resolve_repo_branch(client, configs, repo, branch).await?)
     } else {
         None
     };
@@ -354,6 +358,7 @@ enum CreateKind {
     #[strum(to_string = "GitHub Repo")]
     GithubRepo {
         repo: String,
+        branch: Option<String>,
         variables: Variables,
         name: Option<String>,
     },

@@ -15,6 +15,7 @@ mod config;
 mod consts;
 mod controllers;
 mod errors;
+mod exec_context;
 mod gql;
 mod oauth;
 mod resources;
@@ -35,6 +36,7 @@ commands!(
     autoupdate,
     bucket,
     completion,
+    config,
     connect,
     dash,
     delete,
@@ -56,6 +58,7 @@ commands!(
     open,
     project,
     run(local),
+    sandbox(sandboxes, sbx),
     service,
     setup,
     shell,
@@ -85,6 +88,7 @@ struct UpdateContext {
     auto_update_enabled: bool,
     skipped_version: Option<String>,
     check_gate_armed: bool,
+    check_skills: bool,
 }
 
 /// Routes a pending version to the appropriate background updater.
@@ -117,24 +121,48 @@ fn spawn_update_task(
             }
         }
 
-        // Skip the network check entirely when auto-update is disabled
-        // and there is no TTY to show a banner on (e.g. CI / scripts).
-        let (from_cache, latest_version) =
-            if !ctx.auto_update_enabled && !std::io::stdout().is_terminal() {
-                (ctx.known_version.is_some(), ctx.known_version)
+        // CLI version check and skills staleness check share this task's budget
+        // — run them concurrently so a slow API call on one doesn't starve the
+        // other within the short window handle_update_task() waits.
+        let cli_check = async {
+            // Skip the network check entirely when auto-update is disabled
+            // and there is no TTY to show a banner on (e.g. CI / scripts).
+            let (from_cache, latest_version) = if !ctx.auto_update_enabled
+                && !std::io::stdout().is_terminal()
+            {
+                (ctx.known_version.is_some(), ctx.known_version.clone())
             } else {
                 match util::check_update::check_update(false).await {
                     Ok(Some(v)) => (false, Some(v)),
-                    Ok(None) | Err(_) => (ctx.known_version.is_some(), ctx.known_version),
+                    Ok(None) | Err(_) => (ctx.known_version.is_some(), ctx.known_version.clone()),
                 }
             };
 
-        if let Some(ref version) = latest_version {
-            if ctx.auto_update_enabled && !from_cache {
-                try_dispatch_update(version, ctx.skipped_version.as_deref(), &method);
+            if let Some(ref version) = latest_version {
+                if ctx.auto_update_enabled && !from_cache {
+                    try_dispatch_update(version, ctx.skipped_version.as_deref(), &method);
+                }
             }
-        }
+            latest_version
+        };
 
+        // Skills auto-update mirrors the binary self-updater: refresh the cached
+        // upstream SHA (skipping the network only when auto-update is off and
+        // there's no TTY to ever banner on), then — when auto-update is enabled —
+        // spawn a detached process to apply it. Unmodified skills update
+        // silently; user-modified ones are skipped and left to the TTY banner.
+        let skills_check = async {
+            if ctx.check_skills {
+                if ctx.auto_update_enabled || std::io::stdout().is_terminal() {
+                    commands::skills::refresh_skill_update_state().await;
+                }
+                if ctx.auto_update_enabled && commands::skills::cached_skill_auto_apply_due() {
+                    commands::skills::spawn_background_skill_update();
+                }
+            }
+        };
+
+        let (latest_version, ()) = tokio::join!(cli_check, skills_check);
         Ok(latest_version)
     })
 }
@@ -197,6 +225,12 @@ async fn main() -> Result<()> {
     // Internal: detached background download spawned by a prior invocation.
     if let Ok(version) = std::env::var(consts::RAILWAY_STAGE_UPDATE_ENV) {
         return background_stage_update(&version).await;
+    }
+
+    // Internal: detached background skills refresh spawned by a prior invocation.
+    if std::env::var(consts::RAILWAY_UPDATE_SKILLS_ENV).is_ok() {
+        let _ = commands::skills::apply_update_in_background().await;
+        return Ok(());
     }
 
     let raw_os_args: Vec<OsString> = std::env::args_os().collect();
@@ -284,6 +318,30 @@ async fn main() -> Result<()> {
                 );
             }
         }
+
+        // Mirror the CLI banner for skills: a prior background check found a
+        // newer railway-skills commit than what we last installed.
+        if commands::skills::cached_skill_update_available() {
+            eprintln!(
+                "{} run {} to update",
+                "Railway skills update available:".green().bold(),
+                "railway skills update".cyan(),
+            );
+        }
+
+        // Railway skills on disk that this CLI isn't managing yet —
+        // installed before the manifest existed or synced externally.
+        // Nag (once per upstream SHA) toward the managed path; we never
+        // write to them without the user asking.
+        if let Some(tools) = commands::skills::orphan_skills_nag_due() {
+            eprintln!(
+                "{} ({}) — run {} to keep them current ({} overwrites local changes)",
+                "Unmanaged Railway skills found".yellow().bold(),
+                tools.join(", "),
+                "railway skills update".cyan(),
+                "--force".cyan(),
+            );
+        }
     }
 
     // Spawn the background version check for all invocations (including
@@ -299,6 +357,9 @@ async fn main() -> Result<()> {
             auto_update_enabled,
             skipped_version,
             check_gate_armed,
+            // `skills`/`setup` write the manifest themselves; don't have the
+            // background check race their write.
+            check_skills: !matches!(raw_subcommand.as_deref(), Some("skills" | "setup")),
         }))
     };
 
@@ -323,32 +384,7 @@ async fn main() -> Result<()> {
         eprintln!("{suggestion}");
     }
 
-    // Commands that do not require authentication -- skip token refresh for these.
-    const NO_AUTH_COMMANDS: &[&str] = &[
-        "login",
-        "logout",
-        "completion",
-        "docs",
-        "setup",
-        "skills",
-        "upgrade",
-        "autoupdate",
-        "telemetry_cmd",
-        "templates",
-        "check_updates",
-    ];
-
-    let is_mcp_install = matches!(
-        cli.subcommand(),
-        Some(("mcp", mcp_matches)) if mcp_matches.subcommand_name() == Some("install")
-    );
-
-    let needs_refresh = cli
-        .subcommand_name()
-        .map(|cmd| !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install)
-        .unwrap_or(false);
-
-    if needs_refresh {
+    if command_needs_refresh(&cli) {
         if let Ok(mut configs) = Configs::new() {
             if let Err(e) = client::ensure_valid_token(&mut configs).await {
                 eprintln!("{}: {e}", "Warning: failed to refresh OAuth token".yellow());
@@ -385,7 +421,7 @@ async fn main() -> Result<()> {
             std::process::exit(130);
         }
 
-        eprintln!("{e:?}");
+        crate::util::reporter::render_error(&e);
 
         handle_update_task(check_updates_handle).await;
         std::process::exit(1);
@@ -396,6 +432,42 @@ async fn main() -> Result<()> {
     handle_update_task(check_updates_handle).await;
 
     Ok(())
+}
+
+fn command_needs_refresh(cli: &clap::ArgMatches) -> bool {
+    // Commands that do not require authentication -- skip token refresh for these.
+    const NO_AUTH_COMMANDS: &[&str] = &[
+        "login",
+        "logout",
+        "completion",
+        "docs",
+        "setup",
+        "skills",
+        "upgrade",
+        "autoupdate",
+        "telemetry_cmd",
+        "check_updates",
+    ];
+
+    let is_mcp_install = matches!(
+        cli.subcommand(),
+        Some(("mcp", mcp_matches)) if mcp_matches.subcommand_name() == Some("install")
+    );
+
+    let is_public_templates_command = matches!(
+        cli.subcommand(),
+        Some(("templates", template_matches))
+            if matches!(
+                template_matches.subcommand_name(),
+                Some("search" | "find" | "list" | "ls")
+            )
+    );
+
+    cli.subcommand_name()
+        .map(|cmd| {
+            !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install && !is_public_templates_command
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -583,6 +655,27 @@ mod cli_tests {
             assert_parses(&["service", "redeploy"]);
             assert_parses(&["service", "redeploy", "-s", "myservice"]);
             assert_parses(&["service", "restart"]);
+            assert_parses(&[
+                "service",
+                "source",
+                "connect",
+                "--repo",
+                "owner/repo",
+                "--branch",
+                "main",
+                "--service",
+                "web",
+            ]);
+            assert_parses(&[
+                "service",
+                "source",
+                "connect",
+                "--image",
+                "nginx:latest",
+                "--service",
+                "web",
+            ]);
+            assert_parses(&["service", "source", "disconnect", "--service", "web"]);
             assert_parses(&["service", "scale"]);
             assert_parses(&["service", "scale", "eu-west=2"]);
             assert_parses(&["service", "scale", "--eu-west", "2"]);
@@ -594,6 +687,11 @@ mod cli_tests {
                 "eu-west=2",
                 "us-east=1",
             ]);
+        }
+
+        #[test]
+        fn add_repo_branch() {
+            assert_parses(&["add", "--repo", "owner/repo", "--branch", "main"]);
         }
 
         #[test]
@@ -646,6 +744,25 @@ mod cli_tests {
             assert_parses(&["setup", "agent", "-y"]);
             assert_parses(&["setup", "agent", "--remote"]);
             assert_parses(&["setup", "agent", "--remote", "-y"]);
+        }
+
+        #[test]
+        fn template_auth_refresh_is_subcommand_aware() {
+            let search = parse(&["templates", "search"]).unwrap();
+            let find = parse(&["template", "find", "postgres"]).unwrap();
+            let create = parse(&["templates", "create", "--environment", "production"]).unwrap();
+            let publish = parse(&["templates", "publish", "template-id"]).unwrap();
+            let update = parse(&["templates", "update", "template-id"]).unwrap();
+            let unpublish = parse(&["templates", "unpublish", "template-id"]).unwrap();
+            let delete = parse(&["templates", "delete", "template-id"]).unwrap();
+
+            assert!(!command_needs_refresh(&search));
+            assert!(!command_needs_refresh(&find));
+            assert!(command_needs_refresh(&create));
+            assert!(command_needs_refresh(&publish));
+            assert!(command_needs_refresh(&update));
+            assert!(command_needs_refresh(&unpublish));
+            assert!(command_needs_refresh(&delete));
         }
 
         #[test]

@@ -1,18 +1,33 @@
 use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 use reqwest::Client;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
+use crate::controllers::ssh::keys::{SshKeySource, find_local_ssh_keys, register_ssh_key};
 use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
-pub(super) const SSH_HOST: &str = "ssh.railway.com";
+/// SSH relay endpoint (host, non-default port) for the current environment —
+/// must track `Configs::get_backboard()`'s environment, or key registration
+/// is checked against one backboard while the relay authenticates against
+/// another (dev-mode CLIs used to dial the prod relay and get publickey
+/// denials for keys that were registered fine).
+pub(super) fn ssh_relay() -> (&'static str, Option<u16>) {
+    Configs::get_ssh_relay()
+}
+
+/// Append `-p <port>` when the relay listens on a non-default port (the
+/// develop relay uses 2222).
+fn apply_relay_port(cmd: &mut Command, port: Option<u16>) {
+    if let Some(port) = port {
+        cmd.args(["-p", &port.to_string()]);
+    }
+}
 
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
@@ -39,19 +54,19 @@ pub async fn get_service_instance_id(
 /// its workspace's keys; session and user tokens get personal keys. The
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
-pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
-    let local_keys = find_local_ssh_keys()?;
+pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    let local_keys = find_local_ssh_keys().await?;
 
     if local_keys.is_empty() {
         bail!(
-            "No SSH keys found in ~/.ssh/\n\n\
+            "No SSH keys found in your SSH agent or ~/.ssh/\n\n\
             Generate one with:\n  ssh-keygen -t ed25519\n\n\
             Then run this command again."
         );
     }
 
     let registered_keys =
-        crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs, None).await?;
+        crate::controllers::ssh::keys::get_registered_ssh_keys(client, configs, None).await?;
 
     // Find a local key that's already registered
     let registered_local = local_keys.iter().find(|local| {
@@ -61,8 +76,15 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     });
 
     if let Some(key) = registered_local {
-        eprintln!("Using SSH key: {}", key.path.display());
-        return Ok(());
+        match &key.source {
+            SshKeySource::File(path) => eprintln!(
+                "Using SSH key from file {}: {}",
+                path.display(),
+                key.key_name()
+            ),
+            SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+        }
+        return Ok(identity_for(key));
     }
 
     // No local key is registered - need to register one
@@ -80,10 +102,10 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     } else {
         // Let the user pick which key to register
         use std::fmt;
-        struct KeyOption<'a>(&'a crate::controllers::ssh_keys::LocalSshKey);
+        struct KeyOption<'a>(&'a crate::controllers::ssh::keys::LocalSshKey);
         impl fmt::Display for KeyOption<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{} ({})", self.0.path.display(), self.0.fingerprint)
+                write!(f, "{} ({})", self.0.key_name(), self.0.fingerprint)
             }
         }
         let options: Vec<KeyOption> = local_keys.iter().map(KeyOption).collect();
@@ -93,7 +115,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     println!(
         "Key: {} ({})",
-        key_to_register.path.display(),
+        key_to_register.key_name(),
         key_to_register.fingerprint
     );
     println!();
@@ -107,25 +129,34 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         );
     }
 
-    let key_name = key_to_register
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("ssh-key")
-        .to_string();
-
     register_ssh_key(
         client,
         configs,
-        &key_name,
-        &key_to_register.public_key,
+        &key_to_register.key_name(),
+        &key_to_register.public_key.to_string(),
         None,
     )
     .await?;
 
     println!("SSH key registered successfully!");
 
-    Ok(())
+    Ok(identity_for(key_to_register))
+}
+
+/// The path to hand `ssh -i` for a registered local key. File-backed keys point
+/// at the private key beside the `.pub`; agent-backed keys return `None` (the
+/// agent offers them automatically, and there's no file to pass).
+fn identity_for(key: &crate::controllers::ssh::keys::LocalSshKey) -> Option<PathBuf> {
+    match &key.source {
+        SshKeySource::File(path) => {
+            if path.extension().and_then(|e| e.to_str()) == Some("pub") {
+                Some(path.with_extension(""))
+            } else {
+                Some(path.to_path_buf())
+            }
+        }
+        SshKeySource::Agent => None,
+    }
 }
 
 /// Ensure tmux is installed inside the target container.
@@ -133,10 +164,12 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 /// Split out from the session loop so that a tmux-install failure is
 /// distinguishable from a session connect failure in telemetry.
 pub fn ensure_tmux_installed(ssh_target: &str, identity_file: Option<&Path>) -> Result<()> {
-    let target = format!("{}@{}", ssh_target, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{ssh_target}@{host}");
 
     eprintln!("Ensuring tmux is installed...");
     let mut install_cmd = Command::new("ssh");
+    apply_relay_port(&mut install_cmd, port);
     if let Some(key) = identity_file {
         install_cmd.arg("-i").arg(key);
     }
@@ -167,7 +200,8 @@ pub fn run_tmux_session(
     session_name: &str,
     identity_file: Option<&Path>,
 ) -> Result<()> {
-    let target = format!("{}@{}", ssh_target, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{ssh_target}@{host}");
     let tmux_cmd = format!(
         "exec tmux new-session -A -s {} \\; set -g mouse on",
         session_name
@@ -175,6 +209,7 @@ pub fn run_tmux_session(
 
     loop {
         let mut session_cmd = Command::new("ssh");
+        apply_relay_port(&mut session_cmd, port);
         if let Some(key) = identity_file {
             session_cmd.arg("-i").arg(key);
         }
@@ -198,6 +233,15 @@ pub fn run_tmux_session(
     Ok(())
 }
 
+/// Resume request for a relay durable session, delivered via SSH `SetEnv`
+/// (the relay intercepts these env keys; they are not forwarded to the VM).
+pub struct DurableResume<'a> {
+    pub session_name: &'a str,
+    /// Resume from the server's last-read cursor instead of replaying the
+    /// full retained scrollback.
+    pub resume_from_last_read: bool,
+}
+
 /// Run SSH command with the given service instance ID.
 /// Optionally executes a command instead of starting an interactive shell.
 ///
@@ -211,15 +255,31 @@ pub fn run_native_ssh(
     service_instance_id: &str,
     command: Option<&[String]>,
     identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
-    let target = format!("{}@{}", service_instance_id, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{service_instance_id}@{host}");
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
     let mut ssh_cmd = Command::new("ssh");
+    apply_relay_port(&mut ssh_cmd, port);
 
     if let Some(key) = identity_file {
         ssh_cmd.arg("-i").arg(key);
+    }
+
+    if let Some(durable) = durable {
+        // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
+        // honors the first SetEnv it encounters.
+        let mut set_env = format!(
+            "SetEnv RAILWAY_DURABLE_SESSION_NAME={}",
+            durable.session_name
+        );
+        if durable.resume_from_last_read {
+            set_env.push_str(" RAILWAY_DURABLE_RESUME=lastread");
+        }
+        ssh_cmd.arg("-o").arg(set_env);
     }
 
     match command {

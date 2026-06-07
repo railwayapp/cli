@@ -1,0 +1,14 @@
+query Sandboxes($environmentId: String!, $first: Int, $after: String) {
+  sandboxes(environmentId: $environmentId, first: $first, after: $after) {
+    edges {
+      node {
+        id
+        status
+        region
+        environmentId
+        createdAt
+        idleTimeoutMinutes
+      }
+    }
+  }
+}

@@ -41,7 +41,7 @@ pub async fn get_service_variables(
     Ok(variables)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Variable {
     pub key: String,
     pub value: String,

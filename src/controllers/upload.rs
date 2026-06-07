@@ -107,12 +107,22 @@ pub async fn upload_deploy_tarball(
     }
 
     let body_len = body.len();
-    let res = client
+    let mut request = client
         .post(url.to_string())
-        .header("Content-Type", "application/gzip")
-        .body(body)
-        .send()
-        .await?;
+        .header("Content-Type", "application/gzip");
+
+    // Agent attribution: present only when an agent harness is driving the
+    // CLI. Backboard threads these into the deployment-create event so an
+    // agentic `up` deploy is distinguishable from a human CLI deploy
+    // (`source = "CLI Agent"`), closing the signup → deploy funnel.
+    if let Some((caller, agent_session_id)) = crate::telemetry::deploy_attribution() {
+        request = request.header("x-railway-caller", caller);
+        if let Some(agent_session_id) = agent_session_id {
+            request = request.header("x-railway-agent-session", agent_session_id);
+        }
+    }
+
+    let res = request.body(body).send().await?;
 
     let status = res.status();
     if status != 200 {

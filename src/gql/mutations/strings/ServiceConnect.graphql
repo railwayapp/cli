@@ -1,0 +1,6 @@
+mutation ServiceConnect($id: String!, $input: ServiceConnectInput!) {
+  serviceConnect(id: $id, input: $input) {
+    id
+    name
+  }
+}

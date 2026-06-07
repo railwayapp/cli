@@ -1,0 +1,10 @@
+mutation TemplateGenerate($projectId: String!, $environmentId: String) {
+  templateGenerate(input: { projectId: $projectId, environmentId: $environmentId }) {
+    id
+    code
+    name
+    description
+    status
+    workspaceId
+  }
+}

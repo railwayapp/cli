@@ -433,7 +433,7 @@ pub async fn command(args: Args) -> Result<()> {
     // SSH key is by far the most common failure mode and we can tell the user
     // exactly how to fix it without waiting on a connection.
     let db_stats_preflight_error = if db_type.is_some() && (args.watch || include_db_stats) {
-        db_stats::preflight_db_stats_ssh().err()
+        db_stats::preflight_db_stats_ssh().await.err()
     } else {
         None
     };

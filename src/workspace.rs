@@ -13,10 +13,17 @@ use super::{
 
 pub async fn workspaces() -> Result<Vec<Workspace>> {
     let configs = Configs::new()?;
-    let vars = queries::user_projects::Variables {};
     let client = GQLClient::new_authorized(&configs)?;
+    workspaces_with_client(&client, &configs).await
+}
+
+pub async fn workspaces_with_client(
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> Result<Vec<Workspace>> {
+    let vars = queries::user_projects::Variables {};
     let response =
-        post_graphql::<queries::UserProjects, _>(&client, configs.get_backboard(), vars).await?;
+        post_graphql::<queries::UserProjects, _>(client, configs.get_backboard(), vars).await?;
 
     // Member variants are yielded first so that a workspace the user both owns
     // and is an external member of keeps the richer Member representation.
@@ -161,4 +168,40 @@ pub struct ProjectWithWorkspace {
     pub workspace: WorkspaceInfo,
     #[serde(flatten)]
     pub project: Project,
+}
+
+/// Resolve a workspace from the list using an optional CLI-supplied
+/// identifier (name or id). If exactly one workspace is available,
+/// auto-selects it; if more than one and TTY, prompts; otherwise
+/// bails with a helpful message.
+///
+/// Non-TTY callers with more than one workspace must pass --workspace
+/// or this bails. When the workspace is auto-selected (flag or
+/// single-workspace cases), echoes the choice via `fake_select` so
+/// the user can see what landed.
+pub fn pick_workspace(workspaces: Vec<Workspace>, requested: Option<String>) -> Result<Workspace> {
+    use crate::errors::RailwayError;
+    use crate::util::prompt::{fake_select, prompt_select};
+    use is_terminal::IsTerminal;
+
+    let confirm = |w: &Workspace| {
+        fake_select("Select a workspace", w.name());
+        w.clone()
+    };
+
+    if let Some(input) = requested {
+        return workspaces
+            .iter()
+            .find(|w| w.id().eq_ignore_ascii_case(&input) || w.name().eq_ignore_ascii_case(&input))
+            .map(confirm)
+            .ok_or_else(|| RailwayError::WorkspaceNotFound(input).into());
+    }
+    if workspaces.len() == 1 {
+        return Ok(confirm(&workspaces[0]));
+    }
+    if !std::io::stdout().is_terminal() {
+        bail!("--workspace required in non-interactive mode (multiple workspaces available)");
+    }
+    let workspace = prompt_select("Select a workspace", workspaces)?;
+    Ok(workspace)
 }

@@ -212,7 +212,7 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
             "Railway skills already configured; skipping install.".dimmed()
         );
     } else {
-        skills::install_skills(&missing_skills).await?;
+        skills::install_skills(&missing_skills, false).await?;
     }
 
     // Step 2: MCP install (skips universal internally — no MCP convention).

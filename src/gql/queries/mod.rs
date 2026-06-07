@@ -141,10 +141,26 @@ pub type EnvironmentConfig = serde_json::Value;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Template.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct Template;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/TemplateDetail.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct TemplateDetail;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/WorkspaceTemplates.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct WorkspaceTemplates;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -244,6 +260,24 @@ pub struct HttpDurationMetrics;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct SshPublicKeys;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Sandboxes.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct Sandboxes;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/SandboxTemplate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxTemplate;
 
 #[derive(GraphQLQuery)]
 #[graphql(
