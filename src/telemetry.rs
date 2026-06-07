@@ -412,6 +412,21 @@ fn build_unix_snapshot() -> Option<HashMap<u32, ProcessNode>> {
     Some(map)
 }
 
+/// Decode a Toolhelp `szExeFile` field (`[u16; MAX_PATH]`, NUL-padded) to
+/// a lowercased String, stopping at the first NUL. Pulled out of
+/// [`build_windows_snapshot`] so the UTF-16 / NUL-termination handling can
+/// be unit-tested on any platform (the snapshot builder itself only runs
+/// on Windows and against the live process table).
+///
+/// Only called from the `#[cfg(windows)]` snapshot builder, but defined
+/// unconditionally so the test runs everywhere; allow dead_code on the
+/// non-windows non-test builds where the lone caller is compiled out.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn decode_sz_exe_file(buf: &[u16]) -> String {
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len]).to_ascii_lowercase()
+}
+
 /// Windows equivalent of [`build_unix_snapshot`], via a Toolhelp32 process
 /// snapshot (the same API `commands/shell.rs` uses for shell detection).
 ///
@@ -423,6 +438,18 @@ fn build_unix_snapshot() -> Option<HashMap<u32, ProcessNode>> {
 /// distinctive binary name are still caught by their strong env vars
 /// (Layer 1), which is how all the major node-shipped harnesses identify
 /// themselves anyway.
+///
+/// LIMITATION: because only the basename is available, [`agent_ancestor_pid`]
+/// can't recognize node-bundled agents (they run as `node.exe`), so the
+/// persistent session-file anchor falls back to the immediate parent on
+/// Windows rather than the agent ancestor. This is masked for the major
+/// agents because their session env vars (CLAUDE_CODE_SESSION_ID,
+/// CODEX_THREAD_ID, ...) resolve first in [`resolve_agent_session_id`];
+/// agents without one fragment their sessions, but the dbt-side
+/// is_unstitched_agent_session macro flags those as unstitched rather than
+/// miscounting them. Recovering the full argv would require reading the
+/// PEB (NtQueryInformationProcess + ReadProcessMemory) and still wouldn't
+/// help node-bundled agents, so it isn't worth the fragility.
 #[cfg(windows)]
 fn build_windows_snapshot() -> Option<HashMap<u32, ProcessNode>> {
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -447,18 +474,11 @@ fn build_windows_snapshot() -> Option<HashMap<u32, ProcessNode>> {
         let mut map = HashMap::new();
         if Process32FirstW(snapshot, &mut entry) != 0 {
             loop {
-                let len = entry
-                    .szExeFile
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                let command =
-                    String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
                 map.insert(
                     entry.th32ProcessID,
                     ProcessNode {
                         ppid: entry.th32ParentProcessID,
-                        command,
+                        command: decode_sz_exe_file(&entry.szExeFile),
                     },
                 );
                 if Process32NextW(snapshot, &mut entry) == 0 {
@@ -2068,6 +2088,26 @@ mod tests {
         assert_eq!(parent_kind_from_command("ruby script.rb"), Some("ruby"));
         assert_eq!(parent_kind_from_command("pwsh"), Some("powershell"));
         assert_eq!(parent_kind_from_command("/usr/bin/unknown-binary"), None);
+    }
+
+    #[test]
+    fn decodes_toolhelp_exe_names() {
+        // The Windows snapshot decodes a NUL-padded [u16; MAX_PATH]
+        // szExeFile via decode_sz_exe_file; exercise the NUL-termination
+        // and lowercasing on any platform so a regression in the decode
+        // (off-by-one on the NUL scan, missing lowercase) fails in CI
+        // rather than silently on Windows only.
+        let mut buf = [0u16; 260];
+        for (i, c) in "Codex.exe".encode_utf16().enumerate() {
+            buf[i] = c;
+        }
+        assert_eq!(super::decode_sz_exe_file(&buf), "codex.exe");
+        // Empty and all-NUL buffers decode to the empty string, not a panic.
+        assert_eq!(super::decode_sz_exe_file(&[]), "");
+        assert_eq!(super::decode_sz_exe_file(&[0u16; 260]), "");
+        // A buffer with no NUL terminator uses the whole slice.
+        let full: Vec<u16> = "node".encode_utf16().collect();
+        assert_eq!(super::decode_sz_exe_file(&full), "node");
     }
 
     #[cfg(unix)]
