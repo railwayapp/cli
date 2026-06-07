@@ -194,6 +194,17 @@ const STRONG_AGENT_ENV: &[(&str, &str)] = &[
     ("CURSOR_TRACE_ID", "cursor"),
     ("CODEX_SANDBOX", "codex"),
     ("OPENAI_CODEX", "codex"),
+    // Codex injects `CODEX_THREAD_ID` into every exec environment whenever a
+    // thread exists — even when the user's `shell_environment_policy.
+    // include_only` would filter everything else (openai/codex
+    // codex-rs/core/src/exec_env.rs, exported from codex_protocol::
+    // shell_environment). Unlike CODEX_SANDBOX/OPENAI_CODEX it is thread
+    // metadata rather than sandbox metadata, so it is also present on
+    // Windows, where Codex has no seatbelt/landlock sandbox and the two
+    // entries above never fire. Warehouse audit 2026-06-07: codex was 0.0%
+    // of Windows CLI events vs 15–30% Windows for every other major
+    // harness — those invocations were landing in `agent_unknown`.
+    ("CODEX_THREAD_ID", "codex"),
     ("OPENCODE", "opencode"),
     ("OPENCODE_SESSION_ID", "opencode"),
     ("AMP_CURRENT_THREAD_ID", "amp"),
@@ -341,11 +352,12 @@ where
     None
 }
 
-/// One-shot snapshot of the system process table. Spawning `ps` once and
-/// building an in-memory map is significantly cheaper than calling `ps` at
-/// every hop. Empty map on platforms or invocations where the snapshot is
-/// unavailable; callers degrade gracefully (process-tree layer becomes a
-/// no-op and we fall through to env-only detection).
+/// One-shot snapshot of the system process table. On unix, spawning `ps`
+/// once and building an in-memory map is significantly cheaper than calling
+/// `ps` at every hop; on Windows a Toolhelp32 snapshot serves the same role.
+/// Empty map on platforms or invocations where the snapshot is unavailable;
+/// callers degrade gracefully (process-tree layer becomes a no-op and we
+/// fall through to env-only detection).
 fn process_snapshot() -> &'static HashMap<u32, ProcessNode> {
     static SNAPSHOT: OnceLock<HashMap<u32, ProcessNode>> = OnceLock::new();
     SNAPSHOT.get_or_init(|| {
@@ -353,7 +365,11 @@ fn process_snapshot() -> &'static HashMap<u32, ProcessNode> {
         {
             build_unix_snapshot().unwrap_or_default()
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            build_windows_snapshot().unwrap_or_default()
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             HashMap::new()
         }
@@ -396,13 +412,104 @@ fn build_unix_snapshot() -> Option<HashMap<u32, ProcessNode>> {
     Some(map)
 }
 
+/// Decode a Toolhelp `szExeFile` field (`[u16; MAX_PATH]`, NUL-padded) to
+/// a lowercased String, stopping at the first NUL. Pulled out of
+/// [`build_windows_snapshot`] so the UTF-16 / NUL-termination handling can
+/// be unit-tested on any platform (the snapshot builder itself only runs
+/// on Windows and against the live process table).
+///
+/// Only called from the `#[cfg(windows)]` snapshot builder, but defined
+/// unconditionally so the test runs everywhere; allow dead_code on the
+/// non-windows non-test builds where the lone caller is compiled out.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn decode_sz_exe_file(buf: &[u16]) -> String {
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len]).to_ascii_lowercase()
+}
+
+/// Windows equivalent of [`build_unix_snapshot`], via a Toolhelp32 process
+/// snapshot (the same API `commands/shell.rs` uses for shell detection).
+///
+/// Toolhelp exposes only the executable basename (`szExeFile`), not the
+/// full argv, so `command` here is e.g. `codex.exe` / `node.exe` rather
+/// than `node C:\...\cursor-agent`. That is enough for the exact-basename
+/// and distinctive-substring arms of [`caller_from_process_name`] and for
+/// [`parent_kind_from_command`] bucketing; node-bundled agents without a
+/// distinctive binary name are still caught by their strong env vars
+/// (Layer 1), which is how all the major node-shipped harnesses identify
+/// themselves anyway.
+///
+/// LIMITATION: because only the basename is available, [`agent_ancestor_pid`]
+/// can't recognize node-bundled agents (they run as `node.exe`), so the
+/// persistent session-file anchor falls back to the immediate parent on
+/// Windows rather than the agent ancestor. This is masked for the major
+/// agents because their session env vars (CLAUDE_CODE_SESSION_ID,
+/// CODEX_THREAD_ID, ...) resolve first in [`resolve_agent_session_id`];
+/// agents without one fragment their sessions, but the dbt-side
+/// is_unstitched_agent_session macro flags those as unstitched rather than
+/// miscounting them. Recovering the full argv would require reading the
+/// PEB (NtQueryInformationProcess + ReadProcessMemory) and still wouldn't
+/// help node-bundled agents, so it isn't worth the fragility.
+#[cfg(windows)]
+fn build_windows_snapshot() -> Option<HashMap<u32, ProcessNode>> {
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::tlhelp32::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: documented Toolhelp32 enumeration pattern — zeroed
+    // PROCESSENTRY32W with dwSize set before the first call, a
+    // Process32FirstW/Process32NextW loop, and CloseHandle on every path
+    // out of the function.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut map = HashMap::new();
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                map.insert(
+                    entry.th32ProcessID,
+                    ProcessNode {
+                        ppid: entry.th32ParentProcessID,
+                        command: decode_sz_exe_file(&entry.szExeFile),
+                    },
+                );
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+        Some(map)
+    }
+}
+
+/// Extract the executable basename from a (lowercased) argv0: strip the
+/// directory (both separator styles — Windows snapshot rows and any
+/// Windows-style paths embedded in argv) and a trailing `.exe` so the
+/// exact-basename match arms behave identically across platforms
+/// (`claude.exe` → `claude`, `pi.exe` → `pi`).
+fn exe_basename(argv0: &str) -> &str {
+    let basename = argv0.rsplit(['/', '\\']).next().unwrap_or("");
+    basename.strip_suffix(".exe").unwrap_or(basename)
+}
+
 /// Map a process command line to a canonical agent slug. Operates on the
 /// lowercased full command line so that node-bundled agents (e.g. `node
 /// /path/to/cursor-agent`) match even though their `comm` is just `node`.
+/// On Windows the snapshot carries only the exe basename (`codex.exe`),
+/// which the substring arms and [`exe_basename`] normalization both handle.
 fn caller_from_process_name(command: &str) -> Option<&'static str> {
     let lower = command.to_ascii_lowercase();
     let argv0 = lower.split_whitespace().next().unwrap_or("");
-    let basename = argv0.rsplit('/').next().unwrap_or("");
+    let basename = exe_basename(argv0);
 
     // Short / generic agent names need exact-basename matching to avoid
     // false positives (`pi` vs `pilot`, `amp` vs `chamber`, `droid` vs
@@ -501,14 +608,10 @@ fn agent_from_process_tree() -> Option<&'static str> {
 fn parent_kind_from_command(command: &str) -> Option<&'static str> {
     let name = command.to_ascii_lowercase();
     // Exact-binary / path-suffix matches to avoid false positives on
-    // strings that incidentally contain the substring.
-    let basename = name
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
+    // strings that incidentally contain the substring. `.exe` is stripped
+    // by exe_basename, so Windows parents (`node.exe`, `python.exe`,
+    // `cmd.exe`) land in the same buckets as their unix counterparts.
+    let basename = exe_basename(name.split_whitespace().next().unwrap_or(""));
     match basename {
         "python" | "python2" | "python3" | "uv" | "pipx" => Some("python"),
         "node" | "deno" | "bun" | "npm" | "npx" | "pnpm" | "yarn" => Some("node"),
@@ -517,7 +620,7 @@ fn parent_kind_from_command(command: &str) -> Option<&'static str> {
         "go" => Some("go"),
         "java" | "kotlin" | "scala" => Some("jvm"),
         "perl" => Some("perl"),
-        "powershell" | "pwsh" | "cmd.exe" => Some("powershell"),
+        "powershell" | "pwsh" | "cmd" => Some("powershell"),
         _ => None,
     }
 }
@@ -723,8 +826,53 @@ fn ai_ide_host_from_env() -> Option<&'static str> {
 /// Map an MCP `clientInfo.name` value (sent verbatim by the client during
 /// the JSON-RPC `initialize` handshake) to our canonical caller slug. This
 /// is the strongest signal we have for any MCP-driven event because the
-/// client identifies itself explicitly per the MCP spec.
-fn caller_from_mcp_client_name(name: &str) -> &'static str {
+/// client identifies itself explicitly per the MCP spec. Unrecognized
+/// clients surface their raw name as `mcp_unknown:<sanitized-name>` so new
+/// clients catalog themselves in the warehouse without re-shipping the CLI;
+/// the dbt-side caller_class macro folds the whole `mcp_unknown(:*)` family
+/// into `agent_unknown`.
+fn caller_from_mcp_client_name(name: &str) -> String {
+    if let Some(known) = known_caller_from_mcp_client_name(name) {
+        return known.to_string();
+    }
+    match mcp_client_name_slug(name) {
+        Some(slug) => format!("mcp_unknown:{slug}"),
+        None => "mcp_unknown".to_string(),
+    }
+}
+
+/// Sanitize a raw MCP client name into the `<name>` part of
+/// `mcp_unknown:<name>`: lowercased, every char outside the telemetry-safe
+/// charset (alnum plus `. _ @ / -`, and notably NOT `:` so the value stays
+/// a single-colon caller for downstream subkind splitting) collapsed into
+/// single hyphens, length-bounded. Returns None when nothing safe survives.
+fn mcp_client_name_slug(name: &str) -> Option<String> {
+    const MAX_SLUG_LEN: usize = 48;
+    let mut slug = String::with_capacity(name.len().min(MAX_SLUG_LEN));
+    for c in name.trim().to_ascii_lowercase().chars() {
+        let mapped = match c {
+            'a'..='z' | '0'..='9' | '.' | '_' | '@' | '/' | '-' => c,
+            _ => '-',
+        };
+        if mapped == '-' && (slug.is_empty() || slug.ends_with('-')) {
+            continue;
+        }
+        slug.push(mapped);
+        if slug.len() >= MAX_SLUG_LEN {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_string())
+    }
+}
+
+/// The recognized-client mapping table. Returns None for clients we don't
+/// catalog yet; the caller composes the `mcp_unknown:<name>` passthrough.
+fn known_caller_from_mcp_client_name(name: &str) -> Option<&'static str> {
     let lower = name.to_ascii_lowercase();
     // Order: longer / more specific patterns first.
     if lower == "claude-ai" {
@@ -732,58 +880,56 @@ fn caller_from_mcp_client_name(name: &str) -> &'static str {
         // by checking the env: Claude Code sets `CLAUDECODE=1` in the spawned
         // MCP server's environment, Claude Desktop does not.
         if env_var_is_truthy("CLAUDECODE") || std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() {
-            return "claude_code";
+            return Some("claude_code");
         }
-        return "claude_desktop";
+        return Some("claude_desktop");
     }
     if lower == "codex-mcp-client" || lower.contains("codex") {
-        return "codex";
+        return Some("codex");
     }
     if lower == "cline" {
-        return "cline";
+        return Some("cline");
     }
     if lower == "roo code" || lower == "roo-code" {
-        return "roo_code";
+        return Some("roo_code");
     }
     if lower == "kilo" || lower.starts_with("kilo") {
-        return "kilo_code";
+        return Some("kilo_code");
     }
     if lower == "opencode" {
-        return "opencode";
+        return Some("opencode");
     }
     if lower == "continue-client" || lower.contains("continue") {
-        return "continue_dev";
+        return Some("continue_dev");
     }
     if lower.starts_with("visual studio code") {
         if lower.contains("insiders") {
-            return "vscode_insiders";
+            return Some("vscode_insiders");
         }
-        return "vscode_copilot";
+        return Some("vscode_copilot");
     }
     if lower.contains("windsurf") {
-        return "windsurf";
+        return Some("windsurf");
     }
     if lower.contains("cursor") {
-        return "cursor";
+        return Some("cursor");
     }
     if lower.contains("goose") {
-        return "goose";
+        return Some("goose");
     }
     if lower.contains("firebender") {
-        return "firebender";
+        return Some("firebender");
     }
     if lower.contains("gemini") {
-        return "gemini_cli";
+        return Some("gemini_cli");
     }
     if lower.contains("zed") {
-        return "zed_agent";
+        return Some("zed_agent");
     }
     if lower.contains("jetbrains") || lower.contains("intellij") {
-        return "jetbrains_ai";
+        return Some("jetbrains_ai");
     }
-    // Unrecognized — surface the raw client name (lowercased, sanitized) so
-    // we can iterate without re-shipping the CLI when new clients appear.
-    "mcp_unknown"
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -927,7 +1073,38 @@ fn parent_boot_time(pid: u32) -> Option<u64> {
     Some(u64::from_be_bytes(out8))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn parent_boot_time(pid: u32) -> Option<u64> {
+    use winapi::shared::minwindef::FILETIME;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
+    use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+    // The process creation time (FILETIME ticks since 1601) is the Windows
+    // analogue of the /proc starttime field: stable for the process's
+    // lifetime and different for any pid-reuse successor.
+    //
+    // SAFETY: handle opened with the least-privilege query right and closed
+    // on every path; GetProcessTimes only writes the four out-params.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn parent_boot_time(_pid: u32) -> Option<u64> {
     None
 }
@@ -1493,7 +1670,7 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
 static MCP_CLIENT_CALLER: OnceLock<String> = OnceLock::new();
 
 fn record_mcp_client_caller(client: &McpClientInfo) {
-    let _ = MCP_CLIENT_CALLER.set(caller_from_mcp_client_name(&client.name).to_string());
+    let _ = MCP_CLIENT_CALLER.set(caller_from_mcp_client_name(&client.name));
 }
 
 /// Send MCP tool telemetry. The caller is derived from the JSON-RPC
@@ -1511,7 +1688,7 @@ pub async fn send_mcp_tool_with_client(
     }
     let caller_override = mcp_client
         .as_ref()
-        .map(|c| caller_from_mcp_client_name(&c.name).to_string());
+        .map(|c| caller_from_mcp_client_name(&c.name));
     send_with_caller_override(
         CliTrackEvent {
             command: "mcp".to_string(),
@@ -1801,9 +1978,93 @@ mod tests {
         assert_eq!(caller_from_mcp_client_name("Windsurf"), "windsurf");
         assert_eq!(caller_from_mcp_client_name("goose"), "goose");
         assert_eq!(caller_from_mcp_client_name("firebender"), "firebender");
+    }
+
+    #[test]
+    fn unknown_mcp_clients_surface_their_raw_name() {
+        // Unrecognized clients pass their (sanitized) name through so new
+        // clients catalog themselves in the warehouse without a CLI ship.
         assert_eq!(
             caller_from_mcp_client_name("totally-unknown-client"),
-            "mcp_unknown"
+            "mcp_unknown:totally-unknown-client"
+        );
+        // Whitespace and out-of-charset chars collapse into single hyphens;
+        // no `:` survives in the name part so the caller stays a
+        // single-colon value for downstream subkind splitting.
+        assert_eq!(
+            caller_from_mcp_client_name("My Fancy IDE (beta)"),
+            "mcp_unknown:my-fancy-ide-beta"
+        );
+        assert_eq!(
+            caller_from_mcp_client_name("some::client v2"),
+            "mcp_unknown:some-client-v2"
+        );
+        // Nothing safe survives → plain mcp_unknown, same as before.
+        assert_eq!(caller_from_mcp_client_name("   "), "mcp_unknown");
+        assert_eq!(caller_from_mcp_client_name("漢字"), "mcp_unknown");
+        // Length-bounded: 48 chars of name max after the prefix.
+        let long = caller_from_mcp_client_name(&"x".repeat(300));
+        assert!(long.starts_with("mcp_unknown:"));
+        assert!(long.len() <= "mcp_unknown:".len() + 48);
+        // Output always passes the telemetry charset filter, so the
+        // composed caller survives safe_telemetry_value downstream.
+        assert!(super::safe_telemetry_value(&long).is_some());
+    }
+
+    #[test]
+    fn strong_env_includes_codex_thread_id() {
+        // CODEX_THREAD_ID is the only codex env signal present on Windows
+        // (CODEX_SANDBOX / OPENAI_CODEX are sandbox metadata; Windows has
+        // no sandbox). Pin it so a table refactor can't silently drop it.
+        assert!(
+            STRONG_AGENT_ENV
+                .iter()
+                .any(|(name, caller)| *name == "CODEX_THREAD_ID" && *caller == "codex")
+        );
+    }
+
+    #[test]
+    fn detects_windows_exe_basenames() {
+        // The Windows Toolhelp32 snapshot carries bare exe basenames; the
+        // exact-basename arms must match through the `.exe` suffix.
+        assert_eq!(caller_from_process_name("claude.exe"), Some("claude_code"));
+        assert_eq!(caller_from_process_name("pi.exe"), Some("pi"));
+        assert_eq!(caller_from_process_name("droid.exe"), Some("factory_droid"));
+        // npm-vendored codex binary name (substring arm).
+        assert_eq!(
+            caller_from_process_name("codex-x86_64-pc-windows-msvc.exe"),
+            Some("codex")
+        );
+        // Windows-style absolute paths split on backslash.
+        assert_eq!(
+            caller_from_process_name(r"c:\users\x\.local\bin\pi.exe"),
+            Some("pi")
+        );
+        // Generic hosts stay unmatched.
+        assert_eq!(caller_from_process_name("node.exe"), None);
+        assert_eq!(caller_from_process_name("explorer.exe"), None);
+    }
+
+    #[test]
+    fn parent_kind_buckets_windows_interpreters() {
+        assert_eq!(parent_kind_from_command("node.exe"), Some("node"));
+        assert_eq!(
+            parent_kind_from_command("python.exe script.py"),
+            Some("python")
+        );
+        assert_eq!(
+            parent_kind_from_command("cmd.exe /c railway up"),
+            Some("powershell")
+        );
+        assert_eq!(
+            parent_kind_from_command("powershell.exe"),
+            Some("powershell")
+        );
+        // The Windows snapshot carries bare exe basenames (no paths), so a
+        // spaceless path is the most pathful shape this fn ever sees.
+        assert_eq!(
+            parent_kind_from_command(r"c:\nodejs\node.exe deploy.js"),
+            Some("node")
         );
     }
 
@@ -1827,6 +2088,26 @@ mod tests {
         assert_eq!(parent_kind_from_command("ruby script.rb"), Some("ruby"));
         assert_eq!(parent_kind_from_command("pwsh"), Some("powershell"));
         assert_eq!(parent_kind_from_command("/usr/bin/unknown-binary"), None);
+    }
+
+    #[test]
+    fn decodes_toolhelp_exe_names() {
+        // The Windows snapshot decodes a NUL-padded [u16; MAX_PATH]
+        // szExeFile via decode_sz_exe_file; exercise the NUL-termination
+        // and lowercasing on any platform so a regression in the decode
+        // (off-by-one on the NUL scan, missing lowercase) fails in CI
+        // rather than silently on Windows only.
+        let mut buf = [0u16; 260];
+        for (i, c) in "Codex.exe".encode_utf16().enumerate() {
+            buf[i] = c;
+        }
+        assert_eq!(super::decode_sz_exe_file(&buf), "codex.exe");
+        // Empty and all-NUL buffers decode to the empty string, not a panic.
+        assert_eq!(super::decode_sz_exe_file(&[]), "");
+        assert_eq!(super::decode_sz_exe_file(&[0u16; 260]), "");
+        // A buffer with no NUL terminator uses the whole slice.
+        let full: Vec<u16> = "node".encode_utf16().collect();
+        assert_eq!(super::decode_sz_exe_file(&full), "node");
     }
 
     #[cfg(unix)]
