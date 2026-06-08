@@ -11,6 +11,7 @@ pub mod prompt;
 pub mod reporter;
 pub mod retry;
 pub mod self_update;
+pub mod shell;
 pub mod time;
 pub mod two_factor;
 pub mod watcher;
