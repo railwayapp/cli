@@ -1513,8 +1513,7 @@ fn parse_port_spec(spec: &str) -> Result<PortSpec> {
 /// Bind-test then release — a small TOCTOU window before ssh re-binds, which
 /// is fine for the interactive dev workflow this serves.
 fn resolve_local_port(spec: &PortSpec, strict: bool) -> Result<(u16, bool)> {
-    let is_free =
-        |port: u16| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+    let is_free = |port: u16| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
 
     let requested = spec.local.unwrap_or(spec.remote);
     if is_free(requested) {
@@ -1609,7 +1608,11 @@ async fn forward(
 
     let short_id: String = sandbox_id.chars().take(8).collect();
     eprintln!();
-    eprintln!("{} Forwarding to sandbox {}", "⚡".yellow(), short_id.bold());
+    eprintln!(
+        "{} Forwarding to sandbox {}",
+        "⚡".yellow(),
+        short_id.bold()
+    );
     eprintln!();
     for (remapped_remote, picked) in &remaps {
         eprintln!(
