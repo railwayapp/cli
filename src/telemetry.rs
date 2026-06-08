@@ -1673,14 +1673,30 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
     }
 }
 
-/// Process-scoped MCP client caller, captured the first time a tool call
-/// arrives with `clientInfo`. Lets the server-lifecycle telemetry::send
+/// Process-scoped MCP client caller, captured at the JSON-RPC `initialize`
+/// handshake (see [`record_mcp_client`]) or, failing that, the first tool
+/// call that carries `clientInfo`. Lets the server-lifecycle telemetry::send
 /// emitted by the dispatch macro at process exit attribute itself to the
 /// MCP client even though no `clientInfo` is in scope at that point.
+///
+/// Recording at `initialize` matters because a large share of MCP sessions
+/// handshake and enumerate tools but never *call* one (editors connect,
+/// list tools, then idle/disconnect). Those sessions previously had nothing
+/// set here and fell through to env/process-tree detection, landing the
+/// `mcp_session` lifecycle event in `agent_unknown`. `OnceLock` makes the
+/// first writer win, so the handshake value is stable for the session.
 static MCP_CLIENT_CALLER: OnceLock<String> = OnceLock::new();
 
 fn record_mcp_client_caller(client: &McpClientInfo) {
     let _ = MCP_CLIENT_CALLER.set(caller_from_mcp_client_name(&client.name));
+}
+
+/// Record the MCP client identity from the `initialize` handshake so the
+/// server-lifecycle event is attributed even when no tool call follows.
+/// Idempotent and cheap; safe to call once per session from the handler's
+/// `initialize`.
+pub fn record_mcp_client(client: &McpClientInfo) {
+    record_mcp_client_caller(client);
 }
 
 /// Send MCP tool telemetry. The caller is derived from the JSON-RPC
