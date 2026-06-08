@@ -146,8 +146,7 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
     let pkce = oauth::generate_pkce();
     let state = oauth::generate_state();
     let caller = crate::telemetry::detect_caller();
-    let auth_url =
-        oauth::get_authorization_url(host, &redirect_uri, &pkce, &state, &caller);
+    let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state, &caller);
     // Sign-up vs sign-in is handled entirely server-side (the consent
     // screen adapts for brand-new accounts); the CLI doesn't declare
     // its intent up front.
