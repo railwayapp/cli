@@ -1287,7 +1287,7 @@ fn persistent_agent_session_id() -> Option<String> {
 /// lifetime of the process so repeated calls are free and stable across a
 /// session (important for long-lived processes like the local MCP server,
 /// where the same caller value is reported across many tool events).
-fn detect_caller() -> String {
+pub(crate) fn detect_caller() -> String {
     static CALLER: OnceLock<String> = OnceLock::new();
     CALLER.get_or_init(detect_caller_uncached).clone()
 }
