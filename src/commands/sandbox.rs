@@ -20,6 +20,7 @@ use crate::util::progress::{create_shimmer_spinner, fail_spinner};
 use crate::util::prompt::{
     prompt_confirm_with_default_with_cancel, prompt_options, prompt_options_skippable,
 };
+use crate::util::shell::shell_join;
 
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
@@ -223,6 +224,10 @@ struct ListArgs {
     /// Output as JSON
     #[clap(long)]
     json: bool,
+
+    /// Include destroyed sandboxes (hidden by default)
+    #[clap(long)]
+    all: bool,
 }
 
 /// `railway sandbox ssh [--id <id>] [-- command...]`. The id is a flag (not a
@@ -1131,7 +1136,16 @@ async fn list(
         },
     )
     .await?;
-    let nodes: Vec<_> = res.sandboxes.edges.into_iter().map(|e| e.node).collect();
+    let mut nodes: Vec<_> = res.sandboxes.edges.into_iter().map(|e| e.node).collect();
+
+    // Tombstones quickly outnumber live sandboxes; hide them unless --all.
+    let hidden = if args.all {
+        0
+    } else {
+        let before = nodes.len();
+        nodes.retain(|n| !matches!(n.status, queries::sandboxes::SandboxStatus::DESTROYED));
+        before - nodes.len()
+    };
 
     // Refresh the local id -> environment cache so `--id` works for any listed
     // sandbox. Does not change which sandbox is active.
@@ -1154,7 +1168,13 @@ async fn list(
     }
 
     if nodes.is_empty() {
-        println!("No sandboxes in this environment.");
+        if hidden > 0 {
+            println!(
+                "No active sandboxes in this environment ({hidden} destroyed; use --all to show them)."
+            );
+        } else {
+            println!("No sandboxes in this environment.");
+        }
         return Ok(());
     }
 
@@ -1176,6 +1196,9 @@ async fn list(
             node.region,
             node.created_at.format("%Y-%m-%d %H:%M").to_string()
         );
+    }
+    if hidden > 0 {
+        println!("\n({hidden} destroyed sandboxes hidden; use --all to show them)");
     }
     Ok(())
 }
@@ -1247,7 +1270,15 @@ async fn exec(
     );
 
     let options = sandbox_exec::ExecOptions {
-        command: (!args.command.is_empty()).then(|| args.command.join(" ")),
+        // A single argument passes through as a full shell command so pipes
+        // and redirects work (`exec -- "ls | head"`). Multiple arguments are
+        // argv: quote each so the remote shell sees the same boundaries —
+        // `exec -- bash -lc 'echo a | b'` must not re-split on the pipe.
+        command: match args.command.as_slice() {
+            [] => None,
+            [cmd] => Some(cmd.clone()),
+            argv => Some(shell_join(argv)),
+        },
         session: args.session.clone(),
         resume_from_last_read: args.resume_from_last_read,
         timeout: args
