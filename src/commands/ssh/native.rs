@@ -29,6 +29,22 @@ fn apply_relay_port(cmd: &mut Command, port: Option<u16>) {
     }
 }
 
+/// Base `ssh` invocation for the current environment's relay: the binary, the
+/// non-default relay port, and the `-i` identity when one was resolved.
+/// Returns the command plus the `<target>@<relay-host>` to append *after* any
+/// mode-specific options (interactive `-t`/`-T`, forward `-N`/`-L`, …). Shared
+/// so the relay/port/identity setup can't drift between the interactive and
+/// forward paths.
+fn base_ssh_command(ssh_target: &str, identity_file: Option<&Path>) -> (Command, String) {
+    let (host, port) = ssh_relay();
+    let mut cmd = Command::new("ssh");
+    apply_relay_port(&mut cmd, port);
+    if let Some(key) = identity_file {
+        cmd.arg("-i").arg(key);
+    }
+    (cmd, format!("{ssh_target}@{host}"))
+}
+
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
     client: &Client,
@@ -257,17 +273,10 @@ pub fn run_native_ssh(
     identity_file: Option<&Path>,
     durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
-    let (host, port) = ssh_relay();
-    let target = format!("{service_instance_id}@{host}");
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
-    let mut ssh_cmd = Command::new("ssh");
-    apply_relay_port(&mut ssh_cmd, port);
-
-    if let Some(key) = identity_file {
-        ssh_cmd.arg("-i").arg(key);
-    }
+    let (mut ssh_cmd, target) = base_ssh_command(service_instance_id, identity_file);
 
     if let Some(durable) = durable {
         // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
@@ -309,4 +318,71 @@ pub fn run_native_ssh(
 
     let status = ssh_cmd.status().context("Failed to execute ssh command")?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// One `-L` style forward: localhost:`local_port` → 127.0.0.1:`remote_port`
+/// inside the target.
+#[derive(Clone)]
+pub struct PortForward {
+    pub local_port: u16,
+    pub remote_port: u16,
+}
+
+/// Run a forward-only SSH session (`ssh -N -L ...`) against the relay.
+///
+/// The remote side is pinned to loopback — forwards reach ports the target
+/// itself listens on, mirroring the `/ws/tcpip` bridge's behavior. Blocks
+/// until the connection drops or the user interrupts; a signal-death (Ctrl+C)
+/// is reported as exit code 0 since that's the normal way to stop a forward.
+pub fn run_native_ssh_forward(
+    ssh_target: &str,
+    identity_file: Option<&Path>,
+    forwards: &[PortForward],
+) -> Result<i32> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+
+    ssh_cmd.args([
+        "-N",
+        // `-N` runs with stdin closed, so an interactive host-key prompt can't
+        // be answered — a fresh machine that hasn't trusted the relay yet would
+        // die with "Host key verification failed". accept-new auto-trusts on
+        // first contact (TOFU) while still rejecting a *changed* key (MITM
+        // protection). The interactive `sandbox ssh` path doesn't need this: it
+        // inherits stdin and the user can type "yes".
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        // Fail loudly if a forward can't be established instead of sitting
+        // connected with nothing bound.
+        "-o",
+        "ExitOnForwardFailure=yes",
+        // Long-lived idle forwards: detect a dead relay connection within
+        // ~90s instead of hanging until the next local connection fails.
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+    ]);
+
+    for forward in forwards {
+        ssh_cmd.args([
+            "-L",
+            &format!(
+                "127.0.0.1:{}:127.0.0.1:{}",
+                forward.local_port, forward.remote_port
+            ),
+        ]);
+    }
+
+    ssh_cmd.arg(&target);
+
+    // `-N` runs no command; keep stderr inherited so relay/auth errors and
+    // per-connection forward failures stay visible.
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stdout(Stdio::null());
+    ssh_cmd.stderr(Stdio::inherit());
+
+    let status = ssh_cmd.status().context("Failed to execute ssh command")?;
+    // `code()` is None when ssh died from a signal — for a forward that's the
+    // user's Ctrl+C (delivered to the whole foreground process group).
+    Ok(status.code().unwrap_or(0))
 }

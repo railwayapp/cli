@@ -7,7 +7,9 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
-use crate::commands::ssh::{DurableResume, ensure_ssh_key, run_native_ssh, tel};
+use crate::commands::ssh::{
+    DurableResume, PortForward, ensure_ssh_key, run_native_ssh, run_native_ssh_forward, tel,
+};
 use crate::config::{Configs, StoredSandbox, StoredSandboxTemplate};
 use crate::controllers::environment::get_matched_environment;
 use crate::controllers::project::get_project;
@@ -22,7 +24,7 @@ use crate::util::prompt::{
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox forward 3000      # localhost:3000 → port 3000 in the active sandbox\n  railway sandbox forward 8080:3000 # localhost:8080 → port 3000 (explicit local port)\n  railway sandbox forward 3000 5432 # several ports over one connection\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -59,6 +61,10 @@ enum Commands {
 
     /// Run a single command inside a sandbox (defaults to the active sandbox)
     Exec(ExecArgs),
+
+    /// Forward local ports into a sandbox (defaults to the active sandbox)
+    #[clap(visible_alias = "port-forward", visible_alias = "fwd")]
+    Forward(ForwardArgs),
 
     /// Destroy a sandbox (defaults to the active sandbox)
     #[clap(visible_alias = "rm", visible_alias = "delete")]
@@ -272,9 +278,34 @@ struct ExecArgs {
     #[clap(long)]
     detach: bool,
 
-    /// Command to run (everything after `--`; optional with --session)
+    /// Command to run (everything after `--`; optional with --session).
+    /// A single argument runs as a shell command; multiple arguments run
+    /// as argv with each argument quoted intact
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
+}
+
+/// `railway sandbox forward 3000 5432` / `railway sandbox forward 8080:3000`.
+/// Ports are positional so the common case stays short; `--id` selects a
+/// sandbox other than the active one.
+#[derive(Parser)]
+struct ForwardArgs {
+    /// Ports to forward: `REMOTE` (same port locally) or `LOCAL:REMOTE`
+    #[clap(value_name = "[LOCAL:]REMOTE", required = true)]
+    ports: Vec<String>,
+
+    /// Sandbox ID to forward into (defaults to the active sandbox)
+    #[clap(long = "id", value_name = "ID")]
+    id: Option<String>,
+
+    /// Path to an identity (private key) file, like `ssh -i`
+    #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
+    identity_file: Option<std::path::PathBuf>,
+
+    /// Fail if a requested local port is busy instead of picking a nearby
+    /// free one
+    #[clap(long)]
+    strict: bool,
 }
 
 /// Destroy has no trailing command, so a positional id is unambiguous; `--id`
@@ -316,6 +347,7 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::List(sub) => list(&mut configs, &client, project, environment, sub).await,
         Commands::Ssh(sub) => ssh(&mut configs, &client, project, environment, sub).await,
         Commands::Exec(sub) => exec(&mut configs, &client, project, environment, sub).await,
+        Commands::Forward(sub) => forward(&mut configs, &client, project, environment, sub).await,
         Commands::Destroy(sub) => destroy(&mut configs, &client, project, environment, sub).await,
     }
 }
@@ -1349,6 +1381,15 @@ async fn destroy(
 /// long-lived shell alive against the idle reaper.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
+/// A forward session that survives this long was a healthy tunnel; its drop
+/// resets the quick-failure budget instead of consuming it.
+const FORWARD_STABLE_SESSION: Duration = Duration::from_secs(30);
+/// Base delay between reconnect attempts (doubles per consecutive quick
+/// failure, capped at 2^4).
+const FORWARD_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+/// Consecutive quick failures tolerated before the forward gives up.
+const FORWARD_MAX_QUICK_FAILURES: u32 = 5;
+
 async fn ssh(
     configs: &mut Configs,
     client: &reqwest::Client,
@@ -1433,6 +1474,277 @@ async fn ssh(
     Ok(())
 }
 
+/// A parsed `[LOCAL:]REMOTE` port spec. `local` is None when the user gave a
+/// bare remote port (local defaults to the same port, with busy-port
+/// fallback); an explicit `LOCAL:REMOTE` never gets remapped.
+struct PortSpec {
+    local: Option<u16>,
+    remote: u16,
+}
+
+fn parse_port_spec(spec: &str) -> Result<PortSpec> {
+    let parse_port = |s: &str, what: &str| -> Result<u16> {
+        let port: u16 = s
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("Invalid {what} port {s:?} in {spec:?} (expected 1-65535)"))?;
+        if port == 0 {
+            bail!("Invalid {what} port 0 in {spec:?} (expected 1-65535)");
+        }
+        Ok(port)
+    };
+
+    match spec.split_once(':') {
+        Some((local, remote)) => Ok(PortSpec {
+            local: Some(parse_port(local, "local")?),
+            remote: parse_port(remote, "remote")?,
+        }),
+        None => Ok(PortSpec {
+            local: None,
+            remote: parse_port(spec, "remote")?,
+        }),
+    }
+}
+
+/// Pick the local port for a spec. Bare `REMOTE` specs fall back to a nearby
+/// free port when the obvious one is busy (dev-server style) unless `strict`;
+/// explicit `LOCAL:REMOTE` specs always fail busy. Returns `(port, remapped)`.
+///
+/// Bind-test then release — a small TOCTOU window before ssh re-binds, which
+/// is fine for the interactive dev workflow this serves.
+fn resolve_local_port(spec: &PortSpec, strict: bool) -> Result<(u16, bool)> {
+    let is_free = |port: u16| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+
+    let requested = spec.local.unwrap_or(spec.remote);
+    if is_free(requested) {
+        return Ok((requested, false));
+    }
+
+    if spec.local.is_some() || strict {
+        bail!(
+            "Local port {requested} is already in use.\n\
+            Pick a different one with: railway sandbox forward <local>:{remote}",
+            remote = spec.remote
+        );
+    }
+
+    // Scan upward like dev servers do; checked_add stops the scan at 65535.
+    for offset in 1..=100u16 {
+        if let Some(candidate) = requested.checked_add(offset)
+            && is_free(candidate)
+        {
+            return Ok((candidate, true));
+        }
+    }
+    bail!("Local port {requested} is in use and no nearby free port was found");
+}
+
+async fn forward(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: ForwardArgs,
+) -> Result<()> {
+    use colored::Colorize;
+
+    // Parse and de-dup before any network work so bad specs fail instantly.
+    let specs = args
+        .ports
+        .iter()
+        .map(|s| parse_port_spec(s))
+        .collect::<Result<Vec<_>>>()?;
+
+    let (sandbox_id, environment_id) = tel::track_for(
+        "sandbox",
+        "forward_resolve_target",
+        resolve_target(configs, client, args.id.clone(), project, environment).await,
+    )
+    .await?;
+
+    // Same key flow as `sandbox ssh`: resolve (or register) the key so a
+    // non-default-named identity is actually offered to the relay.
+    let auto_identity = if args.identity_file.is_none() {
+        tel::track_for(
+            "sandbox",
+            "forward_key_setup",
+            ensure_ssh_key(client, configs).await,
+        )
+        .await?
+    } else {
+        None
+    };
+
+    let mut forwards = Vec::with_capacity(specs.len());
+    let mut remaps = Vec::new();
+    let mut seen_local = std::collections::BTreeSet::new();
+    for spec in &specs {
+        let (local_port, remapped) = resolve_local_port(spec, args.strict)?;
+        if !seen_local.insert(local_port) {
+            bail!("Local port {local_port} is requested more than once");
+        }
+        if remapped {
+            remaps.push((spec.remote, local_port));
+        }
+        forwards.push(PortForward {
+            local_port,
+            remote_port: spec.remote,
+        });
+    }
+
+    configs.set_active_sandbox(&sandbox_id);
+    configs.write()?;
+
+    let target = format!("sbx:{environment_id}:{sandbox_id}");
+
+    // Keep the sandbox alive while the forward is up; the relay extends once
+    // on connect but an idle forward would otherwise hit the idle reaper.
+    let heartbeat = spawn_heartbeat(
+        client.clone(),
+        configs.get_backboard(),
+        environment_id.clone(),
+        sandbox_id.clone(),
+    );
+
+    let short_id: String = sandbox_id.chars().take(8).collect();
+    eprintln!();
+    eprintln!(
+        "{} Forwarding to sandbox {}",
+        "⚡".yellow(),
+        short_id.bold()
+    );
+    eprintln!();
+    for (remapped_remote, picked) in &remaps {
+        eprintln!(
+            "  {} port {remapped_remote} is in use locally, using {picked} instead",
+            "⚠".yellow()
+        );
+    }
+    for f in &forwards {
+        eprintln!(
+            "  {}  {} {} {}",
+            "➜".green(),
+            format!("http://localhost:{}", f.local_port).cyan().bold(),
+            "→".dimmed(),
+            format!("sandbox:{}", f.remote_port).dimmed()
+        );
+    }
+    eprintln!();
+    eprintln!("  {}", "Press Ctrl+C to stop".dimmed());
+    eprintln!();
+
+    let identity = args.identity_file.clone().or(auto_identity);
+
+    // Reconnect loop: the relay can drop a long-lived tunnel while the
+    // sandbox itself is still healthy. On an unexpected ssh exit, re-check
+    // the sandbox and reconnect if it is RUNNING; only tell the user to
+    // create a fresh sandbox when it actually stopped. Consecutive *fast*
+    // failures are bounded so a broken relay/auth setup can't hot-loop; a
+    // session that held for a while resets the budget.
+    let mut quick_failures: u32 = 0;
+    let exit_code = loop {
+        let session_target = target.clone();
+        let session_identity = identity.clone();
+        let session_forwards = forwards.clone();
+        let started = std::time::Instant::now();
+        // Blocking ssh runs off the async runtime so the heartbeat keeps ticking.
+        let session = tokio::task::spawn_blocking(move || {
+            run_native_ssh_forward(
+                &session_target,
+                session_identity.as_deref(),
+                &session_forwards,
+            )
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+        let exit_code = tel::track_for("sandbox", "forward_session", session).await?;
+
+        // Clean exit is the user's Ctrl+C (ssh dies by signal in our
+        // process group); anything else is an unexpected drop.
+        if exit_code == 0 {
+            break 0;
+        }
+
+        if started.elapsed() >= FORWARD_STABLE_SESSION {
+            quick_failures = 0;
+        } else {
+            quick_failures += 1;
+        }
+        if quick_failures > FORWARD_MAX_QUICK_FAILURES {
+            eprintln!(
+                "\nForward keeps failing right after connecting (ssh exit code {exit_code}); giving up."
+            );
+            break exit_code;
+        }
+
+        match fetch_sandbox_status(client, configs, &environment_id, &sandbox_id).await {
+            Ok(Some(queries::sandbox::SandboxStatus::RUNNING)) => {
+                let delay = FORWARD_RECONNECT_DELAY * 2u32.saturating_pow(quick_failures.min(4));
+                eprintln!(
+                    "\n{} Forward dropped (ssh exit code {exit_code}); sandbox {} is still running — reconnecting in {}s...",
+                    "⚠".yellow(),
+                    short_id.bold(),
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Ok(status) => {
+                let status = status
+                    .map(|s| format!("{s:?}"))
+                    .unwrap_or_else(|| "GONE".to_string());
+                eprintln!(
+                    "\nForward ended: sandbox {short_id} is {status}.\n\
+                    Start a fresh one with `railway sandbox create` or `railway sandbox fork`."
+                );
+                break exit_code;
+            }
+            // Can't verify the sandbox either — the old generic message is
+            // the honest one here.
+            Err(_) => {
+                eprintln!(
+                    "\nForward ended unexpectedly (ssh exit code {exit_code}).\n\
+                    If the sandbox stopped, start a fresh one with `railway sandbox create` or `railway sandbox fork`."
+                );
+                break exit_code;
+            }
+        }
+    };
+
+    heartbeat.abort();
+
+    if exit_code != 0 {
+        tel::report_failure_for(
+            "sandbox",
+            "forward_exit_nonzero",
+            &format!("ssh exited with code {exit_code}"),
+        )
+        .await;
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// Best-effort status read used to decide whether a dropped forward should
+/// reconnect. `Ok(None)` means the API answered but the sandbox is gone.
+async fn fetch_sandbox_status(
+    client: &reqwest::Client,
+    configs: &Configs,
+    environment_id: &str,
+    sandbox_id: &str,
+) -> Result<Option<queries::sandbox::SandboxStatus>> {
+    let res = post_graphql::<queries::Sandbox, _>(
+        client,
+        configs.get_backboard(),
+        queries::sandbox::Variables {
+            environment_id: environment_id.to_string(),
+            id: sandbox_id.to_string(),
+        },
+    )
+    .await?;
+    Ok(res.sandbox.map(|s| s.status))
+}
+
 fn spawn_heartbeat(
     client: reqwest::Client,
     backboard: String,
@@ -1464,6 +1776,30 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_port_spec_bare_remote() {
+        let spec = parse_port_spec("3000").unwrap();
+        assert!(spec.local.is_none());
+        assert_eq!(spec.remote, 3000);
+    }
+
+    #[test]
+    fn parse_port_spec_local_remote() {
+        let spec = parse_port_spec("8080:3000").unwrap();
+        assert_eq!(spec.local, Some(8080));
+        assert_eq!(spec.remote, 3000);
+    }
+
+    #[test]
+    fn parse_port_spec_rejects_garbage() {
+        assert!(parse_port_spec("abc").is_err());
+        assert!(parse_port_spec("0").is_err());
+        assert!(parse_port_spec("8080:0").is_err());
+        assert!(parse_port_spec(":3000").is_err());
+        assert!(parse_port_spec("70000").is_err());
+        assert!(parse_port_spec("8080:3000:1").is_err());
     }
 
     #[test]
