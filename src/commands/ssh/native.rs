@@ -29,6 +29,22 @@ fn apply_relay_port(cmd: &mut Command, port: Option<u16>) {
     }
 }
 
+/// Base `ssh` invocation for the current environment's relay: the binary, the
+/// non-default relay port, and the `-i` identity when one was resolved.
+/// Returns the command plus the `<target>@<relay-host>` to append *after* any
+/// mode-specific options (interactive `-t`/`-T`, forward `-N`/`-L`, …). Shared
+/// so the relay/port/identity setup can't drift between the interactive and
+/// forward paths.
+fn base_ssh_command(ssh_target: &str, identity_file: Option<&Path>) -> (Command, String) {
+    let (host, port) = ssh_relay();
+    let mut cmd = Command::new("ssh");
+    apply_relay_port(&mut cmd, port);
+    if let Some(key) = identity_file {
+        cmd.arg("-i").arg(key);
+    }
+    (cmd, format!("{ssh_target}@{host}"))
+}
+
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
     client: &Client,
@@ -257,17 +273,10 @@ pub fn run_native_ssh(
     identity_file: Option<&Path>,
     durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
-    let (host, port) = ssh_relay();
-    let target = format!("{service_instance_id}@{host}");
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
-    let mut ssh_cmd = Command::new("ssh");
-    apply_relay_port(&mut ssh_cmd, port);
-
-    if let Some(key) = identity_file {
-        ssh_cmd.arg("-i").arg(key);
-    }
+    let (mut ssh_cmd, target) = base_ssh_command(service_instance_id, identity_file);
 
     if let Some(durable) = durable {
         // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
@@ -330,15 +339,7 @@ pub fn run_native_ssh_forward(
     identity_file: Option<&Path>,
     forwards: &[PortForward],
 ) -> Result<i32> {
-    let (host, port) = ssh_relay();
-    let target = format!("{ssh_target}@{host}");
-
-    let mut ssh_cmd = Command::new("ssh");
-    apply_relay_port(&mut ssh_cmd, port);
-
-    if let Some(key) = identity_file {
-        ssh_cmd.arg("-i").arg(key);
-    }
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
 
     ssh_cmd.args([
         "-N",
