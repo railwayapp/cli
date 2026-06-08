@@ -884,6 +884,16 @@ fn known_caller_from_mcp_client_name(name: &str) -> Option<&'static str> {
         }
         return Some("claude_desktop");
     }
+    if lower == "claude-code" || lower == "claude code" {
+        // Distinct from the `claude-ai` handshake above: this literal name
+        // is Claude Code identifying itself directly (no Claude Desktop
+        // ambiguity — Desktop reports `claude-ai`), so no env disambiguation
+        // is needed. Surfaced by the `mcp_unknown:` passthrough after the
+        // 5.5.0 rollout: ~80 users/day were landing in agent_unknown as
+        // `mcp_unknown:claude-code` (warehouse 2026-06-08), the largest
+        // identifiable slice of the local-MCP `mcp_unknown` bucket.
+        return Some("claude_code");
+    }
     if lower == "codex-mcp-client" || lower.contains("codex") {
         return Some("codex");
     }
@@ -1958,6 +1968,9 @@ mod tests {
         // claude-ai disambiguation depends on env (CLAUDECODE etc.). This
         // test pins the subset that doesn't need env state.
         assert_eq!(caller_from_mcp_client_name("codex-mcp-client"), "codex");
+        // `claude-code` is unambiguous (unlike env-gated `claude-ai`).
+        assert_eq!(caller_from_mcp_client_name("claude-code"), "claude_code");
+        assert_eq!(caller_from_mcp_client_name("Claude Code"), "claude_code");
         assert_eq!(caller_from_mcp_client_name("Cline"), "cline");
         assert_eq!(caller_from_mcp_client_name("Roo Code"), "roo_code");
         assert_eq!(caller_from_mcp_client_name("kilo"), "kilo_code");
