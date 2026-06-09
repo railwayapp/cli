@@ -1,10 +1,11 @@
-use std::{fs::File, io::Read, path::PathBuf};
+use std::{cmp::Ordering, fs::File, io::Read, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
+use super::compare_semver::compare_semver;
 use crate::{telemetry, util};
 
 const STATE_VERSION: u32 = 1;
@@ -18,6 +19,8 @@ struct AgentState {
     setup: SetupState,
     #[serde(default)]
     advisory: AdvisoryState,
+    #[serde(default)]
+    upgrade_nudge: UpgradeNudgeState,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -32,6 +35,13 @@ struct SetupState {
 struct AdvisoryState {
     last_shown_cli_version: Option<String>,
     last_shown_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpgradeNudgeState {
+    last_nudged_version: Option<String>,
+    last_nudged_at: Option<DateTime<Utc>>,
 }
 
 fn state_path() -> Result<PathBuf> {
@@ -198,6 +208,86 @@ pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
 
     telemetry::send(telemetry::CliTrackEvent {
         command: "agent_advisory".to_string(),
+        sub_command: Some(command.to_string()),
+        success: true,
+        error_message: None,
+        duration_ms: 0,
+        cli_version: env!("CARGO_PKG_VERSION"),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        is_ci: crate::config::Configs::env_is_ci(),
+    })
+    .await;
+}
+
+/// Agent-facing counterpart of the TTY-only "new version available" banner.
+///
+/// Agent-driven machines are structurally unable to upgrade through the
+/// normal flow: staged-binary apply is TTY-gated (main.rs) so a host whose
+/// railway usage is 100% agent-driven downloads updates forever without
+/// applying them, and the banner that would tell a human to act never
+/// prints. Warehouse audit 2026-06-09: the largest plain agent_unknown
+/// population was pre-5.5.0 versions that newer detection had already
+/// fixed. This nudge tells the agent itself — once per pending version, on
+/// stderr — which agents reliably surface to the user or act on directly.
+pub async fn maybe_show_upgrade_nudge(
+    raw_args: &[String],
+    command: Option<&str>,
+    latest_version: Option<&str>,
+    skipped_version: Option<&str>,
+) {
+    let Some(latest) = latest_version else {
+        return;
+    };
+    if disabled_by_env() || should_skip_for_args(raw_args) {
+        return;
+    }
+    let Some(command) = command else {
+        return;
+    };
+    if command_is_exempt(command) {
+        return;
+    }
+    // Respect a rollback: don't nudge agents toward the version the user
+    // explicitly backed out of (mirrors the TTY banner's skip logic).
+    if skipped_version == Some(latest) {
+        return;
+    }
+    if !matches!(
+        compare_semver(env!("CARGO_PKG_VERSION"), latest),
+        Ordering::Less
+    ) {
+        return;
+    }
+    // Last (most expensive) gate: process-tree-aware agent detection.
+    if !telemetry::is_agent() {
+        return;
+    }
+
+    let mut state = read_state();
+    if state.upgrade_nudge.last_nudged_version.as_deref() == Some(latest) {
+        return;
+    }
+
+    eprintln!(
+        "\n{}\n{}",
+        format!(
+            "A newer Railway CLI is available: v{} (current: v{}).",
+            latest,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .yellow(),
+        "Run `railway upgrade --yes` to update.".dimmed(),
+    );
+
+    state.upgrade_nudge = UpgradeNudgeState {
+        last_nudged_version: Some(latest.to_string()),
+        last_nudged_at: Some(Utc::now()),
+    };
+    let _ = write_state(&state);
+
+    telemetry::send(telemetry::CliTrackEvent {
+        command: "upgrade_nudge".to_string(),
         sub_command: Some(command.to_string()),
         success: true,
         error_message: None,

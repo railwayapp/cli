@@ -341,6 +341,21 @@ async fn main() -> Result<()> {
                 "--force".cyan(),
             );
         }
+    } else if !env_or_ci_suppressed && !is_help_or_error {
+        // Non-TTY counterpart of the banner above, for agent callers only.
+        // Staged-binary apply is TTY-gated (see auto_applied_version), so a
+        // machine whose railway usage is entirely agent-driven would
+        // otherwise never apply a downloaded update nor see a reason to —
+        // tell the driving agent once per pending version instead. Skipped
+        // on parse-error paths: a typo'd command should print only the
+        // clap error.
+        util::agent_advisory::maybe_show_upgrade_nudge(
+            &raw_args,
+            raw_subcommand.as_deref(),
+            known_pending.as_deref(),
+            skipped_version.as_deref(),
+        )
+        .await;
     }
 
     // Spawn the background version check for all invocations (including
