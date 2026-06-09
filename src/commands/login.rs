@@ -145,7 +145,8 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
 
     let pkce = oauth::generate_pkce();
     let state = oauth::generate_state();
-    let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
+    let caller = crate::telemetry::detect_caller();
+    let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state, &caller);
     // Sign-up vs sign-in is handled entirely server-side (the consent
     // screen adapts for brand-new accounts); the CLI doesn't declare
     // its intent up front.
@@ -391,7 +392,8 @@ async fn send_response(
 
 /// Browserless flow: Device Authorization Grant (RFC 8628).
 async fn device_flow_login(host: &str) -> Result<oauth::TokenResponse> {
-    let device_auth = oauth::request_device_code(host).await?;
+    let caller = crate::telemetry::detect_caller();
+    let device_auth = oauth::request_device_code(host, &caller).await?;
 
     println!();
     println!("  {} Sign in at:", "→".cyan());

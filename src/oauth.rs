@@ -69,6 +69,7 @@ pub fn get_authorization_url(
     redirect_uri: &str,
     pkce: &PkceChallenge,
     state: &str,
+    caller: &str,
 ) -> String {
     let base = get_oauth_base_url(host);
     let client_id = get_oauth_client_id();
@@ -81,7 +82,12 @@ pub fn get_authorization_url(
         .append_pair("code_challenge", &pkce.code_challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", state)
-        .append_pair("prompt", "consent");
+        .append_pair("prompt", "consent")
+        // Caller (agent harness / tty) that initiated this login, forwarded so
+        // the OAuth grant confirm event can attribute the signup to the agent
+        // that drove it (mono#30906). Server registers it as a no-op extra
+        // param; analytics-only — same value we stamp on cli_submit_auth.
+        .append_pair("cli_caller", caller);
     url.to_string()
 }
 
@@ -144,14 +150,20 @@ struct TokenErrorResponse {
     error_description: Option<String>,
 }
 
-pub async fn request_device_code(host: &str) -> Result<DeviceAuthResponse> {
+pub async fn request_device_code(host: &str, caller: &str) -> Result<DeviceAuthResponse> {
     let client = build_http_client()?;
     let url = format!("{}/device/auth", get_oauth_base_url(host));
     let client_id = get_oauth_client_id();
 
     let resp = client
         .post(&url)
-        .form(&[("client_id", client_id), ("scope", CLI_SCOPES)])
+        // `cli_caller`: see get_authorization_url — attributes the signup to
+        // the agent/harness that drove it on the grant confirm event.
+        .form(&[
+            ("client_id", client_id),
+            ("scope", CLI_SCOPES),
+            ("cli_caller", caller),
+        ])
         .send()
         .await?;
 
