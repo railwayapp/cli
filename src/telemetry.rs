@@ -602,6 +602,258 @@ fn agent_from_process_tree() -> Option<&'static str> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Ancestor residue — discovery axis for the agent_unknown fallback
+// ---------------------------------------------------------------------------
+//
+// When every identification layer misses, the ancestry usually still names
+// the thing driving us: the npm package of a node-bundled harness, the
+// script a wrapper invokes, or an uncataloged agent binary. Emitting that
+// name as a sanitized third caller segment (`agent_unknown:node:<residue>`,
+// `agent_unknown:vscode:<residue>`, `agent_unknown:proc:<residue>`) lets new
+// harnesses catalog themselves in the warehouse and get mapped dbt-side
+// without re-shipping the CLI — the same flywheel as the `mcp_unknown:`
+// clientInfo passthrough. The follow-up was flagged in the 5.5.0 Windows
+// snapshot PR: agent_unknown:vscode (~18%) and agent_unknown:node (~17%)
+// were dead-end buckets without it.
+//
+// Privacy: only process basenames, npm package names, and script basenames
+// are ever emitted — never full paths (directories embed usernames and
+// project names), never flag values, and never inline-code payloads
+// (`bash -c ...`, `node -e ...`). The extraction is deliberately
+// abort-happy: any flag before the entrypoint kills the candidate (there
+// is no general way to tell a boolean flag from one that takes a value —
+// `--prefix <path>` / `-Command <code>` — so we never read past one), and
+// a token that looks like the continuation of a space-containing argv0
+// path kills it too. Losing residue coverage is always acceptable;
+// emitting a fragment of something private is not.
+
+/// Process basenames that carry no identifying signal as residue: our own
+/// binary, terminal emulators and IDE host processes, service managers,
+/// container runtimes, and common build/wrapper tools. The ancestry walk
+/// continues past these to the next candidate.
+const RESIDUE_DENYLIST: &[&str] = &[
+    "railway",
+    // Service managers / session leaders
+    "launchd",
+    "systemd",
+    "init",
+    "login",
+    "sshd",
+    "sshd-session",
+    "su",
+    "sudo",
+    "doas",
+    // Transparent wrappers
+    "env",
+    "xargs",
+    "nohup",
+    "setsid",
+    "timeout",
+    "script",
+    "tmux",
+    "screen",
+    "zellij",
+    // Container runtimes
+    "docker",
+    "dockerd",
+    "docker-init",
+    "containerd",
+    "containerd-shim",
+    "containerd-shim-runc-v2",
+    "runc",
+    "podman",
+    "tini",
+    // Build / dev wrappers
+    "cargo",
+    "make",
+    "gmake",
+    "cmake",
+    "ninja",
+    "just",
+    "mise",
+    "direnv",
+    "watchexec",
+    "entr",
+    // Terminal emulators (macOS app-bundle binaries included: Warp ships as
+    // `stable`; argv0 tokens of space-containing bundle paths reduce to
+    // `visual` for VS Code helpers)
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "wezterm-gui",
+    "ghostty",
+    "iterm2",
+    "terminal",
+    "gnome-terminal",
+    "gnome-terminal-server",
+    "konsole",
+    "xterm",
+    "foot",
+    "st",
+    "hyper",
+    "tabby",
+    "warp",
+    "warpterminal",
+    "stable",
+    "wt",
+    "windowsterminal",
+    "openconsole",
+    "conhost",
+    "winpty-agent",
+    // Windows session processes
+    "explorer",
+    "svchost",
+    "services",
+    "wininit",
+    "winlogon",
+    "userinit",
+    "runtimebroker",
+    // Editor host processes (agent extensions inside them are the thing we
+    // are trying to identify, but the host binary itself is not it)
+    "code",
+    "code-insiders",
+    "codium",
+    "electron",
+    "visual",
+    "positron",
+];
+
+/// Entrypoint names too generic to identify anything. Checked against the
+/// final slug (post-sanitization) so `Run!.exe` can't sneak past as `run`.
+/// Interpreter binary names are included so wrapper indirection
+/// (`uv run python x.py`) can't emit the interpreter as the residue.
+const GENERIC_SCRIPT_NAMES: &[&str] = &[
+    "index", "main", "cli", "app", "server", "script", "start", "dist", "bundle", "bin", "tool",
+    "install", "test", "dev", "run", "exec", "eval", "python", "python3", "node", "deno", "bun",
+    "npx", "npm", "ruby", "perl",
+];
+
+/// Package-manager verbs to step over when locating the entrypoint argument
+/// (`npm exec foo`, `uv run agent.py`). These are the ONLY tokens ever
+/// stepped over — any flag aborts instead (see residue_from_command).
+const PM_VERBS: &[&str] = &["run", "exec", "x", "tool"];
+
+/// True for a token that looks like the continuation of an argv0/entrypoint
+/// path that contained spaces ("/Users/John Smith/agent", macOS app-bundle
+/// paths): a path separator appears mid-token without the token being an
+/// absolute path or a flag. When one of these trails the candidate, the
+/// basename we computed may be a fragment of a user's directory name.
+fn looks_like_split_path_fragment(token: &str) -> bool {
+    !token.starts_with('-')
+        && !token.starts_with('/')
+        && !token.starts_with('\\')
+        && token.contains(['/', '\\'])
+}
+
+/// Extract a residue from one (lowercased) ancestor command line, or None to
+/// keep walking. Interpreter/shell parents yield their entrypoint script or
+/// npm package; anything else yields its own basename unless denylisted.
+fn residue_from_command(command: &str) -> Option<String> {
+    let lower = command.to_ascii_lowercase();
+    let mut tokens = lower.split_whitespace();
+    let argv0 = tokens.next()?;
+    let basename = exe_basename(argv0);
+    let rest: Vec<&str> = tokens.collect();
+
+    if parent_kind_from_command(&lower).is_some() {
+        // Interpreter / shell: the identity lives in the entrypoint script,
+        // not the binary. Exactly one candidate token is considered, and
+        // ANY flag before it aborts: a flag may carry a value in the next
+        // token (`--prefix <dir>`, `--require <path>`) or inline code
+        // (`-c`, `-Command`, `--eval=...`, combined short forms like `-lc`
+        // / `-ne`), and there is no general way to know which — so we never
+        // read past one. Tokens after the entrypoint are the script's own
+        // argv and are never read as candidates either.
+        let mut entrypoint = None;
+        let mut after_entrypoint: &[&str] = &[];
+        for (i, token) in rest.iter().enumerate() {
+            if token.starts_with('-') {
+                return None;
+            }
+            if PM_VERBS.contains(token) {
+                continue;
+            }
+            entrypoint = Some(*token);
+            after_entrypoint = &rest[i + 1..];
+            break;
+        }
+        let entrypoint = entrypoint?;
+        if after_entrypoint
+            .iter()
+            .any(|t| looks_like_split_path_fragment(t))
+        {
+            return None;
+        }
+        // The entrypoint must carry some path/name structure. A bare word
+        // after an interpreter is a pipeline fragment or sub-verb, not an
+        // entrypoint; hyphenated bare words are allowed for the
+        // `npx <package>` shape.
+        if !(entrypoint.contains(['/', '\\', '.', '-'])) {
+            return None;
+        }
+        return script_residue(entrypoint);
+    }
+
+    if rest.iter().any(|t| looks_like_split_path_fragment(t)) {
+        return None;
+    }
+    if RESIDUE_DENYLIST.contains(&basename) {
+        return None;
+    }
+    residue_slug(basename)
+}
+
+/// Reduce a script path to its identifying name: the npm package for
+/// anything under `node_modules/` (scope preserved, `.bin` shims skipped),
+/// otherwise the basename minus a recognized script extension. Never the
+/// full path.
+fn script_residue(path: &str) -> Option<String> {
+    if let Some(idx) = path.rfind("node_modules/") {
+        let after = &path[idx + "node_modules/".len()..];
+        let mut segments = after.split('/').filter(|s| !s.is_empty() && *s != ".bin");
+        let first = segments.next()?;
+        if first.starts_with('@') {
+            let second = segments.next()?;
+            return residue_slug(&format!("{first}/{second}"));
+        }
+        return residue_slug(first);
+    }
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let base = ["js", "mjs", "cjs", "ts", "py", "sh", "rb", "pl"]
+        .iter()
+        .find_map(|ext| base.strip_suffix(&format!(".{ext}")))
+        .unwrap_or(base);
+    residue_slug(base)
+}
+
+/// Sanitize a residue candidate through the shared telemetry-safe charset,
+/// rejecting names too short or too generic to mean anything. The generic /
+/// denylist checks run on the SLUG (not the raw name) so punctuation can't
+/// smuggle a generic name past them (`Run!.exe` slugs to `run`).
+fn residue_slug(name: &str) -> Option<String> {
+    let slug = mcp_client_name_slug(name)?;
+    if slug.len() < 2
+        || GENERIC_SCRIPT_NAMES.contains(&slug.as_str())
+        || RESIDUE_DENYLIST.contains(&slug.as_str())
+    {
+        return None;
+    }
+    Some(slug)
+}
+
+/// Walk the ancestry (starting at the parent — the current process is
+/// `railway` itself) for the nearest process yielding a usable residue.
+/// Only called on the agent_unknown fallback paths, after every positive
+/// identification layer has missed.
+fn ancestor_residue() -> Option<String> {
+    let snapshot = process_snapshot();
+    let me = snapshot.get(&std::process::id())?;
+    walk_ancestors(snapshot, me.ppid, 15, |node| {
+        residue_from_command(&node.command)
+    })
+}
+
 /// Categorize a generic interpreter / shell parent so unknown subprocess
 /// callers can still tell us *what shape* of caller we're looking at
 /// (Python vs Node vs Bash). Returns the canonical slug or None.
@@ -846,6 +1098,8 @@ fn caller_from_mcp_client_name(name: &str) -> String {
 /// charset (alnum plus `. _ @ / -`, and notably NOT `:` so the value stays
 /// a single-colon caller for downstream subkind splitting) collapsed into
 /// single hyphens, length-bounded. Returns None when nothing safe survives.
+/// Also shared by the ancestor-residue fallback ([`residue_slug`]) so both
+/// discovery axes emit the same charset.
 fn mcp_client_name_slug(name: &str) -> Option<String> {
     const MAX_SLUG_LEN: usize = 48;
     let mut slug = String::with_capacity(name.len().min(MAX_SLUG_LEN));
@@ -905,6 +1159,33 @@ fn known_caller_from_mcp_client_name(name: &str) -> Option<&'static str> {
     }
     if lower == "kilo" || lower.starts_with("kilo") {
         return Some("kilo_code");
+    }
+    // The next five were surfaced by the 5.5.0 `mcp_unknown:` passthrough
+    // (warehouse audit 2026-06-09): kiro / trae / antigravity-client /
+    // q-dev-cli / github-copilot-developer were the identifiable raw
+    // clientInfo names still landing in agent_unknown. Slugs match the
+    // dbt-side recovered mapping in dbt-analytics normalize_caller.sql.
+    if lower.starts_with("kiro") {
+        return Some("kiro");
+    }
+    // Exact / delimited match only — a bare `starts_with("trae")` would
+    // swallow unrelated names like "traefik".
+    if lower == "trae" || lower.starts_with("trae-") || lower.starts_with("trae ") {
+        return Some("trae");
+    }
+    if lower.contains("antigravity") {
+        return Some("antigravity");
+    }
+    // Amazon Q Developer CLI reports `q-dev-cli`.
+    if lower == "q-dev-cli" || lower.contains("amazon-q") || lower.contains("amazonq") {
+        return Some("amazon_q");
+    }
+    // Deliberately NOT mapped to copilot_cli / vscode_copilot: this name has
+    // been observed without confirmation of which Copilot surface sends it
+    // (VS Code reports "Visual Studio Code"), so it gets a truthful generic
+    // slug rather than a guessed surface.
+    if lower.starts_with("github-copilot") {
+        return Some("github_copilot");
     }
     if lower == "opencode" {
         return Some("opencode");
@@ -1319,10 +1600,16 @@ fn detect_caller_uncached() -> String {
     //    or `agent_unknown:<ide>` (subprocess inside that IDE with no
     //    agent fingerprint — likely an agent extension we don't yet
     //    catalog, e.g. Cline / Roo Code / Continue running inside VS Code
-    //    when we couldn't grab the MCP clientInfo or env).
+    //    when we couldn't grab the MCP clientInfo or env). The ancestor
+    //    residue, when one survives the walk, names what's driving us as a
+    //    third segment so the warehouse can catalog it (dbt classifies on
+    //    the first two segments; see dbt-analytics normalize_caller.sql).
     if let Some(ide) = ai_ide_host_from_env() {
         if interactive {
             return format!("tty:{}", ide);
+        }
+        if let Some(residue) = ancestor_residue() {
+            return format!("agent_unknown:{}:{}", ide, residue);
         }
         return format!("agent_unknown:{}", ide);
     }
@@ -1351,14 +1638,20 @@ fn detect_caller_uncached() -> String {
     //    Subprocess with no agent / IDE / CI fingerprint → bucket by the
     //    immediate parent's interpreter kind so we can distinguish
     //    "Python script driving us" from "Node tooling" from "raw shell
-    //    pipeline" without claiming knowledge we don't have.
+    //    pipeline" without claiming knowledge we don't have, with the
+    //    ancestor residue appended as a discovery axis. When the parent
+    //    isn't a recognized interpreter but the ancestry still names
+    //    something, `proc` is the pseudo-kind carrying that residue (keeps
+    //    arbitrary names out of the subkind vocabulary).
     if interactive {
         return "tty".to_string();
     }
-    if let Some(kind) = parent_process_kind() {
-        return format!("agent_unknown:{}", kind);
+    match (parent_process_kind(), ancestor_residue()) {
+        (Some(kind), Some(residue)) => format!("agent_unknown:{}:{}", kind, residue),
+        (Some(kind), None) => format!("agent_unknown:{}", kind),
+        (None, Some(residue)) => format!("agent_unknown:proc:{}", residue),
+        (None, None) => "agent_unknown".to_string(),
     }
-    "agent_unknown".to_string()
 }
 
 /// True when the caller represents agentic / automated invocation rather
@@ -1825,7 +2118,7 @@ mod tests {
     use super::{
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
         caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, is_agent_harness,
-        new_session_uuid, parent_kind_from_command, walk_ancestors,
+        new_session_uuid, parent_kind_from_command, residue_from_command, walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -2007,6 +2300,26 @@ mod tests {
         assert_eq!(caller_from_mcp_client_name("Windsurf"), "windsurf");
         assert_eq!(caller_from_mcp_client_name("goose"), "goose");
         assert_eq!(caller_from_mcp_client_name("firebender"), "firebender");
+        // Cataloged via the mcp_unknown: passthrough (warehouse 2026-06-09).
+        assert_eq!(caller_from_mcp_client_name("Kiro"), "kiro");
+        assert_eq!(caller_from_mcp_client_name("trae"), "trae");
+        assert_eq!(caller_from_mcp_client_name("Trae AI"), "trae");
+        assert_eq!(
+            caller_from_mcp_client_name("antigravity-client"),
+            "antigravity"
+        );
+        assert_eq!(caller_from_mcp_client_name("q-dev-cli"), "amazon_q");
+        assert_eq!(
+            caller_from_mcp_client_name("github-copilot-developer"),
+            "github_copilot"
+        );
+        // kiro must not shadow kilo (and vice versa), and trae must not
+        // swallow unrelated names.
+        assert_eq!(caller_from_mcp_client_name("kilo-code"), "kilo_code");
+        assert_eq!(
+            caller_from_mcp_client_name("traefik"),
+            "mcp_unknown:traefik"
+        );
     }
 
     #[test]
@@ -2038,6 +2351,143 @@ mod tests {
         // Output always passes the telemetry charset filter, so the
         // composed caller survives safe_telemetry_value downstream.
         assert!(super::safe_telemetry_value(&long).is_some());
+    }
+
+    #[test]
+    fn residue_identifies_node_packages_and_scripts() {
+        // npm package under node_modules — the highest-signal residue.
+        assert_eq!(
+            residue_from_command("node /usr/local/lib/node_modules/some-agent/dist/cli.js"),
+            Some("some-agent".to_string())
+        );
+        // Scoped packages keep the scope; `.bin` shims are skipped.
+        assert_eq!(
+            residue_from_command("node /app/node_modules/@acme/agent-kit/bin/start.js"),
+            Some("@acme/agent-kit".to_string())
+        );
+        assert_eq!(
+            residue_from_command("node /repo/node_modules/.bin/my-agent"),
+            Some("my-agent".to_string())
+        );
+        // Plain script: basename only (never the directory — paths embed
+        // usernames / project names), extension stripped.
+        assert_eq!(
+            residue_from_command("node /srv/bot/worker.js"),
+            Some("worker".to_string())
+        );
+        // Package-manager verbs are stepped over to reach the entrypoint;
+        // bare package names need a hyphen (the `npx <package>` shape).
+        assert_eq!(
+            residue_from_command("uv run /home/u/agents/loop.py"),
+            Some("loop".to_string())
+        );
+        assert_eq!(
+            residue_from_command("npx some-agent"),
+            Some("some-agent".to_string())
+        );
+        // Generic entrypoint names identify nothing — and an interpreter
+        // reached through wrapper indirection is itself generic.
+        assert_eq!(residue_from_command("node /home/u/project/index.js"), None);
+        assert_eq!(residue_from_command("uv run python script.py"), None);
+        assert_eq!(residue_from_command("deno eval 1+1"), None);
+        // Only the entrypoint is considered — script argv (which can carry
+        // project names and other values) is never scanned.
+        assert_eq!(
+            residue_from_command("node /app/cli.js deploy my-private-project"),
+            None
+        );
+    }
+
+    #[test]
+    fn residue_never_emits_flag_values_or_inline_code() {
+        // Inline-code payload flags.
+        assert_eq!(residue_from_command("bash -c railway up --detach"), None);
+        assert_eq!(residue_from_command("sh -c curl -s example.com"), None);
+        assert_eq!(residue_from_command("node -e console.log(1)"), None);
+        assert_eq!(residue_from_command("python3 -c print(1)"), None);
+        // Combined short forms and single-dash long forms — any flag before
+        // the entrypoint aborts, so none of these need cataloging.
+        assert_eq!(residue_from_command("bash -lc railway status"), None);
+        assert_eq!(
+            residue_from_command("bash -lc /users/cody/clients/acme/rotate-prod-db-password.sh"),
+            None
+        );
+        assert_eq!(
+            residue_from_command("pwsh -noprofile -command write-host $env:secret_token"),
+            None
+        );
+        assert_eq!(residue_from_command("perl -ne print($1) app.log"), None);
+        // `=`-attached payloads re-split by the snapshot's argv join.
+        assert_eq!(
+            residue_from_command("node --eval=post( sk-live-abc123 , x)"),
+            None
+        );
+        // Flags that take their value in the NEXT token — the value must
+        // never be read as the entrypoint.
+        assert_eq!(
+            residue_from_command("npm --prefix /users/cody/clients/megacorp-merger run deploy"),
+            None
+        );
+        assert_eq!(
+            residue_from_command("node --require /users/cody/.secret/hook.js app.js"),
+            None
+        );
+        assert_eq!(
+            residue_from_command("node --max-old-space-size=4096 /srv/bot/worker.js"),
+            None
+        );
+        // Shell with an actual script path is fine.
+        assert_eq!(
+            residue_from_command("bash /opt/agents/deploy.sh"),
+            Some("deploy".to_string())
+        );
+        assert_eq!(residue_from_command("zsh"), None);
+    }
+
+    #[test]
+    fn residue_skips_hosts_and_keeps_unrecognized_binaries() {
+        // Unrecognized binary basename = the discovery signal (Windows
+        // snapshots carry only `someagent.exe`-style basenames).
+        assert_eq!(
+            residue_from_command("someagent.exe"),
+            Some("someagent".to_string())
+        );
+        assert_eq!(
+            residue_from_command("/usr/local/bin/my-agent --serve"),
+            Some("my-agent".to_string())
+        );
+        // `=`-attached flag values don't read as split-path fragments.
+        assert_eq!(
+            residue_from_command("/opt/bin/my-agent --config=/etc/agent.yaml"),
+            Some("my-agent".to_string())
+        );
+        // Denylisted hosts/system processes yield nothing so the walk
+        // continues past them.
+        assert_eq!(residue_from_command("launchd"), None);
+        assert_eq!(residue_from_command("/sbin/init splash"), None);
+        // Warp's app-bundle binary is literally `stable`.
+        assert_eq!(
+            residue_from_command("/applications/warp.app/contents/macos/stable"),
+            None
+        );
+        // Space-containing argv0 paths split into fragment tokens; the
+        // basename we'd compute is a directory-name fragment (potentially a
+        // username) — the trailing mid-token separator aborts.
+        assert_eq!(
+            residue_from_command("/applications/visual studio code.app/contents/code helper"),
+            None
+        );
+        assert_eq!(
+            residue_from_command("/users/john smith/agent --serve"),
+            None
+        );
+        assert_eq!(residue_from_command("railway up"), None);
+        // Punctuation can't smuggle a generic name past the denylists —
+        // the checks run on the sanitized slug.
+        assert_eq!(residue_from_command("run!.exe"), None);
+        // Output passes the shared telemetry charset.
+        let residue = residue_from_command("my-weird-agent!!").unwrap();
+        assert!(super::safe_telemetry_value(&residue).is_some());
     }
 
     #[test]
