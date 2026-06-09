@@ -103,10 +103,17 @@ struct SetupAgentEventTrackInput {
 /// failures (which occur before any token exists) are still captured,
 /// attributed by `caller` / `agent_session_id`.
 pub struct CliAuthTrackEvent {
-    /// "browser" | "device_code"
+    /// "browser" | "device_code" — the transport that actually ran
+    /// (an `open` failure that fell back reports "device_code").
     pub transport: &'static str,
     /// "succeeded" | "timed_out" | "failed"
     pub outcome: &'static str,
+    /// Why this transport ran: "browser" | "flag_browserless" |
+    /// "env_ci" | "env_ssh" | "no_display" | "open_failed_fallback".
+    /// Env constraints win over the flag, so "flag_browserless"
+    /// counts exactly the sessions where a browser was reachable but
+    /// the caller opted out of it.
+    pub transport_reason: &'static str,
     pub success: bool,
     pub error_message: Option<String>,
 }
@@ -116,6 +123,7 @@ pub struct CliAuthTrackEvent {
 struct CliAuthEventTrackInput {
     transport: &'static str,
     outcome: &'static str,
+    transport_reason: &'static str,
     success: bool,
     error_message: Option<String>,
     session_id: String,
@@ -2093,6 +2101,7 @@ pub async fn send_auth_event(event: CliAuthTrackEvent) {
     let input = CliAuthEventTrackInput {
         transport: event.transport,
         outcome: event.outcome,
+        transport_reason: event.transport_reason,
         success: event.success,
         error_message: event.error_message,
         session_id: context.session_id,
