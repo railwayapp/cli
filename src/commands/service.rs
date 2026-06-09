@@ -306,6 +306,34 @@ async fn source_command(args: SourceArgs) -> Result<()> {
     }
 }
 
+/// Emit a granular telemetry event distinguishing the source *kind* on
+/// `service source connect|disconnect`.
+///
+/// The `commands!` macro already fires a generic `service` / `source:connect`
+/// event, but it only sees the clap subcommand path — not the `--repo` vs
+/// `--image` argument. That makes a GitHub integration indistinguishable from
+/// a Docker-image source in the funnel (the reason CLI-driven GitHub connects
+/// were invisible in agentic-signup analysis). This additive detail event
+/// — same pattern as the per-tool MCP and per-stage SSH events that sit
+/// alongside the macro's command-level event — records only the source kind.
+///
+/// Deliberately carries NO repo name: `owner/repo` can reveal private repo and
+/// org names, and the kind is all the funnel needs.
+async fn track_service_source(sub_command: &str) {
+    crate::telemetry::send(crate::telemetry::CliTrackEvent {
+        command: "service".to_string(),
+        sub_command: Some(sub_command.to_string()),
+        duration_ms: 0,
+        success: true,
+        error_message: None,
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        cli_version: env!("CARGO_PKG_VERSION"),
+        is_ci: crate::config::Configs::env_is_ci(),
+    })
+    .await;
+}
+
 async fn source_connect_command(args: SourceConnectArgs) -> Result<()> {
     let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
 
@@ -331,6 +359,15 @@ async fn source_connect_command(args: SourceConnectArgs) -> Result<()> {
         },
     )
     .await?;
+
+    // Distinguish a GitHub repo connect from a Docker image connect — the
+    // distinction the macro's generic `source:connect` event can't capture.
+    let source_kind = if repo.is_some() {
+        "source_connect_github"
+    } else {
+        "source_connect_image"
+    };
+    track_service_source(source_kind).await;
 
     let output = ServiceSourceOutput {
         id: result.service_connect.id,
@@ -371,6 +408,8 @@ async fn source_disconnect_command(args: SourceDisconnectArgs) -> Result<()> {
         },
     )
     .await?;
+
+    track_service_source("source_disconnect").await;
 
     let output = ServiceSourceOutput {
         id: result.service_disconnect.id,
