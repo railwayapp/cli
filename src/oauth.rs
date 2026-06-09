@@ -132,6 +132,11 @@ pub struct DeviceAuthResponse {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
+    /// RFC 8628 §3.3.1: the verification URI with the user code
+    /// pre-embedded — one click instead of URL + code transcription.
+    /// Optional in the spec; absent from older backends.
+    #[serde(default)]
+    pub verification_uri_complete: Option<String>,
     pub expires_in: u64,
     #[serde(default = "default_interval")]
     pub interval: u64,

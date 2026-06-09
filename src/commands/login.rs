@@ -24,8 +24,11 @@ use super::*;
 #[derive(Parser)]
 pub struct Args {
     /// Use a device-code flow instead of opening a browser. Prints
-    /// a verification URL + short code to paste into a browser on
-    /// any device. Required for SSH/headless sessions.
+    /// a sign-in link + short code to use from any device. Only
+    /// needed when this machine truly has no browser — the CLI
+    /// already auto-detects SSH, CI, and missing DISPLAY. If a human
+    /// is at this machine (including under a coding agent), omit
+    /// this flag: the browser flow completes far more reliably.
     #[clap(short, long)]
     pub browserless: bool,
 }
@@ -70,11 +73,46 @@ pub async fn command(args: Args) -> Result<()> {
     // DISPLAY); otherwise open a browser. browser_login itself falls
     // back to device-code if `open` fails. Neither path needs a TTY.
     let ctx = crate::exec_context::ExecutionContext::detect(false, false);
-    let (transport, result) = match ctx.login_transport(args.browserless) {
+    let transport_choice = ctx.login_transport(args.browserless);
+
+    // Why this transport was chosen, for funnel telemetry. Env
+    // constraints win over the flag: "flag_browserless" is reported
+    // only when a browser was otherwise reachable, so it counts exactly
+    // the sessions a bare `railway login` would have sent down the
+    // (far more reliable) browser path. browser_login overwrites both
+    // labels if its `open` attempt fails and it falls back.
+    let mut reason = match transport_choice {
+        crate::exec_context::AuthTransport::Browser => "browser",
         crate::exec_context::AuthTransport::DeviceCode => {
-            ("device_code", device_flow_login(host).await)
+            headless_reason().unwrap_or(if args.browserless {
+                "flag_browserless"
+            } else {
+                "unknown"
+            })
         }
-        crate::exec_context::AuthTransport::Browser => ("browser", browser_login(host).await),
+    };
+
+    // --browserless on a machine that has a browser: honor the flag,
+    // but say so in the output. Agents (the dominant source of this
+    // combination) read command output at exactly this moment, and the
+    // browser path completes far more often for watched sessions.
+    if reason == "flag_browserless" {
+        println!(
+            "  {} A browser is available on this machine — `railway login` without {} opens it directly and completes more reliably.",
+            "→".cyan(),
+            "--browserless".bold(),
+        );
+    }
+
+    let mut transport = match transport_choice {
+        crate::exec_context::AuthTransport::DeviceCode => "device_code",
+        crate::exec_context::AuthTransport::Browser => "browser",
+    };
+    let result = match transport_choice {
+        crate::exec_context::AuthTransport::DeviceCode => device_flow_login(host).await,
+        crate::exec_context::AuthTransport::Browser => {
+            browser_login(host, &mut transport, &mut reason).await
+        }
     };
 
     // Funnel telemetry: record the auth-attempt outcome. Sent via a
@@ -100,6 +138,7 @@ pub async fn command(args: Args) -> Result<()> {
     crate::telemetry::send_auth_event(crate::telemetry::CliAuthTrackEvent {
         transport,
         outcome,
+        transport_reason: reason,
         success: result.is_ok(),
         error_message: result.as_ref().err().map(|e| e.to_string()),
     })
@@ -138,7 +177,16 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 /// Browser flow: Authorization Code + PKCE with localhost redirect.
-async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
+///
+/// `transport` / `reason` are the funnel-telemetry labels owned by the
+/// caller; they're overwritten here when the `open` attempt fails and
+/// the flow falls back to device-code, so telemetry records the
+/// transport that actually ran rather than the one that was chosen.
+async fn browser_login(
+    host: &str,
+    transport: &mut &'static str,
+    reason: &mut &'static str,
+) -> Result<oauth::TokenResponse> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
@@ -170,6 +218,8 @@ async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
             "  {} Couldn't open a browser — use the sign-in code below instead.",
             "→".cyan(),
         );
+        *transport = "device_code";
+        *reason = "open_failed_fallback";
         drop(listener);
         return device_flow_login(host).await;
     }
@@ -395,12 +445,28 @@ async fn device_flow_login(host: &str) -> Result<oauth::TokenResponse> {
     let caller = crate::telemetry::detect_caller();
     let device_auth = oauth::request_device_code(host, &caller).await?;
 
+    // Prefer the one-click link (code pre-embedded): a single URL
+    // survives being relayed through an agent transcript far better
+    // than a URL plus a separate code to transcribe. Keep the code
+    // visible beneath for cross-device entry and as a fallback.
     println!();
-    println!("  {} Sign in at:", "→".cyan());
-    println!("    {}", device_auth.verification_uri.bold().underline());
-    println!();
-    println!("  {} Enter this code:", "→".cyan());
-    println!("    {}", device_auth.user_code.bold().purple());
+    if let Some(ref one_click) = device_auth.verification_uri_complete {
+        println!("  {} Sign in with one click:", "→".cyan());
+        println!("    {}", one_click.bold().underline());
+        println!();
+        println!(
+            "  {} Or go to {} and enter this code:",
+            "→".cyan(),
+            device_auth.verification_uri.underline(),
+        );
+        println!("    {}", device_auth.user_code.bold().purple());
+    } else {
+        println!("  {} Sign in at:", "→".cyan());
+        println!("    {}", device_auth.verification_uri.bold().underline());
+        println!();
+        println!("  {} Enter this code:", "→".cyan());
+        println!("    {}", device_auth.user_code.bold().purple());
+    }
     println!();
 
     let spinner = create_spinner("Waiting for sign-in...".into());
@@ -411,27 +477,36 @@ async fn device_flow_login(host: &str) -> Result<oauth::TokenResponse> {
     Ok(token_resp)
 }
 
+/// Why a local browser can't be used, if it can't. `None` means a
+/// browser is plausibly reachable. The label doubles as the
+/// `transport_reason` funnel-telemetry value, so keep values in sync
+/// with the backend's accepted labels.
+///
+/// Heuristics (intentionally conservative — false positives just
+/// route the user to a non-interactive path, which still works):
+/// - $CI is truthy (CI runners have no GUI). Truthy, not merely set:
+///   `CI=false` / `CI=0` / `CI=""` appear in real dotfiles and must
+///   not route a desktop session to device-code.
+/// - $SSH_CONNECTION is set (remote shell, browser would open on the
+///   wrong machine)
+/// - On Linux, $DISPLAY is empty (no X11 / Wayland session)
+pub fn headless_reason() -> Option<&'static str> {
+    if crate::config::Configs::env_is_ci() {
+        return Some("env_ci");
+    }
+    if std::env::var("SSH_CONNECTION").is_ok() {
+        return Some("env_ssh");
+    }
+    if cfg!(target_os = "linux") && std::env::var("DISPLAY").unwrap_or_default().is_empty() {
+        return Some("no_display");
+    }
+    None
+}
+
 /// Detect environments where opening a local browser will fail or
 /// be useless, AND where we shouldn't try to show an interactive
 /// picker. Used to skip the `open` attempt and go straight to
 /// device-code flow, and to gate clack-style prompts in other commands.
-///
-/// Heuristics (intentionally conservative — false positives just
-/// route the user to a non-interactive path, which still works):
-/// - $CI is set to any non-empty value (CI runners have no GUI;
-///   handles `CI=1`, `CI=true`, `CI=yes`, etc.)
-/// - $SSH_CONNECTION is set (remote shell, browser would open on the
-///   wrong machine)
-/// - On Linux, $DISPLAY is empty (no X11 / Wayland session)
 pub fn is_likely_headless() -> bool {
-    if std::env::var("CI").is_ok() {
-        return true;
-    }
-    if std::env::var("SSH_CONNECTION").is_ok() {
-        return true;
-    }
-    if cfg!(target_os = "linux") && std::env::var("DISPLAY").unwrap_or_default().is_empty() {
-        return true;
-    }
-    false
+    headless_reason().is_some()
 }
