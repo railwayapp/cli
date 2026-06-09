@@ -1228,6 +1228,29 @@ impl RailwayMcp {
 }
 
 impl ServerHandler for RailwayMcp {
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        // Capture the client identity at the handshake — the earliest and
+        // most reliable point, and the only one that covers sessions which
+        // enumerate tools but never call one. Without this, those sessions'
+        // `mcp_session` lifecycle event falls back to env/process-tree
+        // detection and lands in `agent_unknown`. OnceLock keeps the first
+        // (handshake) value, so a later tool call won't override it.
+        telemetry::record_mcp_client(&telemetry::McpClientInfo {
+            name: request.client_info.name.clone(),
+        });
+
+        // Preserve the default rmcp behavior: stash peer info for later
+        // `peer_info()` reads, then return our server info.
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        Ok(self.get_info())
+    }
+
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
