@@ -38,6 +38,7 @@ commands!(
     completion,
     config,
     connect,
+    dash,
     delete,
     deploy,
     deployment,

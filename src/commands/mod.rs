@@ -14,6 +14,7 @@ pub mod bucket;
 pub mod completion;
 pub mod config;
 pub mod connect;
+pub mod dash;
 pub mod delete;
 pub mod deploy;
 pub mod deployment;

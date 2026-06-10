@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod config;
+pub mod dash_tui;
 pub mod database;
 pub mod db_stats;
 pub mod deployment;

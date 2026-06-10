@@ -1,6 +1,5 @@
 use crate::{
     controllers::{
-        database::DatabaseType,
         db_stats::{self, DatabaseStats},
         environment::get_matched_environment,
         metrics::{
@@ -15,7 +14,7 @@ use crate::{
             get_project,
         },
     },
-    resources::is_database_service,
+    resources::{detect_database_type, is_database_service},
     util::{progress::create_spinner_if, time::parse_time},
 };
 
@@ -2085,22 +2084,6 @@ fn format_uptime(seconds: i64) -> String {
         format!("{}h {}m", hours, mins)
     } else {
         format!("{}m", mins)
-    }
-}
-
-/// Detect the database type from the source image string.
-fn detect_database_type(source_image: Option<&str>) -> Option<DatabaseType> {
-    let img = source_image?.to_lowercase();
-    if img.contains("postgres") || img.contains("postgis") || img.contains("timescale") {
-        Some(DatabaseType::PostgreSQL)
-    } else if img.contains("redis") || img.contains("valkey") {
-        Some(DatabaseType::Redis)
-    } else if img.contains("mongo") {
-        Some(DatabaseType::MongoDB)
-    } else if img.contains("mysql") || img.contains("mariadb") {
-        Some(DatabaseType::MySQL)
-    } else {
-        None
     }
 }
 

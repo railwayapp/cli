@@ -1,8 +1,10 @@
 use super::*;
-use crate::client::post_graphql;
-use crate::controllers::environment::get_matched_environment;
-use crate::controllers::project::{ensure_project_and_environment_exist, get_project};
-use crate::gql::queries::deployments::{DeploymentStatus, ResponseData, Variables};
+use crate::controllers::{
+    deployment::fetch_service_deployments,
+    environment::get_matched_environment,
+    project::{ensure_project_and_environment_exist, get_project},
+};
+use crate::gql::queries::deployments::DeploymentStatus;
 use chrono::{DateTime, Local, Utc};
 use serde::Serialize;
 
@@ -134,30 +136,15 @@ async fn list_deployments(
         );
     };
 
-    let variables = Variables {
-        input: crate::gql::queries::deployments::DeploymentListInput {
-            service_id: Some(service_id.clone()),
-            environment_id: Some(environment_id),
-            project_id: None,
-            status: None,
-            include_deleted: None,
-        },
-        first: Some(limit),
-    };
-
-    let response: ResponseData = post_graphql::<crate::gql::queries::Deployments, _>(
+    let deployments = fetch_service_deployments(
         &client,
-        configs.get_backboard(),
-        variables,
+        &configs.get_backboard(),
+        &project.id,
+        &environment_id,
+        &service_id,
+        limit,
     )
     .await?;
-
-    let deployments = response
-        .deployments
-        .edges
-        .into_iter()
-        .map(|edge| edge.node)
-        .collect::<Vec<_>>();
 
     if json {
         let output: Vec<DeploymentOutput> = deployments
