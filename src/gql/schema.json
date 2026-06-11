@@ -17374,6 +17374,169 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "name",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "sandboxId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Capture a running sandbox's current disk into a reusable, named checkpoint. Synchronous: the checkpoint is ready when this returns.",
+              "isDeprecated": false,
+              "name": "sandboxCheckpointCreate",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "SandboxCheckpoint",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "id",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "ID",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Delete a sandbox checkpoint.",
+              "isDeprecated": false,
+              "name": "sandboxCheckpointDelete",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "id",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "ID",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "name",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Rename a sandbox checkpoint.",
+              "isDeprecated": false,
+              "name": "sandboxCheckpointRename",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "OBJECT",
+                  "name": "SandboxCheckpoint",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "input",
                   "type": {
                     "kind": "NON_NULL",
@@ -17583,7 +17746,7 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Build a sandbox template.",
+              "description": "Build a sandbox template into a bootable checkpoint.",
               "isDeprecated": false,
               "name": "sandboxTemplateBuild",
               "type": {
@@ -17591,7 +17754,7 @@
                 "name": null,
                 "ofType": {
                   "kind": "OBJECT",
-                  "name": "SandboxTemplate",
+                  "name": "SandboxTemplateBuild",
                   "ofType": null
                 }
               }
@@ -33179,15 +33342,15 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Get the status of a sandbox template.",
+              "description": "Get a template's build state by id (the recipe content hash). READY once its checkpoint exists; BUILDING/FAILED reflect the build workflow.",
               "isDeprecated": false,
-              "name": "sandboxTemplate",
+              "name": "sandboxTemplateBuild",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
                 "ofType": {
                   "kind": "OBJECT",
-                  "name": "SandboxTemplate",
+                  "name": "SandboxTemplateBuild",
                   "ofType": null
                 }
               }
@@ -35020,6 +35183,45 @@
                   "kind": "OBJECT",
                   "name": "QueryWorkspaceTemplatesConnection",
                   "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "List named sandbox checkpoints in an environment.",
+              "isDeprecated": false,
+              "name": "sandboxCheckpoints",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "SandboxCheckpoint",
+                      "ofType": null
+                    }
+                  }
                 }
               }
             }
@@ -38617,7 +38819,7 @@
           "possibleTypes": null
         },
         {
-          "description": null,
+          "description": "The state of a template build, derived from its workflow and the existence of its checkpoint. READY means the checkpoint exists and can be booted.",
           "enumValues": null,
           "fields": [
             {
@@ -38639,7 +38841,7 @@
             {
               "args": [],
               "deprecationReason": null,
-              "description": null,
+              "description": "The template's resolved-content hash.",
               "isDeprecated": false,
               "name": "id",
               "type": {
@@ -38663,7 +38865,7 @@
                 "name": null,
                 "ofType": {
                   "kind": "ENUM",
-                  "name": "SandboxTemplateStatus",
+                  "name": "SandboxTemplateBuildStatus",
                   "ofType": null
                 }
               }
@@ -38672,7 +38874,7 @@
           "inputFields": null,
           "interfaces": [],
           "kind": "OBJECT",
-          "name": "SandboxTemplate",
+          "name": "SandboxTemplateBuild",
           "possibleTypes": null
         },
         {
@@ -38692,24 +38894,40 @@
             },
             {
               "defaultValue": null,
-              "description": null,
+              "description": "Build a template by running these shell instructions on the base image. Mutually exclusive with name.",
               "name": "instructions",
               "type": {
-                "kind": "NON_NULL",
+                "kind": "LIST",
                 "name": null,
                 "ofType": {
-                  "kind": "LIST",
+                  "kind": "NON_NULL",
                   "name": null,
                   "ofType": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "SCALAR",
-                      "name": "String",
-                      "ofType": null
-                    }
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
                   }
                 }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": "Boot from a saved checkpoint with this name (one captured from a sandbox). Mutually exclusive with instructions.",
+              "name": "name",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": "Environment variables available to the template's build instructions. Values may contain Railway variable references (e.g. ${{shared.FOO}}, ${{ServiceName.BAR}}), resolved at build time.",
+              "name": "variables",
+              "type": {
+                "kind": "SCALAR",
+                "name": "EnvironmentVariables",
+                "ofType": null
               }
             }
           ],
@@ -38750,7 +38968,7 @@
           "inputFields": null,
           "interfaces": null,
           "kind": "ENUM",
-          "name": "SandboxTemplateStatus",
+          "name": "SandboxTemplateBuildStatus",
           "possibleTypes": null
         },
         {
@@ -52910,6 +53128,81 @@
           "interfaces": null,
           "kind": "INPUT_OBJECT",
           "name": "customerTogglePayoutsToCreditsInput",
+          "possibleTypes": null
+        },
+        {
+          "description": "A bootable snapshot of a sandbox's disk, scoped to an environment. Built from a template recipe or captured from a running sandbox.",
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "createdAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "DateTime",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "environmentId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "id",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "ID",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The checkpoint's identity within the environment (same as id): a recipe content hash for a built template, or the user-given name for one captured from a sandbox.",
+              "isDeprecated": false,
+              "name": "key",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "SandboxCheckpoint",
           "possibleTypes": null
         }
       ]

@@ -25,7 +25,7 @@ use crate::util::shell::shell_join;
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox forward 3000      # localhost:3000 → port 3000 in the active sandbox\n  railway sandbox forward 8080:3000 # localhost:8080 → port 3000 (explicit local port)\n  railway sandbox forward 3000 5432 # several ports over one connection\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox checkpoint create my-setup       # capture the active sandbox's disk\n  railway sandbox create --checkpoint my-setup     # boot a new sandbox from it\n  railway sandbox checkpoint list   # list named checkpoints in the environment\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox forward 3000      # localhost:3000 → port 3000 in the active sandbox\n  railway sandbox forward 8080:3000 # localhost:8080 → port 3000 (explicit local port)\n  railway sandbox forward 3000 5432 # several ports over one connection\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -51,6 +51,10 @@ enum Commands {
 
     /// Manage sandbox templates (pre-built filesystem snapshots)
     Template(TemplateArgs),
+
+    /// Manage sandbox checkpoints (named disk snapshots captured from running
+    /// sandboxes, bootable with `create --checkpoint`)
+    Checkpoint(CheckpointArgs),
 
     /// List sandboxes in the environment
     #[clap(visible_alias = "ls")]
@@ -94,6 +98,12 @@ struct CreateArgs {
     #[clap(long, value_name = "NAME_OR_ID")]
     template: Option<String>,
 
+    /// Create from a named checkpoint (see `railway sandbox checkpoint
+    /// create`). Checkpoints are stored server-side, so this works from any
+    /// machine
+    #[clap(long, value_name = "NAME", conflicts_with = "template")]
+    checkpoint: Option<String>,
+
     /// Join the environment's private network (default: isolated, public
     /// egress only). Needed to reach internal hosts like
     /// `postgres.railway.internal`
@@ -114,8 +124,8 @@ struct TemplateArgs {
 #[derive(Parser)]
 enum TemplateCommands {
     /// Build a template from shell instructions. Templates are
-    /// content-addressed and cached server-side (~7 days), so re-running the
-    /// same build is an instant cache hit
+    /// content-addressed and cached server-side, so re-running the same
+    /// build is an instant cache hit
     #[clap(visible_alias = "create", visible_alias = "new")]
     Build(TemplateBuildArgs),
 
@@ -155,6 +165,78 @@ struct TemplateBuildArgs {
     /// Output as JSON
     #[clap(long)]
     json: bool,
+}
+
+#[derive(Parser)]
+struct CheckpointArgs {
+    #[clap(subcommand)]
+    command: CheckpointCommands,
+}
+
+#[derive(Parser)]
+enum CheckpointCommands {
+    /// Capture a sandbox's current disk into a named checkpoint. Synchronous:
+    /// the checkpoint is bootable as soon as this returns. Reusing a name
+    /// replaces the previous checkpoint
+    #[clap(visible_alias = "capture", visible_alias = "save")]
+    Create(CheckpointCreateArgs),
+
+    /// List named checkpoints in the environment
+    #[clap(visible_alias = "ls")]
+    List(CheckpointListArgs),
+
+    /// Rename a checkpoint
+    Rename(CheckpointRenameArgs),
+
+    /// Delete a checkpoint and its underlying disk snapshot
+    #[clap(visible_alias = "rm")]
+    Delete(CheckpointDeleteArgs),
+}
+
+#[derive(Parser)]
+struct CheckpointCreateArgs {
+    /// Name for the checkpoint, usable with `railway sandbox create
+    /// --checkpoint <name>` (64-character hex names are reserved for
+    /// template hashes)
+    #[clap(value_name = "NAME")]
+    name: String,
+
+    /// Source sandbox ID (defaults to the active sandbox)
+    #[clap(long = "id", value_name = "ID")]
+    id: Option<String>,
+
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct CheckpointListArgs {
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct CheckpointRenameArgs {
+    /// Current checkpoint name
+    #[clap(value_name = "NAME")]
+    name: String,
+
+    /// New checkpoint name
+    #[clap(value_name = "NEW_NAME")]
+    new_name: String,
+
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct CheckpointDeleteArgs {
+    /// Checkpoint name to delete
+    #[clap(value_name = "NAME")]
+    name: String,
 }
 
 #[derive(Parser)]
@@ -349,6 +431,9 @@ pub async fn command(args: Args) -> Result<()> {
         Commands::Create(sub) => create(&mut configs, &client, project, environment, sub).await,
         Commands::Fork(sub) => fork(&mut configs, &client, project, environment, sub).await,
         Commands::Template(sub) => template(&mut configs, &client, project, environment, sub).await,
+        Commands::Checkpoint(sub) => {
+            checkpoint(&mut configs, &client, project, environment, sub).await
+        }
         Commands::List(sub) => list(&mut configs, &client, project, environment, sub).await,
         Commands::Ssh(sub) => ssh(&mut configs, &client, project, environment, sub).await,
         Commands::Exec(sub) => exec(&mut configs, &client, project, environment, sub).await,
@@ -777,23 +862,33 @@ async fn create(
     let (project_id, environment_id) =
         resolve_project_and_env(configs, client, project, environment).await?;
 
-    // Templates are content-addressed server-side: sandboxCreate needs the
-    // full recipe, not just the id, so resolve it from the local store.
-    let template = match &args.template {
-        Some(handle) => {
-            let stored = configs
-                .find_sandbox_template(handle, Some(&environment_id))
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Unknown template `{handle}` for this environment. Build it first:\n  railway sandbox template build --name {handle} -c '<command>' --wait"
-                    )
-                })?;
-            Some(mutations::sandbox_create::SandboxTemplateInput {
-                instructions: stored.instructions,
-                base_image_digest: stored.base_image_digest,
-            })
-        }
-        None => None,
+    // A checkpoint is referenced server-side by name alone; templates are
+    // content-addressed, so sandboxCreate needs the full recipe (not just the
+    // id), resolved from the local store. Both ride the same input — the
+    // server treats `name` and `instructions` as mutually exclusive.
+    let template = if let Some(name) = &args.checkpoint {
+        Some(mutations::sandbox_create::SandboxTemplateInput {
+            instructions: None,
+            base_image_digest: None,
+            name: Some(name.clone()),
+            variables: None,
+        })
+    } else if let Some(handle) = &args.template {
+        let stored = configs
+            .find_sandbox_template(handle, Some(&environment_id))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Unknown template `{handle}` for this environment. Build it first:\n  railway sandbox template build --name {handle} -c '<command>' --wait"
+                )
+            })?;
+        Some(mutations::sandbox_create::SandboxTemplateInput {
+            instructions: Some(stored.instructions),
+            base_image_digest: stored.base_image_digest,
+            name: None,
+            variables: None,
+        })
+    } else {
+        None
     };
 
     let input = mutations::sandbox_create::SandboxCreateInput {
@@ -854,8 +949,10 @@ async fn template_build(
         mutations::sandbox_template_build::Variables {
             environment_id: environment_id.clone(),
             input: mutations::sandbox_template_build::SandboxTemplateInput {
-                instructions: args.commands.clone(),
+                instructions: Some(args.commands.clone()),
                 base_image_digest: args.base_image_digest.clone(),
+                name: None,
+                variables: None,
             },
         },
     )
@@ -876,7 +973,7 @@ async fn template_build(
 
     let already_ready = matches!(
         built.status,
-        mutations::sandbox_template_build::SandboxTemplateStatus::READY
+        mutations::sandbox_template_build::SandboxTemplateBuildStatus::READY
     );
     let status = if args.wait && !already_ready {
         wait_for_template(client, configs, &environment_id, &built.id).await?
@@ -929,13 +1026,13 @@ async fn template_status(
         }
     };
 
-    let res = post_graphql::<queries::SandboxTemplate, _>(
+    let res = post_graphql::<queries::SandboxTemplateBuild, _>(
         client,
         configs.get_backboard(),
-        queries::sandbox_template::Variables { environment_id, id },
+        queries::sandbox_template_build::Variables { environment_id, id },
     )
     .await?;
-    let tpl = res.sandbox_template;
+    let tpl = res.sandbox_template_build;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&tpl)?);
@@ -974,16 +1071,16 @@ async fn template_list(
 
     let mut rows = Vec::new();
     for t in &templates {
-        let status = post_graphql::<queries::SandboxTemplate, _>(
+        let status = post_graphql::<queries::SandboxTemplateBuild, _>(
             client,
             configs.get_backboard(),
-            queries::sandbox_template::Variables {
+            queries::sandbox_template_build::Variables {
                 environment_id: environment_id.clone(),
                 id: t.id.clone(),
             },
         )
         .await
-        .map(|r| format!("{:?}", r.sandbox_template.status))
+        .map(|r| format!("{:?}", r.sandbox_template_build.status))
         .unwrap_or_else(|_| "UNKNOWN".to_string());
         rows.push((t, status));
     }
@@ -1035,21 +1132,21 @@ async fn wait_for_template(
     let deadline = std::time::Instant::now() + Duration::from_secs(45 * 60);
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let res = post_graphql::<queries::SandboxTemplate, _>(
+        let res = post_graphql::<queries::SandboxTemplateBuild, _>(
             client,
             configs.get_backboard(),
-            queries::sandbox_template::Variables {
+            queries::sandbox_template_build::Variables {
                 environment_id: environment_id.to_string(),
                 id: id.to_string(),
             },
         )
         .await?;
-        match res.sandbox_template.status {
-            queries::sandbox_template::SandboxTemplateStatus::READY => {
+        match res.sandbox_template_build.status {
+            queries::sandbox_template_build::SandboxTemplateBuildStatus::READY => {
                 spinner.finish_and_clear();
                 return Ok("READY".to_string());
             }
-            queries::sandbox_template::SandboxTemplateStatus::FAILED => {
+            queries::sandbox_template_build::SandboxTemplateBuildStatus::FAILED => {
                 fail_spinner(&mut spinner, "Template build failed".to_string());
                 bail!(
                     "Template build failed. Each instruction must exit 0 within 10 minutes; fix the failing step and rebuild."
@@ -1062,6 +1159,172 @@ async fn wait_for_template(
             bail!("Timed out waiting for the template build.");
         }
     }
+}
+
+async fn checkpoint(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: CheckpointArgs,
+) -> Result<()> {
+    match args.command {
+        CheckpointCommands::Create(sub) => {
+            checkpoint_create(configs, client, project, environment, sub).await
+        }
+        CheckpointCommands::List(sub) => {
+            checkpoint_list(configs, client, project, environment, sub).await
+        }
+        CheckpointCommands::Rename(sub) => {
+            checkpoint_rename(configs, client, project, environment, sub).await
+        }
+        CheckpointCommands::Delete(sub) => {
+            checkpoint_delete(configs, client, project, environment, sub).await
+        }
+    }
+}
+
+/// Capture is synchronous server-side: the live rootfs is flushed and its
+/// dirty blocks uploaded before the mutation returns, so a large disk can
+/// take a while (the request honors `RAILWAY_HTTP_TIMEOUT`).
+async fn checkpoint_create(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: CheckpointCreateArgs,
+) -> Result<()> {
+    let (sandbox_id, environment_id) =
+        resolve_target(configs, client, args.id.clone(), project, environment).await?;
+
+    let mut spinner = create_shimmer_spinner("Capturing checkpoint");
+    let created = match post_graphql::<mutations::SandboxCheckpointCreate, _>(
+        client,
+        configs.get_backboard(),
+        mutations::sandbox_checkpoint_create::Variables {
+            environment_id,
+            sandbox_id: sandbox_id.clone(),
+            name: args.name.clone(),
+        },
+    )
+    .await
+    {
+        Ok(res) => res.sandbox_checkpoint_create,
+        Err(e) => {
+            fail_spinner(&mut spinner, "Failed to capture checkpoint".to_string());
+            return Err(e.into());
+        }
+    };
+    spinner.finish_and_clear();
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&created)?);
+        return Ok(());
+    }
+    println!("✓ Checkpoint {} captured from {sandbox_id}", created.key);
+    println!(
+        "\nBoot a sandbox from it with:\n  railway sandbox create --checkpoint {}",
+        created.key
+    );
+    Ok(())
+}
+
+async fn checkpoint_list(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: CheckpointListArgs,
+) -> Result<()> {
+    let (_, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+
+    let res = post_graphql::<queries::SandboxCheckpoints, _>(
+        client,
+        configs.get_backboard(),
+        queries::sandbox_checkpoints::Variables { environment_id },
+    )
+    .await?;
+    let checkpoints = res.sandbox_checkpoints;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&checkpoints)?);
+        return Ok(());
+    }
+    if checkpoints.is_empty() {
+        println!(
+            "No checkpoints in this environment.\nCapture one with:\n  railway sandbox checkpoint create <name>"
+        );
+        return Ok(());
+    }
+
+    println!("{:<32}  {:<16}", "NAME", "CREATED");
+    for cp in checkpoints {
+        println!(
+            "{:<32}  {:<16}",
+            cp.key,
+            cp.created_at.format("%Y-%m-%d %H:%M").to_string()
+        );
+    }
+    Ok(())
+}
+
+async fn checkpoint_rename(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: CheckpointRenameArgs,
+) -> Result<()> {
+    let (_, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+
+    let res = post_graphql::<mutations::SandboxCheckpointRename, _>(
+        client,
+        configs.get_backboard(),
+        mutations::sandbox_checkpoint_rename::Variables {
+            environment_id,
+            id: args.name.clone(),
+            name: args.new_name.clone(),
+        },
+    )
+    .await?;
+    let renamed = res.sandbox_checkpoint_rename;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&renamed)?);
+        return Ok(());
+    }
+    println!("✓ Renamed checkpoint {} → {}", args.name, renamed.key);
+    Ok(())
+}
+
+async fn checkpoint_delete(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    project: Option<String>,
+    environment: Option<String>,
+    args: CheckpointDeleteArgs,
+) -> Result<()> {
+    let (_, environment_id) =
+        resolve_project_and_env(configs, client, project, environment).await?;
+
+    let res = post_graphql::<mutations::SandboxCheckpointDelete, _>(
+        client,
+        configs.get_backboard(),
+        mutations::sandbox_checkpoint_delete::Variables {
+            environment_id,
+            id: args.name.clone(),
+        },
+    )
+    .await?;
+
+    // The server reports false (rather than erroring) when no such row exists.
+    if !res.sandbox_checkpoint_delete {
+        bail!("No checkpoint named `{}` in this environment.", args.name);
+    }
+    println!("✓ Deleted checkpoint {}", args.name);
+    Ok(())
 }
 
 async fn fork(
@@ -2032,6 +2295,36 @@ mod tests {
     #[test]
     fn env_file_missing_errors() {
         assert!(parse_env_file(std::path::Path::new("/nonexistent/x.env")).is_err());
+    }
+
+    /// The server treats `template.name` and `template.instructions` as
+    /// mutually exclusive; `skip_serializing_none` must keep the unused
+    /// boot source off the wire entirely.
+    #[test]
+    fn checkpoint_boot_serializes_name_only() {
+        let input = mutations::sandbox_create::SandboxTemplateInput {
+            instructions: None,
+            base_image_digest: None,
+            name: Some("my-setup".to_string()),
+            variables: None,
+        };
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json, serde_json::json!({ "name": "my-setup" }));
+    }
+
+    #[test]
+    fn template_boot_serializes_instructions_only() {
+        let input = mutations::sandbox_create::SandboxTemplateInput {
+            instructions: Some(vec!["npm i -g pnpm".to_string()]),
+            base_image_digest: None,
+            name: None,
+            variables: None,
+        };
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "instructions": ["npm i -g pnpm"] })
+        );
     }
 
     #[test]

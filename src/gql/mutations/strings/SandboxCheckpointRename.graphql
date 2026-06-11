@@ -1,0 +1,12 @@
+mutation SandboxCheckpointRename(
+  $environmentId: String!
+  $id: ID!
+  $name: String!
+) {
+  sandboxCheckpointRename(environmentId: $environmentId, id: $id, name: $name) {
+    id
+    key
+    createdAt
+    environmentId
+  }
+}
