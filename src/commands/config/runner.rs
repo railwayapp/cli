@@ -32,6 +32,10 @@ pub struct Args {
     #[clap(long)]
     pub(super) yes: bool,
 
+    /// Allow destructive applies in non-interactive or agent sessions.
+    #[clap(long)]
+    pub(super) confirm_destructive: bool,
+
     #[clap(skip)]
     pub(super) apply: bool,
 
@@ -61,7 +65,7 @@ pub(super) struct RunnerResponse {
     current_environment: Option<CurrentEnvironment>,
     pub(super) change_set: Option<ChangeSet>,
     diff: Option<String>,
-    diagnostics: Vec<Diagnostic>,
+    pub(super) diagnostics: Vec<Diagnostic>,
     pub(super) current_graph: Option<DesiredGraph>,
     pub(super) desired_graph: Option<DesiredGraph>,
     staged_patch: Option<StagedPatch>,
@@ -92,10 +96,10 @@ pub(super) struct Change {
 }
 
 #[derive(Deserialize, serde::Serialize)]
-struct Diagnostic {
+pub(super) struct Diagnostic {
     severity: String,
-    path: String,
-    message: String,
+    pub(super) path: String,
+    pub(super) message: String,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -162,7 +166,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
     let command = if args.stage {
         "stage"
-    } else if args.apply || args.yes {
+    } else if args.apply {
         "apply"
     } else {
         "plan"
@@ -190,46 +194,37 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         }
     }
 
-    if command == "apply" && !args.yes && !args.json {
-        if !std::io::stdout().is_terminal() {
-            bail!("Run `railway config apply --yes` to apply changes non-interactively.");
-        }
-
-        let mut spinner = create_spinner_if(true, "Checking Railway configuration".into());
+    if command == "apply" {
         let preview =
-            invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
-        if let Some(spinner) = &mut spinner {
-            if preview.ok {
-                success_spinner(spinner, "Checked Railway configuration".into());
-            } else {
-                fail_spinner(spinner, "Could not read Railway configuration".into());
-            }
-        }
-
-        print_response_with_options_and_next(&preview, args.verbose, false);
-        if !preview.ok {
-            bail!("IaC runner returned diagnostics");
-        }
+            preview_before_apply(&args, &configs, &linked_project, &token, auth_type).await?;
         let changes = preview
             .change_set
             .as_ref()
             .map(|change_set| change_set.changes.len())
             .unwrap_or(0);
         if changes == 0 {
+            if !args.json {
+                print_response_with_options(&preview, args.verbose);
+            }
             return Ok(());
         }
 
         let destructive = has_destructive_changes(&preview);
-        println!();
-        let prompt = if destructive {
-            "Apply these changes? This will remove Railway resources or variables."
-        } else {
-            "Apply these changes to Railway?"
-        };
-        if !prompt_confirm_with_default(prompt, false)? {
-            bail!("No changes applied.");
+        guard_destructive_apply(&args, destructive)?;
+
+        if !args.yes && !args.json {
+            print_response_with_options_and_next(&preview, args.verbose, false);
+            println!();
+            let prompt = if destructive {
+                "Apply these changes? This will remove Railway resources or variables."
+            } else {
+                "Apply these changes to Railway?"
+            };
+            if !prompt_confirm_with_default(prompt, false)? {
+                bail!("No changes applied.");
+            }
+            println!();
         }
-        println!();
     }
 
     let mut spinner = create_spinner_if(
@@ -257,6 +252,54 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
     print_response_with_options(&output, args.verbose);
     if !output.ok {
         bail!("IaC runner returned diagnostics");
+    }
+
+    Ok(())
+}
+
+async fn preview_before_apply(
+    args: &Args,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+    token: &str,
+    auth_type: &str,
+) -> Result<RunnerResponse> {
+    if !args.yes && !args.json && !std::io::stdout().is_terminal() {
+        bail!("Run `railway config apply --yes` to apply changes non-interactively.");
+    }
+
+    let mut spinner = create_spinner_if(
+        !args.json && std::io::stdout().is_terminal(),
+        "Checking Railway configuration".into(),
+    );
+    let preview = invoke_runner(args, configs, linked_project, token, auth_type, "plan").await?;
+    if let Some(spinner) = &mut spinner {
+        if preview.ok {
+            success_spinner(spinner, "Checked Railway configuration".into());
+        } else {
+            fail_spinner(spinner, "Could not read Railway configuration".into());
+        }
+    }
+
+    if !preview.ok {
+        if !args.json {
+            print_response_with_options_and_next(&preview, args.verbose, false);
+        }
+        bail!("IaC runner returned diagnostics");
+    }
+
+    Ok(preview)
+}
+
+fn guard_destructive_apply(args: &Args, destructive: bool) -> Result<()> {
+    if !destructive || args.confirm_destructive {
+        return Ok(());
+    }
+
+    if args.yes || args.json || crate::telemetry::is_agent() {
+        bail!(
+            "Destructive Railway configuration changes require explicit confirmation. Review `railway config plan`, then re-run with `railway config apply --confirm-destructive` if the removals are expected."
+        );
     }
 
     Ok(())
