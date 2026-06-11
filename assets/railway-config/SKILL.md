@@ -1,6 +1,6 @@
 ---
 name: railway-config
-description: Edit this project's Railway infrastructure-as-code configuration. Use this skill whenever the user asks to create, change, import, review, deploy, or troubleshoot Railway project infrastructure for the current repository, including services, databases, buckets, custom domains, replicas/regions, groups, environment variables, `railway config *`, `.railway/railway.ts`, or `railway up` behavior.
+description: Edit this project's Railway infrastructure-as-code configuration. Use this skill whenever the user asks to create, change, import, review, or troubleshoot Railway project infrastructure for the current repository, including services, databases, buckets, custom domains, replicas/regions, groups, environment variables, `railway config *`, or `.railway/railway.ts`.
 ---
 
 # Railway configuration skill
@@ -25,7 +25,8 @@ The source of desired Railway project state is:
 8. Do not add platform defaults unless the user explicitly wants them.
 9. Do not manage a service from both `.railway/railway.ts` and `railway.json` / `railway.toml`; migrate the repo config first.
 10. After editing `.railway/railway.ts`, run `railway config plan`.
-11. Do not run `railway config apply` unless the user asks.
+11. Do not run `railway config apply` unless the user explicitly asks.
+12. Never use `railway config apply --yes` or `railway config apply --confirm-destructive` from an agent session without explicit user approval for the exact plan.
 
 ## Commands
 
@@ -51,12 +52,6 @@ Apply changes:
 
 ```bash
 railway config apply
-```
-
-Deploy this directory:
-
-```bash
-railway up
 ```
 
 Machine-readable preview:
@@ -204,6 +199,7 @@ export default defineRailway(() => {
 
 Before applying changes, confirm:
 
+- The user has reviewed the latest `railway config plan` output.
 - `railway config plan` shows only expected changes.
 - Secrets are not replaced with literal placeholder values.
 - Existing Railway-managed variables are omitted or use `preserve()` when the value should remain untouched.

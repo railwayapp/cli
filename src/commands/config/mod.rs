@@ -52,6 +52,10 @@ struct SharedArgs {
     #[clap(long)]
     yes: bool,
 
+    /// Allow destructive applies in non-interactive or agent sessions.
+    #[clap(long)]
+    confirm_destructive: bool,
+
     /// Ask Railway to decrypt variables while planning, when authorized.
     #[clap(long)]
     decrypt_variables: bool,
@@ -116,7 +120,15 @@ struct PullArgs {
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
-        Command::Plan(args) => run_sync(args, false, false).await,
+        Command::Plan(args) => {
+            if args.yes {
+                bail!("--yes is only valid with `railway config apply`.");
+            }
+            if args.confirm_destructive {
+                bail!("--confirm-destructive is only valid with `railway config apply`.");
+            }
+            run_sync(args, false, false).await
+        }
         Command::Stage(_args) => bail!(
             "Staged Railway configuration changes are not available yet. Run `railway config plan` to preview changes or `railway config apply` to apply them."
         ),
@@ -346,6 +358,7 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
         stage: false,
         json: true,
         yes: false,
+        confirm_destructive: false,
         apply: false,
         decrypt_variables: false,
         include_types: false,
@@ -1034,6 +1047,7 @@ async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
         stage,
         json: args.json,
         yes: args.yes,
+        confirm_destructive: args.confirm_destructive,
         apply,
         decrypt_variables: args.decrypt_variables,
         include_types: args.include_types,
