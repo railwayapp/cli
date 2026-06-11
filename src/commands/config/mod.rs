@@ -368,7 +368,9 @@ async fn write_pulled_config(
 }
 
 async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGraph> {
-    let temp_dir = std::env::temp_dir().join(format!("railway-config-pull-{}", std::process::id()));
+    let temp_dir = std::env::current_dir()
+        .context("Unable to get current directory")?
+        .join(format!(".railway-config-pull-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).context("Failed to create temporary Railway config directory")?;
     let temp_file = temp_dir.join("railway.ts");
     fs::write(&temp_file, railway_ts("import-placeholder"))
@@ -391,7 +393,22 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
     let _ = fs::remove_dir(temp_dir);
 
     if !response.ok {
-        bail!("Could not import Railway configuration because planning returned diagnostics.");
+        let diagnostics = response
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                if diagnostic.path.is_empty() {
+                    diagnostic.message.clone()
+                } else {
+                    format!("{}: {}", diagnostic.path, diagnostic.message)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if diagnostics.is_empty() {
+            bail!("Could not import Railway configuration because planning returned diagnostics.");
+        }
+        bail!("Could not import Railway configuration:\n{diagnostics}");
     }
 
     response

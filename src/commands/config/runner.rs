@@ -65,7 +65,7 @@ pub(super) struct RunnerResponse {
     current_environment: Option<CurrentEnvironment>,
     pub(super) change_set: Option<ChangeSet>,
     diff: Option<String>,
-    diagnostics: Vec<Diagnostic>,
+    pub(super) diagnostics: Vec<Diagnostic>,
     pub(super) current_graph: Option<DesiredGraph>,
     pub(super) desired_graph: Option<DesiredGraph>,
     staged_patch: Option<StagedPatch>,
@@ -96,10 +96,10 @@ pub(super) struct Change {
 }
 
 #[derive(Deserialize, serde::Serialize)]
-struct Diagnostic {
+pub(super) struct Diagnostic {
     severity: String,
-    path: String,
-    message: String,
+    pub(super) path: String,
+    pub(super) message: String,
 }
 
 #[derive(Deserialize, serde::Serialize)]
