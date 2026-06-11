@@ -302,10 +302,22 @@ pub(crate) fn print_agent_health_check() {
     eprintln!("\n{}", "Agent tooling:".dimmed());
 
     if skills_ok {
+        let revision = match skills::installed_skills_revision(&home) {
+            Some((installed, skills::SkillsStaleness::UpdateAvailable(newer))) => {
+                format!(" (rev {installed} \u{2192} {newer} available, run `railway skills update`)")
+            }
+            Some((installed, skills::SkillsStaleness::UpToDate)) => {
+                format!(" (rev {installed}, up to date)")
+            }
+            // No staleness evidence yet — show the revision, claim nothing.
+            Some((installed, skills::SkillsStaleness::Unknown)) => format!(" (rev {installed})"),
+            None => String::new(),
+        };
         eprintln!(
-            "  {} {}",
+            "  {} {}{}",
             "\u{2713}".green(),
-            "Railway skills installed".green()
+            "Railway skills installed".green(),
+            revision.dimmed()
         );
     } else {
         eprintln!(
