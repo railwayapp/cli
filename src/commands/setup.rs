@@ -252,6 +252,101 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
     Ok(configured_clients)
 }
 
+/// Health check for the root help screen: green/red status lines for Railway
+/// skills and MCP configuration across detected editors — exactly the set
+/// `railway setup agent -y` would install for. No network; a handful of stat
+/// calls and local config-file parses. Prints nothing when no coding tools
+/// are detected or in CI.
+pub(crate) fn print_agent_health_check() {
+    if Configs::env_is_ci() {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+
+    let detected: Vec<_> = coding_tools(&home)
+        .into_iter()
+        .filter(|tool| tool.slug == "universal" || tool.global_parent.is_dir())
+        .collect();
+
+    // The universal `.agents` target alone doesn't indicate agent usage — only
+    // run the health check for users with an actual coding tool installed.
+    if !detected.iter().any(|tool| tool.slug != "universal") {
+        return;
+    }
+
+    let missing_skills: Vec<&str> = detected
+        .iter()
+        .filter(|tool| !skills::skills_configured_for_slug(&home, tool.slug))
+        .map(|tool| tool.name)
+        .collect();
+
+    // Either transport counts as configured — `setup agent` installs one of
+    // the two, and a remote-configured editor isn't unhealthy.
+    let missing_mcp: Vec<&str> = detected
+        .iter()
+        .filter(|tool| mcp_install::supports_mcp(tool.slug))
+        .filter(|tool| {
+            !mcp_install::mcp_configured_for_slug(&home, tool.slug, false)
+                && !mcp_install::mcp_configured_for_slug(&home, tool.slug, true)
+        })
+        .map(|tool| tool.name)
+        .collect();
+
+    let skills_ok = missing_skills.is_empty();
+    let mcp_ok = missing_mcp.is_empty();
+
+    // Styled as a section of the help output (it only prints after root
+    // help), with the verdict line last — the spot the eye lands on.
+    eprintln!("\n{}", "Agent tooling:".dimmed());
+
+    if skills_ok {
+        eprintln!(
+            "  {} {}",
+            "\u{2713}".green(),
+            "Railway skills installed".green()
+        );
+    } else {
+        eprintln!(
+            "  {} {}",
+            "\u{2717}".red(),
+            format!(
+                "Railway skills not installed: {}",
+                missing_skills.join(", ")
+            )
+            .red()
+        );
+    }
+
+    if mcp_ok {
+        eprintln!(
+            "  {} {}",
+            "\u{2713}".green(),
+            "Railway MCP server configured".green()
+        );
+    } else {
+        eprintln!(
+            "  {} {}",
+            "\u{2717}".red(),
+            format!(
+                "Railway MCP server not configured: {}",
+                missing_mcp.join(", ")
+            )
+            .red()
+        );
+    }
+
+    if skills_ok && mcp_ok {
+        eprintln!("  {}", "Agent tooling is healthy".green());
+    } else {
+        eprintln!(
+            "  Run {} to install missing configuration.",
+            "railway setup agent".cyan()
+        );
+    }
+}
+
 async fn install_missing_mcp(
     home: &std::path::Path,
     selected_slugs: &[String],

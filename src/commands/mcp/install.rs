@@ -93,7 +93,7 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result
     Ok(())
 }
 
-fn supports_mcp(slug: &str) -> bool {
+pub(crate) fn supports_mcp(slug: &str) -> bool {
     matches!(
         slug,
         "claude-code" | "cursor" | "opencode" | "codex" | "copilot" | "factory-droid"

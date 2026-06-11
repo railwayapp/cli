@@ -11,7 +11,7 @@ macro_rules! commands {
                     .propagate_version(true)
                     .about(concat!(
                         clap::crate_description!(),
-                        "\n\nTip: Using an AI coding agent? Run `railway setup agent -y` to install Railway skills and MCP configuration."
+                        "\n\nTip: Using an AI coding agent? Run `railway setup agent -y` to install Railway skills and the Railway MCP server."
                     ))
                     .long_about(None)
                     .version(clap::crate_version!());
@@ -102,6 +102,9 @@ macro_rules! commands {
                     _ => {
                         build_args().print_help()?;
                         println!();
+                        // Bare `railway` shows the same root help as --help;
+                        // mirror its agent-tooling health check.
+                        $crate::commands::setup::print_agent_health_check();
                     }
                 }
                 Ok(())
