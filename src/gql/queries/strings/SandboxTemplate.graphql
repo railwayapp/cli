@@ -1,7 +1,0 @@
-query SandboxTemplate($environmentId: String!, $id: ID!) {
-  sandboxTemplate(environmentId: $environmentId, id: $id) {
-    id
-    status
-    environmentId
-  }
-}

@@ -17591,7 +17591,7 @@
                 "name": null,
                 "ofType": {
                   "kind": "OBJECT",
-                  "name": "SandboxTemplate",
+                  "name": "SandboxTemplateBuild",
                   "ofType": null
                 }
               }
@@ -33181,13 +33181,13 @@
               "deprecationReason": null,
               "description": "Get the status of a sandbox template.",
               "isDeprecated": false,
-              "name": "sandboxTemplate",
+              "name": "sandboxTemplateBuild",
               "type": {
                 "kind": "NON_NULL",
                 "name": null,
                 "ofType": {
                   "kind": "OBJECT",
-                  "name": "SandboxTemplate",
+                  "name": "SandboxTemplateBuild",
                   "ofType": null
                 }
               }
@@ -38663,7 +38663,7 @@
                 "name": null,
                 "ofType": {
                   "kind": "ENUM",
-                  "name": "SandboxTemplateStatus",
+                  "name": "SandboxTemplateBuildStatus",
                   "ofType": null
                 }
               }
@@ -38672,7 +38672,7 @@
           "inputFields": null,
           "interfaces": [],
           "kind": "OBJECT",
-          "name": "SandboxTemplate",
+          "name": "SandboxTemplateBuild",
           "possibleTypes": null
         },
         {
@@ -38695,21 +38695,27 @@
               "description": null,
               "name": "instructions",
               "type": {
-                "kind": "NON_NULL",
+                "kind": "LIST",
                 "name": null,
                 "ofType": {
-                  "kind": "LIST",
+                  "kind": "NON_NULL",
                   "name": null,
                   "ofType": {
-                    "kind": "NON_NULL",
-                    "name": null,
-                    "ofType": {
-                      "kind": "SCALAR",
-                      "name": "String",
-                      "ofType": null
-                    }
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
                   }
                 }
+              }
+            },
+            {
+              "defaultValue": null,
+              "description": null,
+              "name": "name",
+              "type": {
+                "kind": "SCALAR",
+                "name": "String",
+                "ofType": null
               }
             }
           ],
@@ -38750,7 +38756,7 @@
           "inputFields": null,
           "interfaces": null,
           "kind": "ENUM",
-          "name": "SandboxTemplateStatus",
+          "name": "SandboxTemplateBuildStatus",
           "possibleTypes": null
         },
         {

@@ -789,8 +789,9 @@ async fn create(
                     )
                 })?;
             Some(mutations::sandbox_create::SandboxTemplateInput {
-                instructions: stored.instructions,
+                instructions: Some(stored.instructions),
                 base_image_digest: stored.base_image_digest,
+                name: None,
             })
         }
         None => None,
@@ -854,8 +855,9 @@ async fn template_build(
         mutations::sandbox_template_build::Variables {
             environment_id: environment_id.clone(),
             input: mutations::sandbox_template_build::SandboxTemplateInput {
-                instructions: args.commands.clone(),
+                instructions: Some(args.commands.clone()),
                 base_image_digest: args.base_image_digest.clone(),
+                name: None,
             },
         },
     )
@@ -876,7 +878,7 @@ async fn template_build(
 
     let already_ready = matches!(
         built.status,
-        mutations::sandbox_template_build::SandboxTemplateStatus::READY
+        mutations::sandbox_template_build::SandboxTemplateBuildStatus::READY
     );
     let status = if args.wait && !already_ready {
         wait_for_template(client, configs, &environment_id, &built.id).await?
@@ -929,13 +931,13 @@ async fn template_status(
         }
     };
 
-    let res = post_graphql::<queries::SandboxTemplate, _>(
+    let res = post_graphql::<queries::SandboxTemplateBuild, _>(
         client,
         configs.get_backboard(),
-        queries::sandbox_template::Variables { environment_id, id },
+        queries::sandbox_template_build::Variables { environment_id, id },
     )
     .await?;
-    let tpl = res.sandbox_template;
+    let tpl = res.sandbox_template_build;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&tpl)?);
@@ -974,16 +976,16 @@ async fn template_list(
 
     let mut rows = Vec::new();
     for t in &templates {
-        let status = post_graphql::<queries::SandboxTemplate, _>(
+        let status = post_graphql::<queries::SandboxTemplateBuild, _>(
             client,
             configs.get_backboard(),
-            queries::sandbox_template::Variables {
+            queries::sandbox_template_build::Variables {
                 environment_id: environment_id.clone(),
                 id: t.id.clone(),
             },
         )
         .await
-        .map(|r| format!("{:?}", r.sandbox_template.status))
+        .map(|r| format!("{:?}", r.sandbox_template_build.status))
         .unwrap_or_else(|_| "UNKNOWN".to_string());
         rows.push((t, status));
     }
@@ -1035,21 +1037,21 @@ async fn wait_for_template(
     let deadline = std::time::Instant::now() + Duration::from_secs(45 * 60);
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let res = post_graphql::<queries::SandboxTemplate, _>(
+        let res = post_graphql::<queries::SandboxTemplateBuild, _>(
             client,
             configs.get_backboard(),
-            queries::sandbox_template::Variables {
+            queries::sandbox_template_build::Variables {
                 environment_id: environment_id.to_string(),
                 id: id.to_string(),
             },
         )
         .await?;
-        match res.sandbox_template.status {
-            queries::sandbox_template::SandboxTemplateStatus::READY => {
+        match res.sandbox_template_build.status {
+            queries::sandbox_template_build::SandboxTemplateBuildStatus::READY => {
                 spinner.finish_and_clear();
                 return Ok("READY".to_string());
             }
-            queries::sandbox_template::SandboxTemplateStatus::FAILED => {
+            queries::sandbox_template_build::SandboxTemplateBuildStatus::FAILED => {
                 fail_spinner(&mut spinner, "Template build failed".to_string());
                 bail!(
                     "Template build failed. Each instruction must exit 0 within 10 minutes; fix the failing step and rebuild."
