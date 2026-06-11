@@ -244,14 +244,14 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
         if !output.ok {
-            bail!("IaC runner returned diagnostics");
+            bail!(runner_diagnostics_message(&output));
         }
         return Ok(());
     }
 
     print_response_with_options(&output, args.verbose);
     if !output.ok {
-        bail!("IaC runner returned diagnostics");
+        bail!(runner_diagnostics_message(&output));
     }
 
     Ok(())
@@ -285,7 +285,7 @@ async fn preview_before_apply(
         if !args.json {
             print_response_with_options_and_next(&preview, args.verbose, false);
         }
-        bail!("IaC runner returned diagnostics");
+        bail!(runner_diagnostics_message(&preview));
     }
 
     Ok(preview)
@@ -521,6 +521,29 @@ fn runner_done_message(command: &str) -> &'static str {
         "stage" => "Checked Railway configuration",
         _ => "Checked Railway configuration",
     }
+}
+
+fn runner_diagnostics_message(response: &RunnerResponse) -> String {
+    let diagnostics = response
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            if diagnostic.path.is_empty() {
+                diagnostic.message.clone()
+            } else {
+                format!("{}: {}", diagnostic.path, diagnostic.message)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if diagnostics.is_empty() {
+        return "Railway configuration could not be processed. Run again with --verbose for more details.".into();
+    }
+
+    format!(
+        "Railway configuration could not be processed:\n{}",
+        diagnostics.join("\n")
+    )
 }
 
 pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
