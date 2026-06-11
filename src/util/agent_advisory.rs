@@ -180,14 +180,10 @@ fn should_skip_for_args(raw_args: &[String]) -> bool {
 // expose a stable session id (`current_session` is None or per-process), the
 // time window is the only gate.
 fn advisory_suppressed(state: &AgentState, current_session: Option<&str>) -> bool {
-    let shown_to_this_session = matches!(
-        (
-            current_session,
-            state.advisory.last_shown_agent_session_id.as_deref(),
-        ),
-        (Some(current), Some(last)) if current == last
-    );
-    if shown_to_this_session {
+    // `is_some` guard: two unknown sessions (None == None) are not a match.
+    if current_session.is_some()
+        && current_session == state.advisory.last_shown_agent_session_id.as_deref()
+    {
         return true;
     }
 

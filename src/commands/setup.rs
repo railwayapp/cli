@@ -287,10 +287,7 @@ pub(crate) fn print_agent_health_check() {
     let missing_mcp: Vec<&str> = detected
         .iter()
         .filter(|tool| mcp_install::supports_mcp(tool.slug))
-        .filter(|tool| {
-            !mcp_install::mcp_configured_for_slug(&home, tool.slug, false)
-                && !mcp_install::mcp_configured_for_slug(&home, tool.slug, true)
-        })
+        .filter(|tool| !mcp_install::mcp_configured_any_transport(&home, tool.slug))
         .map(|tool| tool.name)
         .collect();
 
@@ -304,7 +301,9 @@ pub(crate) fn print_agent_health_check() {
     if skills_ok {
         let revision = match skills::installed_skills_revision(&home) {
             Some((installed, skills::SkillsStaleness::UpdateAvailable(newer))) => {
-                format!(" (rev {installed} \u{2192} {newer} available, run `railway skills update`)")
+                format!(
+                    " (rev {installed} \u{2192} {newer} available, run `railway skills update`)"
+                )
             }
             Some((installed, skills::SkillsStaleness::UpToDate)) => {
                 format!(" (rev {installed}, up to date)")
