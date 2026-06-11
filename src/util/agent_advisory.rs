@@ -335,3 +335,67 @@ pub fn record_setup_complete() -> Result<()> {
     };
     write_state(&state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_shown(days_ago: i64, session: Option<&str>) -> AgentState {
+        AgentState {
+            advisory: AdvisoryState {
+                last_shown_cli_version: Some("5.0.0".to_string()),
+                last_shown_at: Some(Utc::now() - chrono::Duration::days(days_ago)),
+                last_shown_agent_session_id: session.map(str::to_string),
+            },
+            ..AgentState::default()
+        }
+    }
+
+    #[test]
+    fn never_shown_is_not_suppressed() {
+        assert!(!advisory_suppressed(&AgentState::default(), Some("s1")));
+        assert!(!advisory_suppressed(&AgentState::default(), None));
+    }
+
+    #[test]
+    fn same_session_is_suppressed_even_outside_window() {
+        let state = state_shown(ADVISORY_REARM_DAYS + 7, Some("s1"));
+        assert!(advisory_suppressed(&state, Some("s1")));
+    }
+
+    #[test]
+    fn new_session_within_window_is_suppressed() {
+        let state = state_shown(1, Some("s1"));
+        assert!(advisory_suppressed(&state, Some("s2")));
+    }
+
+    #[test]
+    fn new_session_outside_window_is_shown() {
+        let state = state_shown(ADVISORY_REARM_DAYS + 1, Some("s1"));
+        assert!(!advisory_suppressed(&state, Some("s2")));
+    }
+
+    #[test]
+    fn missing_session_id_falls_back_to_window_only() {
+        assert!(advisory_suppressed(&state_shown(1, None), None));
+        assert!(!advisory_suppressed(
+            &state_shown(ADVISORY_REARM_DAYS + 1, None),
+            None
+        ));
+    }
+
+    // Pre-#919 state files (no lastShownAgentSessionId) and post-#919 files
+    // (no field at all) must keep deserializing; the field defaults to None.
+    #[test]
+    fn old_state_files_deserialize() {
+        let state: AgentState = serde_json::from_str(
+            r#"{"advisory":{"lastShownCliVersion":"4.63.0","lastShownAt":"2026-05-20T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            state.advisory.last_shown_cli_version.as_deref(),
+            Some("4.63.0")
+        );
+        assert!(state.advisory.last_shown_agent_session_id.is_none());
+    }
+}
