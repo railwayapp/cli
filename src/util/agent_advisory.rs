@@ -215,14 +215,15 @@ pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
         return;
     }
 
-    // Declarative facts only: what's missing, what that makes unavailable,
-    // and what the remediation command does. No imperatives addressed at the
-    // agent and no consent-skipping flags — the directive phrasing this
-    // replaced was flagged as prompt injection by agent harnesses (#919).
+    // Declarative facts only: what this session is missing and the setup
+    // command, stated as a label rather than an instruction. No imperatives
+    // addressed at the agent and no consent-skipping flags — the directive
+    // phrasing this replaced was flagged as prompt injection by agent
+    // harnesses (#919).
     eprintln!(
         "\n{}\n{}",
-        "Railway agent tooling isn't installed — the use-railway skill and Railway MCP tools (docs lookup, deploy and log debugging, service management) are unavailable in this session.".yellow(),
-        "`railway setup agent` installs them. It is idempotent, auto-detects installed editors, and uses non-interactive defaults when stdout is not a TTY.".dimmed(),
+        "This session is missing Railway's agent tooling. That includes Railway skills (use-railway) and the Railway MCP server, which provides tooling for deployments, logs, status, and docs.".yellow(),
+        "Setup: `railway setup agent`".dimmed(),
     );
 
     state.advisory = AdvisoryState {
