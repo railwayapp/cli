@@ -113,6 +113,10 @@ struct PullArgs {
     #[clap(long)]
     runner: Option<String>,
 
+    /// Omit unknown imported variables instead of rendering them as preserve().
+    #[clap(long)]
+    omit_preserved_variables: bool,
+
     /// Ask an agent to turn imported state into idiomatic railway.ts code.
     #[clap(long)]
     agent: bool,
@@ -184,7 +188,9 @@ async fn init_config(args: InitArgs) -> Result<()> {
             &railway_ts_from_repo(&cwd, &project_name),
             args.force,
         )?,
-        InitMode::ImportFromRailway => write_pulled_config(&railway_file, args.force, None).await?,
+        InitMode::ImportFromRailway => {
+            write_pulled_config(&railway_file, args.force, None, true).await?
+        }
         InitMode::MinimalFile => write_new(&railway_file, &railway_ts(&project_name), args.force)?,
     }
     write_new(
@@ -289,7 +295,13 @@ async fn pull_config(args: PullArgs) -> Result<()> {
 
     create_parent(&railway_file)?;
     create_parent(&skill_file)?;
-    write_pulled_config(&railway_file, args.force, args.runner).await?;
+    write_pulled_config(
+        &railway_file,
+        args.force,
+        args.runner,
+        !args.omit_preserved_variables,
+    )
+    .await?;
     let wrote_readme = write_asset_if_missing(
         &readme_file,
         include_str!("../../../assets/railway-config/README.md"),
@@ -341,9 +353,18 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     Ok(())
 }
 
-async fn write_pulled_config(path: &Path, force: bool, runner: Option<String>) -> Result<()> {
+async fn write_pulled_config(
+    path: &Path,
+    force: bool,
+    runner: Option<String>,
+    preserve_variables: bool,
+) -> Result<()> {
     let graph = load_current_graph(runner).await?;
-    write_new(path, &render_graph_as_railway_ts(&graph), force)
+    write_new(
+        path,
+        &render_graph_as_railway_ts(&graph, preserve_variables),
+        force,
+    )
 }
 
 async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGraph> {
@@ -378,7 +399,7 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
         .context("Railway did not return current project state")
 }
 
-fn render_graph_as_railway_ts(graph: &runner::DesiredGraph) -> String {
+fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: bool) -> String {
     let mut imports = vec!["defineRailway", "project", "service"];
     if graph
         .resources
@@ -406,7 +427,9 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph) -> String {
     }) {
         imports.push("image");
     }
-    // Imported unknown secrets are preserved by default and omitted from generated source.
+    if preserve_variables && graph.resources.iter().any(has_preserved_variables) {
+        imports.push("preserve");
+    }
     if graph.resources.iter().any(|resource| {
         resource.r#type == "database" && resource.engine.as_deref() == Some("postgres")
     }) {
@@ -476,7 +499,7 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph) -> String {
                     "  const {var_name} = service(\"{}\"",
                     resource.name
                 ));
-                let body = render_service_body(resource, &source_aliases);
+                let body = render_service_body(resource, &source_aliases, preserve_variables);
                 if body.is_empty() {
                     out.push_str(");\n");
                 } else {
@@ -513,6 +536,18 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph) -> String {
     out.push_str("  });\n");
     out.push_str("});\n");
     out
+}
+
+fn has_preserved_variables(resource: &runner::DesiredResource) -> bool {
+    resource
+        .variables
+        .as_ref()
+        .map(|variables| {
+            variables
+                .values()
+                .any(|value| value.get("type").and_then(|value| value.as_str()) == Some("preserve"))
+        })
+        .unwrap_or(false)
 }
 
 fn shared_github_sources(
@@ -557,6 +592,7 @@ fn shared_github_sources(
 fn render_service_body(
     resource: &runner::DesiredResource,
     source_aliases: &std::collections::BTreeMap<String, String>,
+    preserve_variables: bool,
 ) -> String {
     let mut lines = Vec::new();
     if let Some(source) = &resource.source {
@@ -599,7 +635,7 @@ fn render_service_body(
     render_build(resource.build.as_ref(), &mut lines);
     render_deploy(resource.deploy.as_ref(), &mut lines);
     render_networking(resource.networking.as_ref(), &mut lines);
-    render_variables(resource.variables.as_ref(), &mut lines);
+    render_variables(resource.variables.as_ref(), &mut lines, preserve_variables);
     if lines.is_empty() {
         return String::new();
     }
@@ -609,6 +645,7 @@ fn render_service_body(
 fn render_variables(
     vars: Option<&serde_json::Map<String, serde_json::Value>>,
     lines: &mut Vec<String>,
+    preserve_variables: bool,
 ) {
     let Some(vars) = vars else {
         return;
@@ -619,7 +656,7 @@ fn render_variables(
         .into_iter()
         .filter_map(|(key, value)| {
             if value.get("type").and_then(|value| value.as_str()) == Some("preserve") {
-                return None;
+                return preserve_variables.then(|| format!("      {}: preserve(),", ts_key(key)));
             }
             if let Some(literal) = value.get("value").and_then(|value| value.as_str()) {
                 return Some(format!("      {}: {:?},", ts_key(key), literal));

@@ -20,7 +20,7 @@ The source of desired Railway project state is:
 3. Do not write `EnvironmentConfigPatch`, `ServiceInstance`, Backboard internals, or generated Railway domains into source.
 4. Prefer Railway configuration helpers like `service()`, `postgres()`, `redis()`, `mysql()`, `mongo()`, `bucket()`, `group()`, `github()`, and `image()`.
 5. Use `service.env.VARIABLE` and `database.env.VARIABLE` for references.
-6. Keep secrets out of source. Prefer omitting unknown imported secrets; use `preserve()` when an existing Railway-managed value must be explicitly retained.
+6. Keep secrets out of source. Imported unknown secret values should use `preserve()` or be omitted when the user wants a smaller import.
 7. Prefer product DSL names such as `domains`, `replicas`, and `group`; avoid internal names like `customDomains` and `multiRegionConfig`.
 8. Do not add platform defaults unless the user explicitly wants them.
 9. Do not manage a service from both `.railway/railway.ts` and `railway.json` / `railway.toml`; migrate the repo config first.
@@ -40,6 +40,12 @@ Import current Railway state:
 
 ```bash
 railway config pull
+```
+
+Import current Railway state with a smaller generated file that omits unknown variable values:
+
+```bash
+railway config pull --omit-preserved-variables
 ```
 
 Preview changes:
