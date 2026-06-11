@@ -17,7 +17,8 @@ use common::*;
 // Re-exported for the `sandbox` command, which reuses the same native SSH
 // transport (key registration + `ssh <target>@<env relay host>`).
 pub use native::{
-    DurableResume, PortForward, ensure_ssh_key, run_native_ssh, run_native_ssh_forward,
+    DurableResume, PortForward, ensure_ssh_key, get_service_instance_id, run_native_ssh,
+    run_native_ssh_forward, spawn_native_ssh_forward,
 };
 
 /// Connect to a service via SSH or manage SSH keys

@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 use reqwest::Client;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::client::post_graphql;
 use crate::config::Configs;
@@ -340,8 +341,30 @@ pub fn run_native_ssh_forward(
     forwards: &[PortForward],
 ) -> Result<i32> {
     let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    apply_forward_options(&mut ssh_cmd, forwards);
+    ssh_cmd.arg(&target);
 
-    ssh_cmd.args([
+    // `-N` runs no command; keep stderr inherited so relay/auth errors and
+    // per-connection forward failures stay visible.
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stdout(Stdio::null());
+    ssh_cmd.stderr(Stdio::inherit());
+
+    let status = ssh_cmd.status().context("Failed to execute ssh command")?;
+    // `code()` is None when ssh died from a signal — for a forward that's the
+    // user's Ctrl+C (delivered to the whole foreground process group).
+    Ok(status.code().unwrap_or(0))
+}
+
+/// Apply the `-N` forward-mode options and `-L` specs shared by the blocking
+/// (`run_native_ssh_forward`) and backgrounded (`spawn_native_ssh_forward`)
+/// paths, so their flags can't drift. The remote side of every forward is
+/// pinned to the `127.0.0.1` literal — names like `localhost` go through the
+/// relay's resolver (which doesn't honor the target's `/etc/hosts`) and resolve
+/// to unreachable mesh addresses, so a literal is the only thing that reliably
+/// reaches the port the target itself listens on.
+fn apply_forward_options(cmd: &mut Command, forwards: &[PortForward]) {
+    cmd.args([
         "-N",
         // `-N` runs with stdin closed, so an interactive host-key prompt can't
         // be answered — a fresh machine that hasn't trusted the relay yet would
@@ -364,7 +387,7 @@ pub fn run_native_ssh_forward(
     ]);
 
     for forward in forwards {
-        ssh_cmd.args([
+        cmd.args([
             "-L",
             &format!(
                 "127.0.0.1:{}:127.0.0.1:{}",
@@ -372,17 +395,84 @@ pub fn run_native_ssh_forward(
             ),
         ]);
     }
+}
 
+/// A backgrounded `ssh -N -L` forward. The child ssh process is killed when the
+/// guard is dropped, so a caller can keep the tunnel up for the lifetime of a
+/// foreground client (e.g. `railway connect` launching psql) and tear it down
+/// automatically when that client exits.
+pub struct ForwardGuard {
+    child: std::process::Child,
+}
+
+impl Drop for ForwardGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Spawn a forward-only SSH session in the background and block until the
+/// forwarded local port(s) accept connections, so the caller can immediately
+/// point a client at `127.0.0.1:<local_port>` without racing an unbound
+/// listener. Returns a guard that kills ssh on drop.
+pub fn spawn_native_ssh_forward(
+    ssh_target: &str,
+    identity_file: Option<&Path>,
+    forwards: &[PortForward],
+) -> Result<ForwardGuard> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    apply_forward_options(&mut ssh_cmd, forwards);
     ssh_cmd.arg(&target);
 
-    // `-N` runs no command; keep stderr inherited so relay/auth errors and
-    // per-connection forward failures stay visible.
+    // Backgrounded: no stdin (host-key prompts are handled by accept-new),
+    // stderr stays visible so relay/auth errors surface, stdout is unused.
     ssh_cmd.stdin(Stdio::null());
     ssh_cmd.stdout(Stdio::null());
     ssh_cmd.stderr(Stdio::inherit());
 
-    let status = ssh_cmd.status().context("Failed to execute ssh command")?;
-    // `code()` is None when ssh died from a signal — for a forward that's the
-    // user's Ctrl+C (delivered to the whole foreground process group).
-    Ok(status.code().unwrap_or(0))
+    // Detach ssh from the terminal's foreground process group. Ctrl+C in the
+    // foreground client (e.g. cancelling a long psql query) is delivered to
+    // the whole group, and ssh doesn't trap SIGINT — left in the group, a
+    // routine query-cancel would kill the tunnel mid-session. Detached, ssh
+    // only goes down via the guard.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        ssh_cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        ssh_cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    let child = ssh_cmd.spawn().context("Failed to spawn ssh forward")?;
+    let mut guard = ForwardGuard { child };
+    wait_for_forward_ready(&mut guard, forwards)?;
+    Ok(guard)
+}
+
+/// Poll the forwarded local ports until they accept a TCP connection. Bails if
+/// ssh exits first (e.g. `ExitOnForwardFailure` tripping on a busy local port)
+/// or the tunnel doesn't come up within the deadline.
+fn wait_for_forward_ready(guard: &mut ForwardGuard, forwards: &[PortForward]) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = guard.child.try_wait()? {
+            bail!("SSH tunnel exited before it was ready ({status})");
+        }
+        let all_up = forwards.iter().all(|forward| {
+            let addr = SocketAddr::from(([127, 0, 0, 1], forward.local_port));
+            TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+        });
+        if all_up {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("Timed out waiting for the SSH tunnel to become ready on 127.0.0.1");
+        }
+        sleep(Duration::from_millis(150));
+    }
 }
