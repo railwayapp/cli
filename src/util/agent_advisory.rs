@@ -11,6 +11,12 @@ use crate::{telemetry, util};
 const STATE_VERSION: u32 = 1;
 const DISABLE_ENV: &str = "RAILWAY_AGENT_ADVISORY";
 const FORCE_ENV: &str = "RAILWAY_AGENT";
+// Global floor between advisory impressions on a machine. Re-arming on a
+// timer (rather than only on CLI upgrade) is deliberate: the once-per-version
+// gate from #919 cut fresh-user setup conversion from 9.1% to 3.3%, while the
+// "firing constantly" complaints it fixed are prevented by the per-session
+// gate below, not by the version gate.
+const ADVISORY_REARM_DAYS: i64 = 3;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +41,7 @@ struct SetupState {
 struct AdvisoryState {
     last_shown_cli_version: Option<String>,
     last_shown_at: Option<DateTime<Utc>>,
+    last_shown_agent_session_id: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -166,14 +173,28 @@ fn should_skip_for_args(raw_args: &[String]) -> bool {
     })
 }
 
-// Suppress the advisory if we've already shown it for the currently running
-// CLI version. Upgrading the CLI re-arms the advisory exactly once.
-fn advisory_already_shown_for_current_cli(state: &AgentState) -> bool {
+// Suppress the advisory when this agent session has already seen it, or when
+// any session on this machine saw it within the re-arm window. An agent
+// session gets at most one impression (no context spam), and a machine gets
+// at most one impression per ADVISORY_REARM_DAYS. When the harness doesn't
+// expose a stable session id (`current_session` is None or per-process), the
+// time window is the only gate.
+fn advisory_suppressed(state: &AgentState, current_session: Option<&str>) -> bool {
+    let shown_to_this_session = matches!(
+        (
+            current_session,
+            state.advisory.last_shown_agent_session_id.as_deref(),
+        ),
+        (Some(current), Some(last)) if current == last
+    );
+    if shown_to_this_session {
+        return true;
+    }
+
     state
         .advisory
-        .last_shown_cli_version
-        .as_deref()
-        .is_some_and(|shown| shown == env!("CARGO_PKG_VERSION"))
+        .last_shown_at
+        .is_some_and(|shown_at| Utc::now() - shown_at < chrono::Duration::days(ADVISORY_REARM_DAYS))
 }
 
 pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
@@ -188,20 +209,26 @@ pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
         return;
     }
 
+    let agent_session_id = telemetry::current_agent_session_id();
     let mut state = read_state();
-    if agent_setup_is_current(&state) || advisory_already_shown_for_current_cli(&state) {
+    if agent_setup_is_current(&state) || advisory_suppressed(&state, agent_session_id.as_deref()) {
         return;
     }
 
+    // Declarative facts only: what's missing, what that makes unavailable,
+    // and what the remediation command does. No imperatives addressed at the
+    // agent and no consent-skipping flags — the directive phrasing this
+    // replaced was flagged as prompt injection by agent harnesses (#919).
     eprintln!(
         "\n{}\n{}",
-        "Railway agent tooling (skills + MCP) isn't installed.".yellow(),
-        "Run `railway setup agent` to configure it.".dimmed(),
+        "Railway agent tooling isn't installed — the use-railway skill and Railway MCP tools (docs lookup, deploy and log debugging, service management) are unavailable in this session.".yellow(),
+        "`railway setup agent` installs them. It is idempotent, auto-detects installed editors, and uses non-interactive defaults when stdout is not a TTY.".dimmed(),
     );
 
     state.advisory = AdvisoryState {
         last_shown_cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         last_shown_at: Some(Utc::now()),
+        last_shown_agent_session_id: agent_session_id,
     };
 
     let _ = write_state(&state);

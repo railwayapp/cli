@@ -1824,6 +1824,18 @@ fn resolve_agent_session_id(caller: &str) -> Option<String> {
         })
 }
 
+/// The agent session id for the current invocation, resolved exactly as the
+/// telemetry event context resolves it, so per-session gating (e.g. the agent
+/// advisory) keys on the same id the warehouse sees. `None` for human/CI
+/// callers.
+pub(crate) fn current_agent_session_id() -> Option<String> {
+    let caller = MCP_CLIENT_CALLER
+        .get()
+        .cloned()
+        .unwrap_or_else(detect_caller);
+    resolve_agent_session_id(&caller)
+}
+
 /// Attribution for the deploy tarball upload (`x-railway-caller` /
 /// `x-railway-agent-session` headers). Returns `Some` only when the CLI
 /// detects an agent harness driving it — backboard treats header presence
