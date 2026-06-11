@@ -537,6 +537,38 @@ pub(crate) fn orphan_skills_nag_due() -> Option<Vec<String>> {
     orphan_skills_nag(&home)
 }
 
+/// What the background staleness check knows about an install, distinguishing
+/// "verified current" from "never checked" so the health check doesn't claim
+/// freshness it has no evidence for.
+pub(super) enum SkillsStaleness {
+    /// The last upstream check matched the installed commit.
+    UpToDate,
+    /// Upstream has moved past the install (short SHA of the newer commit).
+    UpdateAvailable(String),
+    /// No upstream check result yet — staleness unknown.
+    Unknown,
+}
+
+/// Skills install/staleness info for the help-screen health check: the short
+/// commit SHA we last installed from, plus what the background staleness
+/// check knows about it. Reads only what the manifest already tracks — no
+/// network. None when there's no manifest-tracked install (e.g.
+/// pre-manifest/orphan copies).
+pub(super) fn installed_skills_revision(home: &Path) -> Option<(String, SkillsStaleness)> {
+    let manifest = SkillsManifest::read(home);
+    if !manifest.has_installed_skills() {
+        return None;
+    }
+    let installed = manifest.source_sha.as_deref()?;
+    let short = |sha: &str| sha.chars().take(7).collect::<String>();
+    let staleness = match manifest.latest_sha.as_deref() {
+        Some(latest) if latest == installed => SkillsStaleness::UpToDate,
+        Some(latest) => SkillsStaleness::UpdateAvailable(short(latest)),
+        None => SkillsStaleness::Unknown,
+    };
+    Some((short(installed), staleness))
+}
+
 pub(super) fn skills_configured_for_slug(home: &Path, slug: &str) -> bool {
     coding_tools(home)
         .into_iter()

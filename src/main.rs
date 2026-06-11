@@ -384,6 +384,19 @@ async fn main() -> Result<()> {
         // printed to stdout and exit with a status of 0.
         Err(e) if e.kind() == ErrorKind::DisplayHelp || e.kind() == ErrorKind::DisplayVersion => {
             println!("{e}");
+            // Root help doubles as a lightweight health check: tell users
+            // with coding tools installed when Railway skills/MCP config is
+            // missing, pointing at `railway setup agent`. Scoped to root
+            // help only — both `railway <cmd> --help` and `railway help
+            // <cmd>` stay clean (the count guard catches the latter, where
+            // the first non-flag arg is still "help").
+            let non_flag_args = raw_args.iter().filter(|a| !a.starts_with('-')).count();
+            if e.kind() == ErrorKind::DisplayHelp
+                && matches!(raw_subcommand.as_deref(), None | Some("help"))
+                && non_flag_args <= 1
+            {
+                commands::setup::print_agent_health_check();
+            }
             handle_update_task(check_updates_handle).await;
             std::process::exit(0);
         }

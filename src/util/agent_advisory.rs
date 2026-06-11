@@ -11,6 +11,12 @@ use crate::{telemetry, util};
 const STATE_VERSION: u32 = 1;
 const DISABLE_ENV: &str = "RAILWAY_AGENT_ADVISORY";
 const FORCE_ENV: &str = "RAILWAY_AGENT";
+// Global floor between advisory impressions on a machine. Re-arming on a
+// timer (rather than only on CLI upgrade) is deliberate: the once-per-version
+// gate from #919 cut fresh-user setup conversion from 9.1% to 3.3%, while the
+// "firing constantly" complaints it fixed are prevented by the per-session
+// gate below, not by the version gate.
+const ADVISORY_REARM_DAYS: i64 = 3;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +41,7 @@ struct SetupState {
 struct AdvisoryState {
     last_shown_cli_version: Option<String>,
     last_shown_at: Option<DateTime<Utc>>,
+    last_shown_agent_session_id: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -166,14 +173,24 @@ fn should_skip_for_args(raw_args: &[String]) -> bool {
     })
 }
 
-// Suppress the advisory if we've already shown it for the currently running
-// CLI version. Upgrading the CLI re-arms the advisory exactly once.
-fn advisory_already_shown_for_current_cli(state: &AgentState) -> bool {
+// Suppress the advisory when this agent session has already seen it, or when
+// any session on this machine saw it within the re-arm window. An agent
+// session gets at most one impression (no context spam), and a machine gets
+// at most one impression per ADVISORY_REARM_DAYS. When the harness doesn't
+// expose a stable session id (`current_session` is None or per-process), the
+// time window is the only gate.
+fn advisory_suppressed(state: &AgentState, current_session: Option<&str>) -> bool {
+    // `is_some` guard: two unknown sessions (None == None) are not a match.
+    if current_session.is_some()
+        && current_session == state.advisory.last_shown_agent_session_id.as_deref()
+    {
+        return true;
+    }
+
     state
         .advisory
-        .last_shown_cli_version
-        .as_deref()
-        .is_some_and(|shown| shown == env!("CARGO_PKG_VERSION"))
+        .last_shown_at
+        .is_some_and(|shown_at| Utc::now() - shown_at < chrono::Duration::days(ADVISORY_REARM_DAYS))
 }
 
 pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
@@ -188,20 +205,27 @@ pub async fn maybe_show(raw_args: &[String], command: Option<&str>) {
         return;
     }
 
+    let agent_session_id = telemetry::current_agent_session_id();
     let mut state = read_state();
-    if agent_setup_is_current(&state) || advisory_already_shown_for_current_cli(&state) {
+    if agent_setup_is_current(&state) || advisory_suppressed(&state, agent_session_id.as_deref()) {
         return;
     }
 
+    // Declarative facts only: what this session is missing and the setup
+    // command, stated as a label rather than an instruction. No imperatives
+    // addressed at the agent and no consent-skipping flags — the directive
+    // phrasing this replaced was flagged as prompt injection by agent
+    // harnesses (#919).
     eprintln!(
         "\n{}\n{}",
-        "Railway agent tooling (skills + MCP) isn't installed.".yellow(),
-        "Run `railway setup agent` to configure it.".dimmed(),
+        "This session is missing Railway's agent tooling. That includes Railway skills (use-railway) and the Railway MCP server, which provides tooling for deployments, logs, status, and docs.".yellow(),
+        "Setup: `railway setup agent`".dimmed(),
     );
 
     state.advisory = AdvisoryState {
         last_shown_cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         last_shown_at: Some(Utc::now()),
+        last_shown_agent_session_id: agent_session_id,
     };
 
     let _ = write_state(&state);
@@ -307,4 +331,68 @@ pub fn record_setup_complete() -> Result<()> {
         last_run_at: Some(Utc::now()),
     };
     write_state(&state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_shown(days_ago: i64, session: Option<&str>) -> AgentState {
+        AgentState {
+            advisory: AdvisoryState {
+                last_shown_cli_version: Some("5.0.0".to_string()),
+                last_shown_at: Some(Utc::now() - chrono::Duration::days(days_ago)),
+                last_shown_agent_session_id: session.map(str::to_string),
+            },
+            ..AgentState::default()
+        }
+    }
+
+    #[test]
+    fn never_shown_is_not_suppressed() {
+        assert!(!advisory_suppressed(&AgentState::default(), Some("s1")));
+        assert!(!advisory_suppressed(&AgentState::default(), None));
+    }
+
+    #[test]
+    fn same_session_is_suppressed_even_outside_window() {
+        let state = state_shown(ADVISORY_REARM_DAYS + 7, Some("s1"));
+        assert!(advisory_suppressed(&state, Some("s1")));
+    }
+
+    #[test]
+    fn new_session_within_window_is_suppressed() {
+        let state = state_shown(1, Some("s1"));
+        assert!(advisory_suppressed(&state, Some("s2")));
+    }
+
+    #[test]
+    fn new_session_outside_window_is_shown() {
+        let state = state_shown(ADVISORY_REARM_DAYS + 1, Some("s1"));
+        assert!(!advisory_suppressed(&state, Some("s2")));
+    }
+
+    #[test]
+    fn missing_session_id_falls_back_to_window_only() {
+        assert!(advisory_suppressed(&state_shown(1, None), None));
+        assert!(!advisory_suppressed(
+            &state_shown(ADVISORY_REARM_DAYS + 1, None),
+            None
+        ));
+    }
+
+    // Pre-#919 state files (no lastShownAgentSessionId) and post-#919 files
+    // (no field at all) must keep deserializing; the field defaults to None.
+    #[test]
+    fn old_state_files_deserialize() {
+        let state: AgentState = serde_json::from_str(
+            r#"{"advisory":{"lastShownCliVersion":"4.63.0","lastShownAt":"2026-05-20T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            state.advisory.last_shown_cli_version.as_deref(),
+            Some("4.63.0")
+        );
+        assert!(state.advisory.last_shown_agent_session_id.is_none());
+    }
 }

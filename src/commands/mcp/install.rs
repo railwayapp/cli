@@ -93,7 +93,7 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result
     Ok(())
 }
 
-fn supports_mcp(slug: &str) -> bool {
+pub(crate) fn supports_mcp(slug: &str) -> bool {
     matches!(
         slug,
         "claude-code" | "cursor" | "opencode" | "codex" | "copilot" | "factory-droid"
@@ -110,6 +110,32 @@ fn config_path(slug: &str, home: &Path) -> PathBuf {
         "factory-droid" => home.join(".factory").join("mcp.json"),
         // supports_mcp gates this; unreachable in practice.
         _ => home.join(".unsupported"),
+    }
+}
+
+/// True when a railway MCP entry is configured for either transport — the
+/// help health check doesn't care which one `setup agent` installed. Reads
+/// each config file once instead of once per transport.
+pub(crate) fn mcp_configured_any_transport(home: &Path, slug: &str) -> bool {
+    let path = config_path(slug, home);
+    match slug {
+        "claude-code" | "cursor" | "copilot" | "factory-droid" => read_json_or_empty(&path)
+            .ok()
+            .and_then(|root| root.pointer("/mcpServers/railway").cloned())
+            .is_some_and(|entry| {
+                json_mcp_entry_matches(&entry, false) || json_mcp_entry_matches(&entry, true)
+            }),
+        "opencode" => read_json_or_empty(&path)
+            .ok()
+            .and_then(|root| root.pointer("/mcp/railway").cloned())
+            .is_some_and(|entry| {
+                opencode_mcp_entry_matches(&entry, false)
+                    || opencode_mcp_entry_matches(&entry, true)
+            }),
+        // Codex keeps its TOML matching in one place at the cost of a second
+        // read for this one tool.
+        "codex" => codex_mcp_configured(&path, false) || codex_mcp_configured(&path, true),
+        _ => false,
     }
 }
 

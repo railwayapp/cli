@@ -313,7 +313,10 @@ fn select_service(
             if require_service {
                 Some(prompt_options("Select a service", useful_services)?)
             } else {
-                prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+                prompt_options_skippable(
+                    "Select a service (optional) <esc to skip>",
+                    useful_services,
+                )?
             }
         } else if useful_services.len() == 1 {
             let svc = useful_services.into_iter().next().unwrap();
