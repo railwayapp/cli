@@ -262,6 +262,13 @@ async fn run_ssh_connect(
     let identity = ensure_ssh_key(client, configs).await?;
     let ssh_target = get_service_instance_id(client, configs, environment_id, service_id).await?;
 
+    // The database clients trap SIGINT themselves (Ctrl+C cancels the running
+    // query, it doesn't exit) — but the terminal delivers it to this parent
+    // too, and dying here would skip the guard's Drop and strand the session.
+    // Ignore it, same as `run` and `shell`; the session ends when the client
+    // exits and the guard tears the tunnel down.
+    ctrlc::set_handler(move || {})?;
+
     eprintln!("Opening SSH tunnel: 127.0.0.1:{local_port} → service :{remote_port} ...");
 
     // Hold the guard for the lifetime of the client; dropping it kills ssh.

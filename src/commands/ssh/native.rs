@@ -431,6 +431,23 @@ pub fn spawn_native_ssh_forward(
     ssh_cmd.stdout(Stdio::null());
     ssh_cmd.stderr(Stdio::inherit());
 
+    // Detach ssh from the terminal's foreground process group. Ctrl+C in the
+    // foreground client (e.g. cancelling a long psql query) is delivered to
+    // the whole group, and ssh doesn't trap SIGINT — left in the group, a
+    // routine query-cancel would kill the tunnel mid-session. Detached, ssh
+    // only goes down via the guard.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        ssh_cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        ssh_cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
     let child = ssh_cmd.spawn().context("Failed to spawn ssh forward")?;
     let mut guard = ForwardGuard { child };
     wait_for_forward_ready(&mut guard, forwards)?;
