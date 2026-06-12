@@ -425,6 +425,13 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
     {
         imports.push("bucket");
     }
+    if graph
+        .resources
+        .iter()
+        .any(|resource| resource.r#type == "group" || resource.group_id.is_some())
+    {
+        imports.push("group");
+    }
     if graph.resources.iter().any(|resource| {
         resource
             .source
@@ -485,10 +492,21 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
     }
 
     let mut names = Vec::new();
+    let mut resource_names = std::collections::HashMap::new();
+    let mut group_names = std::collections::HashMap::new();
     let import_names: std::collections::HashSet<&str> = imports.iter().copied().collect();
     for resource in &graph.resources {
+        if resource.r#type == "group" {
+            continue;
+        }
         let var_name =
             unique_resource_ident(&resource.name, &resource.r#type, &import_names, &names);
+        let resource_key = resource
+            .address
+            .as_deref()
+            .unwrap_or(&resource.name)
+            .to_string();
+        resource_names.insert(resource_key, var_name.clone());
         match resource.r#type.as_str() {
             "database" => {
                 let helper = match resource.engine.as_deref() {
@@ -543,13 +561,73 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
         }
     }
 
+    for resource in graph
+        .resources
+        .iter()
+        .filter(|resource| resource.r#type == "group")
+    {
+        let var_name =
+            unique_resource_ident(&resource.name, &resource.r#type, &import_names, &names);
+        let children = graph
+            .resources
+            .iter()
+            .filter(|candidate| candidate.group_id.as_deref() == Some(resource.name.as_str()))
+            .filter_map(|candidate| {
+                let key = candidate
+                    .address
+                    .as_deref()
+                    .unwrap_or(&candidate.name)
+                    .to_string();
+                resource_names.get(&key).cloned()
+            })
+            .collect::<Vec<_>>();
+        if children.is_empty() {
+            out.push_str(&format!(
+                "  const {var_name} = group(\"{}\");\n",
+                resource.name
+            ));
+        } else {
+            out.push_str(&format!(
+                "  const {var_name} = group(\"{}\", [{}]);\n",
+                resource.name,
+                children.join(", ")
+            ));
+        }
+        group_names.insert(resource.name.clone(), var_name.clone());
+        names.push(var_name);
+    }
+
+    let top_level_names = graph
+        .resources
+        .iter()
+        .filter(|resource| resource.r#type != "group" && resource.group_id.is_none())
+        .filter_map(|resource| {
+            let key = resource
+                .address
+                .as_deref()
+                .unwrap_or(&resource.name)
+                .to_string();
+            resource_names.get(&key).cloned()
+        })
+        .chain(
+            graph
+                .resources
+                .iter()
+                .filter(|resource| resource.r#type == "group")
+                .filter_map(|resource| group_names.get(&resource.name).cloned()),
+        )
+        .collect::<Vec<_>>();
+
     let project_name = graph
         .project
         .as_ref()
         .map(|project| project.name.as_str())
         .unwrap_or("imported-project");
     out.push_str(&format!("\n  return project({:?}, {{\n", project_name));
-    out.push_str(&format!("    resources: [{}],\n", names.join(", ")));
+    out.push_str(&format!(
+        "    resources: [{}],\n",
+        top_level_names.join(", ")
+    ));
     out.push_str("  });\n");
     out.push_str("});\n");
     out

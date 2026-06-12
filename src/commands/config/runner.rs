@@ -148,6 +148,7 @@ pub(super) struct DesiredResource {
     pub(super) deploy: Option<Value>,
     pub(super) networking: Option<Value>,
     pub(super) config: Option<Value>,
+    pub(super) group_id: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
