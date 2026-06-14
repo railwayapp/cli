@@ -131,6 +131,61 @@ pub struct GenerateDomainParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DomainStatusParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Domain name, URL, or domain ID.
+    pub domain: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteDomainParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Domain name, URL, or domain ID.
+    pub domain: String,
+    /// Must be set to true to confirm deletion. This action is irreversible.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateDomainParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Domain name, URL, or domain ID.
+    pub domain: String,
+    /// Target port for the domain. Must be from 1 to 65535.
+    #[serde(default)]
+    pub port: Option<i64>,
+    /// Rename a Railway-provided service domain. Accepts a full service domain or host label.
+    #[serde(default)]
+    pub new_domain: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct LinkServiceParams {
     /// The project ID. If omitted, uses the currently linked project.
     #[serde(default)]

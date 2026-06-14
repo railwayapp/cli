@@ -1,7 +1,0 @@
-query CustomDomainAvailable($domain: String!) {
-  customDomainAvailable(domain: $domain) {
-    __typename
-    available
-    message
-  }
-}

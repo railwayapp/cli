@@ -1,0 +1,3 @@
+mutation ServiceDomainUpdate($input: ServiceDomainUpdateInput!) {
+  serviceDomainUpdate(input: $input)
+}
