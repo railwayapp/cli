@@ -20,6 +20,7 @@ use crate::{
         },
     },
     errors::RailwayError,
+    workspace::workspaces_with_client,
 };
 
 use super::environment::get_matched_environment;
@@ -58,6 +59,86 @@ pub async fn get_project(
         .project;
 
     Ok(project)
+}
+
+#[derive(Debug, Clone)]
+struct ProjectChoice {
+    id: String,
+    name: String,
+    workspace_name: String,
+}
+
+pub async fn resolve_project_id_or_name(
+    client: &Client,
+    configs: &Configs,
+    project: &str,
+) -> Result<String> {
+    match get_project(client, configs, project.to_string()).await {
+        Ok(project) => return Ok(project.id),
+        Err(RailwayError::ProjectNotFound) => {}
+        Err(RailwayError::GraphQLError(message)) if message.contains("Project not found") => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let choices = project_choices(client, configs).await?;
+    let id_matches = choices
+        .iter()
+        .filter(|choice| choice.id.eq_ignore_ascii_case(project))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(choice) = single_project_match(id_matches, project, "project ID")? {
+        return Ok(choice.id);
+    }
+
+    let name_matches = choices
+        .into_iter()
+        .filter(|choice| choice.name.eq_ignore_ascii_case(project))
+        .collect::<Vec<_>>();
+
+    if let Some(choice) = single_project_match(name_matches, project, "project name")? {
+        return Ok(choice.id);
+    }
+
+    bail!("Project \"{}\" not found", project)
+}
+
+async fn project_choices(client: &Client, configs: &Configs) -> Result<Vec<ProjectChoice>> {
+    let mut choices = Vec::new();
+    for workspace in workspaces_with_client(client, configs).await? {
+        let workspace_name = workspace.name().to_string();
+        choices.extend(
+            workspace
+                .projects()
+                .into_iter()
+                .filter(|project| project.deleted_at().is_none())
+                .map(|project| ProjectChoice {
+                    id: project.id().to_string(),
+                    name: project.name().to_string(),
+                    workspace_name: workspace_name.clone(),
+                }),
+        );
+    }
+    Ok(choices)
+}
+
+fn single_project_match(
+    matches: Vec<ProjectChoice>,
+    input: &str,
+    kind: &str,
+) -> Result<Option<ProjectChoice>> {
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => {
+            let available = matches
+                .iter()
+                .map(|choice| format!("{} ({})", choice.id, choice.workspace_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("Ambiguous {kind} \"{input}\". Use one of these project IDs: {available}");
+        }
+    }
 }
 
 pub fn get_service(
@@ -263,11 +344,16 @@ pub async fn resolve_service_context(
         ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
     }
 
-    let project_id = project_arg
-        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
-        .ok_or_else(|| {
-            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
-        })?;
+    let project_id = if let Some(project_arg) = project_arg {
+        resolve_project_id_or_name(&client, &configs, &project_arg).await?
+    } else {
+        linked_project
+            .as_ref()
+            .map(|lp| lp.project.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+            })?
+    };
 
     let project = get_project(&client, &configs, project_id.clone()).await?;
 
@@ -293,7 +379,9 @@ pub async fn resolve_service_context(
         (Some(service_arg), _) => {
             let service = services
                 .iter()
-                .find(|s| s.node.name == service_arg || s.node.id == service_arg)
+                .find(|s| {
+                    s.node.name.eq_ignore_ascii_case(&service_arg) || s.node.id == service_arg
+                })
                 .with_context(|| format!("Service '{service_arg}' not found"))?;
             (service.node.id.clone(), service.node.name.clone())
         }
