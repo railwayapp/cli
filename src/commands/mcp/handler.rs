@@ -657,7 +657,8 @@ impl RailwayMcp {
                         .unwrap_or("");
                     let host_label = host.strip_suffix(&format!(".{zone}")).unwrap_or(host);
                     output.push_str(&format!(
-                        "\nVerification TXT record (required):\n  TXT {host_label} -> railway-verify={token}\n"
+                        "\nVerification TXT record (required):\n  TXT {host_label} -> {}\n",
+                        crate::commands::domain::format_verification_txt_value(token)
                     ));
                 }
             }
