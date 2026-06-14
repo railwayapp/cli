@@ -23,7 +23,7 @@ use super::*;
 /// - `railway domain example.com` creates a custom domain
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway domain\n  railway domain example.com --port 3000\n  railway domain list --service api --json\n  railway domain status example.com\n  railway domain update example.com --port 8080\n  railway domain delete example.com --yes"
+    after_help = "Examples:\n\n  railway domain\n  railway domain example.com --port 3000\n  railway domain list --service api --json\n  railway domain status example.com\n  railway domain update example.com --port 8080\n  railway domain certificate retry example.com\n  railway domain delete example.com --yes"
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -96,6 +96,22 @@ enum Commands {
         #[clap(long = "domain", value_name = "DOMAIN")]
         new_domain: Option<String>,
     },
+
+    /// Manage custom domain certificates
+    Certificate {
+        #[clap(subcommand)]
+        command: CertificateCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CertificateCommands {
+    /// Retry certificate issuance for a custom domain
+    Retry {
+        /// Domain name, URL, or domain ID
+        #[clap(value_name = "DOMAIN_OR_ID")]
+        domain: String,
+    },
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -133,6 +149,11 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?
         }
+        Some(Commands::Certificate { command }) => match command {
+            CertificateCommands::Retry { domain } => {
+                retry_domain_certificate(domain, project, service, environment, json).await?
+            }
+        },
         None => {
             if let Some(domain) = domain {
                 create_custom_domain(domain, port, project, service, environment, json).await?;
@@ -376,6 +397,44 @@ async fn update_domain(
     } else {
         let changes = update_change_summary(port, new_domain.as_deref());
         println!("Updated {}.", changes);
+        print_domain_details(&updated, "Updated domain status", false);
+    }
+
+    Ok(())
+}
+
+async fn retry_domain_certificate(
+    identifier: String,
+    project: Option<String>,
+    service_name: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service_name, environment).await?;
+    let domain = resolve_domain(&ctx, &identifier).await?;
+
+    if domain.summary.kind != DomainKind::Custom {
+        bail!("Certificate retry is only supported for custom domains.");
+    }
+
+    post_graphql::<mutations::CustomDomainIssueCertificate, _>(
+        &ctx.client,
+        ctx.configs.get_backboard_internal(),
+        mutations::custom_domain_issue_certificate::Variables {
+            id: domain.summary.id.clone(),
+        },
+    )
+    .await?;
+
+    let updated = resolve_domain(&ctx, &domain.summary.id).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&DomainOutput { domain: updated })?
+        );
+    } else {
+        println!("Certificate retry requested.");
         print_domain_details(&updated, "Updated domain status", false);
     }
 
@@ -1236,6 +1295,14 @@ mod tests {
                 port: Some(8080),
                 new_domain: Some(new_domain),
             }) if identifier == "example.com" && new_domain == "api-new"
+        ));
+
+        let args = Args::parse_from(["domain", "certificate", "retry", "example.com"]);
+        assert!(matches!(
+            args.command,
+            Some(Commands::Certificate {
+                command: CertificateCommands::Retry { domain },
+            }) if domain == "example.com"
         ));
     }
 

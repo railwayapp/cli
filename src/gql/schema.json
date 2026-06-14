@@ -13782,6 +13782,37 @@
                 {
                   "defaultValue": null,
                   "description": null,
+                  "name": "id",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Issues a new certificate",
+              "isDeprecated": false,
+              "name": "customDomainIssueCertificate",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "Boolean",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": null,
                   "name": "environmentId",
                   "type": {
                     "kind": "NON_NULL",

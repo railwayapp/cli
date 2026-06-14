@@ -264,6 +264,14 @@ pub struct CustomDomainDelete;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainIssueCertificate.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CustomDomainIssueCertificate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/EnvironmentCreate.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none

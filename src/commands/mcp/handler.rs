@@ -1021,6 +1021,44 @@ impl RailwayMcp {
     }
 
     #[tool(
+        description = "Retry TLS certificate issuance for a custom domain by domain name, URL, or domain ID. Custom domains only. Returns updated status after readback."
+    )]
+    async fn retry_domain_certificate(
+        &self,
+        Parameters(params): Parameters<DomainStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+        let domain = self.resolve_domain_details(&ctx, &params.domain).await?;
+
+        if domain.kind != McpDomainKind::Custom {
+            return Err(McpError::invalid_params(
+                "Certificate retry is only supported for custom domains.",
+                None,
+            ));
+        }
+
+        post_graphql::<mutations::CustomDomainIssueCertificate, _>(
+            &self.client,
+            self.configs.get_backboard_internal(),
+            mutations::custom_domain_issue_certificate::Variables {
+                id: domain.id.clone(),
+            },
+        )
+        .await
+        .map_err(|e| {
+            McpError::internal_error(format!("Failed to retry domain certificate: {e}"), None)
+        })?;
+
+        let updated = self.resolve_domain_details(&ctx, &domain.id).await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Certificate retry requested.\n\n{}",
+            format_domain_details(&updated)
+        ))]))
+    }
+
+    #[tool(
         description = "Delete a custom or service domain by domain name, URL, or domain ID. This is irreversible. Returns a preview first.",
         annotations(destructive_hint = true)
     )]
