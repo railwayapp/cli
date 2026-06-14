@@ -1,7 +1,6 @@
 use super::*;
 use crate::client::post_graphql;
-use crate::controllers::environment::get_matched_environment;
-use crate::controllers::project::{ensure_project_and_environment_exist, get_project};
+use crate::controllers::project::resolve_service_context;
 use crate::gql::queries::deployments::{DeploymentStatus, ResponseData, Variables};
 use chrono::{DateTime, Local, Utc};
 use serde::Serialize;
@@ -40,6 +39,10 @@ struct ListArgs {
     #[clap(short, long)]
     environment: Option<String>,
 
+    /// Project ID or name to list deployments from (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT")]
+    project: Option<String>,
+
     /// Maximum number of deployments to show (default: 20, max: 1000)
     #[clap(long, default_value = "20")]
     limit: i64,
@@ -62,6 +65,7 @@ pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Commands::List(list_args) => {
             list_deployments(
+                list_args.project,
                 list_args.service,
                 list_args.environment,
                 list_args.limit,
@@ -81,17 +85,12 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 async fn list_deployments(
+    project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
     limit: i64,
     json: bool,
 ) -> Result<()> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
-
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-
     let limit = if limit > 1000 {
         eprintln!(
             "{}",
@@ -108,37 +107,18 @@ async fn list_deployments(
         limit
     };
 
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
-    let environment = match environment {
-        Some(env) => env,
-        None => linked_project.environment_id()?.to_string(),
-    };
-    let environment_id = get_matched_environment(&project, environment)?.id;
-
-    let service_id = if let Some(service_name_or_id) = service {
-        let service = project
-            .services
-            .edges
-            .iter()
-            .find(|s| {
-                s.node.name.to_lowercase() == service_name_or_id.to_lowercase()
-                    || s.node.id == service_name_or_id
-            })
-            .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", service_name_or_id))?;
-        service.node.id.clone()
-    } else if let Some(linked_service_id) = linked_project.service {
-        linked_service_id
-    } else {
-        bail!(
-            "No service specified and no service linked. Use 'railway link' to link a service or specify one with the service argument."
-        );
-    };
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let client = ctx.client;
+    let configs = ctx.configs;
+    let project_id = ctx.project_id;
+    let environment_id = ctx.environment_id;
+    let service_id = ctx.service_id;
 
     let variables = Variables {
         input: crate::gql::queries::deployments::DeploymentListInput {
             service_id: Some(service_id.clone()),
             environment_id: Some(environment_id),
-            project_id: None,
+            project_id: Some(project_id),
             status: None,
             include_deleted: None,
         },
