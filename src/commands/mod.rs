@@ -46,6 +46,7 @@ pub mod skills;
 pub mod ssh;
 pub mod starship;
 pub mod status;
+pub mod tcp_proxy;
 pub mod telemetry_cmd;
 pub mod templates;
 pub mod unlink;
