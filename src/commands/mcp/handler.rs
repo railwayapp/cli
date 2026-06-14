@@ -1001,6 +1001,47 @@ impl RailwayMcp {
     }
 
     #[tool(
+        description = "List public TCP proxies for a Railway service. Returns endpoint, ID, proxy port, application port, and sync status."
+    )]
+    async fn list_tcp_proxies(
+        &self,
+        Parameters(params): Parameters<ServiceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_list_tcp_proxies(params).await
+    }
+
+    #[tool(
+        description = "Create a public TCP proxy for a Railway service application port. Only one TCP proxy is allowed per service instance."
+    )]
+    async fn create_tcp_proxy(
+        &self,
+        Parameters(params): Parameters<CreateTcpProxyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_create_tcp_proxy(params).await
+    }
+
+    #[tool(
+        description = "Get details for one public TCP proxy by ID, domain, endpoint, proxy port, or application port."
+    )]
+    async fn get_tcp_proxy(
+        &self,
+        Parameters(params): Parameters<TcpProxySelectorParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_get_tcp_proxy(params).await
+    }
+
+    #[tool(
+        description = "Remove a public TCP proxy by ID, domain, endpoint, proxy port, or application port. This is irreversible and returns a preview first.",
+        annotations(destructive_hint = true)
+    )]
+    async fn remove_tcp_proxy(
+        &self,
+        Parameters(params): Parameters<RemoveTcpProxyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_remove_tcp_proxy(params).await
+    }
+
+    #[tool(
         description = "Set reference variables on a service. Each variable value must be a Railway reference expression starting with '${{' (e.g. '${{ Postgres.DATABASE_URL }}')."
     )]
     async fn add_reference_variable(
@@ -1224,6 +1265,26 @@ impl RailwayMcp {
             response.deployment_domain,
             response.deployment_id,
         ))]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_proxy_tools_are_registered() {
+        let router = RailwayMcp::tool_router();
+        let tools = router.list_all();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"list_tcp_proxies"));
+        assert!(names.contains(&"create_tcp_proxy"));
+        assert!(names.contains(&"get_tcp_proxy"));
+        assert!(names.contains(&"remove_tcp_proxy"));
     }
 }
 

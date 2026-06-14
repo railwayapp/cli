@@ -1,6 +1,12 @@
 #[macro_export]
 macro_rules! commands {
-    ($($module:ident $(($($alias:ident),*))?),*) => {
+    (@command_name $module:ident) => {
+        stringify!($module)
+    };
+    (@command_name $module:ident as $name:literal) => {
+        $name
+    };
+    ($($module:ident $(as $name:literal)? $(($($alias:ident),*))?),*) => {
         pastey::paste! {
             /// Build the global CLI (root command) and attach module subcommands.
             pub fn build_args() -> clap::Command {
@@ -17,6 +23,7 @@ macro_rules! commands {
                     .version(clap::crate_version!());
                 $(
                     {
+                        let command_name = $crate::commands!(@command_name $module $(as $name)?);
                         // Get the subcommand as defined by the module.
                         let sub = <$crate::commands::$module::Args as ::clap::CommandFactory>::command();
                         // Allow the module to add dynamic arguments (if needed) and add any aliases.
@@ -37,10 +44,9 @@ macro_rules! commands {
                                     s = get_dynamic_args(s);
                                 }
                             }
-                            s = s.name(stringify!($module));
+                            s = s.name(command_name);
                             s
                         };
-                        let command_name = stringify!($module);
                         // Add this subcommand into the global CLI.
                         cmd = cmd.subcommand(sub.name(command_name));
                     }
@@ -63,7 +69,8 @@ macro_rules! commands {
             pub async fn exec_cli(matches: clap::ArgMatches) -> anyhow::Result<()> {
                 match matches.subcommand() {
                     $(
-                        Some((stringify!([<$module:snake>]), sub_matches)) => {
+                        Some((matched_command_name, sub_matches))
+                            if matched_command_name == $crate::commands!(@command_name [<$module:snake>] $(as $name)?) => {
                             // Walk nested subcommand levels so telemetry can
                             // distinguish e.g. `sandbox template build` from
                             // `sandbox template status` ("template:build").

@@ -15,6 +15,7 @@ pub mod sandbox_exec;
 pub mod scale_tui;
 pub mod service;
 pub mod ssh;
+pub mod tcp_proxy;
 pub mod upload;
 pub mod user;
 pub mod variables;
