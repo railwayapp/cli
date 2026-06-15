@@ -33,6 +33,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod open;
 mod output;
+pub mod private_network;
 pub mod project;
 pub mod redeploy;
 pub mod restart;

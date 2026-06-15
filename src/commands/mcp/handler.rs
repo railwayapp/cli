@@ -1001,6 +1001,56 @@ impl RailwayMcp {
     }
 
     #[tool(
+        description = "List private networks for a Railway environment. Dashboard parity: mirrors privateNetworks(environmentId)."
+    )]
+    async fn list_private_networks(
+        &self,
+        Parameters(params): Parameters<EnvironmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_list_private_networks(params).await
+    }
+
+    #[tool(
+        description = "Show a service private network endpoint status. Dashboard parity: mirrors privateNetworkEndpoint(privateNetworkId, environmentId, serviceId)."
+    )]
+    async fn private_network_status(
+        &self,
+        Parameters(params): Parameters<PrivateNetworkStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_private_network_status(params).await
+    }
+
+    #[tool(
+        description = "Enable private networking through Railway environment config. Dashboard parity: sets privateNetworkDisabled=false and optionally services.<serviceId>.networking.privateNetworkEndpoint; no direct endpoint mutations."
+    )]
+    async fn enable_private_network(
+        &self,
+        Parameters(params): Parameters<EnablePrivateNetworkParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_enable_private_network(params).await
+    }
+
+    #[tool(
+        description = "Set a service private endpoint DNS prefix through Railway environment config. Dashboard parity: uses the same config apply workflow as the dashboard endpoint edit."
+    )]
+    async fn set_private_network_endpoint(
+        &self,
+        Parameters(params): Parameters<SetPrivateNetworkEndpointParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_set_private_network_endpoint(params).await
+    }
+
+    #[tool(
+        description = "Check whether a private endpoint DNS prefix is available on a private network. Dashboard parity: mirrors privateNetworkEndpointNameAvailable."
+    )]
+    async fn check_private_network_endpoint_name(
+        &self,
+        Parameters(params): Parameters<CheckPrivateNetworkEndpointNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_check_private_network_endpoint_name(params).await
+    }
+
+    #[tool(
         description = "Set reference variables on a service. Each variable value must be a Railway reference expression starting with '${{' (e.g. '${{ Postgres.DATABASE_URL }}')."
     )]
     async fn add_reference_variable(
@@ -1224,6 +1274,27 @@ impl RailwayMcp {
             response.deployment_domain,
             response.deployment_id,
         ))]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_network_tools_are_registered() {
+        let router = RailwayMcp::tool_router();
+        let tools = router.list_all();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"list_private_networks"));
+        assert!(names.contains(&"private_network_status"));
+        assert!(names.contains(&"enable_private_network"));
+        assert!(names.contains(&"set_private_network_endpoint"));
+        assert!(names.contains(&"check_private_network_endpoint_name"));
     }
 }
 

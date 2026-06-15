@@ -23,6 +23,90 @@ pub struct ServiceParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EnvironmentParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PrivateNetworkStatusParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Private network ID, name, DNS suffix, or numeric network ID. Defaults to the network named "railway", then the first network.
+    #[serde(default)]
+    pub network: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EnablePrivateNetworkParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. Required only when endpoint is provided, unless a service is linked.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Optional service private endpoint DNS prefix to configure in the same environment config patch.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Stage the environment config change instead of committing it immediately.
+    #[serde(default)]
+    pub stage: bool,
+    /// Commit message to use when applying immediately.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetPrivateNetworkEndpointParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Service private endpoint DNS prefix to set through environment config.
+    pub endpoint: String,
+    /// Stage the environment config change instead of committing it immediately.
+    #[serde(default)]
+    pub stage: bool,
+    /// Commit message to use when applying immediately.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CheckPrivateNetworkEndpointNameParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Private endpoint DNS prefix to validate and check.
+    pub endpoint: String,
+    /// Private network ID, name, DNS suffix, or numeric network ID. Defaults to the network named "railway", then the first network.
+    #[serde(default)]
+    pub network: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListDeploymentsParams {
     /// The project ID. If omitted, uses the currently linked project.
     #[serde(default)]

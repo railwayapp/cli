@@ -55,6 +55,7 @@ commands!(
     mcp,
     metrics,
     open,
+    private_network as "private-network",
     project,
     run(local),
     sandbox(sandboxes, sbx),
@@ -713,6 +714,55 @@ mod cli_tests {
                 "worker",
                 "eu-west=2",
                 "us-east=1",
+            ]);
+        }
+
+        #[test]
+        fn private_network_subcommands() {
+            assert_parses(&["private-network", "list"]);
+            assert_parses(&[
+                "private-network",
+                "list",
+                "--environment",
+                "production",
+                "--json",
+            ]);
+            assert_parses(&[
+                "private-network",
+                "status",
+                "--service",
+                "api",
+                "--network",
+                "railway",
+            ]);
+            assert_parses(&["private-network", "enable"]);
+            assert_parses(&["private-network", "enable", "--stage"]);
+            assert_parses(&[
+                "private-network",
+                "enable",
+                "--service",
+                "api",
+                "--endpoint",
+                "api-internal",
+                "--message",
+                "Enable private networking",
+            ]);
+            assert_parses(&[
+                "private-network",
+                "set-endpoint",
+                "api-internal",
+                "--service",
+                "api",
+            ]);
+            assert_parses(&["private-network", "set-endpoint", "api-renamed", "--stage"]);
+            assert_parses(&["private-network", "name-available", "api-internal"]);
+            assert_parses(&[
+                "private-network",
+                "name-available",
+                "api-internal",
+                "--network",
+                "railway",
+                "--json",
             ]);
         }
 

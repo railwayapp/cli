@@ -1,0 +1,13 @@
+query PrivateNetworks($environmentId: String!) {
+  privateNetworks(environmentId: $environmentId) {
+    publicId
+    projectId
+    environmentId
+    name
+    dnsName
+    networkId
+    tags
+    createdAt
+    deletedAt
+  }
+}

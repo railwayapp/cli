@@ -239,6 +239,65 @@ pub struct ServiceContext {
     pub service_name: String,
 }
 
+/// Resolved context for environment-scoped operations.
+pub struct EnvironmentContext {
+    pub client: Client,
+    pub configs: Configs,
+    pub environment_id: String,
+    pub environment_name: String,
+}
+
+/// Resolves project and environment from args and linked project.
+/// When project_arg is provided, environment_arg must also be provided.
+pub async fn resolve_environment_context(
+    project_arg: Option<String>,
+    environment_arg: Option<String>,
+) -> Result<EnvironmentContext> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+
+    if project_arg.is_some() && environment_arg.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if project_arg.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = project_arg
+        .or_else(|| linked_project.as_ref().map(|lp| lp.project.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+        })?;
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
+
+    let env = match environment_arg {
+        Some(env) => env,
+        None => linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string(),
+    };
+    let environment = get_matched_environment(&project, env)?;
+    let environment_id = environment.id;
+    let environment_name = environment.name;
+
+    Ok(EnvironmentContext {
+        client,
+        configs,
+        environment_id,
+        environment_name,
+    })
+}
+
 /// Resolves project, environment, and service from args and linked project.
 /// When project_arg is provided, environment_arg must also be provided.
 pub async fn resolve_service_context(
