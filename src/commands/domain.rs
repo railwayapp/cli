@@ -416,6 +416,9 @@ async fn retry_domain_certificate(
     if domain.summary.kind != DomainKind::Custom {
         bail!("Certificate retry is only supported for custom domains.");
     }
+    if let Some(reason) = certificate_retry_unavailable_reason(&domain) {
+        bail!("{reason}");
+    }
 
     post_graphql::<mutations::CustomDomainIssueCertificate, _>(
         &ctx.client,
@@ -1106,6 +1109,39 @@ fn enum_name_option<T: fmt::Debug>(value: &Option<T>) -> Option<String> {
     value.as_ref().map(enum_name)
 }
 
+const CERTIFICATE_STATUS_ISSUE_FAILED: &str = "CERTIFICATE_STATUS_TYPE_ISSUE_FAILED";
+
+fn certificate_retry_unavailable_reason(domain: &DomainDetails) -> Option<String> {
+    let Some(certificate) = &domain.certificate else {
+        return Some(
+            "Certificate retry is only available after certificate issuance fails. Current status is unknown."
+                .to_string(),
+        );
+    };
+
+    if certificate.status != CERTIFICATE_STATUS_ISSUE_FAILED {
+        return Some(format!(
+            "Certificate retry is only available after certificate issuance fails. Current status: {}.",
+            certificate.status
+        ));
+    }
+
+    if certificate.retryable == Some(false) {
+        return Some(
+            certificate
+                .error_message
+                .as_ref()
+                .map(|message| format!("Certificate retry is not available for this failure. {message}"))
+                .unwrap_or_else(|| {
+                    "Certificate retry is not available for this failure. Check your DNS configuration or contact support."
+                        .to_string()
+                }),
+        );
+    }
+
+    None
+}
+
 fn verification_txt_value(token: &str) -> String {
     let mut token = token;
     while let Some(stripped) = token.strip_prefix("railway-verify=") {
@@ -1275,6 +1311,17 @@ mod tests {
         domain
     }
 
+    fn sample_certificate(status: &str, retryable: Option<bool>) -> CertificateStatusOutput {
+        CertificateStatusOutput {
+            status: status.to_string(),
+            detailed_status: None,
+            error_message: Some("Certificate failed.".to_string()),
+            error_type: None,
+            retryable,
+            cdn_provider: None,
+        }
+    }
+
     #[test]
     fn parses_legacy_create_and_subcommands() {
         let args = Args::parse_from(["domain", "example.com", "--port", "3000"]);
@@ -1365,6 +1412,30 @@ mod tests {
             "web.up.railway.app"
         );
         assert!(service_domain_input(&domain, "").is_err());
+    }
+
+    #[test]
+    fn certificate_retry_matches_dashboard_gate() {
+        let mut domain = sample_domain("dom_123", "api.example.com");
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
+
+        domain.certificate = Some(sample_certificate(CERTIFICATE_STATUS_ISSUE_FAILED, None));
+        assert_eq!(certificate_retry_unavailable_reason(&domain), None);
+
+        domain.certificate = Some(sample_certificate(
+            CERTIFICATE_STATUS_ISSUE_FAILED,
+            Some(true),
+        ));
+        assert_eq!(certificate_retry_unavailable_reason(&domain), None);
+
+        domain.certificate = Some(sample_certificate(
+            CERTIFICATE_STATUS_ISSUE_FAILED,
+            Some(false),
+        ));
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
+
+        domain.certificate = Some(sample_certificate("CERTIFICATE_STATUS_TYPE_VALID", None));
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
     }
 
     #[test]

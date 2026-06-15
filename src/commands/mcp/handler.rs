@@ -536,6 +536,39 @@ fn enum_name_option<T: fmt::Debug>(value: &Option<T>) -> Option<String> {
     value.as_ref().map(enum_name)
 }
 
+const CERTIFICATE_STATUS_ISSUE_FAILED: &str = "CERTIFICATE_STATUS_TYPE_ISSUE_FAILED";
+
+fn certificate_retry_unavailable_reason(domain: &McpDomainDetails) -> Option<String> {
+    let Some(certificate) = &domain.certificate else {
+        return Some(
+            "Certificate retry is only available after certificate issuance fails. Current status is unknown."
+                .to_string(),
+        );
+    };
+
+    if certificate.status != CERTIFICATE_STATUS_ISSUE_FAILED {
+        return Some(format!(
+            "Certificate retry is only available after certificate issuance fails. Current status: {}.",
+            certificate.status
+        ));
+    }
+
+    if certificate.retryable == Some(false) {
+        return Some(
+            certificate
+                .error_message
+                .as_ref()
+                .map(|message| format!("Certificate retry is not available for this failure. {message}"))
+                .unwrap_or_else(|| {
+                    "Certificate retry is not available for this failure. Check your DNS configuration or contact support."
+                        .to_string()
+                }),
+        );
+    }
+
+    None
+}
+
 fn validate_domain_port(port: i64) -> Result<i64, McpError> {
     if (1..=65535).contains(&port) {
         Ok(port)
@@ -1030,7 +1063,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Retry TLS certificate issuance for a custom domain by domain name, URL, or domain ID. Custom domains only. Returns updated status after readback."
+        description = "Retry failed TLS certificate issuance for a custom domain by domain name, URL, or domain ID. Custom domains only. Returns updated status after readback."
     )]
     async fn retry_domain_certificate(
         &self,
@@ -1046,6 +1079,9 @@ impl RailwayMcp {
                 "Certificate retry is only supported for custom domains.",
                 None,
             ));
+        }
+        if let Some(reason) = certificate_retry_unavailable_reason(&domain) {
+            return Err(McpError::invalid_params(reason, None));
         }
 
         post_graphql::<mutations::CustomDomainIssueCertificate, _>(
@@ -1852,6 +1888,17 @@ mod tests {
         domain
     }
 
+    fn sample_certificate(status: &str, retryable: Option<bool>) -> McpCertificateStatus {
+        McpCertificateStatus {
+            status: status.to_string(),
+            detailed_status: None,
+            error_message: Some("Certificate failed.".to_string()),
+            error_type: None,
+            retryable,
+            cdn_provider: None,
+        }
+    }
+
     #[test]
     fn mcp_domain_lookup_accepts_id_name_and_url() {
         let domains = vec![sample_domain()];
@@ -1875,6 +1922,30 @@ mod tests {
             "web.up.railway.app"
         );
         assert!(mcp_service_domain_input(&domain, "").is_err());
+    }
+
+    #[test]
+    fn mcp_certificate_retry_matches_dashboard_gate() {
+        let mut domain = sample_domain();
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
+
+        domain.certificate = Some(sample_certificate(CERTIFICATE_STATUS_ISSUE_FAILED, None));
+        assert_eq!(certificate_retry_unavailable_reason(&domain), None);
+
+        domain.certificate = Some(sample_certificate(
+            CERTIFICATE_STATUS_ISSUE_FAILED,
+            Some(true),
+        ));
+        assert_eq!(certificate_retry_unavailable_reason(&domain), None);
+
+        domain.certificate = Some(sample_certificate(
+            CERTIFICATE_STATUS_ISSUE_FAILED,
+            Some(false),
+        ));
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
+
+        domain.certificate = Some(sample_certificate("CERTIFICATE_STATUS_TYPE_VALID", None));
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
     }
 
     #[test]
