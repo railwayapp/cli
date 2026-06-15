@@ -479,12 +479,21 @@ fn format_domain_details(domain: &McpDomainDetails) -> String {
                 .unwrap_or("");
             let host_label = host.strip_suffix(&format!(".{zone}")).unwrap_or(host);
             output.push_str(&format!(
-                "- TXT {host_label} -> railway-verify={token} (verification)\n"
+                "- TXT {host_label} -> {} (verification)\n",
+                verification_txt_value(token)
             ));
         }
     }
 
     output
+}
+
+fn verification_txt_value(token: &str) -> String {
+    let mut token = token;
+    while let Some(stripped) = token.strip_prefix("railway-verify=") {
+        token = stripped;
+    }
+    format!("railway-verify={token}")
 }
 
 fn format_target_port(port: Option<i64>) -> String {
@@ -1866,5 +1875,18 @@ mod tests {
             "web.up.railway.app"
         );
         assert!(mcp_service_domain_input(&domain, "").is_err());
+    }
+
+    #[test]
+    fn mcp_verification_txt_value_has_one_prefix() {
+        assert_eq!(verification_txt_value("abc123"), "railway-verify=abc123");
+        assert_eq!(
+            verification_txt_value("railway-verify=abc123"),
+            "railway-verify=abc123"
+        );
+        assert_eq!(
+            verification_txt_value("railway-verify=railway-verify=abc123"),
+            "railway-verify=abc123"
+        );
     }
 }

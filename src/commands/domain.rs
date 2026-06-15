@@ -975,7 +975,7 @@ fn print_dns(domains: &[DnsRecordOutput], verification: Option<&VerificationOutp
                 let host_label = zone
                     .and_then(|zone| host.strip_suffix(&format!(".{}", zone)))
                     .unwrap_or(host);
-                Some((host_label.to_string(), format!("railway-verify={}", token)))
+                Some((host_label.to_string(), verification_txt_value(token)))
             }
             _ => None,
         }
@@ -1106,6 +1106,14 @@ fn enum_name_option<T: fmt::Debug>(value: &Option<T>) -> Option<String> {
     value.as_ref().map(enum_name)
 }
 
+fn verification_txt_value(token: &str) -> String {
+    let mut token = token;
+    while let Some(stripped) = token.strip_prefix("railway-verify=") {
+        token = stripped;
+    }
+    format!("railway-verify={token}")
+}
+
 fn confirm_delete<F>(yes: bool, is_terminal: bool, prompt: F) -> Result<bool>
 where
     F: FnOnce() -> Result<bool>,
@@ -1130,10 +1138,10 @@ enum DomainKind {
 
 impl fmt::Display for DomainKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DomainKind::Custom => write!(f, "custom"),
-            DomainKind::Service => write!(f, "service"),
-        }
+        f.pad(match self {
+            DomainKind::Custom => "custom",
+            DomainKind::Service => "service",
+        })
     }
 }
 
@@ -1313,6 +1321,25 @@ mod tests {
         assert!(parse_port("0").is_err());
         assert!(parse_port("65536").is_err());
         assert!(Args::try_parse_from(["domain", "update", "example.com", "--port", "0"]).is_err());
+    }
+
+    #[test]
+    fn domain_kind_display_respects_padding() {
+        assert_eq!(format!("{:<10}", DomainKind::Service), "service   ");
+        assert_eq!(format!("{:<9}", DomainKind::Custom), "custom   ");
+    }
+
+    #[test]
+    fn verification_txt_value_has_one_prefix() {
+        assert_eq!(verification_txt_value("abc123"), "railway-verify=abc123");
+        assert_eq!(
+            verification_txt_value("railway-verify=abc123"),
+            "railway-verify=abc123"
+        );
+        assert_eq!(
+            verification_txt_value("railway-verify=railway-verify=abc123"),
+            "railway-verify=abc123"
+        );
     }
 
     #[test]
