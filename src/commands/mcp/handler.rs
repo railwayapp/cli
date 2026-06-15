@@ -1050,7 +1050,7 @@ impl RailwayMcp {
 
         post_graphql::<mutations::CustomDomainIssueCertificate, _>(
             &self.client,
-            self.configs.get_backboard_internal(),
+            self.configs.get_backboard(),
             mutations::custom_domain_issue_certificate::Variables {
                 id: domain.id.clone(),
             },

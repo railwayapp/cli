@@ -291,10 +291,6 @@ impl Configs {
         format!("https://backboard.{}/graphql/v2", self.get_host())
     }
 
-    pub fn get_backboard_internal(&self) -> String {
-        format!("https://backboard.{}/graphql/internal", self.get_host())
-    }
-
     /// SSH relay host and non-default port for the current environment.
     /// Mirrors backboard's `controllers/ssh` mapping: only the develop relay
     /// is separate (and listens on 2222); staging falls through to the

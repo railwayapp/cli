@@ -419,7 +419,7 @@ async fn retry_domain_certificate(
 
     post_graphql::<mutations::CustomDomainIssueCertificate, _>(
         &ctx.client,
-        ctx.configs.get_backboard_internal(),
+        ctx.configs.get_backboard(),
         mutations::custom_domain_issue_certificate::Variables {
             id: domain.summary.id.clone(),
         },
