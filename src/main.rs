@@ -562,6 +562,20 @@ mod cli_tests {
         }
 
         #[test]
+        fn deployment_list_project_flag_parses() {
+            assert_parses(&[
+                "deployment",
+                "list",
+                "--project",
+                "project-id",
+                "--environment",
+                "production",
+                "--service",
+                "api",
+            ]);
+        }
+
+        #[test]
         fn logs_http_examples_parse() {
             assert_parses(&["logs", "--http", "--lines", "50"]);
             assert_parses(&[
