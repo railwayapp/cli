@@ -146,8 +146,14 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
     // isn't a TTY (piped, CI, agent-driven). Matches the convention used by
     // `interact_or!` elsewhere in this CLI.
     let non_interactive = args.yes || !is_stdout_terminal();
+    // When launched by the installer (`… | sh --agents`, which sets
+    // RAILWAY_SETUP_EMBEDDED), render only the skills/MCP steps as part of one
+    // unified flow — the installer prints the banner, next steps, and closer.
+    let embedded = std::env::var("RAILWAY_SETUP_EMBEDDED").is_ok();
 
-    println!("\n{}\n", "Railway Agent Setup".bold().cyan());
+    if !embedded {
+        println!("\n{}\n", "Railway Agent Setup".bold().cyan());
+    }
 
     let choices: Vec<ToolChoice> = coding_tools(&home)
         .into_iter()
@@ -166,7 +172,9 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
             .filter(|c| c.detected)
             .map(|c| c.slug.to_string())
             .collect();
-        println!("{} {}\n", "Detected:".bold(), detected.join(", ").cyan());
+        if !embedded {
+            println!("{} {}\n", "Detected:".bold(), detected.join(", ").cyan());
+        }
         detected
     } else {
         let default_indices: Vec<usize> = choices
@@ -206,44 +214,95 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
         .cloned()
         .collect();
     if missing_skills.is_empty() {
-        println!(
-            "\n{} {}",
-            "-".dimmed(),
-            "Railway skills already configured; skipping install.".dimmed()
-        );
+        if !embedded {
+            println!(
+                "\n{} {}",
+                "-".dimmed(),
+                "Railway skills already configured; skipping install.".dimmed()
+            );
+        }
     } else {
-        skills::install_skills(&missing_skills, false).await?;
+        skills::install_skills(&missing_skills, false, embedded).await?;
+    }
+    if embedded {
+        let names: Vec<&str> = choices
+            .iter()
+            .filter(|c| selected_slugs.iter().any(|s| s.as_str() == c.slug))
+            .map(|c| c.name)
+            .collect();
+        println!(
+            "{} {} \u{2014} {}",
+            "\u{2713}".green(),
+            "Agent skills".bold(),
+            names.join(", ")
+        );
     }
 
     // Step 2: MCP install (skips universal internally — no MCP convention).
     // `--remote` short-circuits the prompt; `-y`/non-TTY defaults to local.
     let mcp_choice = pick_mcp_choice(args.remote, non_interactive)?;
-    match mcp_choice {
-        McpChoice::Local => install_missing_mcp(&home, &selected_slugs, false).await?,
-        McpChoice::Remote => install_missing_mcp(&home, &selected_slugs, true).await?,
+    let mcp_transport = match mcp_choice {
+        McpChoice::Local => {
+            install_missing_mcp(&home, &selected_slugs, false, embedded).await?;
+            Some("local")
+        }
+        McpChoice::Remote => {
+            install_missing_mcp(&home, &selected_slugs, true, embedded).await?;
+            Some("remote")
+        }
         McpChoice::Skip => {
-            println!(
-                "\n{} {}",
-                "-".dimmed(),
-                "Skipping MCP install. Run `railway mcp install` later to configure.".dimmed()
-            );
+            if !embedded {
+                println!(
+                    "\n{} {}",
+                    "-".dimmed(),
+                    "Skipping MCP install. Run `railway mcp install` later to configure.".dimmed()
+                );
+            }
+            None
+        }
+    };
+    if embedded {
+        if let Some(transport) = mcp_transport {
+            let names: Vec<&str> = choices
+                .iter()
+                .filter(|c| {
+                    selected_slugs.iter().any(|s| s.as_str() == c.slug)
+                        && mcp_install::supports_mcp(c.slug)
+                })
+                .map(|c| c.name)
+                .collect();
+            if !names.is_empty() {
+                println!(
+                    "{} {} ({}) \u{2014} {}",
+                    "\u{2713}".green(),
+                    "Railway MCP".bold(),
+                    transport,
+                    names.join(", ")
+                );
+            }
         }
     }
 
-    // Step 3: login
-    if non_interactive {
-        warn_if_not_logged_in().await;
-    } else {
-        ensure_logged_in_interactive().await?;
+    // Step 3: login — skipped when embedded; the installer owns login (it logs
+    // in interactively before this runs, and shows `railway login` in its
+    // consolidated next-steps when not logged in).
+    if !embedded {
+        if non_interactive {
+            warn_if_not_logged_in().await;
+        } else {
+            ensure_logged_in_interactive().await?;
+        }
     }
 
-    // Step 4: docs link
-    println!(
-        "\n{} {} {}\n",
-        "\u{2713}".green().bold(),
-        "Setup complete. Learn more:".bold(),
-        DOCS_URL.purple()
-    );
+    // Step 4: docs link — the installer prints the unified closer when embedded.
+    if !embedded {
+        println!(
+            "\n{} {} {}\n",
+            "\u{2713}".green().bold(),
+            "Setup complete. Learn more:".bold(),
+            DOCS_URL.purple()
+        );
+    }
 
     if let Err(e) = crate::util::agent_advisory::record_setup_complete() {
         eprintln!("{}: {e}", "Warning: failed to record agent setup".yellow());
@@ -362,6 +421,7 @@ async fn install_missing_mcp(
     home: &std::path::Path,
     selected_slugs: &[String],
     remote: bool,
+    quiet: bool,
 ) -> Result<()> {
     let missing_mcp: Vec<String> = selected_slugs
         .iter()
@@ -371,15 +431,17 @@ async fn install_missing_mcp(
         .collect();
 
     if missing_mcp.is_empty() {
-        println!(
-            "\n{} {}",
-            "-".dimmed(),
-            "Railway MCP already configured; skipping install.".dimmed()
-        );
+        if !quiet {
+            println!(
+                "\n{} {}",
+                "-".dimmed(),
+                "Railway MCP already configured; skipping install.".dimmed()
+            );
+        }
         return Ok(());
     }
 
-    mcp_install::install_mcp(&missing_mcp, remote).await
+    mcp_install::install_mcp(&missing_mcp, remote, quiet).await
 }
 
 /// Mirrors the logic at the top of `login::command` without invoking the

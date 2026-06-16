@@ -855,6 +855,9 @@ find_railway_bins() {
 }
 
 print_cli_conflicts() {
+  # In quiet mode (the agent setup flow) we only surface an actual conflict;
+  # the informational "on PATH" listing is noise when there's a single install.
+  local quiet="${1:-}"
   local bins_file
   local bin version
   local count=0
@@ -867,14 +870,14 @@ print_cli_conflicts() {
     return
   fi
 
-  info "Railway CLI on PATH:"
+  [ -z "$quiet" ] && info "Railway CLI on PATH:"
   while IFS= read -r bin; do
     count=$((count + 1))
     version="$("$bin" --version 2>/dev/null || echo unknown)"
-    info "  $bin ($version)"
+    [ -z "$quiet" ] && info "  $bin ($version)"
   done < "$bins_file"
   rm -f "$bins_file"
-  info "Shells use the first entry above."
+  [ -z "$quiet" ] && info "Shells use the first entry above."
 
   if [ "$count" -gt 1 ]; then
     warn "Multiple Railway CLI installs found. No PATH entries were reordered or removed."
@@ -926,11 +929,31 @@ run_agent_setup() {
     fi
   fi
 
-  "$railway_bin" setup agent $yes $remote
+  # Tell `setup agent` it's running inside the installer so it renders its
+  # skills/MCP steps as part of one unified flow (no duplicate header, footer,
+  # login prompt, or restart notices — the installer prints those once below).
+  RAILWAY_SETUP_EMBEDDED=1 "$railway_bin" setup agent $yes $remote
 
-  if ! "$railway_bin" whoami >/dev/null 2>&1; then
-    warn "Next: run '$railway_bin login' to finish setup (opens a browser)."
+  # Record login state for the consolidated next-steps block; don't warn here.
+  if "$railway_bin" whoami >/dev/null 2>&1; then
+    AGENT_LOGGED_IN=1
+  else
+    AGENT_LOGGED_IN=0
   fi
+}
+
+# Consolidated "what to do next" for the agent setup flow — a single block
+# instead of warnings scattered between the install, skills, and MCP steps.
+print_agent_next_steps() {
+  printf '\n%s\n' "${BOLD}Next steps${NO_COLOR}"
+  info "Restart your editor / agent to load the skills and MCP server."
+  if [ "${AGENT_LOGGED_IN:-0}" != "1" ]; then
+    info "Run ${BOLD}railway login${NO_COLOR} to connect your Railway account."
+  fi
+  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ] && activation="$(activation_command)"; then
+    info "New shells: run ${BOLD}$activation${NO_COLOR} (or add it to your shell profile)."
+  fi
+  printf '\n%s %s\n\n' "${GREEN}✓${NO_COLOR} Setup complete." "Learn more: ${UNDERLINE}https://docs.railway.com/ai${NO_COLOR}"
 }
 
 if [ "$UNINSTALL" = 1 ]; then
@@ -1103,6 +1126,10 @@ mkdir -p "${BIN_DIR}" || {
 }
 check_bin_dir "${BIN_DIR}"
 
+if [ "$AGENTS" = 1 ] && [ "$RAILWAY_UPGRADE_AGENT" != "1" ]; then
+  printf '\n%s\n' "${BOLD}Setting up Railway for agents${NO_COLOR}"
+fi
+
 install "${EXT}"
 
 completed "railway was installed successfully to $(tildify "$BIN_DIR/railway")"
@@ -1131,18 +1158,20 @@ if [ "$AGENTS" = 1 ]; then
     info "Upgraded Railway CLI to ${GREEN}${RAILWAY_VERSION}${NO_COLOR}."
   fi
 
-  print_cli_conflicts
+  print_cli_conflicts quiet
   run_agent_setup "$RAILWAY_BIN"
 
-  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ] && activation="$(activation_command)"; then
-    warn "IMPORTANT: Railway was installed to $BIN_DIR."
-    warn "Run '$activation' in new shells before calling railway, or add it to your shell startup file."
-  elif [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ]; then
-    warn "IMPORTANT: Railway was installed to $BIN_DIR."
-    warn "Add it to PATH before calling railway in new shells."
+  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ] && [ -z "$(activation_command)" ]; then
+    # No activation file was written; fall back to a plain PATH note.
+    warn "Railway was installed to $BIN_DIR. Add it to PATH before calling railway in new shells."
   fi
+
+  print_agent_next_steps
 fi
 
+# The "Poof" banner + telemetry notice are the standalone-CLI install ending;
+# the agent flow prints its own unified "Next steps" closer above instead.
+if [ "$AGENTS" != 1 ]; then
 printf "$MAGENTA"
   cat <<'EOF'
                    .
@@ -1165,3 +1194,4 @@ printf "$NO_COLOR"
 
 info "Railway collects anonymous CLI usage data to improve the developer experience."
 info "You can opt out anytime: ${BOLD}railway telemetry disable${NO_COLOR} or ${BOLD}RAILWAY_NO_TELEMETRY=1${NO_COLOR}"
+fi

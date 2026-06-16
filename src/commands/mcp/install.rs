@@ -20,14 +20,20 @@ pub struct Args {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    install_mcp(&args.agent, args.remote).await
+    install_mcp(&args.agent, args.remote, false).await
 }
 
-pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result<()> {
+// `quiet` suppresses the section header, the "Installing … to:" line, per-tool
+// success lines, and the footer/restart notice — used by the embedded
+// agent-setup flow, which prints its own collapsed one-line summary. Failures
+// are always surfaced so a silent error can't contradict that summary.
+pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool, quiet: bool) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let tools = resolve_tools(&home, agent_filter)?;
 
-    println!("\n{}\n", "Railway MCP".bold());
+    if !quiet {
+        println!("\n{}\n", "Railway MCP".bold());
+    }
 
     let configurable: Vec<_> = tools
         .iter()
@@ -38,12 +44,14 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result
     if configurable.is_empty() {
         // The skills command auto-includes "universal", which has no MCP target.
         // Tell the user nothing was configured rather than silently no-op.
-        println!("{}", "No MCP-capable tools selected or detected.".yellow());
-        if tools.iter().any(|t| t.slug == "universal") {
-            println!(
-                "{} The universal `.agents` directory has no MCP convention; pass --agent to target a specific tool.",
-                "!".yellow().bold()
-            );
+        if !quiet {
+            println!("{}", "No MCP-capable tools selected or detected.".yellow());
+            if tools.iter().any(|t| t.slug == "universal") {
+                println!(
+                    "{} The universal `.agents` directory has no MCP convention; pass --agent to target a specific tool.",
+                    "!".yellow().bold()
+                );
+            }
         }
         return Ok(());
     }
@@ -54,24 +62,28 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result
     } else {
         "local stdio".cyan()
     };
-    println!(
-        "{} {} {} {}\n",
-        "Installing".bold(),
-        transport,
-        "to:".bold(),
-        names.join(", ")
-    );
+    if !quiet {
+        println!(
+            "{} {} {} {}\n",
+            "Installing".bold(),
+            transport,
+            "to:".bold(),
+            names.join(", ")
+        );
+    }
 
     for tool in &configurable {
         let path = config_path(tool.slug, &home);
         match install_for(tool.slug, &path, remote) {
             Ok(()) => {
-                println!(
-                    "{} {}: configured \u{2192} {}",
-                    "\u{2713}".green(),
-                    tool.name.bold(),
-                    path.display().to_string().cyan()
-                );
+                if !quiet {
+                    println!(
+                        "{} {}: configured \u{2192} {}",
+                        "\u{2713}".green(),
+                        tool.name.bold(),
+                        path.display().to_string().cyan()
+                    );
+                }
             }
             Err(e) => {
                 println!(
@@ -84,11 +96,13 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool) -> Result
         }
     }
 
-    println!("\n{}", "MCP server installed successfully!".green().bold());
-    println!(
-        "{} You may need to restart your tool(s) for the MCP server to register.\n",
-        "!".yellow().bold()
-    );
+    if !quiet {
+        println!("\n{}", "MCP server installed successfully!".green().bold());
+        println!(
+            "{} You may need to restart your tool(s) for the MCP server to register.\n",
+            "!".yellow().bold()
+        );
+    }
 
     Ok(())
 }
