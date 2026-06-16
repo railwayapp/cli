@@ -1,0 +1,3 @@
+mutation TcpProxyDelete($id: String!) {
+  tcpProxyDelete(id: $id)
+}

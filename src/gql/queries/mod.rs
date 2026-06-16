@@ -114,6 +114,14 @@ pub struct Domains;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/TcpProxies.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TcpProxies;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/ProjectToken.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

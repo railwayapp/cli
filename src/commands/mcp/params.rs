@@ -23,6 +23,55 @@ pub struct ServiceParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateTcpProxyParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Application port to expose through the TCP proxy.
+    pub application_port: i64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TcpProxySelectorParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// TCP proxy ID, domain, endpoint, proxy port, or application port.
+    pub proxy: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveTcpProxyParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// TCP proxy ID, domain, endpoint, proxy port, or application port.
+    pub proxy: String,
+    /// Must be set to true to confirm deletion. This action is irreversible.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListDeploymentsParams {
     /// The project ID. If omitted, uses the currently linked project.
     #[serde(default)]

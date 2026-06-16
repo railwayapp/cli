@@ -67,6 +67,7 @@ commands!(
     status,
     telemetry_cmd(telemetry),
     templates,
+    tcp_proxy as "tcp-proxy",
     unlink,
     up,
     upgrade,
@@ -548,6 +549,7 @@ mod cli_tests {
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
+            assert_subcommand(&["tcp-proxy", "list"], "tcp-proxy");
         }
 
         #[test]
@@ -732,6 +734,15 @@ mod cli_tests {
                 "eu-west=2",
                 "us-east=1",
             ]);
+        }
+
+        #[test]
+        fn tcp_proxy_subcommands() {
+            assert_parses(&["tcp-proxy", "list"]);
+            assert_parses(&["tcp-proxy", "list", "--service", "api", "--json"]);
+            assert_parses(&["tcp-proxy", "create", "--port", "5432"]);
+            assert_parses(&["tcp-proxy", "status", "proxy-id"]);
+            assert_parses(&["tcp-proxy", "delete", "proxy-id", "--yes"]);
         }
 
         #[test]
