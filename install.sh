@@ -724,6 +724,7 @@ configure_shell_startup() {
 }
 
 configure_shell_path() {
+  local quiet="${1:-}"
   local quoted_bin_dir
   local quoted_railway_home
   local fish_bin_dir
@@ -770,6 +771,17 @@ $fish_line"
   if activation="$(activation_command)"; then
     path_commands="$activation"
     startup_contents="$activation"
+  fi
+
+  # Agent flow: still write the startup file, but collapse to one clean line.
+  # The "source in this shell" reminder is deferred to the next-steps block, so
+  # leave PATH_ACTIVATION_PRINTED unset to signal next-steps should show it.
+  if [ -n "$quiet" ]; then
+    if configure_shell_startup "$startup_contents"; then
+      completed "Shell PATH — $(tildify "$SHELL_STARTUP_FILE") updated"
+    fi
+    RAILWAY_ACTIVATION_CMD="$path_commands"
+    return
   fi
 
   warn "Railway was installed to $(tildify "$BIN_DIR"), but this shell does not resolve 'railway' from there yet."
@@ -942,18 +954,27 @@ run_agent_setup() {
   fi
 }
 
-# Consolidated "what to do next" for the agent setup flow — a single block
-# instead of warnings scattered between the install, skills, and MCP steps.
+# Section 2 of the agent setup flow: a visually distinct "completion +
+# verification" block, separated from the installation steps by a rule.
 print_agent_next_steps() {
+  local rule="────────────────────────────────────────────"
+  local n=1
+  printf '\n%s\n\n' "$rule"
+  printf '%s %s\n' "${GREEN}✓${NO_COLOR}" "${BOLD}Setup complete${NO_COLOR}"
+
   printf '\n%s\n' "${BOLD}Next steps${NO_COLOR}"
-  info "Restart your editor / agent to load the skills and MCP server."
+  printf '  %s  %s\n' "$n" "Restart your editor / agent to load the skills and MCP server."
+  n=$((n + 1))
   if [ "${AGENT_LOGGED_IN:-0}" != "1" ]; then
-    info "Run ${BOLD}railway login${NO_COLOR} to connect your Railway account."
+    printf '  %s  Run %s to connect your Railway account.\n' "$n" "${BOLD}railway login${NO_COLOR}"
+    n=$((n + 1))
   fi
-  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ] && activation="$(activation_command)"; then
-    info "New shells: run ${BOLD}$activation${NO_COLOR} (or add it to your shell profile)."
+  if [ -n "${RAILWAY_ACTIVATION_CMD:-}" ]; then
+    printf '  %s  Run %s to use railway in this shell.\n' "$n" "${BOLD}${RAILWAY_ACTIVATION_CMD}${NO_COLOR}"
+    n=$((n + 1))
   fi
-  printf '\n%s %s\n\n' "${GREEN}✓${NO_COLOR} Setup complete." "Learn more: ${UNDERLINE}https://docs.railway.com/ai${NO_COLOR}"
+
+  printf '\n%s\n\n' "Docs · ${UNDERLINE}https://docs.railway.com/agents${NO_COLOR}"
 }
 
 if [ "$UNINSTALL" = 1 ]; then
@@ -1132,13 +1153,21 @@ fi
 
 install "${EXT}"
 
-completed "railway was installed successfully to $(tildify "$BIN_DIR/railway")"
+if [ "$AGENTS" = 1 ]; then
+  completed "CLI — v${RAILWAY_VERSION} · $(tildify "$BIN_DIR")"
+else
+  completed "railway was installed successfully to $(tildify "$BIN_DIR/railway")"
+fi
 if [ "$RAILWAY_UPGRADE_AGENT" != "1" ]; then
   write_env_files
 fi
 
 if ! installed_railway_is_on_path; then
-  configure_shell_path
+  if [ "$AGENTS" = 1 ]; then
+    configure_shell_path quiet
+  else
+    configure_shell_path
+  fi
 fi
 
 if [ "$AGENTS" != 1 ]; then

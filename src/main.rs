@@ -300,7 +300,11 @@ async fn main() -> Result<()> {
     // to cautious interactive users who want release visibility. Suppress it
     // when disabled via env var or CI, where extra output is noise.
     let env_or_ci_suppressed = telemetry::is_auto_update_disabled_by_env() || Configs::env_is_ci();
-    if is_tty && !env_or_ci_suppressed {
+    // The installer's embedded agent setup renders one cohesive flow; the
+    // version/skills update banners are noise mid-install (the user just
+    // configured skills), so suppress them in that context.
+    let embedded_setup = std::env::var("RAILWAY_SETUP_EMBEDDED").is_ok();
+    if is_tty && !env_or_ci_suppressed && !embedded_setup {
         if let Some(ref latest_version) = known_pending {
             let is_skipped = skipped_version.as_deref() == Some(latest_version.as_str());
             if !is_skipped
@@ -341,7 +345,7 @@ async fn main() -> Result<()> {
                 "--force".cyan(),
             );
         }
-    } else if !env_or_ci_suppressed && !is_help_or_error {
+    } else if !env_or_ci_suppressed && !is_help_or_error && !embedded_setup {
         // Non-TTY counterpart of the banner above, for agent callers only.
         // Staged-binary apply is TTY-gated (see auto_applied_version), so a
         // machine whose railway usage is entirely agent-driven would

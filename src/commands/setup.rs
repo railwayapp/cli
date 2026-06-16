@@ -13,7 +13,7 @@ use crate::{
     telemetry::{self, SetupAgentPhase, SetupAgentTrackEvent},
 };
 
-const DOCS_URL: &str = "https://docs.railway.com/ai";
+const DOCS_URL: &str = "https://docs.railway.com/agents";
 
 /// Set up your editor for Railway agent functionality (skills, MCP, login)
 #[derive(Parser)]
