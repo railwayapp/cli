@@ -1,5 +1,7 @@
 use super::*;
 use crate::{
+    client::post_graphql,
+    commands::mutations,
     controllers::{
         project::resolve_service_context,
         variables::{Variable, get_service_variables},
@@ -7,7 +9,8 @@ use crate::{
     table::Table,
     util::progress::create_spinner_if,
 };
-use anyhow::bail;
+use anyhow::{Context, bail};
+use colored::Colorize;
 use std::io::{IsTerminal, Read};
 
 /// Manage environment variables for a service
@@ -65,6 +68,12 @@ enum Commands {
     /// Delete a variable
     #[clap(visible_alias = "rm", visible_alias = "remove")]
     Delete(DeleteArgs),
+
+    /// Import variables from a file
+    Import(ImportArgs),
+
+    /// Export variables to a file
+    Export(ExportArgs),
 }
 
 #[derive(Parser)]
@@ -143,12 +152,60 @@ struct DeleteArgs {
     json: bool,
 }
 
+#[derive(Parser)]
+struct ImportArgs {
+    /// The file to import from (.env or .json)
+    #[clap(short, long)]
+    file: String,
+
+    /// The service to import variables to
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// The environment to import variables to
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Skip triggering deploys when importing variables
+    #[clap(long)]
+    skip_deploys: bool,
+
+    /// Accept all overwrites without prompting
+    #[clap(short, long)]
+    yes: bool,
+
+    /// Output in JSON format
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct ExportArgs {
+    /// The file to export to (.env or .json)
+    #[clap(short, long)]
+    file: String,
+
+    /// The service to export variables from
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// The environment to export variables from
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Output in JSON format (to stdout)
+    #[clap(long)]
+    json: bool,
+}
+
 pub async fn command(args: Args) -> Result<()> {
     if let Some(cmd) = args.command {
         return match cmd {
             Commands::List(list_args) => list_variables(list_args).await,
             Commands::Set(set_args) => set_variable(set_args).await,
             Commands::Delete(delete_args) => delete_variable(delete_args).await,
+            Commands::Import(import_args) => import_variables(import_args).await,
+            Commands::Export(export_args) => export_variables(export_args).await,
         };
     }
 
@@ -374,4 +431,433 @@ fn read_value_from_stdin() -> Result<String> {
     }
 
     Ok(value.to_string())
+}
+
+async fn import_variables(args: ImportArgs) -> Result<()> {
+    let ctx = resolve_service_context(args.service.clone(), args.environment.clone()).await?;
+
+    // Read file content
+    let content = tokio::fs::read_to_string(&args.file)
+        .await
+        .with_context(|| format!("Failed to read file: {}", args.file))?;
+
+    // Parse variables based on file extension
+    let variables = if args.file.ends_with(".json") {
+        parse_json_variables(&content)?
+    } else {
+        parse_env_variables(&content)?
+    };
+
+    if variables.is_empty() {
+        eprintln!("No variables found in file");
+        return Ok(());
+    }
+
+    // Get existing variables for conflict detection
+    let existing = get_service_variables(
+        &ctx.client,
+        &ctx.configs,
+        ctx.project.id.clone(),
+        ctx.environment_id.clone(),
+        ctx.service_id.clone(),
+    )
+    .await?;
+
+    // Determine which variables to import
+    let mut to_import = Vec::new();
+    let mut skipped = Vec::new();
+
+    let is_tty = std::io::stdout().is_terminal();
+
+    for var in &variables {
+        if existing.contains_key(&var.key) {
+            let should_overwrite = if args.yes {
+                true
+            } else if !is_tty {
+                eprintln!(
+                    "Skipping {}: already exists (use --yes to overwrite)",
+                    var.key.bold()
+                );
+                false
+            } else {
+                match prompt_for_overwrite(&var.key)? {
+                    OverwriteChoice::Yes => true,
+                    OverwriteChoice::No => {
+                        skipped.push(var.key.clone());
+                        false
+                    }
+                    OverwriteChoice::Quit => {
+                        eprintln!("Import cancelled");
+                        return Ok(());
+                    }
+                }
+            };
+
+            if should_overwrite {
+                to_import.push(var.clone());
+            }
+        } else {
+            to_import.push(var.clone());
+        }
+    }
+
+    if to_import.is_empty() {
+        eprintln!("No variables to import");
+        return Ok(());
+    }
+
+    // Import the variables
+    let keys: Vec<String> = to_import.iter().map(|v| v.key.clone()).collect();
+    let fmt_keys = keys
+        .iter()
+        .map(|k| k.bold().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let spinner = create_spinner_if(!args.json, format!("Importing {fmt_keys}..."));
+
+    let vars = mutations::variable_collection_upsert::Variables {
+        project_id: ctx.project_id,
+        environment_id: ctx.environment_id,
+        service_id: ctx.service_id,
+        variables: to_import.into_iter().map(|v| (v.key, v.value)).collect(),
+        skip_deploys: args.skip_deploys.then_some(true),
+    };
+
+    post_graphql::<mutations::VariableCollectionUpsert, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        vars,
+    )
+    .await?;
+
+    if let Some(sp) = spinner {
+        sp.finish_with_message(format!("Imported {} variables", keys.len()));
+    } else {
+        println!(
+            "{}",
+            serde_json::json!({"imported": keys.len(), "skipped": skipped.len(), "keys": keys})
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OverwriteChoice {
+    Yes,
+    No,
+    Quit,
+}
+
+fn prompt_for_overwrite(key: &str) -> Result<OverwriteChoice> {
+    use std::io::Write;
+
+    print!("Overwrite {}? [y/N/q]: ", key.bold());
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    match input.trim().to_lowercase().as_str() {
+        "y" | "yes" => Ok(OverwriteChoice::Yes),
+        "q" | "quit" => Ok(OverwriteChoice::Quit),
+        _ => Ok(OverwriteChoice::No),
+    }
+}
+
+fn parse_json_variables(content: &str) -> Result<Vec<Variable>> {
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(content)
+        .with_context(|| "Failed to parse JSON file. Expected format: {\"KEY\": \"value\"}")?;
+
+    Ok(map
+        .into_iter()
+        .map(|(key, value)| Variable { key, value })
+        .collect())
+}
+
+fn parse_env_variables(content: &str) -> Result<Vec<Variable>> {
+    let mut variables = Vec::new();
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1;
+        let trimmed = line.trim();
+
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Parse KEY=VALUE format
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim().to_string();
+            let value = parse_env_value(&trimmed[eq_pos + 1..])
+                .with_context(|| format!("Failed to parse value on line {}", line_num))?;
+
+            if key.is_empty() {
+                bail!("Empty key on line {}", line_num);
+            }
+
+            variables.push(Variable { key, value });
+        } else {
+            bail!("Invalid format on line {}: expected KEY=VALUE", line_num);
+        }
+    }
+
+    Ok(variables)
+}
+
+fn parse_env_value(value: &str) -> Result<String> {
+    let value = value.trim();
+
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Handle double-quoted values
+    if value.starts_with('"') && value.ends_with('"') && value.len() > 1 {
+        let inner = &value[1..value.len() - 1];
+        // Process escape sequences
+        let mut result = String::new();
+        let mut chars = inner.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => result.push('\n'),
+                    Some('t') => result.push('\t'),
+                    Some('r') => result.push('\r'),
+                    Some('\\') => result.push('\\'),
+                    Some('"') => result.push('"'),
+                    Some(c) => {
+                        result.push('\\');
+                        result.push(c);
+                    }
+                    None => result.push('\\'),
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        return Ok(result);
+    }
+
+    // Handle single-quoted values (no escape processing)
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() > 1 {
+        return Ok(value[1..value.len() - 1].to_string());
+    }
+
+    // Unquoted value
+    Ok(value.to_string())
+}
+
+async fn export_variables(args: ExportArgs) -> Result<()> {
+    let ctx = resolve_service_context(args.service, args.environment).await?;
+
+    let variables = get_service_variables(
+        &ctx.client,
+        &ctx.configs,
+        ctx.project.id.clone(),
+        ctx.environment_id,
+        ctx.service_id,
+    )
+    .await?;
+
+    if variables.is_empty() {
+        eprintln!("No variables found to export");
+        return Ok(());
+    }
+
+    // Determine format by file extension
+    let is_json = args.file.ends_with(".json");
+
+    let content = if is_json {
+        serde_json::to_string_pretty(&variables)?
+    } else {
+        // .env format
+        let mut lines = Vec::new();
+        for (key, value) in &variables {
+            // Escape special characters for .env format
+            let escaped_value = if value.contains('\n')
+                || value.contains('"')
+                || value.contains('\'')
+                || value.contains('$')
+            {
+                // Use double quotes and escape
+                let escaped = value
+                    .replace('\\', "\\\\")
+                    .replace('\n', "\\n")
+                    .replace('\t', "\\t")
+                    .replace('\r', "\\r")
+                    .replace('"', "\\\"");
+                format!("{}=\"{}\"", key, escaped)
+            } else if value.contains(' ') || value.contains('#') {
+                format!("{}=\"{}\"", key, value)
+            } else {
+                format!("{}={}", key, value)
+            };
+            lines.push(escaped_value);
+        }
+        lines.join("\n") + "\n"
+    };
+
+    // Write to file
+    tokio::fs::write(&args.file, content)
+        .await
+        .with_context(|| format!("Failed to write to file: {}", args.file))?;
+
+    if !args.json {
+        println!(
+            "Exported {} variables to {}",
+            variables.len(),
+            args.file.bold()
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::json!({
+                "exported": variables.len(),
+                "file": args.file,
+            })
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_env_basic() {
+        let content = "KEY=value\nFOO=bar";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value");
+        assert_eq!(vars[1].key, "FOO");
+        assert_eq!(vars[1].value, "bar");
+    }
+
+    #[test]
+    fn test_parse_env_quoted_double() {
+        let content = r#"KEY="value with spaces""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value with spaces");
+    }
+
+    #[test]
+    fn test_parse_env_quoted_single() {
+        let content = "KEY='no escapes here'";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "no escapes here");
+    }
+
+    #[test]
+    fn test_parse_env_escapes() {
+        let content = r#"KEY="line1\nline2\ttab""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "line1\nline2\ttab");
+    }
+
+    #[test]
+    fn test_parse_env_comments_and_empty() {
+        let content = "\n# This is a comment\nKEY=value\n\n\n# Another comment\nFOO=bar";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[1].key, "FOO");
+    }
+
+    #[test]
+    fn test_parse_env_empty_value() {
+        let content = "KEY=";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "");
+    }
+
+    #[test]
+    fn test_parse_env_whitespace_trimmed() {
+        let content = "  KEY  =  value  ";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value");
+    }
+
+    #[test]
+    fn test_parse_env_invalid_format() {
+        let content = "INVALID_LINE";
+        assert!(parse_env_variables(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_env_empty_key() {
+        let content = "=value";
+        assert!(parse_env_variables(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_json_basic() {
+        let content = r#"{"KEY": "value", "NUM": "123"}"#;
+        let vars = parse_json_variables(content).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "value");
+        assert_eq!(vars[1].key, "NUM");
+        assert_eq!(vars[1].value, "123");
+    }
+
+    #[test]
+    fn test_parse_json_empty() {
+        let content = "{}";
+        let vars = parse_json_variables(content).unwrap();
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_invalid() {
+        let content = "not valid json";
+        assert!(parse_json_variables(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_env_value_with_equals() {
+        let content = "KEY=val=ue=with=equals";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].key, "KEY");
+        assert_eq!(vars[0].value, "val=ue=with=equals");
+    }
+
+    #[test]
+    fn test_parse_env_unknown_escapes() {
+        let content = r#"KEY="value\x\y\z""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "value\\x\\y\\z");
+    }
+
+    #[test]
+    fn test_parse_env_escaped_quotes() {
+        let content = r#"KEY="say \"hello\"""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "say \"hello\"");
+    }
+
+    #[test]
+    fn test_parse_env_backslash_at_end() {
+        let content = r#"KEY="value\""#;
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "value\\");
+    }
+
+    #[test]
+    fn test_parse_env_unquoted_special() {
+        let content = "KEY=value$with$special\nOTHER=simple";
+        let vars = parse_env_variables(content).unwrap();
+        assert_eq!(vars[0].value, "value$with$special");
+        assert_eq!(vars[1].value, "simple");
+    }
 }
