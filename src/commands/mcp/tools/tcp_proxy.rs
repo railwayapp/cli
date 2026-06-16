@@ -235,7 +235,7 @@ fn format_tcp_proxy_create_for_service(
         output.push_str(&format!("\n{}", format_tcp_proxy_details(proxy)));
     } else {
         output.push_str(
-            "\nRedeploy the service for the TCP proxy to become active, then call list_tcp_proxies.",
+            "\nThe TCP proxy is configured but is not readable yet. Call list_tcp_proxies shortly; if it does not become active, redeploy the service.",
         );
     }
 
@@ -338,6 +338,6 @@ mod tests {
         let staged =
             format_tcp_proxy_create_for_service("redis", "svc_123", 5432, PatchMode::Stage, None);
         assert!(staged.contains("Change: staged"));
-        assert!(staged.contains("Redeploy the service"));
+        assert!(staged.contains("if it does not become active, redeploy the service"));
     }
 }

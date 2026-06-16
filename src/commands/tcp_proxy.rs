@@ -16,7 +16,7 @@ use super::*;
 /// Manage public TCP proxies for a service
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway tcp-proxy list --service postgres --json\n  railway tcp-proxy create --port 5432 --service postgres\n  railway tcp-proxy status tcp-proxy-id\n  railway tcp-proxy delete tcp-proxy-id --yes\n\nAutomation notes:\n  Only one TCP proxy is allowed per service instance.\n  TCP proxy creation updates service networking config. Redeploy the service after committing the change for the proxy to become active."
+    after_help = "Examples:\n\n  railway tcp-proxy list --service postgres --json\n  railway tcp-proxy create --port 5432 --service postgres\n  railway tcp-proxy status tcp-proxy-id\n  railway tcp-proxy delete tcp-proxy-id --yes\n\nAutomation notes:\n  Only one TCP proxy is allowed per service instance.\n  TCP proxy creation updates service networking config. If the proxy does not become active, redeploy the service and check its status."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -271,7 +271,7 @@ async fn create(
         print_proxy_details(&proxy, "Active TCP proxy");
     } else {
         println!(
-            "Redeploy the service for the TCP proxy to become active, then run {}.",
+            "The TCP proxy is configured but is not readable yet. Run {} shortly; if it does not become active, redeploy the service.",
             format!("railway tcp-proxy list --service {}", ctx.service_name).bold()
         );
     }
@@ -342,6 +342,7 @@ async fn delete(
         println!(
             "{}",
             serde_json::to_string_pretty(&DeleteOutput {
+                deleted: true,
                 id: proxy.id,
                 endpoint: proxy.endpoint,
                 application_port: proxy.application_port,
@@ -444,6 +445,7 @@ struct CreateOutput {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeleteOutput {
+    deleted: bool,
     id: String,
     endpoint: String,
     application_port: i64,
@@ -520,6 +522,7 @@ mod tests {
     #[test]
     fn delete_output_is_compact_and_not_a_stale_proxy_snapshot() {
         let output = DeleteOutput {
+            deleted: true,
             id: "tcp_123".to_string(),
             endpoint: "containers-us-west.railway.app:15432".to_string(),
             application_port: 5432,
@@ -529,6 +532,7 @@ mod tests {
 
         let value = serde_json::to_value(output).unwrap();
 
+        assert_eq!(value["deleted"], true);
         assert_eq!(value["id"], "tcp_123");
         assert_eq!(value["endpoint"], "containers-us-west.railway.app:15432");
         assert_eq!(value["applicationPort"], 5432);

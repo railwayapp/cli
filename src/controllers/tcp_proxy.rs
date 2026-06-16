@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::Client;
@@ -7,12 +8,12 @@ use serde::Serialize;
 use crate::{
     client::post_graphql,
     config::Configs,
-    controllers::config::{
-        EnvironmentConfig, ServiceInstance, ServiceNetworking, TcpProxyConfig,
-        environment::fetch_environment_config,
-    },
+    controllers::config::{EnvironmentConfig, ServiceInstance, ServiceNetworking, TcpProxyConfig},
     gql::{mutations, queries},
 };
+
+const VERIFY_ATTEMPTS: usize = 8;
+const VERIFY_DELAY_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -89,9 +90,18 @@ pub async fn fetch_tcp_proxies(
 pub fn active_tcp_proxies(proxies: &[queries::tcp_proxies::TcpProxiesTcpProxies]) -> Vec<TcpProxy> {
     proxies
         .iter()
-        .filter(|proxy| proxy.deleted_at.is_none())
+        .filter(|proxy| is_live_tcp_proxy(proxy))
         .map(tcp_proxy_output)
         .collect()
+}
+
+fn is_live_tcp_proxy(proxy: &queries::tcp_proxies::TcpProxiesTcpProxies) -> bool {
+    proxy.deleted_at.is_none()
+        && !matches!(
+            proxy.sync_status,
+            queries::tcp_proxies::TCPProxySyncStatus::DELETED
+                | queries::tcp_proxies::TCPProxySyncStatus::DELETING
+        )
 }
 
 pub fn tcp_proxy_output(proxy: &queries::tcp_proxies::TcpProxiesTcpProxies) -> TcpProxy {
@@ -110,13 +120,16 @@ pub fn tcp_proxy_output(proxy: &queries::tcp_proxies::TcpProxiesTcpProxies) -> T
 }
 
 pub fn existing_proxy_for_create(proxies: &[TcpProxy], port: u16) -> Result<Option<&TcpProxy>> {
+    if let Some(proxy) = proxies
+        .iter()
+        .find(|proxy| proxy.application_port == i64::from(port))
+    {
+        return Ok(Some(proxy));
+    }
+
     let Some(proxy) = proxies.first() else {
         return Ok(None);
     };
-
-    if proxy.application_port == i64::from(port) {
-        return Ok(Some(proxy));
-    }
 
     bail!(
         "A TCP proxy already exists for application port {} ({}). Only one TCP proxy is allowed per service instance. Delete it before creating a TCP proxy for application port {}.",
@@ -285,24 +298,24 @@ pub async fn verify_tcp_proxy_configured(
     service_id: &str,
     port: u16,
 ) -> Result<()> {
-    let response = fetch_environment_config(client, configs, environment_id, false)
-        .await?
-        .config;
+    for attempt in 0..VERIFY_ATTEMPTS {
+        let proxies = fetch_tcp_proxies(client, configs, environment_id, service_id).await?;
+        if proxies
+            .iter()
+            .any(|proxy| proxy.application_port == i64::from(port))
+        {
+            return Ok(());
+        }
 
-    let configured = response
-        .services
-        .get(service_id)
-        .and_then(|service| service.networking.as_ref())
-        .is_some_and(|networking| networking.tcp_proxies.contains_key(&port.to_string()));
-
-    if !configured {
-        bail!(
-            "TCP proxy configuration was requested, but port {} was not present after verification.",
-            port
-        );
+        if attempt + 1 < VERIFY_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(VERIFY_DELAY_MS)).await;
+        }
     }
 
-    Ok(())
+    bail!(
+        "TCP proxy configuration was requested, but port {} was not present after verification.",
+        port
+    );
 }
 
 pub async fn delete_tcp_proxy(
@@ -422,6 +435,24 @@ mod tests {
         }
     }
 
+    fn sample_raw_proxy(
+        id: &str,
+        sync_status: queries::tcp_proxies::TCPProxySyncStatus,
+    ) -> queries::tcp_proxies::TcpProxiesTcpProxies {
+        queries::tcp_proxies::TcpProxiesTcpProxies {
+            id: id.to_string(),
+            domain: "containers-us-west.railway.app".to_string(),
+            proxy_port: 15432,
+            application_port: 5432,
+            service_id: "svc_123".to_string(),
+            environment_id: "env_123".to_string(),
+            sync_status,
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+        }
+    }
+
     #[test]
     fn validates_port_range() {
         assert_eq!(parse_port("1").unwrap(), 1);
@@ -488,6 +519,18 @@ mod tests {
     }
 
     #[test]
+    fn create_idempotency_is_not_dependent_on_proxy_order() {
+        let proxies = vec![
+            sample_proxy_with_ports("tcp_6379", 16379, 6379),
+            sample_proxy_with_ports("tcp_5432", 15432, 5432),
+        ];
+
+        let existing = existing_proxy_for_create(&proxies, 5432).unwrap().unwrap();
+
+        assert_eq!(existing.id, "tcp_5432");
+    }
+
+    #[test]
     fn id_lookup_wins_even_when_numeric_selector_would_be_ambiguous() {
         let proxies = vec![
             sample_proxy_with_ports("15432", 15432, 5432),
@@ -521,6 +564,29 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn active_tcp_proxies_ignores_deleted_and_deleting_sync_status() {
+        let proxies = vec![
+            sample_raw_proxy(
+                "tcp_active",
+                queries::tcp_proxies::TCPProxySyncStatus::ACTIVE,
+            ),
+            sample_raw_proxy(
+                "tcp_deleting",
+                queries::tcp_proxies::TCPProxySyncStatus::DELETING,
+            ),
+            sample_raw_proxy(
+                "tcp_deleted",
+                queries::tcp_proxies::TCPProxySyncStatus::DELETED,
+            ),
+        ];
+
+        let active = active_tcp_proxies(&proxies);
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "tcp_active");
     }
 
     #[test]
