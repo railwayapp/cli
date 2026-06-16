@@ -42,6 +42,7 @@ set -eu
 printf '\n'
 
 BOLD="$(tput bold 2>/dev/null || printf '')"
+DIM="$(tput dim 2>/dev/null || printf '')"
 GREY="$(tput setaf 0 2>/dev/null || printf '')"
 UNDERLINE="$(tput smul 2>/dev/null || printf '')"
 RED="$(tput setaf 1 2>/dev/null || printf '')"
@@ -946,8 +947,11 @@ run_agent_setup() {
   # login prompt, or restart notices — the installer prints those once below).
   RAILWAY_SETUP_EMBEDDED=1 "$railway_bin" setup agent $yes $remote
 
-  # Record login state for the consolidated next-steps block; don't warn here.
-  if "$railway_bin" whoami >/dev/null 2>&1; then
+  # Record login state (and the "Logged in as …" line) for the next-steps
+  # block; don't warn here. whoami exits non-zero and prints nothing when
+  # unauthenticated.
+  AGENT_WHOAMI="$("$railway_bin" whoami 2>/dev/null)"
+  if [ $? -eq 0 ] && [ -n "$AGENT_WHOAMI" ]; then
     AGENT_LOGGED_IN=1
   else
     AGENT_LOGGED_IN=0
@@ -958,21 +962,29 @@ run_agent_setup() {
 # verification" block, separated from the installation steps by a rule.
 print_agent_next_steps() {
   local rule="────────────────────────────────────────────"
-  local n=1
   printf '\n%s\n\n' "$rule"
   printf '%s %s\n' "${GREEN}✓${NO_COLOR}" "${BOLD}Setup complete${NO_COLOR}"
 
   printf '\n%s\n' "${BOLD}Next steps${NO_COLOR}"
-  printf '  %s  %s\n' "$n" "Restart your editor / agent to load the skills and MCP server."
-  n=$((n + 1))
-  if [ "${AGENT_LOGGED_IN:-0}" != "1" ]; then
-    printf '  %s  Run %s to connect your Railway account.\n' "$n" "${BOLD}railway login${NO_COLOR}"
-    n=$((n + 1))
+
+  # 1. Account — green check when already authenticated, otherwise the action.
+  if [ "${AGENT_LOGGED_IN:-0}" = "1" ]; then
+    printf '  1  %s\n' "${GREEN}✓ ${AGENT_WHOAMI:-Logged in to Railway}${NO_COLOR}"
+  else
+    printf '  1  Run %s to connect your Railway account\n' "${BOLD}railway login${NO_COLOR}"
   fi
+
+  # 2. Shell PATH — green check when railway already resolves, otherwise activate.
   if [ -n "${RAILWAY_ACTIVATION_CMD:-}" ]; then
-    printf '  %s  Run %s to use railway in this shell.\n' "$n" "${BOLD}${RAILWAY_ACTIVATION_CMD}${NO_COLOR}"
-    n=$((n + 1))
+    printf '  2  Run %s to use railway in this shell\n' "${BOLD}${RAILWAY_ACTIVATION_CMD}${NO_COLOR}"
+  else
+    printf '  2  %s\n' "${GREEN}✓ railway is on your PATH${NO_COLOR}"
   fi
+
+  # 3. Kick the tires — guide the user (or agent) into actually using it.
+  printf '  3  %s\n' "Run your agent (Claude Code, Codex, OpenCode, etc.) and ask it to ${BOLD}'Show the status of your projects'${NO_COLOR} or ${BOLD}'Deploy this application'${NO_COLOR}"
+
+  printf '\n%s\n' "${DIM}Note: if running in an agent session, you may need to restart the agent to access the new Skills or MCP resources.${NO_COLOR}"
 
   printf '\n%s\n\n' "Docs · ${UNDERLINE}https://docs.railway.com/agents${NO_COLOR}"
 }
