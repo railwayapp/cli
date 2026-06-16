@@ -53,6 +53,7 @@ pub mod unlink;
 pub mod up;
 pub mod upgrade;
 pub mod variable;
+pub mod version;
 pub mod volume;
 pub mod whoami;
 
