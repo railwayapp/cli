@@ -392,7 +392,7 @@ pub(crate) async fn refresh_skill_update_state() {
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
-        None | Some(Commands::Install) => install_skills(&args.agent, args.force).await,
+        None | Some(Commands::Install) => install_skills(&args.agent, args.force, false).await,
         Some(Commands::Remove) => remove_skills(&args.agent).await,
     }
 }
@@ -676,8 +676,12 @@ fn extract_skill_files(tarball_bytes: &[u8]) -> Result<SkillFiles> {
     Ok(skills)
 }
 
-pub(super) async fn install_skills(agent_filter: &[String], force: bool) -> Result<()> {
-    run_install(agent_filter, force, false).await
+pub(super) async fn install_skills(
+    agent_filter: &[String],
+    force: bool,
+    quiet: bool,
+) -> Result<()> {
+    run_install(agent_filter, force, quiet).await
 }
 
 /// Headless skills refresh, spawned as a detached process (mirrors the binary's
