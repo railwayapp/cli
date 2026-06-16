@@ -8,6 +8,7 @@ mutation CustomDomainCreate($input: CustomDomainCreateInput!) {
     environmentId
     projectId
     targetPort
+    syncStatus
     status {
       dnsRecords {
         hostlabel
@@ -28,6 +29,10 @@ mutation CustomDomainCreate($input: CustomDomainCreateInput!) {
         keyType
       }
       certificateStatus
+      certificateStatusDetailed
+      certificateErrorMessage
+      certificateErrorType
+      certificateRetryable
       verificationToken
       verificationDnsHost
       verified

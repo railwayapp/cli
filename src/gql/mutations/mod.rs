@@ -53,6 +53,23 @@ pub struct ServiceDomainCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceDomainUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceDomainUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceDomainDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceDomainDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ValidateTwoFactor.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
@@ -226,6 +243,31 @@ pub struct ServiceDisconnect;
     skip_serializing_none
 )]
 pub struct CustomDomainCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CustomDomainUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CustomDomainDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainIssueCertificate.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CustomDomainIssueCertificate;
 
 #[derive(GraphQLQuery)]
 #[graphql(

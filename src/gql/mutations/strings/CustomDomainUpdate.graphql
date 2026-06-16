@@ -1,0 +1,3 @@
+mutation CustomDomainUpdate($environmentId: String!, $id: String!, $targetPort: Int) {
+  customDomainUpdate(environmentId: $environmentId, id: $id, targetPort: $targetPort)
+}

@@ -1,0 +1,3 @@
+mutation CustomDomainIssueCertificate($id: String!) {
+  customDomainIssueCertificate(id: $id)
+}

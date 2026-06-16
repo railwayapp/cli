@@ -1,0 +1,3 @@
+mutation CustomDomainDelete($id: String!) {
+  customDomainDelete(id: $id)
+}

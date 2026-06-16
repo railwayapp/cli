@@ -184,6 +184,7 @@ async fn create_domain_if_requested(
         mutations::service_domain_create::Variables {
             service_id: service_id.to_string(),
             environment_id: environment.node.id.clone(),
+            target_port: None,
         },
     )
     .await?;
