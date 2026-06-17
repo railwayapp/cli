@@ -1577,6 +1577,26 @@ impl RailwayMcp {
     }
 
     #[tool(
+        description = "Get private networking status for a service. Returns full hostname, short name, network name/ID, sync status, address family, and private IPs. If network is omitted, returns all private networks in the environment."
+    )]
+    async fn private_network_status(
+        &self,
+        Parameters(params): Parameters<PrivateNetworkParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_private_network_status(params).await
+    }
+
+    #[tool(
+        description = "Update the private networking endpoint name for a service. Name must be the short prefix without the .internal suffix. If network is omitted, uses the only private network or the network named railway."
+    )]
+    async fn private_network_update(
+        &self,
+        Parameters(params): Parameters<UpdatePrivateNetworkParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_private_network_update(params).await
+    }
+
+    #[tool(
         description = "Set reference variables on a service. Each variable value must be a Railway reference expression starting with '${{' (e.g. '${{ Postgres.DATABASE_URL }}')."
     )]
     async fn add_reference_variable(

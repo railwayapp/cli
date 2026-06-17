@@ -56,6 +56,7 @@ commands!(
     metrics,
     open,
     project,
+    private_network as "private-network",
     run(local),
     sandbox(sandboxes, sbx),
     service,
@@ -743,6 +744,22 @@ mod cli_tests {
             assert_parses(&["tcp-proxy", "create", "--port", "5432"]);
             assert_parses(&["tcp-proxy", "status", "proxy-id"]);
             assert_parses(&["tcp-proxy", "delete", "proxy-id", "--yes"]);
+        }
+
+        #[test]
+        fn private_network_subcommands() {
+            assert!(parse(&["private-network"]).is_err());
+            assert_parses(&["private-network", "status"]);
+            assert_parses(&["private-network", "status", "--service", "api", "--json"]);
+            assert_parses(&["private-network", "status", "--network", "railway"]);
+            assert_parses(&["private-network", "update", "api-internal"]);
+            assert_parses(&[
+                "private-network",
+                "update",
+                "api-internal",
+                "--network",
+                "railway",
+            ]);
         }
 
         #[test]

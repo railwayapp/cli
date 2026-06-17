@@ -122,6 +122,30 @@ pub struct TcpProxies;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/PrivateNetworks.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq"
+)]
+pub struct PrivateNetworks;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/PrivateNetworkEndpoint.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq"
+)]
+pub struct PrivateNetworkEndpoint;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/PrivateNetworkEndpointNameAvailable.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct PrivateNetworkEndpointNameAvailable;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/ProjectToken.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

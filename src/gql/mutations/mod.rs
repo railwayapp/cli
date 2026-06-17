@@ -280,6 +280,14 @@ pub struct TcpProxyDelete;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/PrivateNetworkEndpointRename.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct PrivateNetworkEndpointRename;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/EnvironmentCreate.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
