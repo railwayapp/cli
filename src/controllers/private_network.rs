@@ -10,9 +10,10 @@ use crate::{
 
 const DEFAULT_PRIVATE_NETWORK_NAME: &str = "railway";
 const IPV4_PRIVATE_NETWORK_TAG: &str = "SUPPORTS_IPV4_PRIVNETS";
+const RESERVED_ENDPOINT_NAMES: &[&str] =
+    &["health", "internal", "internal-health", "railway", "up"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateNetwork {
     pub id: String,
     pub project_id: String,
@@ -22,36 +23,27 @@ pub struct PrivateNetwork {
     pub ip_family: String,
     pub network_id: i64,
     pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateNetworkEndpoint {
     pub id: String,
     pub service_instance_id: String,
     pub dns_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub new_dns_name: Option<String>,
     pub private_ips: Vec<String>,
     pub sync_status: String,
     pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateNetworkStatus {
     pub network: PrivateNetwork,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<PrivateNetworkEndpoint>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub full_hostname: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_hostname: Option<String>,
     pub state: PrivateNetworkState,
 }
@@ -147,9 +139,9 @@ pub async fn update_private_network_endpoint_name(
     network_selector: Option<&str>,
     name: &str,
 ) -> Result<PrivateNetworkStatus> {
+    let name = validate_endpoint_name(name)?;
     let networks = fetch_private_networks(client, configs, environment_id).await?;
     let network = resolve_network_for_update(&networks, network_selector)?.clone();
-    let name = validate_endpoint_name(name, &endpoint_dns_suffix(&network))?;
 
     let endpoint = fetch_private_network_endpoint(
         client,
@@ -165,7 +157,12 @@ pub async fn update_private_network_endpoint_name(
         )
     })?;
 
-    if endpoint.dns_name == name {
+    if endpoint.dns_name == name
+        || endpoint
+            .new_dns_name
+            .as_deref()
+            .is_some_and(|new_dns_name| new_dns_name.eq_ignore_ascii_case(&name))
+    {
         return Ok(private_network_status(network, Some(endpoint)));
     }
 
@@ -306,14 +303,13 @@ pub fn resolve_network<'a>(
     }
 }
 
-pub fn validate_endpoint_name(name: &str, dns_suffix: &str) -> Result<String> {
+pub fn validate_endpoint_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         bail!("Enter your endpoint name.");
     }
 
-    let suffix = dns_suffix.trim_start_matches('.');
-    if name.contains('.') || name.eq_ignore_ascii_case(suffix) {
+    if name.contains('.') {
         bail!("Endpoint name must be the short prefix, not a full .internal hostname.");
     }
 
@@ -332,7 +328,12 @@ pub fn validate_endpoint_name(name: &str, dns_suffix: &str) -> Result<String> {
         bail!("Malformed endpoint name.");
     }
 
-    Ok(name.to_ascii_lowercase())
+    let name = name.to_ascii_lowercase();
+    if is_reserved_endpoint_name(&name) {
+        bail!("Endpoint name is reserved for internal use: {name}");
+    }
+
+    Ok(name)
 }
 
 pub fn private_network_status(
@@ -349,7 +350,12 @@ pub fn private_network_status(
     let short_name = endpoint.as_ref().map(|endpoint| endpoint.dns_name.clone());
     let pending_hostname = endpoint
         .as_ref()
-        .and_then(|endpoint| endpoint.new_dns_name.as_ref())
+        .and_then(|endpoint| {
+            endpoint
+                .new_dns_name
+                .as_ref()
+                .filter(|new_name| !new_name.eq_ignore_ascii_case(&endpoint.dns_name))
+        })
         .map(|name| full_hostname(name, &network));
 
     PrivateNetworkStatus {
@@ -413,6 +419,10 @@ fn ip_family_label(tags: &[String]) -> String {
     } else {
         "IPv6".to_string()
     }
+}
+
+fn is_reserved_endpoint_name(name: &str) -> bool {
+    RESERVED_ENDPOINT_NAMES.contains(&name) || name.starts_with("railway-internal")
 }
 
 fn endpoint_state(endpoint: &PrivateNetworkEndpoint) -> PrivateNetworkState {
@@ -552,20 +562,17 @@ mod tests {
 
     #[test]
     fn validates_endpoint_name() {
-        assert_eq!(
-            validate_endpoint_name("api-1", "railway.internal").unwrap(),
-            "api-1"
-        );
-        assert_eq!(
-            validate_endpoint_name("API", "railway.internal").unwrap(),
-            "api"
-        );
-        assert!(validate_endpoint_name("", "railway.internal").is_err());
-        assert!(validate_endpoint_name("-api", "railway.internal").is_err());
-        assert!(validate_endpoint_name("api-", "railway.internal").is_err());
-        assert!(validate_endpoint_name("api.railway.internal", "railway.internal").is_err());
-        assert!(validate_endpoint_name("api.example", "railway.internal").is_err());
-        assert!(validate_endpoint_name("api_name", "railway.internal").is_err());
+        assert_eq!(validate_endpoint_name("api-1").unwrap(), "api-1");
+        assert_eq!(validate_endpoint_name("API").unwrap(), "api");
+        assert!(validate_endpoint_name("").is_err());
+        assert!(validate_endpoint_name("-api").is_err());
+        assert!(validate_endpoint_name("api-").is_err());
+        assert!(validate_endpoint_name("api.railway.internal").is_err());
+        assert!(validate_endpoint_name("api.example").is_err());
+        assert!(validate_endpoint_name("api_name").is_err());
+        assert!(validate_endpoint_name("railway").is_err());
+        assert!(validate_endpoint_name("railway-internal-1").is_err());
+        assert!(validate_endpoint_name("internal").is_err());
     }
 
     #[test]
@@ -591,6 +598,29 @@ mod tests {
         assert_eq!(status.short_name.as_deref(), Some("api"));
         assert_eq!(status.network.ip_family, "IPv4 & IPv6");
         assert_eq!(status.state, PrivateNetworkState::Ready);
+        assert!(status.pending_hostname.is_none());
+    }
+
+    #[test]
+    fn pending_hostname_only_shows_real_diff() {
+        let network = network("pn_1", "railway", "railway", vec![]);
+        let endpoint = PrivateNetworkEndpoint {
+            id: "pne_1".to_string(),
+            service_instance_id: "si_1".to_string(),
+            dns_name: "api".to_string(),
+            new_dns_name: Some("api-next".to_string()),
+            private_ips: vec![],
+            sync_status: "UPDATING".to_string(),
+            tags: vec![],
+            created_at: None,
+        };
+
+        let status = private_network_status(network, Some(endpoint));
+
+        assert_eq!(
+            status.pending_hostname.as_deref(),
+            Some("api-next.railway.internal")
+        );
     }
 
     #[test]

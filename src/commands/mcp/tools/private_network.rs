@@ -134,8 +134,13 @@ fn mcp_private_network_error(error: anyhow::Error) -> McpError {
     let message = error.to_string();
     if message.contains("Malformed")
         || message.contains("already used")
+        || message.contains("reserved for internal use")
         || message.contains("Multiple private networks")
+        || message.contains("No private networks")
+        || message.contains("Cannot update private network endpoint")
+        || message.contains("Private networking is initializing")
         || message.contains("Private network '")
+        || message.contains("Private network selector")
         || message.contains("Endpoint name must")
         || message.contains("Enter your endpoint name")
     {
@@ -192,9 +197,7 @@ mod tests {
 
     #[test]
     fn validation_errors_are_invalid_params() {
-        let error =
-            private_network::validate_endpoint_name("api.railway.internal", "railway.internal")
-                .unwrap_err();
+        let error = private_network::validate_endpoint_name("api.railway.internal").unwrap_err();
         let mapped = mcp_private_network_error(error);
 
         assert_eq!(mapped.code, rmcp::model::ErrorCode::INVALID_PARAMS);

@@ -2,7 +2,7 @@ use colored::ColoredString;
 use serde::Serialize;
 
 use crate::controllers::{
-    private_network::{self, PrivateNetworkState, PrivateNetworkStatus},
+    private_network::{self, PrivateNetworkState, PrivateNetworkStatus, endpoint_dns_suffix},
     project::resolve_service_context,
 };
 
@@ -96,7 +96,7 @@ async fn status(
         println!(
             "{}",
             serde_json::to_string_pretty(&StatusOutput {
-                private_networks: statuses,
+                private_networks: statuses.iter().map(PrivateNetworkOutput::from).collect(),
             })?
         );
         return Ok(());
@@ -142,7 +142,7 @@ async fn update(
         println!(
             "{}",
             serde_json::to_string_pretty(&UpdateOutput {
-                private_network: status,
+                private_network: PrivateNetworkOutput::from(&status),
             })?
         );
         return Ok(());
@@ -228,11 +228,137 @@ fn state_label(state: PrivateNetworkState) -> ColoredString {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusOutput {
-    private_networks: Vec<PrivateNetworkStatus>,
+    private_networks: Vec<PrivateNetworkOutput>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateOutput {
-    private_network: PrivateNetworkStatus,
+    private_network: PrivateNetworkOutput,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrivateNetworkOutput {
+    network: NetworkOutput,
+    state: PrivateNetworkState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<EndpointOutput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkOutput {
+    id: String,
+    name: String,
+    dns_name: String,
+    dns_suffix: String,
+    address_family: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EndpointOutput {
+    id: String,
+    short_name: String,
+    hostname: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_hostname: Option<String>,
+    sync_status: String,
+    private_ips: Vec<String>,
+}
+
+impl From<&PrivateNetworkStatus> for PrivateNetworkOutput {
+    fn from(status: &PrivateNetworkStatus) -> Self {
+        Self {
+            network: NetworkOutput {
+                id: status.network.id.clone(),
+                name: status.network.name.clone(),
+                dns_name: status.network.dns_name.clone(),
+                dns_suffix: endpoint_dns_suffix(&status.network),
+                address_family: status.network.ip_family.clone(),
+            },
+            state: status.state,
+            endpoint: status.endpoint.as_ref().map(|endpoint| EndpointOutput {
+                id: endpoint.id.clone(),
+                short_name: endpoint.dns_name.clone(),
+                hostname: private_network::full_hostname(&endpoint.dns_name, &status.network),
+                pending_hostname: status.pending_hostname.clone(),
+                sync_status: endpoint.sync_status.clone(),
+                private_ips: endpoint.private_ips.clone(),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::controllers::private_network::{PrivateNetwork, PrivateNetworkEndpoint};
+
+    use super::*;
+
+    fn status() -> PrivateNetworkStatus {
+        private_network::private_network_status(
+            PrivateNetwork {
+                id: "pn_123".to_string(),
+                project_id: "project".to_string(),
+                environment_id: "environment".to_string(),
+                name: "railway".to_string(),
+                dns_name: "railway".to_string(),
+                ip_family: "IPv4 & IPv6".to_string(),
+                network_id: 1,
+                tags: vec!["SUPPORTS_IPV4_PRIVNETS".to_string()],
+                created_at: None,
+            },
+            Some(PrivateNetworkEndpoint {
+                id: "pne_123".to_string(),
+                service_instance_id: "si_123".to_string(),
+                dns_name: "api".to_string(),
+                new_dns_name: None,
+                private_ips: vec!["fd12::1".to_string()],
+                sync_status: "ACTIVE".to_string(),
+                tags: vec![],
+                created_at: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn json_output_excludes_internal_fields() {
+        let output = StatusOutput {
+            private_networks: vec![PrivateNetworkOutput::from(&status())],
+        };
+        let value = serde_json::to_value(output).unwrap();
+
+        assert_eq!(
+            value["privateNetworks"][0]["network"],
+            serde_json::json!({
+                "id": "pn_123",
+                "name": "railway",
+                "dnsName": "railway",
+                "dnsSuffix": "railway.internal",
+                "addressFamily": "IPv4 & IPv6"
+            })
+        );
+        assert_eq!(
+            value["privateNetworks"][0]["endpoint"],
+            serde_json::json!({
+                "id": "pne_123",
+                "shortName": "api",
+                "hostname": "api.railway.internal",
+                "syncStatus": "ACTIVE",
+                "privateIps": ["fd12::1"]
+            })
+        );
+        assert_eq!(value["privateNetworks"][0]["state"], "ready");
+
+        let output = value.to_string();
+        assert!(!output.contains("networkId"));
+        assert!(!output.contains("tags"));
+        assert!(!output.contains("projectId"));
+        assert!(!output.contains("environmentId"));
+        assert!(!output.contains("serviceInstanceId"));
+        assert!(!output.contains("createdAt"));
+        assert!(!output.contains("pendingHostname"));
+    }
 }
