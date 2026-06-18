@@ -1,7 +1,9 @@
 use crate::{
     commands::{
         queries::{self},
-        subscriptions::{self, build_logs, deployment, deployment_logs, http_logs},
+        subscriptions::{
+            self, build_logs, deployment, deployment_logs, http_logs, network_flow_logs,
+        },
     },
     post_graphql,
     subscription::subscribe_graphql,
@@ -31,6 +33,17 @@ pub struct FetchLogsParams<'a> {
     pub client: &'a Client,
     pub backboard: &'a str,
     pub deployment_id: String,
+    pub limit: Option<i64>,
+    pub filter: Option<String>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+}
+
+pub struct FetchNetworkFlowLogsParams<'a> {
+    pub client: &'a Client,
+    pub backboard: &'a str,
+    pub environment_id: String,
+    pub service_id: Option<String>,
     pub limit: Option<i64>,
     pub filter: Option<String>,
     pub start_date: Option<DateTime<Utc>>,
@@ -129,6 +142,34 @@ pub async fn fetch_http_logs(
     Ok(())
 }
 
+pub async fn fetch_network_flow_logs(
+    params: FetchNetworkFlowLogsParams<'_>,
+    mut on_log: impl FnMut(queries::network_flow_logs::NetworkFlowLogFields),
+) -> Result<()> {
+    let before_limit = params.limit.unwrap_or(500);
+    let vars = queries::network_flow_logs::Variables {
+        environment_id: params.environment_id,
+        service_id: params.service_id,
+        filter: params.filter,
+        before_limit: Some(before_limit),
+        before_date: params.start_date.map(|date| date.to_rfc3339()),
+        anchor_date: params.end_date.map(|date| date.to_rfc3339()),
+        after_date: None,
+        after_limit: None,
+    };
+
+    let response =
+        post_graphql::<queries::NetworkFlowLogs, _>(params.client, params.backboard, vars).await?;
+
+    let logs = take_last_n_logs(response.network_flow_logs, Some(before_limit));
+
+    for log in logs {
+        on_log(log);
+    }
+
+    Ok(())
+}
+
 pub async fn stream_build_logs(
     deployment_id: String,
     filter: Option<String>,
@@ -208,6 +249,93 @@ pub async fn stream_http_logs(
             Ok(())
         }
     }
+}
+
+pub async fn stream_network_flow_logs(
+    environment_id: String,
+    service_id: Option<String>,
+    filter: Option<String>,
+    mut on_log: impl FnMut(network_flow_logs::NetworkFlowLogFields),
+) -> Result<()> {
+    let mut last_capture_end = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let mut seen_flow_ids = HashSet::new();
+    let mut attempt = 0;
+    let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+
+    loop {
+        let vars = subscriptions::network_flow_logs::Variables {
+            environment_id: environment_id.clone(),
+            service_id: service_id.clone(),
+            filter: filter.clone(),
+            before_limit: Some(0),
+            before_date: Some(last_capture_end.clone()),
+            anchor_date: None,
+            after_date: None,
+            after_limit: Some(500),
+        };
+
+        let mut stream = match subscribe_graphql::<subscriptions::NetworkFlowLogs>(vars).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                attempt += 1;
+
+                if attempt >= LOGS_RETRY_CONFIG.max_attempts {
+                    return Err(e);
+                }
+
+                sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
+                    .min(LOGS_RETRY_CONFIG.max_delay_ms);
+                continue;
+            }
+        };
+
+        attempt = 0;
+        delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+
+        while let Some(response) = stream.next().await {
+            let log = response
+                .context("Network flow log stream error")?
+                .data
+                .context("Failed to retrieve network flow logs")?;
+
+            for line in log.network_flow_logs {
+                if !is_new_network_flow_log(
+                    &line.capture_end,
+                    &line.flow_id,
+                    &mut last_capture_end,
+                    &mut seen_flow_ids,
+                ) {
+                    continue;
+                }
+
+                on_log(line);
+            }
+        }
+    }
+}
+
+fn is_new_network_flow_log(
+    capture_end: &str,
+    flow_id: &str,
+    last_capture_end: &mut String,
+    seen_flow_ids: &mut HashSet<String>,
+) -> bool {
+    if capture_end < last_capture_end.as_str() {
+        return false;
+    }
+
+    if capture_end == last_capture_end.as_str() && seen_flow_ids.contains(flow_id) {
+        return false;
+    }
+
+    if capture_end > last_capture_end.as_str() {
+        *last_capture_end = capture_end.to_owned();
+        seen_flow_ids.clear();
+    }
+
+    seen_flow_ids.insert(flow_id.to_owned());
+    true
 }
 
 async fn wait_for_deployment_removal(deployment_id: &str) {

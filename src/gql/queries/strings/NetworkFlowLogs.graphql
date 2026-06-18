@@ -1,0 +1,45 @@
+query NetworkFlowLogs(
+  $environmentId: String!
+  $serviceId: String
+  $filter: String
+  $beforeLimit: Int
+  $beforeDate: String
+  $anchorDate: String
+  $afterDate: String
+  $afterLimit: Int
+) {
+  networkFlowLogs(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    filter: $filter
+    beforeDate: $beforeDate
+    anchorDate: $anchorDate
+    afterDate: $afterDate
+    beforeLimit: $beforeLimit
+    afterLimit: $afterLimit
+  ) {
+    ...NetworkFlowLogFields
+  }
+}
+
+fragment NetworkFlowLogFields on NetworkFlowLog {
+  flowId
+  captureStart
+  captureEnd
+  flowState
+  srcAddr
+  dstAddr
+  srcPort
+  dstPort
+  l4Protocol
+  byteCount
+  packetCount
+  direction
+  l4LatencyMs
+  peerServiceId
+  peerKind
+  dropCause
+  serviceId
+  deploymentId
+  deploymentInstanceId
+}
