@@ -10,10 +10,10 @@ use crate::{
     util::retry::RetryConfig,
 };
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use futures::StreamExt;
 use reqwest::Client;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -28,6 +28,9 @@ const LOGS_RETRY_CONFIG: RetryConfig = RetryConfig {
 const HTTP_LOG_STREAM_AFTER_WINDOW: Duration = Duration::from_secs(60 * 60);
 const HTTP_LOG_STREAM_BATCH_SIZE: i64 = 500;
 const HTTP_LOG_STREAM_STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
+const NETWORK_FLOW_LOG_DEFAULT_LIMIT: i64 = 500;
+const NETWORK_FLOW_STREAM_LOOKBACK_SECONDS: i64 = 30;
+const NETWORK_FLOW_STREAM_DEDUPE_CACHE_SIZE: usize = 10_000;
 
 pub struct FetchLogsParams<'a> {
     pub client: &'a Client,
@@ -60,6 +63,62 @@ fn take_last_n_logs<T>(mut logs: Vec<T>, limit: Option<i64>) -> Vec<T> {
         }
     }
     logs
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NetworkFlowLogWindow {
+    before_limit: Option<i64>,
+    before_date: Option<String>,
+    anchor_date: Option<String>,
+    after_date: Option<String>,
+    after_limit: Option<i64>,
+}
+
+fn format_network_flow_log_timestamp(date: DateTime<Utc>) -> String {
+    date.to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+fn network_flow_log_window(
+    limit: Option<i64>,
+    start_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> NetworkFlowLogWindow {
+    let before_limit = Some(limit.unwrap_or(NETWORK_FLOW_LOG_DEFAULT_LIMIT));
+
+    match (start_date, end_date) {
+        (Some(start), Some(end)) => NetworkFlowLogWindow {
+            before_limit,
+            before_date: Some(format_network_flow_log_timestamp(start)),
+            anchor_date: Some(format_network_flow_log_timestamp(end)),
+            after_date: Some(format_network_flow_log_timestamp(end)),
+            after_limit: Some(0),
+        },
+        (Some(start), None) => NetworkFlowLogWindow {
+            before_limit,
+            before_date: Some(format_network_flow_log_timestamp(start)),
+            anchor_date: Some(format_network_flow_log_timestamp(now)),
+            after_date: Some(format_network_flow_log_timestamp(now)),
+            after_limit: Some(0),
+        },
+        (None, Some(end)) => NetworkFlowLogWindow {
+            before_limit,
+            before_date: Some(format_network_flow_log_timestamp(
+                DateTime::<Utc>::from_timestamp(0, 0)
+                    .expect("Unix epoch should be a valid timestamp"),
+            )),
+            anchor_date: Some(format_network_flow_log_timestamp(end)),
+            after_date: Some(format_network_flow_log_timestamp(end)),
+            after_limit: Some(0),
+        },
+        (None, None) => NetworkFlowLogWindow {
+            before_limit,
+            before_date: None,
+            anchor_date: None,
+            after_date: None,
+            after_limit: None,
+        },
+    }
 }
 
 pub async fn fetch_build_logs(
@@ -146,22 +205,23 @@ pub async fn fetch_network_flow_logs(
     params: FetchNetworkFlowLogsParams<'_>,
     mut on_log: impl FnMut(queries::network_flow_logs::NetworkFlowLogFields),
 ) -> Result<()> {
-    let before_limit = params.limit.unwrap_or(500);
+    let window =
+        network_flow_log_window(params.limit, params.start_date, params.end_date, Utc::now());
     let vars = queries::network_flow_logs::Variables {
         environment_id: params.environment_id,
         service_id: params.service_id,
         filter: params.filter,
-        before_limit: Some(before_limit),
-        before_date: params.start_date.map(|date| date.to_rfc3339()),
-        anchor_date: params.end_date.map(|date| date.to_rfc3339()),
-        after_date: None,
-        after_limit: None,
+        before_limit: window.before_limit,
+        before_date: window.before_date,
+        anchor_date: window.anchor_date,
+        after_date: window.after_date,
+        after_limit: window.after_limit,
     };
 
     let response =
         post_graphql::<queries::NetworkFlowLogs, _>(params.client, params.backboard, vars).await?;
 
-    let logs = take_last_n_logs(response.network_flow_logs, Some(before_limit));
+    let logs = take_last_n_logs(response.network_flow_logs, window.before_limit);
 
     for log in logs {
         on_log(log);
@@ -257,21 +317,22 @@ pub async fn stream_network_flow_logs(
     filter: Option<String>,
     mut on_log: impl FnMut(network_flow_logs::NetworkFlowLogFields),
 ) -> Result<()> {
-    let mut last_capture_end = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
-    let mut seen_flow_ids = HashSet::new();
+    let mut max_capture_end: Option<DateTime<Utc>> = None;
+    let mut seen_flow_ids = NetworkFlowLogDedupe::new(NETWORK_FLOW_STREAM_DEDUPE_CACHE_SIZE);
     let mut attempt = 0;
     let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
 
     loop {
+        let before_date = network_flow_stream_before_date(max_capture_end);
         let vars = subscriptions::network_flow_logs::Variables {
             environment_id: environment_id.clone(),
             service_id: service_id.clone(),
             filter: filter.clone(),
-            before_limit: Some(0),
-            before_date: Some(last_capture_end.clone()),
+            before_limit: Some(NETWORK_FLOW_LOG_DEFAULT_LIMIT),
+            before_date: Some(before_date),
             anchor_date: None,
             after_date: None,
-            after_limit: Some(500),
+            after_limit: Some(0),
         };
 
         let mut stream = match subscribe_graphql::<subscriptions::NetworkFlowLogs>(vars).await {
@@ -300,12 +361,9 @@ pub async fn stream_network_flow_logs(
                 .context("Failed to retrieve network flow logs")?;
 
             for line in log.network_flow_logs {
-                if !is_new_network_flow_log(
-                    &line.capture_end,
-                    &line.flow_id,
-                    &mut last_capture_end,
-                    &mut seen_flow_ids,
-                ) {
+                update_max_network_flow_capture_end(&line.capture_end, &mut max_capture_end);
+
+                if !seen_flow_ids.insert(line.flow_id.clone()) {
                     continue;
                 }
 
@@ -315,27 +373,59 @@ pub async fn stream_network_flow_logs(
     }
 }
 
-fn is_new_network_flow_log(
+struct NetworkFlowLogDedupe {
+    seen: HashSet<String>,
+    order: VecDeque<String>,
+    max_size: usize,
+}
+
+impl NetworkFlowLogDedupe {
+    fn new(max_size: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            order: VecDeque::new(),
+            max_size,
+        }
+    }
+
+    fn insert(&mut self, flow_id: String) -> bool {
+        if self.seen.contains(&flow_id) {
+            return false;
+        }
+
+        self.seen.insert(flow_id.clone());
+        self.order.push_back(flow_id);
+
+        while self.order.len() > self.max_size {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+
+        true
+    }
+}
+
+fn network_flow_stream_before_date(max_capture_end: Option<DateTime<Utc>>) -> String {
+    let anchor = max_capture_end.unwrap_or_else(Utc::now);
+    format_network_flow_log_timestamp(
+        anchor - ChronoDuration::seconds(NETWORK_FLOW_STREAM_LOOKBACK_SECONDS),
+    )
+}
+
+fn update_max_network_flow_capture_end(
     capture_end: &str,
-    flow_id: &str,
-    last_capture_end: &mut String,
-    seen_flow_ids: &mut HashSet<String>,
-) -> bool {
-    if capture_end < last_capture_end.as_str() {
-        return false;
-    }
+    max_capture_end: &mut Option<DateTime<Utc>>,
+) {
+    let Ok(capture_end) =
+        DateTime::parse_from_rfc3339(capture_end).map(|date| date.with_timezone(&Utc))
+    else {
+        return;
+    };
 
-    if capture_end == last_capture_end.as_str() && seen_flow_ids.contains(flow_id) {
-        return false;
+    if max_capture_end.is_none_or(|max| capture_end > max) {
+        *max_capture_end = Some(capture_end);
     }
-
-    if capture_end > last_capture_end.as_str() {
-        *last_capture_end = capture_end.to_owned();
-        seen_flow_ids.clear();
-    }
-
-    seen_flow_ids.insert(flow_id.to_owned());
-    true
 }
 
 async fn wait_for_deployment_removal(deployment_id: &str) {
@@ -568,6 +658,12 @@ pub async fn stream_deploy_logs(
 mod tests {
     use super::*;
 
+    fn dt(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
     #[test]
     fn test_take_last_n_logs_with_limit() {
         let logs = vec!["log1", "log2", "log3", "log4", "log5"];
@@ -619,6 +715,112 @@ mod tests {
         // Limit of 0 should return empty vec
         let result = take_last_n_logs(logs, Some(0));
         assert_eq!(result, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn test_network_flow_log_window_uses_explicit_bounded_range() {
+        let start = dt("2026-06-18T04:41:00Z");
+        let end = dt("2026-06-18T04:42:00Z");
+        let now = dt("2026-06-18T04:43:00Z");
+
+        let window = network_flow_log_window(Some(100), Some(start), Some(end), now);
+
+        assert_eq!(
+            window,
+            NetworkFlowLogWindow {
+                before_limit: Some(100),
+                before_date: Some("2026-06-18T04:41:00.000000000Z".to_string()),
+                anchor_date: Some("2026-06-18T04:42:00.000000000Z".to_string()),
+                after_date: Some("2026-06-18T04:42:00.000000000Z".to_string()),
+                after_limit: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn test_network_flow_log_window_resolves_open_ended_ranges() {
+        let start = dt("2026-06-18T04:41:00Z");
+        let end = dt("2026-06-18T04:42:00Z");
+        let now = dt("2026-06-18T04:43:00Z");
+
+        let since_window = network_flow_log_window(None, Some(start), None, now);
+        assert_eq!(
+            since_window,
+            NetworkFlowLogWindow {
+                before_limit: Some(NETWORK_FLOW_LOG_DEFAULT_LIMIT),
+                before_date: Some("2026-06-18T04:41:00.000000000Z".to_string()),
+                anchor_date: Some("2026-06-18T04:43:00.000000000Z".to_string()),
+                after_date: Some("2026-06-18T04:43:00.000000000Z".to_string()),
+                after_limit: Some(0),
+            }
+        );
+
+        let until_window = network_flow_log_window(None, None, Some(end), now);
+        assert_eq!(
+            until_window,
+            NetworkFlowLogWindow {
+                before_limit: Some(NETWORK_FLOW_LOG_DEFAULT_LIMIT),
+                before_date: Some("1970-01-01T00:00:00.000000000Z".to_string()),
+                anchor_date: Some("2026-06-18T04:42:00.000000000Z".to_string()),
+                after_date: Some("2026-06-18T04:42:00.000000000Z".to_string()),
+                after_limit: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn test_network_flow_log_window_leaves_unbounded_snapshot_to_api_defaults() {
+        let now = dt("2026-06-18T04:43:00Z");
+
+        let window = network_flow_log_window(Some(20), None, None, now);
+
+        assert_eq!(
+            window,
+            NetworkFlowLogWindow {
+                before_limit: Some(20),
+                before_date: None,
+                anchor_date: None,
+                after_date: None,
+                after_limit: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_network_flow_dedupe_keeps_out_of_order_sibling_flows() {
+        let mut dedupe = NetworkFlowLogDedupe::new(10);
+
+        assert!(dedupe.insert("newer-flow".to_string()));
+        assert!(dedupe.insert("older-sibling-flow".to_string()));
+        assert!(!dedupe.insert("newer-flow".to_string()));
+    }
+
+    #[test]
+    fn test_network_flow_dedupe_bounds_cache_size() {
+        let mut dedupe = NetworkFlowLogDedupe::new(2);
+
+        assert!(dedupe.insert("flow-1".to_string()));
+        assert!(dedupe.insert("flow-2".to_string()));
+        assert!(dedupe.insert("flow-3".to_string()));
+        assert!(dedupe.insert("flow-1".to_string()));
+    }
+
+    #[test]
+    fn test_network_flow_stream_before_date_uses_lookback() {
+        let before_date = network_flow_stream_before_date(Some(dt("2026-06-18T04:43:00Z")));
+
+        assert_eq!(before_date, "2026-06-18T04:42:30.000000000Z");
+    }
+
+    #[test]
+    fn test_update_max_network_flow_capture_end_ignores_older_rows() {
+        let mut max_capture_end = Some(dt("2026-06-18T04:43:00Z"));
+
+        update_max_network_flow_capture_end("2026-06-18T04:42:30Z", &mut max_capture_end);
+        assert_eq!(max_capture_end, Some(dt("2026-06-18T04:43:00Z")));
+
+        update_max_network_flow_capture_end("2026-06-18T04:43:30Z", &mut max_capture_end);
+        assert_eq!(max_capture_end, Some(dt("2026-06-18T04:43:30Z")));
     }
 
     #[test]

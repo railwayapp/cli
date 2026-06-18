@@ -4,6 +4,15 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
+const NETWORK_FLOW_TIME_WIDTH: usize = 30;
+const NETWORK_FLOW_DIR_WIDTH: usize = 3;
+const NETWORK_FLOW_PROTO_WIDTH: usize = 7;
+const NETWORK_FLOW_ENDPOINT_WIDTH: usize = 47;
+const NETWORK_FLOW_PEER_WIDTH: usize = 12;
+const NETWORK_FLOW_TRAFFIC_WIDTH: usize = 10;
+const NETWORK_FLOW_LATENCY_WIDTH: usize = 8;
+const NETWORK_FLOW_STATUS_WIDTH: usize = 16;
+
 // Trait for common fields on log types
 pub trait LogLike {
     fn message(&self) -> &str;
@@ -181,7 +190,7 @@ pub trait NetworkFlowLogLike: Serialize {
 
 pub fn format_network_flow_log_header() -> String {
     format!(
-        "{:<24} {:<3} {:<7} {:<30} {:<30} {:<12} {:>10} {:>8} {:<12}",
+        "{:<time_width$} {:<dir_width$} {:<proto_width$} {:<endpoint_width$} {:<endpoint_width$} {:<peer_width$} {:>traffic_width$} {:>latency_width$} {:<status_width$}",
         "Time".bold(),
         "Dir".bold(),
         "Proto".bold(),
@@ -190,7 +199,15 @@ pub fn format_network_flow_log_header() -> String {
         "Peer".bold(),
         "Traffic".bold(),
         "Latency".bold(),
-        "Status".bold()
+        "Status".bold(),
+        time_width = NETWORK_FLOW_TIME_WIDTH,
+        dir_width = NETWORK_FLOW_DIR_WIDTH,
+        proto_width = NETWORK_FLOW_PROTO_WIDTH,
+        endpoint_width = NETWORK_FLOW_ENDPOINT_WIDTH,
+        peer_width = NETWORK_FLOW_PEER_WIDTH,
+        traffic_width = NETWORK_FLOW_TRAFFIC_WIDTH,
+        latency_width = NETWORK_FLOW_LATENCY_WIDTH,
+        status_width = NETWORK_FLOW_STATUS_WIDTH,
     )
 }
 
@@ -217,7 +234,7 @@ pub fn format_network_flow_log_string<T: NetworkFlowLogLike>(log: &T, json: bool
     let status = log.drop_cause().unwrap_or("OK");
 
     format!(
-        "{:<24} {:<3} {:<7} {:<30} {:<30} {:<12} {:>10} {:>8} {:<12}",
+        "{:<time_width$} {:<dir_width$} {:<proto_width$} {:<endpoint_width$} {:<endpoint_width$} {:<peer_width$} {:>traffic_width$} {:>latency_width$} {:<status_width$}",
         log.capture_end().dimmed(),
         direction_label,
         protocol.green(),
@@ -226,7 +243,15 @@ pub fn format_network_flow_log_string<T: NetworkFlowLogLike>(log: &T, json: bool
         peer,
         traffic.dimmed(),
         latency.dimmed(),
-        status_label(status)
+        status_label(status),
+        time_width = NETWORK_FLOW_TIME_WIDTH,
+        dir_width = NETWORK_FLOW_DIR_WIDTH,
+        proto_width = NETWORK_FLOW_PROTO_WIDTH,
+        endpoint_width = NETWORK_FLOW_ENDPOINT_WIDTH,
+        peer_width = NETWORK_FLOW_PEER_WIDTH,
+        traffic_width = NETWORK_FLOW_TRAFFIC_WIDTH,
+        latency_width = NETWORK_FLOW_LATENCY_WIDTH,
+        status_width = NETWORK_FLOW_STATUS_WIDTH,
     )
 }
 
@@ -235,32 +260,40 @@ pub fn print_network_flow_log<T: NetworkFlowLogLike>(log: T, json: bool) {
 }
 
 fn endpoint(addr: &str, port: i64) -> String {
-    format!("{addr}:{port}")
+    if addr.contains(':') {
+        format!("[{addr}]:{port}")
+    } else {
+        format!("{addr}:{port}")
+    }
 }
 
 fn direction_label(direction: &str) -> String {
-    let arrow = match direction {
-        "ingress" => {
-            if is_dumb_terminal() {
-                "in"
-            } else {
-                "↑"
-            }
-        }
-        "egress" => {
-            if is_dumb_terminal() {
-                "out"
-            } else {
-                "↓"
-            }
-        }
-        _ => "?",
-    };
+    let arrow = direction_label_for_terminal(direction, is_dumb_terminal());
 
     match direction {
         "egress" => arrow.blue().bold().to_string(),
         "ingress" => arrow.normal().bold().to_string(),
         _ => arrow.yellow().bold().to_string(),
+    }
+}
+
+fn direction_label_for_terminal(direction: &str, is_dumb: bool) -> &'static str {
+    match direction {
+        "ingress" => {
+            if is_dumb {
+                "in"
+            } else {
+                "↓"
+            }
+        }
+        "egress" => {
+            if is_dumb {
+                "out"
+            } else {
+                "↑"
+            }
+        }
+        _ => "?",
     }
 }
 
@@ -683,6 +716,26 @@ mod tests {
         assert!(row.contains("418 B"));
         assert!(row.contains("0ms"));
         assert!(row.contains("OK"));
+    }
+
+    #[test]
+    fn test_format_network_flow_log_brackets_ipv6_endpoints() {
+        let mut log = TestNetworkFlowLog::example();
+        log.src_addr = "fd12:f783:b81d:1:b000:23:a80e:1d89".to_string();
+        log.dst_addr = "fd12:f783:b81d:1:b000:a4:5366:c08c".to_string();
+
+        let row = format_network_flow_log_string(&log, false);
+
+        assert!(row.contains("[fd12:f783:b81d:1:b000:23:a80e:1d89]:8080"));
+        assert!(row.contains("[fd12:f783:b81d:1:b000:a4:5366:c08c]:51222"));
+    }
+
+    #[test]
+    fn test_network_flow_direction_labels_match_dashboard_orientation() {
+        assert_eq!(direction_label_for_terminal("ingress", false), "↓");
+        assert_eq!(direction_label_for_terminal("egress", false), "↑");
+        assert_eq!(direction_label_for_terminal("ingress", true), "in");
+        assert_eq!(direction_label_for_terminal("egress", true), "out");
     }
 
     #[test]

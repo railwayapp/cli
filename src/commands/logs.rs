@@ -211,6 +211,37 @@ fn build_network_flow_filter(args: &Args) -> Result<Option<String>> {
     })
 }
 
+fn validate_filter_modes(args: &Args) -> Result<()> {
+    if args.status.is_some() && !args.http && !args.network {
+        bail!("--status can only be used with --http or --network");
+    }
+
+    if !args.http && (args.method.is_some() || args.path.is_some() || args.request_id.is_some()) {
+        bail!("--method, --path, and --request-id can only be used with --http");
+    }
+
+    if !args.network && has_network_flow_filter_args(args) {
+        bail!(
+            "--protocol, --direction, --peer, --peer-kind, --dropped, --port, --src, --dst, --host, and --drop-cause can only be used with --network"
+        );
+    }
+
+    Ok(())
+}
+
+fn has_network_flow_filter_args(args: &Args) -> bool {
+    args.protocol.is_some()
+        || args.direction.is_some()
+        || args.peer.is_some()
+        || args.peer_kind.is_some()
+        || args.dropped.is_some()
+        || args.port.is_some()
+        || args.src.is_some()
+        || args.dst.is_some()
+        || args.host.is_some()
+        || args.drop_cause.is_some()
+}
+
 pub struct NetworkFlowFilterParts<'a> {
     pub protocol: Option<&'a NetworkFlowProtocol>,
     pub direction: Option<&'a NetworkFlowDirection>,
@@ -531,6 +562,8 @@ Examples:
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    validate_filter_modes(&args)?;
+
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
@@ -546,10 +579,6 @@ pub async fn command(args: Args) -> Result<()> {
     } else {
         None
     };
-
-    if args.status.is_some() && !args.http && !args.network {
-        bail!("--status can only be used with --http or --network");
-    }
 
     let start_date = args.since.as_ref().map(|s| parse_time(s)).transpose()?;
     let end_date = args.until.as_ref().map(|s| parse_time(s)).transpose()?;
@@ -587,6 +616,7 @@ pub async fn command(args: Args) -> Result<()> {
             })
             .await?;
         } else {
+            let mut has_logs = false;
             fetch_network_flow_logs(
                 FetchNetworkFlowLogsParams {
                     client: &client,
@@ -598,9 +628,16 @@ pub async fn command(args: Args) -> Result<()> {
                     start_date,
                     end_date,
                 },
-                |log| print_network_flow_log(log, args.json),
+                |log| {
+                    has_logs = true;
+                    print_network_flow_log(log, args.json)
+                },
             )
             .await?;
+
+            if !has_logs && !args.json {
+                println!("No network flows found");
+            }
         }
 
         return Ok(());
@@ -721,6 +758,39 @@ pub async fn command(args: Args) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn base_args() -> Args {
+        Args {
+            service: None,
+            environment: None,
+            project: None,
+            deployment: false,
+            build: false,
+            http: false,
+            network: false,
+            deployment_id: None,
+            json: false,
+            lines: None,
+            filter: None,
+            method: None,
+            status: None,
+            path: None,
+            request_id: None,
+            protocol: None,
+            direction: None,
+            peer: None,
+            peer_kind: None,
+            dropped: None,
+            port: None,
+            src: None,
+            dst: None,
+            host: None,
+            drop_cause: None,
+            latest: false,
+            since: None,
+            until: None,
+        }
+    }
+
     #[test]
     fn build_http_filter_composes_typed_and_raw() {
         // No filters → None
@@ -805,5 +875,49 @@ mod tests {
         assert!(Args::try_parse_from(["logs", "--network", "--http"]).is_err());
         assert!(Args::try_parse_from(["logs", "--network", "--build"]).is_err());
         assert!(Args::try_parse_from(["logs", "--network", "--deployment"]).is_err());
+    }
+
+    #[test]
+    fn network_flow_typed_flags_require_network_mode() {
+        let mut args = base_args();
+        args.http = true;
+        args.protocol = Some(NetworkFlowProtocol::Tcp);
+
+        assert!(validate_filter_modes(&args).is_err());
+
+        let mut args = base_args();
+        args.network = true;
+        args.protocol = Some(NetworkFlowProtocol::Tcp);
+
+        assert!(validate_filter_modes(&args).is_ok());
+    }
+
+    #[test]
+    fn http_typed_flags_require_http_mode() {
+        let mut args = base_args();
+        args.network = true;
+        args.method = Some(HttpMethod::Get);
+
+        assert!(validate_filter_modes(&args).is_err());
+
+        let mut args = base_args();
+        args.http = true;
+        args.method = Some(HttpMethod::Get);
+
+        assert!(validate_filter_modes(&args).is_ok());
+    }
+
+    #[test]
+    fn status_requires_http_or_network_mode() {
+        let mut args = base_args();
+        args.status = Some("ok".to_string());
+
+        assert!(validate_filter_modes(&args).is_err());
+
+        let mut args = base_args();
+        args.network = true;
+        args.status = Some("ok".to_string());
+
+        assert!(validate_filter_modes(&args).is_ok());
     }
 }
