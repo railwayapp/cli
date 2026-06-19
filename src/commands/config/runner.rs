@@ -495,6 +495,26 @@ fn runner_cwd(runner: &str) -> Option<PathBuf> {
     dist_dir.parent().map(|path| path.to_path_buf())
 }
 
+/// Terraform-style one-line summary printed atop the change list.
+fn plan_summary_line(changes: &[Change]) -> String {
+    let (mut add, mut change, mut destroy) = (0usize, 0usize, 0usize);
+    for entry in changes {
+        match entry.kind.as_deref() {
+            Some("resource.create") | Some("domain.create") => add += 1,
+            Some("resource.delete") | Some("variable.delete") => destroy += 1,
+            // resource.update, variable.set, and anything else count as a change.
+            _ => change += 1,
+        }
+    }
+    format!(
+        "{} {}, {}, {}",
+        "Plan:".bold(),
+        format!("{add} to add").green(),
+        format!("{change} to change").yellow(),
+        format!("{destroy} to destroy").red(),
+    )
+}
+
 fn has_destructive_changes(response: &RunnerResponse) -> bool {
     response
         .change_set
@@ -633,8 +653,7 @@ pub(super) fn print_response_with_options_and_next(
             "✓ Your Railway configuration is already up to date.".green()
         );
     } else {
-        let total = changes.len();
-        println!("{} {}", "Changes".bold(), format!("({total})").dimmed());
+        println!("{}", plan_summary_line(changes));
         for change in changes {
             print_change(change, verbose);
         }
