@@ -71,6 +71,10 @@ struct SharedArgs {
     /// Show full change details.
     #[clap(long, alias = "full")]
     verbose: bool,
+
+    /// Exit 2 when changes are pending, 0 when none (plan only). For CI gating.
+    #[clap(long)]
+    detailed_exit_code: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -136,7 +140,12 @@ pub async fn command(args: Args) -> Result<()> {
         Command::Stage(_args) => bail!(
             "Staged Railway configuration changes are not available yet. Run `railway config plan` to preview changes or `railway config apply` to apply them."
         ),
-        Command::Apply(args) => run_sync(args, false, true).await,
+        Command::Apply(args) => {
+            if args.detailed_exit_code {
+                bail!("--detailed-exit-code is only valid with `railway config plan`.");
+            }
+            run_sync(args, false, true).await
+        }
         Command::Init(args) => init_config(args).await,
         Command::Pull(args) => pull_config(args).await,
     }
@@ -387,6 +396,7 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
         include_types: false,
         runner,
         verbose: false,
+        detailed_exit_code: false,
     };
     let response = runner::run(&args, "current").await?;
     let _ = fs::remove_file(temp_file);
@@ -1185,6 +1195,7 @@ async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
         include_types: args.include_types,
         runner: args.runner,
         verbose: args.verbose,
+        detailed_exit_code: args.detailed_exit_code,
     })
     .await
 }
