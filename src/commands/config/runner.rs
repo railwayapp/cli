@@ -58,6 +58,10 @@ pub struct Args {
     /// Exit 2 when a plan has pending changes, 0 when none (plan only). For CI gating.
     #[clap(long)]
     pub(super) detailed_exit_code: bool,
+
+    /// Print variable values in the plan instead of redacting them.
+    #[clap(long)]
+    pub(super) show_values: bool,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -390,6 +394,7 @@ async fn invoke_runner(
         "file": args.file.as_ref().map(|path| path.to_string_lossy().to_string()),
         "includeTypes": args.include_types,
         "pretty": false,
+        "revealValues": args.show_values,
         "context": {
             "projectId": linked_project.project,
             "projectName": linked_project.name,
