@@ -23,6 +23,40 @@ pub struct ServiceParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PrivateNetworkParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Private network name, ID, or DNS name. If omitted, status returns all networks.
+    #[serde(default)]
+    pub network: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdatePrivateNetworkParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The service ID or name. If omitted, uses the currently linked service.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Private network name, ID, or DNS name. If omitted, uses the only network or the network named "railway".
+    #[serde(default)]
+    pub network: Option<String>,
+    /// Endpoint name prefix, without the .internal suffix.
+    pub name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateTcpProxyParams {
     /// The project ID. If omitted, uses the currently linked project.
     #[serde(default)]

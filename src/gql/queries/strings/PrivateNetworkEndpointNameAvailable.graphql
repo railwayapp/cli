@@ -1,0 +1,3 @@
+query PrivateNetworkEndpointNameAvailable($privateNetworkId: String!, $environmentId: String!, $prefix: String!) {
+  privateNetworkEndpointNameAvailable(privateNetworkId: $privateNetworkId, environmentId: $environmentId, prefix: $prefix)
+}
