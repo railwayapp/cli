@@ -54,6 +54,10 @@ pub struct Args {
     /// Show full change details.
     #[clap(long, alias = "full")]
     pub(super) verbose: bool,
+
+    /// Exit 2 when a plan has pending changes, 0 when none (plan only). For CI gating.
+    #[clap(long)]
+    pub(super) detailed_exit_code: bool,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -248,6 +252,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         if !output.ok {
             bail!(runner_diagnostics_message(&output));
         }
+        maybe_detailed_exit(&args, command, &output);
         return Ok(());
     }
 
@@ -256,7 +261,27 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         bail!(runner_diagnostics_message(&output));
     }
 
+    maybe_detailed_exit(&args, command, &output);
+
     Ok(())
+}
+
+/// Terraform-style `-detailed-exitcode`: on a successful `plan`, exit 2 if changes
+/// are pending (0 if none). Opt-in via --detailed-exit-code, so default behavior is
+/// unchanged and existing CI keeps working. Errors still surface as a non-zero
+/// failure through the normal path; this only distinguishes no-changes from changes.
+fn maybe_detailed_exit(args: &Args, command: &str, output: &RunnerResponse) {
+    if !args.detailed_exit_code || command != "plan" || !output.ok {
+        return;
+    }
+    let pending = output
+        .change_set
+        .as_ref()
+        .map(|change_set| !change_set.changes.is_empty())
+        .unwrap_or(false);
+    if pending {
+        std::process::exit(2);
+    }
 }
 
 async fn preview_before_apply(
