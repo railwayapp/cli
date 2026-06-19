@@ -75,6 +75,10 @@ struct SharedArgs {
     /// Exit 2 when changes are pending, 0 when none (plan only). For CI gating.
     #[clap(long)]
     detailed_exit_code: bool,
+
+    /// Print variable values in the plan instead of redacting them.
+    #[clap(long)]
+    show_values: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -397,6 +401,7 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
         runner,
         verbose: false,
         detailed_exit_code: false,
+        show_values: false,
     };
     let response = runner::run(&args, "current").await?;
     let _ = fs::remove_file(temp_file);
@@ -1196,6 +1201,7 @@ async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
         runner: args.runner,
         verbose: args.verbose,
         detailed_exit_code: args.detailed_exit_code,
+        show_values: args.show_values,
     })
     .await
 }
