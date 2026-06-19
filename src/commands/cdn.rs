@@ -169,10 +169,7 @@ async fn enable(
         println!(
             "{}",
             serde_json::to_string_pretty(&ActionOutput {
-                enabled: Some(true),
-                disabled: None,
-                updated: None,
-                purged: None,
+                action: "enable",
                 scope: None,
                 status,
             })?
@@ -214,10 +211,7 @@ async fn disable(
         println!(
             "{}",
             serde_json::to_string_pretty(&ActionOutput {
-                enabled: None,
-                disabled: Some(true),
-                updated: None,
-                purged: None,
+                action: "disable",
                 scope: None,
                 status,
             })?
@@ -303,10 +297,7 @@ async fn update(
         println!(
             "{}",
             serde_json::to_string_pretty(&ActionOutput {
-                enabled: None,
-                disabled: None,
-                updated: Some(true),
-                purged: None,
+                action: "update",
                 scope: None,
                 status,
             })?
@@ -358,10 +349,7 @@ async fn purge(
         println!(
             "{}",
             serde_json::to_string_pretty(&ActionOutput {
-                enabled: None,
-                disabled: None,
-                updated: None,
-                purged: Some(true),
+                action: "purge",
                 scope: Some(args.scope),
                 status,
             })?
@@ -452,7 +440,6 @@ fn build_status(
         cdn: CdnOutput {
             available,
             enabled,
-            edge_config_id: edge_config.as_ref().map(|edge| edge.id.clone()),
             caching: edge_config
                 .as_ref()
                 .and_then(edge_caching)
@@ -472,7 +459,10 @@ fn cdn_enabled(edge_config: Option<&ServiceEdgeConfig>) -> bool {
 
 fn edge_caching(edge_config: &ServiceEdgeConfig) -> Option<&ServiceEdgeCaching> {
     if edge_config.enabled {
-        edge_config.caching.as_ref()
+        edge_config
+            .caching
+            .as_ref()
+            .filter(|caching| !caching.mode.eq_ignore_ascii_case("off"))
     } else {
         None
     }
@@ -744,8 +734,6 @@ struct CdnOutput {
     available: bool,
     enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    edge_config_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     caching: Option<CachingOutput>,
     purge: PurgeStatusOutput,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -755,9 +743,9 @@ struct CdnOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CachingOutput {
-    mode: String,
     html_caching: String,
     default_ttl_seconds: i64,
+    #[serde(skip_serializing)]
     default_ttl_label: String,
     stale_while_revalidate: bool,
     purge_on_deploy: String,
@@ -770,7 +758,6 @@ impl From<&queries::service_edge_config::ServiceEdgeConfigServiceInstanceEdgeCon
         caching: &queries::service_edge_config::ServiceEdgeConfigServiceInstanceEdgeConfigCaching,
     ) -> Self {
         Self {
-            mode: caching.mode.clone(),
             html_caching: caching.html_caching.clone(),
             default_ttl_seconds: caching.default_ttl_seconds,
             default_ttl_label: ttl_label(caching.default_ttl_seconds),
@@ -816,14 +803,7 @@ struct WarningOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActionOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    disabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    updated: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    purged: Option<bool>,
+    action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<PurgeScopeValue>,
     #[serde(flatten)]
@@ -962,7 +942,6 @@ mod tests {
             cdn: CdnOutput {
                 available: true,
                 enabled: false,
-                edge_config_id: None,
                 caching: None,
                 purge: PurgeStatusOutput::default(),
                 warnings: Vec::new(),
@@ -971,12 +950,77 @@ mod tests {
         let value = serde_json::to_value(output).unwrap();
         assert_eq!(value["cdn"]["available"], true);
         assert_eq!(value["cdn"]["enabled"], false);
-        assert!(value["cdn"].get("edgeConfigId").is_none());
         assert!(value["cdn"].get("caching").is_none());
         assert_eq!(value["cdn"]["purge"]["htmlLastPurgedEpoch"], 0);
         assert!(value["cdn"]["purge"]["htmlLastPurgedAt"].is_null());
         assert_eq!(value["cdn"]["purge"]["allLastPurgedEpoch"], 0);
         assert!(value["cdn"]["purge"]["allLastPurgedAt"].is_null());
+    }
+
+    #[test]
+    fn enabled_status_json_omits_internal_caching_fields() {
+        let output = CdnStatusOutput {
+            service: ResourceRef {
+                id: "svc_123".to_string(),
+                name: "web".to_string(),
+            },
+            environment: ResourceRef {
+                id: "env_123".to_string(),
+                name: "production".to_string(),
+            },
+            cdn: CdnOutput {
+                available: true,
+                enabled: true,
+                caching: Some(CachingOutput {
+                    html_caching: "force".to_string(),
+                    default_ttl_seconds: 43200,
+                    default_ttl_label: "12 hours".to_string(),
+                    stale_while_revalidate: true,
+                    purge_on_deploy: "html".to_string(),
+                }),
+                purge: PurgeStatusOutput::default(),
+                warnings: Vec::new(),
+            },
+        };
+        let value = serde_json::to_value(output).unwrap();
+        let caching = &value["cdn"]["caching"];
+        assert_eq!(caching["htmlCaching"], "force");
+        assert_eq!(caching["defaultTtlSeconds"], 43200);
+        assert!(caching.get("mode").is_none());
+        assert!(caching.get("defaultTtlLabel").is_none());
+        assert!(value["cdn"].get("edgeConfigId").is_none());
+    }
+
+    #[test]
+    fn action_output_uses_action_and_status_shape() {
+        let output = ActionOutput {
+            action: "purge",
+            scope: Some(PurgeScopeValue::Html),
+            status: CdnStatusOutput {
+                service: ResourceRef {
+                    id: "svc_123".to_string(),
+                    name: "web".to_string(),
+                },
+                environment: ResourceRef {
+                    id: "env_123".to_string(),
+                    name: "production".to_string(),
+                },
+                cdn: CdnOutput {
+                    available: true,
+                    enabled: true,
+                    caching: None,
+                    purge: PurgeStatusOutput::default(),
+                    warnings: Vec::new(),
+                },
+            },
+        };
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["action"], "purge");
+        assert_eq!(value["scope"], "html");
+        assert!(value.get("purged").is_none());
+        assert!(value.get("enabled").is_none());
+        assert_eq!(value["service"]["name"], "web");
+        assert_eq!(value["cdn"]["enabled"], true);
     }
 
     #[test]
@@ -993,7 +1037,6 @@ mod tests {
             cdn: CdnOutput {
                 available: false,
                 enabled: false,
-                edge_config_id: None,
                 caching: None,
                 purge: PurgeStatusOutput::default(),
                 warnings: Vec::new(),
@@ -1016,6 +1059,15 @@ mod tests {
         assert!(cdn_enabled(Some(&edge_config)));
 
         edge_config.caching = None;
+        assert!(!cdn_enabled(Some(&edge_config)));
+        assert!(edge_caching(&edge_config).is_none());
+    }
+
+    #[test]
+    fn edge_config_mode_off_is_not_cdn_enabled() {
+        let mut edge_config = edge_config(true);
+        edge_config.caching.as_mut().unwrap().mode = "off".to_string();
+
         assert!(!cdn_enabled(Some(&edge_config)));
         assert!(edge_caching(&edge_config).is_none());
     }
