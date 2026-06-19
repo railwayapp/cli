@@ -78,6 +78,7 @@ pub(super) struct RunnerResponse {
 #[serde(rename_all = "camelCase")]
 struct CurrentEnvironment {
     project_id: Option<String>,
+    project_name: Option<String>,
     environment_id: String,
     environment_name: Option<String>,
 }
@@ -565,6 +566,13 @@ pub(super) fn print_response_with_options_and_next(
     );
 
     if let Some(environment) = &response.current_environment {
+        if let Some(project_name) = environment
+            .project_name
+            .as_deref()
+            .or(environment.project_id.as_deref())
+        {
+            println!("{} {}", "Project".dimmed(), project_name.cyan());
+        }
         let environment_name = environment
             .environment_name
             .as_deref()
@@ -572,7 +580,7 @@ pub(super) fn print_response_with_options_and_next(
         println!("{} {}", "Environment".dimmed(), environment_name.cyan());
         if verbose {
             if let Some(project_id) = &environment.project_id {
-                println!("{} {}", "Project".dimmed(), project_id.dimmed());
+                println!("{} {}", "Project ID".dimmed(), project_id.dimmed());
             }
         }
     }
