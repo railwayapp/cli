@@ -5,6 +5,8 @@ type BigInt = i64;
 type EnvironmentVariables = std::collections::BTreeMap<String, Option<String>>;
 //type DeploymentMeta = std::collections::BTreeMap<String, serde_json::Value>;
 type DeploymentMeta = serde_json::Value;
+#[allow(clippy::upper_case_acronyms)] // graphql client expects a type called JSON
+type JSON = serde_json::Value;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -118,6 +120,14 @@ pub struct NetworkFlowLogs;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct Domains;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ServiceEdgeConfig.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceEdgeConfig;
 
 #[derive(GraphQLQuery)]
 #[graphql(

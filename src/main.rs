@@ -35,6 +35,7 @@ commands!(
     agent,
     autoupdate,
     bucket,
+    cdn,
     completion,
     config,
     connect,
@@ -550,6 +551,7 @@ mod cli_tests {
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
+            assert_subcommand(&["cdn", "status"], "cdn");
             assert_subcommand(&["tcp-proxy", "list"], "tcp-proxy");
         }
 
@@ -744,6 +746,32 @@ mod cli_tests {
             assert_parses(&["tcp-proxy", "create", "--port", "5432"]);
             assert_parses(&["tcp-proxy", "status", "proxy-id"]);
             assert_parses(&["tcp-proxy", "delete", "proxy-id", "--yes"]);
+        }
+
+        #[test]
+        fn cdn_subcommands() {
+            assert!(parse(&["cdn"]).is_err());
+            assert_parses(&["cdn", "status"]);
+            assert_parses(&["cdn", "status", "--service", "api", "--json"]);
+            assert_parses(&["cdn", "enable", "--environment", "production"]);
+            assert_parses(&["cdn", "disable", "--service", "web"]);
+            assert_parses(&[
+                "cdn",
+                "update",
+                "--html-caching",
+                "force",
+                "--default-ttl",
+                "4h",
+                "--no-swr",
+                "--purge-on-deploy",
+                "all",
+            ]);
+            assert!(parse(&["cdn", "update"]).is_err());
+            assert!(parse(&["cdn", "update", "--swr", "--no-swr"]).is_err());
+            assert!(parse(&["cdn", "update", "--default-ttl", "3h"]).is_err());
+            assert_parses(&["cdn", "purge", "html"]);
+            assert_parses(&["cdn", "purge", "all", "--json"]);
+            assert!(parse(&["cdn", "purge", "--scope", "html"]).is_err());
         }
 
         #[test]
