@@ -56,6 +56,7 @@ commands!(
     mcp,
     metrics,
     open,
+    outbound_networking as "outbound-networking",
     project,
     private_network as "private-network",
     run(local),

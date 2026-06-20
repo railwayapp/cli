@@ -33,6 +33,7 @@ pub mod logs;
 pub mod mcp;
 pub mod metrics;
 pub mod open;
+pub mod outbound_networking;
 mod output;
 pub mod private_network;
 pub mod project;

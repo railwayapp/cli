@@ -144,6 +144,7 @@ pub struct DeployConfig {
     pub pre_deploy_command: Option<serde_json::Value>, // string or [string]
     pub healthcheck_path: Option<String>,
     pub healthcheck_timeout: Option<i64>,
+    pub ipv6_egress_enabled: Option<bool>,
     pub num_replicas: Option<i64>,
     pub multi_region_config: Option<BTreeMap<String, Option<RegionConfig>>>,
     pub cron_schedule: Option<String>,
