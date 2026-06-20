@@ -132,6 +132,14 @@ pub struct ServiceEdgeConfig;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ServiceWafConfig.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceWafConfig;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/TcpProxies.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
