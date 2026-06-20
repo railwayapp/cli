@@ -1,0 +1,6 @@
+mutation UpdateServiceEdgeConfig($input: UpdateServiceEdgeConfigInput!) {
+  updateServiceEdgeConfig(input: $input) {
+    id
+    enabled
+  }
+}

@@ -238,6 +238,40 @@ pub struct ServiceDisconnect;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnableServiceCdn.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnableServiceCdn;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/UpdateServiceEdgeConfig.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct UpdateServiceEdgeConfig;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DisableServiceCdn.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DisableServiceCdn;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/PurgeServiceCache.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct PurgeServiceCache;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/CustomDomainCreate.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
