@@ -1,0 +1,10 @@
+query ServiceWafConfig($environmentId: String!, $serviceId: String!) {
+  serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+    id
+    edgeConfig {
+      id
+      enabled
+      underAttackModeUntil
+    }
+  }
+}

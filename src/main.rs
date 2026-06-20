@@ -74,6 +74,7 @@ commands!(
     up,
     upgrade,
     variable(variables, vars, var),
+    waf,
     whoami,
     volume,
     redeploy,
@@ -552,6 +553,7 @@ mod cli_tests {
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
             assert_subcommand(&["cdn", "status"], "cdn");
+            assert_subcommand(&["waf", "under-attack", "status"], "waf");
             assert_subcommand(&["tcp-proxy", "list"], "tcp-proxy");
         }
 
@@ -772,6 +774,29 @@ mod cli_tests {
             assert_parses(&["cdn", "purge", "html"]);
             assert_parses(&["cdn", "purge", "all", "--json"]);
             assert!(parse(&["cdn", "purge", "--scope", "html"]).is_err());
+        }
+
+        #[test]
+        fn waf_subcommands() {
+            assert!(parse(&["waf"]).is_err());
+            assert!(parse(&["waf", "under-attack"]).is_err());
+            assert_parses(&["waf", "under-attack", "status"]);
+            assert_parses(&[
+                "waf",
+                "under-attack",
+                "status",
+                "--service",
+                "api",
+                "--json",
+            ]);
+            assert_parses(&["waf", "under-attack", "enable"]);
+            assert_parses(&["waf", "under-attack", "enable", "--duration", "forever"]);
+            assert_parses(&["waf", "under-attack", "enable", "--duration", "1h"]);
+            assert_parses(&["waf", "under-attack", "enable", "--duration", "3h"]);
+            assert_parses(&["waf", "under-attack", "enable", "--duration", "12h"]);
+            assert_parses(&["waf", "under-attack", "enable", "--duration", "24h"]);
+            assert_parses(&["waf", "under-attack", "disable", "--service", "web"]);
+            assert!(parse(&["waf", "under-attack", "enable", "--duration", "2h"]).is_err());
         }
 
         #[test]

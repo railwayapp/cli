@@ -1,0 +1,7 @@
+mutation SetServiceUnderAttackMode($input: SetServiceUnderAttackModeInput!) {
+  setServiceUnderAttackMode(input: $input) {
+    id
+    enabled
+    underAttackModeUntil
+  }
+}

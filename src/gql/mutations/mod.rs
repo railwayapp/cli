@@ -272,6 +272,15 @@ pub struct PurgeServiceCache;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SetServiceUnderAttackMode.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SetServiceUnderAttackMode;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/CustomDomainCreate.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
