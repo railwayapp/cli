@@ -13,7 +13,7 @@ const FIELD_LABEL_WIDTH: usize = 20;
 /// Manage outbound networking for a service
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway outbound-networking status --service api\n  railway outbound-networking static-ip enable --service api\n  railway outbound-networking static-ip status --service api --json\n  railway outbound-networking static-ip disable --service api\n  railway outbound-networking ipv6 enable --service api\n  railway outbound-networking ipv6 status --service api --json\n  railway outbound-networking ipv6 disable --service api\n\nAutomation notes:\n  Static Outbound IP changes require a redeploy before outbound traffic changes.\n  Outbound IPv6 changes are staged; apply staged changes to trigger redeploy."
+    after_help = "Examples:\n\n  railway outbound-network status --service api\n  railway outbound-network static-ip enable --service api\n  railway outbound-network static-ip status --service api --json\n  railway outbound-network static-ip disable --service api\n  railway outbound-network ipv6 enable --service api\n  railway outbound-network ipv6 status --service api --json\n  railway outbound-network ipv6 disable --service api\n\nAutomation notes:\n  Static Outbound IP changes require a redeploy before outbound traffic changes.\n  Outbound IPv6 changes are staged; apply staged changes to trigger redeploy."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -638,36 +638,36 @@ mod tests {
     #[test]
     fn parses_subcommands() {
         assert!(matches!(
-            Args::parse_from(["outbound-networking", "status"]).command,
+            Args::parse_from(["outbound-network", "status"]).command,
             Commands::Status
         ));
         assert!(matches!(
-            Args::parse_from(["outbound-networking", "static-ip", "status"]).command,
+            Args::parse_from(["outbound-network", "static-ip", "status"]).command,
             Commands::StaticIp(StaticIpArgs {
                 command: StaticIpCommands::Status
             })
         ));
         assert!(matches!(
-            Args::parse_from(["outbound-networking", "static-ip", "enable"]).command,
+            Args::parse_from(["outbound-network", "static-ip", "enable"]).command,
             Commands::StaticIp(StaticIpArgs {
                 command: StaticIpCommands::Enable
             })
         ));
         assert!(matches!(
-            Args::parse_from(["outbound-networking", "static-ip", "disable"]).command,
+            Args::parse_from(["outbound-network", "static-ip", "disable"]).command,
             Commands::StaticIp(StaticIpArgs {
                 command: StaticIpCommands::Disable
             })
         ));
         assert!(matches!(
-            Args::parse_from(["outbound-networking", "ipv6", "enable"]).command,
+            Args::parse_from(["outbound-network", "ipv6", "enable"]).command,
             Commands::Ipv6(Ipv6Args {
                 command: Ipv6Commands::Enable
             })
         ));
         assert!(matches!(
             Args::parse_from([
-                "outbound-networking",
+                "outbound-network",
                 "--service",
                 "api",
                 "--environment",
