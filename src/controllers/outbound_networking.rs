@@ -50,15 +50,6 @@ impl Lifecycle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum StaticIpMode {
-    Disabled,
-    Legacy,
-    #[serde(rename = "ha")]
-    Ha,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StaticIpAddress {
@@ -74,7 +65,6 @@ pub struct StaticIpAddress {
 #[serde(rename_all = "camelCase")]
 pub struct StaticIpStatus {
     pub enabled: bool,
-    pub mode: StaticIpMode,
     pub high_availability: bool,
     pub ips: Vec<StaticIpAddress>,
 }
@@ -201,7 +191,6 @@ pub async fn disable_static_ips(
     Ok((
         StaticIpStatus {
             enabled: false,
-            mode: StaticIpMode::Disabled,
             high_availability: false,
             ips: Vec::new(),
         },
@@ -331,17 +320,9 @@ fn static_ip_status_from_gateway_fields<T: EgressGatewayFields>(
         .map(EgressGatewayFields::into_static_ip_address)
         .collect::<Vec<_>>();
     let high_availability = ips.iter().any(|ip| ip.zone.is_some());
-    let mode = if ips.is_empty() {
-        StaticIpMode::Disabled
-    } else if high_availability {
-        StaticIpMode::Ha
-    } else {
-        StaticIpMode::Legacy
-    };
 
     StaticIpStatus {
         enabled: !ips.is_empty(),
-        mode,
         high_availability,
         ips,
     }
@@ -407,23 +388,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn static_ip_status_derives_disabled_legacy_and_ha() {
+    fn static_ip_status_derives_enabled_and_high_availability() {
         let disabled = static_ip_status_from_gateways(vec![]);
         assert!(!disabled.enabled);
-        assert_eq!(disabled.mode, StaticIpMode::Disabled);
         assert!(!disabled.high_availability);
 
-        let legacy = static_ip_status_from_gateways(vec![
+        let single_gateway = static_ip_status_from_gateways(vec![
             queries::egress_gateways::EgressGatewaysEgressGateways {
                 ipv4: "203.0.113.10".to_string(),
                 region: "us-west2".to_string(),
                 zone: None,
             },
         ]);
-        assert!(legacy.enabled);
-        assert_eq!(legacy.mode, StaticIpMode::Legacy);
-        assert!(!legacy.high_availability);
-        assert_eq!(legacy.ips[0].ip_type, "shared");
+        assert!(single_gateway.enabled);
+        assert!(!single_gateway.high_availability);
+        assert_eq!(single_gateway.ips[0].ip_type, "shared");
+        assert!(
+            serde_json::to_value(&single_gateway)
+                .unwrap()
+                .get("mode")
+                .is_none()
+        );
 
         let ha = static_ip_status_from_gateways(vec![
             queries::egress_gateways::EgressGatewaysEgressGateways {
@@ -433,7 +418,6 @@ mod tests {
             },
         ]);
         assert!(ha.enabled);
-        assert_eq!(ha.mode, StaticIpMode::Ha);
         assert!(ha.high_availability);
     }
 

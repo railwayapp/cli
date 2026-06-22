@@ -2,7 +2,7 @@ use colored::ColoredString;
 use serde::Serialize;
 
 use crate::controllers::{
-    outbound_networking::{self, FeatureAction, Ipv6Status, StaticIpMode, StaticIpStatus},
+    outbound_networking::{self, FeatureAction, Ipv6Status, StaticIpStatus},
     project::{ServiceContext, resolve_service_context},
 };
 
@@ -400,8 +400,7 @@ fn print_context(service_name: &str, environment_name: &str) {
 
 fn print_static_ip_fields(static_ip: &StaticIpStatus) {
     print_field("Static IPs:", &status_label(static_ip.enabled));
-    print_field("Mode:", &mode_label(static_ip.mode));
-    if static_ip.high_availability {
+    if static_ip.enabled && static_ip.high_availability {
         print_field("High Availability:", &"enabled".green().bold());
     }
     if static_ip.enabled {
@@ -473,14 +472,6 @@ fn status_label(enabled: bool) -> ColoredString {
         "enabled".green().bold()
     } else {
         "disabled".yellow().bold()
-    }
-}
-
-fn mode_label(mode: StaticIpMode) -> ColoredString {
-    match mode {
-        StaticIpMode::Disabled => "disabled".yellow().bold(),
-        StaticIpMode::Legacy => "legacy".yellow().bold(),
-        StaticIpMode::Ha => "ha".green().bold(),
     }
 }
 
