@@ -39,10 +39,10 @@ impl Lifecycle {
         }
     }
 
-    pub fn environment_patch(changed: bool) -> Self {
+    pub fn environment_patch(staged: bool) -> Self {
         Self {
             mode: LifecycleMode::EnvironmentPatch,
-            staged: changed,
+            staged,
             committed: false,
             redeploy_required: false,
             redeploy_triggered: false,
@@ -241,16 +241,8 @@ pub async fn stage_ipv6(
     if current.pending_value == Some(value)
         || (current.pending_value.is_none() && current.enabled == value)
     {
-        return Ok((
-            current,
-            FeatureAction {
-                feature: "ipv6",
-                action: if value { "enable" } else { "disable" },
-                enabled: value,
-                changed: false,
-                lifecycle: Lifecycle::environment_patch(false),
-            },
-        ));
+        let staged = current.staged;
+        return Ok((current, ipv6_feature_action(value, false, staged)));
     }
 
     let patch = ipv6_patch(service_id, value);
@@ -268,14 +260,18 @@ pub async fn stage_ipv6(
 
     Ok((
         updated.clone(),
-        FeatureAction {
-            feature: "ipv6",
-            action: if value { "enable" } else { "disable" },
-            enabled: value,
-            changed: true,
-            lifecycle: Lifecycle::environment_patch(updated.staged),
-        },
+        ipv6_feature_action(value, true, updated.staged),
     ))
+}
+
+fn ipv6_feature_action(value: bool, changed: bool, staged: bool) -> FeatureAction {
+    FeatureAction {
+        feature: "ipv6",
+        action: if value { "enable" } else { "disable" },
+        enabled: value,
+        changed,
+        lifecycle: Lifecycle::environment_patch(staged),
+    }
 }
 
 pub trait EgressGatewayFields {
@@ -474,5 +470,18 @@ mod tests {
             staged_ipv6_value_from_patch(&staged, "svc_456").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn unchanged_ipv6_action_can_still_report_staged_patch() {
+        let action = ipv6_feature_action(true, false, true);
+
+        assert_eq!(action.feature, "ipv6");
+        assert_eq!(action.action, "enable");
+        assert!(action.enabled);
+        assert!(!action.changed);
+        assert!(action.lifecycle.staged);
+        assert!(!action.lifecycle.committed);
+        assert!(!action.lifecycle.redeploy_triggered);
     }
 }
