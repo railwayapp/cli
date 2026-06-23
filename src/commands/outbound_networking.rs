@@ -1,6 +1,7 @@
 use colored::ColoredString;
 use serde::Serialize;
 
+use crate::commands::output::fields::{print_field, print_service_environment_context};
 use crate::controllers::{
     outbound_networking::{self, FeatureAction, Ipv6Status, StaticIpStatus},
     project::{ServiceContext, resolve_service_context},
@@ -126,20 +127,20 @@ async fn status(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let static_ip = outbound_networking::fetch_static_ip_status(
-        &ctx.client,
-        &ctx.configs,
-        &ctx.environment_id,
-        &ctx.service_id,
-    )
-    .await?;
-    let ipv6 = outbound_networking::fetch_ipv6_status(
-        &ctx.client,
-        &ctx.configs,
-        &ctx.environment_id,
-        &ctx.service_id,
-    )
-    .await?;
+    let (static_ip, ipv6) = tokio::try_join!(
+        outbound_networking::fetch_static_ip_status(
+            &ctx.client,
+            &ctx.configs,
+            &ctx.environment_id,
+            &ctx.service_id,
+        ),
+        outbound_networking::fetch_ipv6_status(
+            &ctx.client,
+            &ctx.configs,
+            &ctx.environment_id,
+            &ctx.service_id,
+        )
+    )?;
     let output = OutboundNetworkingOutput::new(&ctx, static_ip, ipv6);
 
     if json {
@@ -281,7 +282,11 @@ async fn ipv6_stage(
 fn print_outbound_networking_status(output: &OutboundNetworkingOutput) {
     println!("{}", "Outbound networking".bold());
     println!();
-    print_context(&output.service.name, &output.environment.name);
+    print_service_environment_context(
+        &output.service.name,
+        &output.environment.name,
+        FIELD_LABEL_WIDTH,
+    );
     println!();
     print_static_ip_fields(&output.static_ip);
     println!();
@@ -291,7 +296,11 @@ fn print_outbound_networking_status(output: &OutboundNetworkingOutput) {
 fn print_static_ip_status(output: &StaticIpStatusOutput) {
     println!("{}", "Static Outbound IPs".bold());
     println!();
-    print_context(&output.service.name, &output.environment.name);
+    print_service_environment_context(
+        &output.service.name,
+        &output.environment.name,
+        FIELD_LABEL_WIDTH,
+    );
     println!();
     print_static_ip_fields(&output.static_ip);
 }
@@ -299,7 +308,11 @@ fn print_static_ip_status(output: &StaticIpStatusOutput) {
 fn print_ipv6_status(output: &Ipv6StatusOutput) {
     println!("{}", "Outbound IPv6".bold());
     println!();
-    print_context(&output.service.name, &output.environment.name);
+    print_service_environment_context(
+        &output.service.name,
+        &output.environment.name,
+        FIELD_LABEL_WIDTH,
+    );
     println!();
     print_ipv6_fields(&output.ipv6);
 }
@@ -393,15 +406,18 @@ fn print_ipv6_action(output: &Ipv6ActionOutput) {
     }
 }
 
-fn print_context(service_name: &str, environment_name: &str) {
-    print_field("Service:", &service_name.green().bold());
-    print_field("Environment:", &environment_name.blue().bold());
-}
-
 fn print_static_ip_fields(static_ip: &StaticIpStatus) {
-    print_field("Static IPs:", &status_label(static_ip.enabled));
+    print_field(
+        "Static IPs:",
+        &status_label(static_ip.enabled),
+        FIELD_LABEL_WIDTH,
+    );
     if static_ip.enabled && static_ip.high_availability {
-        print_field("High Availability:", &"enabled".green().bold());
+        print_field(
+            "High Availability:",
+            &"enabled".green().bold(),
+            FIELD_LABEL_WIDTH,
+        );
     }
     if static_ip.enabled {
         println!();
@@ -410,15 +426,24 @@ fn print_static_ip_fields(static_ip: &StaticIpStatus) {
 }
 
 fn print_ipv6_fields(ipv6: &Ipv6Status) {
-    print_field("Outbound IPv6:", &status_label(ipv6.enabled));
+    print_field(
+        "Outbound IPv6:",
+        &status_label(ipv6.enabled),
+        FIELD_LABEL_WIDTH,
+    );
     if let Some(value) = ipv6.pending_value {
         print_field(
             "Pending:",
             &(if value { "enable" } else { "disable" })
                 .to_string()
                 .yellow(),
+            FIELD_LABEL_WIDTH,
         );
-        print_field("Message:", &"Apply staged changes to trigger redeploy.");
+        print_field(
+            "Message:",
+            &"Apply staged changes to trigger redeploy.",
+            FIELD_LABEL_WIDTH,
+        );
     }
 }
 
@@ -460,11 +485,6 @@ fn print_static_ip_table(static_ip: &StaticIpStatus) {
             region_width = region_width
         );
     }
-}
-
-fn print_field(label: &str, value: &dyn std::fmt::Display) {
-    let padded = format!("{label:<FIELD_LABEL_WIDTH$}");
-    println!("{} {value}", padded.dimmed());
 }
 
 fn status_label(enabled: bool) -> ColoredString {

@@ -6,6 +6,7 @@ use reqwest::{
     Client,
     header::{HeaderMap, HeaderValue},
 };
+use serde::de::DeserializeOwned;
 
 use crate::{
     commands::Environment,
@@ -126,45 +127,24 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
 ) -> Result<Q::ResponseData, RailwayError> {
     let body = Q::build_query(variables);
     let response = client.post(url).json(&body).send().await?;
-    if response.status() == 429 {
-        return Err(RailwayError::Ratelimited);
-    }
-    let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
-    if let Some(errors) = res.errors {
-        let error = &errors[0];
-        if error
-            .message
-            .to_lowercase()
-            .contains("project token not found")
-        {
-            Err(RailwayError::InvalidRailwayToken(
-                RAILWAY_TOKEN_ENV.to_string(),
-            ))
-        } else if error.message.to_lowercase().contains("not authorized") {
-            // Handle unauthorized errors in a custom way
-            Err(auth_failure_error())
-        } else if error.message == "Two Factor Authentication Required" {
-            // Extract workspace name from extensions if available
-            let workspace_name = error
-                .extensions
-                .as_ref()
-                .and_then(|ext| ext.get("workspaceName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("this workspace")
-                .to_string();
-            let security_url = get_security_url();
-            Err(RailwayError::TwoFactorEnforcementRequired(
-                workspace_name,
-                security_url,
-            ))
-        } else {
-            Err(RailwayError::GraphQLError(error.message.clone()))
-        }
-    } else if let Some(data) = res.data {
-        Ok(data)
-    } else {
-        Err(RailwayError::MissingResponseData)
-    }
+    parse_graphql_response(response).await
+}
+
+pub async fn post_graphql_raw<T, U: reqwest::IntoUrl>(
+    client: &reqwest::Client,
+    url: U,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<T, RailwayError>
+where
+    T: DeserializeOwned,
+{
+    let body = serde_json::json!({
+        "query": query,
+        "variables": variables,
+    });
+    let response = client.post(url).json(&body).send().await?;
+    parse_graphql_response(response).await
 }
 
 fn get_security_url() -> String {
@@ -244,10 +224,17 @@ pub async fn post_graphql_skip_none<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     }
 
     let response = client.post(url).json(&body_json).send().await?;
+    parse_graphql_response(response).await
+}
+
+async fn parse_graphql_response<T>(response: reqwest::Response) -> Result<T, RailwayError>
+where
+    T: DeserializeOwned,
+{
     if response.status() == 429 {
         return Err(RailwayError::Ratelimited);
     }
-    let res: GraphQLResponse<Q::ResponseData> = response.json().await?;
+    let res: GraphQLResponse<T> = response.json().await?;
     if let Some(errors) = res.errors {
         let error = &errors[0];
         if error

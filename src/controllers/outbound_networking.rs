@@ -5,11 +5,14 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::{
-    client::post_graphql,
+    client::{post_graphql, post_graphql_raw},
     config::Configs,
     controllers::config::{DeployConfig, EnvironmentConfig, ServiceInstance},
     gql::{mutations, queries},
 };
+
+const ENVIRONMENT_STAGE_CHANGES_MUTATION: &str =
+    include_str!("../gql/mutations/strings/EnvironmentStageChanges.graphql");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,8 +60,6 @@ pub struct StaticIpAddress {
     pub region: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
-    #[serde(rename = "type")]
-    pub ip_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -76,6 +77,12 @@ pub struct Ipv6Status {
     pub staged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_value: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ipv6State {
+    status: Ipv6Status,
+    staged_value: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -105,7 +112,12 @@ pub async fn fetch_static_ip_status(
     .await?
     .egress_gateways;
 
-    Ok(static_ip_status_from_gateways(gateways))
+    let ips = gateways
+        .into_iter()
+        .map(|gateway| static_ip_address(gateway.ipv4, gateway.region, gateway.zone))
+        .collect();
+
+    Ok(static_ip_status_from_addresses(ips))
 }
 
 pub async fn enable_static_ips(
@@ -142,7 +154,11 @@ pub async fn enable_static_ips(
     .await?
     .egress_gateway_association_create;
 
-    let status = static_ip_status_from_gateway_fields(gateways);
+    let ips = gateways
+        .into_iter()
+        .map(|gateway| static_ip_address(gateway.ipv4, gateway.region, gateway.zone))
+        .collect();
+    let status = static_ip_status_from_addresses(ips);
     Ok((
         status,
         FeatureAction {
@@ -210,23 +226,11 @@ pub async fn fetch_ipv6_status(
     environment_id: &str,
     service_id: &str,
 ) -> Result<Ipv6Status> {
-    let config = crate::controllers::config::environment::fetch_environment_config(
-        client,
-        configs,
-        environment_id,
-        false,
+    Ok(
+        fetch_ipv6_state(client, configs, environment_id, service_id)
+            .await?
+            .status,
     )
-    .await?
-    .config;
-    let enabled = ipv6_enabled_from_config(&config, service_id);
-    let pending_value =
-        fetch_staged_ipv6_value(client, configs, environment_id, service_id).await?;
-
-    Ok(Ipv6Status {
-        enabled,
-        staged: pending_value.is_some(),
-        pending_value,
-    })
 }
 
 pub async fn stage_ipv6(
@@ -236,13 +240,25 @@ pub async fn stage_ipv6(
     service_id: &str,
     value: bool,
 ) -> Result<(Ipv6Status, FeatureAction)> {
-    let current = fetch_ipv6_status(client, configs, environment_id, service_id).await?;
+    let current = fetch_ipv6_state(client, configs, environment_id, service_id).await?;
 
-    if current.pending_value == Some(value)
-        || (current.pending_value.is_none() && current.enabled == value)
+    if current.staged_value.is_some() && current.status.enabled == value {
+        clear_staged_ipv6_value(client, configs, environment_id, service_id).await?;
+        let updated = fetch_ipv6_state(client, configs, environment_id, service_id)
+            .await?
+            .status;
+        return Ok((
+            updated.clone(),
+            ipv6_feature_action(value, true, updated.staged),
+        ));
+    }
+
+    if current.staged_value == Some(value)
+        || (current.staged_value.is_none() && current.status.enabled == value)
     {
-        let staged = current.staged;
-        return Ok((current, ipv6_feature_action(value, false, staged)));
+        let status = current.status;
+        let staged = status.staged;
+        return Ok((status, ipv6_feature_action(value, false, staged)));
     }
 
     let patch = ipv6_patch(service_id, value);
@@ -274,53 +290,54 @@ fn ipv6_feature_action(value: bool, changed: bool, staged: bool) -> FeatureActio
     }
 }
 
-pub trait EgressGatewayFields {
-    fn into_static_ip_address(self) -> StaticIpAddress;
+fn static_ip_address(ipv4: String, region: String, zone: Option<String>) -> StaticIpAddress {
+    StaticIpAddress { ipv4, region, zone }
 }
 
-impl EgressGatewayFields for queries::egress_gateways::EgressGatewaysEgressGateways {
-    fn into_static_ip_address(self) -> StaticIpAddress {
-        StaticIpAddress {
-            ipv4: self.ipv4,
-            region: self.region,
-            zone: self.zone,
-            ip_type: "shared".to_string(),
-        }
-    }
-}
-
-impl EgressGatewayFields
-    for mutations::egress_gateway_association_create::EgressGatewayAssociationCreateEgressGatewayAssociationCreate
-{
-    fn into_static_ip_address(self) -> StaticIpAddress {
-        StaticIpAddress {
-            ipv4: self.ipv4,
-            region: self.region,
-            zone: self.zone,
-            ip_type: "shared".to_string(),
-        }
-    }
-}
-
-pub fn static_ip_status_from_gateways(
-    gateways: Vec<queries::egress_gateways::EgressGatewaysEgressGateways>,
-) -> StaticIpStatus {
-    static_ip_status_from_gateway_fields(gateways)
-}
-
-fn static_ip_status_from_gateway_fields<T: EgressGatewayFields>(
-    gateways: Vec<T>,
-) -> StaticIpStatus {
-    let ips = gateways
-        .into_iter()
-        .map(EgressGatewayFields::into_static_ip_address)
-        .collect::<Vec<_>>();
+fn static_ip_status_from_addresses(ips: Vec<StaticIpAddress>) -> StaticIpStatus {
     let high_availability = ips.iter().any(|ip| ip.zone.is_some());
 
     StaticIpStatus {
         enabled: !ips.is_empty(),
         high_availability,
         ips,
+    }
+}
+
+async fn fetch_ipv6_state(
+    client: &Client,
+    configs: &Configs,
+    environment_id: &str,
+    service_id: &str,
+) -> Result<Ipv6State> {
+    let (config, staged_value) = tokio::try_join!(
+        crate::controllers::config::environment::fetch_environment_config(
+            client,
+            configs,
+            environment_id,
+            false,
+        ),
+        fetch_staged_ipv6_value(client, configs, environment_id, service_id)
+    )?;
+
+    Ok(Ipv6State {
+        status: ipv6_status_from_config_and_staged_value(&config.config, service_id, staged_value),
+        staged_value,
+    })
+}
+
+fn ipv6_status_from_config_and_staged_value(
+    config: &EnvironmentConfig,
+    service_id: &str,
+    staged_value: Option<bool>,
+) -> Ipv6Status {
+    let enabled = ipv6_enabled_from_config(config, service_id);
+    let pending_value = staged_value.filter(|value| *value != enabled);
+
+    Ipv6Status {
+        enabled,
+        staged: pending_value.is_some(),
+        pending_value,
     }
 }
 
@@ -338,6 +355,18 @@ pub fn ipv6_patch(service_id: &str, value: bool) -> EnvironmentConfig {
         )]),
         ..EnvironmentConfig::default()
     }
+}
+
+pub fn ipv6_clear_patch(service_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "services": {
+            service_id: {
+                "deploy": {
+                    "ipv6EgressEnabled": null
+                }
+            }
+        }
+    })
 }
 
 pub fn ipv6_enabled_from_config(config: &EnvironmentConfig, service_id: &str) -> bool {
@@ -379,26 +408,50 @@ async fn fetch_staged_ipv6_value(
     staged_ipv6_value_from_patch(&response.environment_staged_changes.patch, service_id)
 }
 
+async fn clear_staged_ipv6_value(
+    client: &Client,
+    configs: &Configs,
+    environment_id: &str,
+    service_id: &str,
+) -> Result<()> {
+    post_graphql_raw::<mutations::environment_stage_changes::ResponseData, _>(
+        client,
+        configs.get_backboard(),
+        ENVIRONMENT_STAGE_CHANGES_MUTATION,
+        serde_json::json!({
+            "environmentId": environment_id,
+            "input": ipv6_clear_patch(service_id),
+            "merge": true,
+        }),
+    )
+    .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn static_ip_status_derives_enabled_and_high_availability() {
-        let disabled = static_ip_status_from_gateways(vec![]);
+        let disabled = static_ip_status_from_addresses(vec![]);
         assert!(!disabled.enabled);
         assert!(!disabled.high_availability);
 
-        let single_gateway = static_ip_status_from_gateways(vec![
-            queries::egress_gateways::EgressGatewaysEgressGateways {
-                ipv4: "203.0.113.10".to_string(),
-                region: "us-west2".to_string(),
-                zone: None,
-            },
-        ]);
+        let single_gateway = static_ip_status_from_addresses(vec![StaticIpAddress {
+            ipv4: "203.0.113.10".to_string(),
+            region: "us-west2".to_string(),
+            zone: None,
+        }]);
         assert!(single_gateway.enabled);
         assert!(!single_gateway.high_availability);
-        assert_eq!(single_gateway.ips[0].ip_type, "shared");
+        assert!(
+            serde_json::to_value(&single_gateway.ips[0])
+                .unwrap()
+                .get("type")
+                .is_none()
+        );
         assert!(
             serde_json::to_value(&single_gateway)
                 .unwrap()
@@ -406,13 +459,11 @@ mod tests {
                 .is_none()
         );
 
-        let ha = static_ip_status_from_gateways(vec![
-            queries::egress_gateways::EgressGatewaysEgressGateways {
-                ipv4: "203.0.113.10".to_string(),
-                region: "us-west2".to_string(),
-                zone: Some("zone-a".to_string()),
-            },
-        ]);
+        let ha = static_ip_status_from_addresses(vec![StaticIpAddress {
+            ipv4: "203.0.113.10".to_string(),
+            region: "us-west2".to_string(),
+            zone: Some("zone-a".to_string()),
+        }]);
         assert!(ha.enabled);
         assert!(ha.high_availability);
     }
@@ -428,6 +479,22 @@ mod tests {
                     "svc_123": {
                         "deploy": {
                             "ipv6EgressEnabled": true
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn ipv6_clear_patch_serializes_null_value() {
+        assert_eq!(
+            ipv6_clear_patch("svc_123"),
+            serde_json::json!({
+                "services": {
+                    "svc_123": {
+                        "deploy": {
+                            "ipv6EgressEnabled": null
                         }
                     }
                 }
@@ -470,6 +537,33 @@ mod tests {
             staged_ipv6_value_from_patch(&staged, "svc_456").unwrap(),
             None
         );
+
+        let status = ipv6_status_from_config_and_staged_value(&current, "svc_123", Some(false));
+        assert!(status.enabled);
+        assert!(status.staged);
+        assert_eq!(status.pending_value, Some(false));
+    }
+
+    #[test]
+    fn ipv6_status_ignores_redundant_staged_value() {
+        let current = EnvironmentConfig {
+            services: BTreeMap::from([(
+                "svc_123".to_string(),
+                ServiceInstance {
+                    deploy: Some(DeployConfig {
+                        ipv6_egress_enabled: Some(true),
+                        ..DeployConfig::default()
+                    }),
+                    ..ServiceInstance::default()
+                },
+            )]),
+            ..EnvironmentConfig::default()
+        };
+
+        let status = ipv6_status_from_config_and_staged_value(&current, "svc_123", Some(true));
+        assert!(status.enabled);
+        assert!(!status.staged);
+        assert_eq!(status.pending_value, None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use colored::ColoredString;
 use serde::Serialize;
 
+use crate::commands::output::fields::{print_field, print_service_environment_context};
 use crate::controllers::{
     private_network::{self, PrivateNetworkState, PrivateNetworkStatus, endpoint_dns_suffix},
     project::resolve_service_context,
@@ -113,7 +114,7 @@ async fn status(
 
     println!("{}", "Private networking".bold());
     println!();
-    print_context(&ctx.service_name, &ctx.environment_name);
+    print_service_environment_context(&ctx.service_name, &ctx.environment_name, FIELD_LABEL_WIDTH);
     print_statuses(&statuses);
 
     Ok(())
@@ -150,15 +151,10 @@ async fn update(
 
     println!("{}", "Private networking".bold());
     println!();
-    print_context(&ctx.service_name, &ctx.environment_name);
+    print_service_environment_context(&ctx.service_name, &ctx.environment_name, FIELD_LABEL_WIDTH);
     print_status(&status);
 
     Ok(())
-}
-
-fn print_context(service_name: &str, environment_name: &str) {
-    print_field("Service:", &service_name.green().bold());
-    print_field("Environment:", &environment_name.blue().bold());
 }
 
 fn print_statuses(statuses: &[PrivateNetworkStatus]) {
@@ -170,44 +166,70 @@ fn print_statuses(statuses: &[PrivateNetworkStatus]) {
 fn print_status(status: &PrivateNetworkStatus) {
     println!();
     print_divider();
-    print_field("Network:", &status.network.name.purple().bold());
-    print_field("Network ID:", &status.network.id.clone().dimmed());
+    print_field(
+        "Network:",
+        &status.network.name.purple().bold(),
+        FIELD_LABEL_WIDTH,
+    );
+    print_field(
+        "Network ID:",
+        &status.network.id.clone().dimmed(),
+        FIELD_LABEL_WIDTH,
+    );
     print_field(
         "DNS suffix:",
         &format!("{}.internal", status.network.dns_name).dimmed(),
+        FIELD_LABEL_WIDTH,
     );
     print_field(
         "Address family:",
         &status.network.ip_family.clone().magenta().bold(),
+        FIELD_LABEL_WIDTH,
     );
-    print_field("Status:", &state_label(status.state));
+    print_field("Status:", &state_label(status.state), FIELD_LABEL_WIDTH);
 
     if let Some(hostname) = &status.full_hostname {
-        print_field("Hostname:", &hostname.clone().magenta().bold());
+        print_field(
+            "Hostname:",
+            &hostname.clone().magenta().bold(),
+            FIELD_LABEL_WIDTH,
+        );
     }
     if let Some(short_name) = &status.short_name {
-        print_field("Short name:", &short_name.clone().magenta());
+        print_field(
+            "Short name:",
+            &short_name.clone().magenta(),
+            FIELD_LABEL_WIDTH,
+        );
     }
     if let Some(pending_hostname) = &status.pending_hostname {
-        print_field("Pending:", &pending_hostname.clone().blue().bold());
+        print_field(
+            "Pending:",
+            &pending_hostname.clone().blue().bold(),
+            FIELD_LABEL_WIDTH,
+        );
     }
     if let Some(endpoint) = &status.endpoint {
-        print_field("Endpoint ID:", &endpoint.id.clone().dimmed());
+        print_field(
+            "Endpoint ID:",
+            &endpoint.id.clone().dimmed(),
+            FIELD_LABEL_WIDTH,
+        );
         if !endpoint.private_ips.is_empty() {
-            print_field("Private IPs:", &endpoint.private_ips.join(", "));
+            print_field(
+                "Private IPs:",
+                &endpoint.private_ips.join(", "),
+                FIELD_LABEL_WIDTH,
+            );
         }
     } else {
         print_field(
             "Message:",
             &"Private networking is initializing and will be ready once the deployment of this service is complete."
                 .blue(),
+            FIELD_LABEL_WIDTH,
         );
     }
-}
-
-fn print_field(label: &str, value: &dyn std::fmt::Display) {
-    let padded = format!("{label:<FIELD_LABEL_WIDTH$}");
-    println!("{} {value}", padded.dimmed());
 }
 
 fn print_divider() {
