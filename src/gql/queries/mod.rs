@@ -148,6 +148,22 @@ pub struct TcpProxies;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/EgressGateways.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq"
+)]
+pub struct EgressGateways;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/EnvironmentStagedChanges.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct EnvironmentStagedChanges;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/PrivateNetworks.graphql",
     response_derives = "Debug, Serialize, Clone, PartialEq"
 )]
