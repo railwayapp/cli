@@ -72,12 +72,20 @@ pub async fn command(args: Args) -> Result<()> {
     )?;
 
     if args.json {
+        let json_environment = if should_scope_json_to_environment(
+            target.explicit_project,
+            args.environment.as_deref(),
+        ) {
+            environment
+        } else {
+            None
+        };
         let project_json = project_json_with_environment_instances(
             &client,
             &configs,
             &target.project_id,
             &project,
-            environment,
+            json_environment,
         )
         .await?;
         println!("{}", serde_json::to_string_pretty(&project_json)?);
@@ -137,6 +145,10 @@ pub async fn command(args: Args) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+fn should_scope_json_to_environment(explicit_project: bool, environment_arg: Option<&str>) -> bool {
+    explicit_project || environment_arg.is_some()
 }
 
 fn ensure_status_args(args: &Args) -> Result<()> {
@@ -748,6 +760,13 @@ mod tests {
             let error = ensure_status_args(&args).unwrap_err().to_string();
             assert_eq!(error, "--environment is required when using --project");
         }
+    }
+
+    #[test]
+    fn status_json_scoping_preserves_linked_project_default() {
+        assert!(!should_scope_json_to_environment(false, None));
+        assert!(should_scope_json_to_environment(false, Some("production")));
+        assert!(should_scope_json_to_environment(true, Some("production")));
     }
 
     #[test]
