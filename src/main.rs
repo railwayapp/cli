@@ -8,7 +8,10 @@ mod commands;
 use commands::*;
 use config::Configs;
 use is_terminal::IsTerminal;
-use util::{check_update::UpdateCheck, compare_semver::compare_semver};
+use util::{
+    check_update::{UPDATE_CHECK_INTERVAL_HOURS, UpdateCheck},
+    compare_semver::compare_semver,
+};
 
 mod client;
 mod config;
@@ -284,11 +287,11 @@ async fn main() -> Result<()> {
     let skipped_version = update.skipped_version.clone();
     let check_gate_armed = update
         .last_update_check
-        .map(|t| (chrono::Utc::now() - t) < chrono::Duration::hours(12))
+        .map(|t| (chrono::Utc::now() - t) < chrono::Duration::hours(UPDATE_CHECK_INTERVAL_HOURS))
         .unwrap_or(false);
 
     // Pass any pending version to spawn_update_task so it can skip the
-    // 12h short-circuit and retry a download that timed out in a
+    // interval short-circuit and retry a download that timed out in a
     // prior run.  The background task clears latest_version on success.
     //
     // If the running binary has already caught up to (or surpassed) the

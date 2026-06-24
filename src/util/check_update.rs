@@ -162,12 +162,18 @@ struct GithubApiRelease {
 }
 
 const GITHUB_API_RELEASE_URL: &str = "https://api.github.com/repos/railwayapp/cli/releases/latest";
+/// How often the background task re-checks GitHub for a newer CLI release.
+pub const UPDATE_CHECK_INTERVAL_HOURS: i64 = 1;
+
 pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
     let update = UpdateCheck::read().unwrap_or_default();
 
     if let Some(last_update_check) = update.last_update_check {
-        // 12-hour gate: avoid hitting the GitHub API on every invocation.
-        if (chrono::Utc::now() - last_update_check) < chrono::Duration::hours(12) && !force {
+        // Avoid hitting the GitHub API on every invocation.
+        if (chrono::Utc::now() - last_update_check)
+            < chrono::Duration::hours(UPDATE_CHECK_INTERVAL_HOURS)
+            && !force
+        {
             return Ok(None);
         }
     }
@@ -189,7 +195,7 @@ pub async fn check_update(force: bool) -> anyhow::Result<Option<String>> {
             // were changed while the network request was in flight (e.g.
             // `skipped_version` set by a concurrent rollback).
             let mut fresh = UpdateCheck::read().unwrap_or_default();
-            // Don't arm the daily gate when the latest release is the version
+            // Don't arm the interval gate when the latest release is the version
             // the user rolled back from — keep checking so a fix release
             // published shortly after is discovered promptly.
             if fresh.skipped_version.as_deref() != Some(latest_version) {

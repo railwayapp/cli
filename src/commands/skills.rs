@@ -16,7 +16,7 @@ const SKILLS_PATH_PREFIX: &str = "plugins/railway/skills/";
 /// Returns the bare 40-char commit SHA of the skills repo's default branch.
 const SKILLS_SHA_URL: &str = "https://api.github.com/repos/railwayapp/railway-skills/commits/main";
 /// How often the background task re-checks upstream for a newer skills commit.
-const SKILLS_CHECK_INTERVAL_HOURS: i64 = 12;
+const SKILLS_CHECK_INTERVAL_HOURS: i64 = 1;
 
 /// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and all tools that support .agents/skills)
 ///
@@ -353,7 +353,7 @@ pub(crate) fn cached_skill_auto_apply_due() -> bool {
 }
 
 /// Background staleness check, run from the same task as the CLI version check.
-/// 12h-gated and best-effort: refreshes the cached upstream SHA so the next
+/// Hourly-gated and best-effort: refreshes the cached upstream SHA so the next
 /// invocation's banner is accurate. Skips entirely when no skills are installed.
 pub(crate) async fn refresh_skill_update_state() {
     let Some(home) = dirs::home_dir() else {
