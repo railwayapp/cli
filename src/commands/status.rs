@@ -12,7 +12,7 @@ use crate::{
     },
     controllers::{
         config::{EnvironmentConfig, environment::fetch_environment_config},
-        environment::ensure_environment_accessible,
+        environment::get_matched_environment_edge,
         project::{
             ProjectEnvironmentInstances, ProjectServiceInstanceEdge,
             ensure_project_and_environment_exist, get_environment_instances, get_project,
@@ -218,12 +218,7 @@ fn find_environment<'a>(
     project: &'a ProjectProject,
     environment: &str,
 ) -> Result<&'a ProjectProjectEnvironmentsEdges> {
-    let environment = project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.name == environment || env.node.id == environment)
-        .ok_or_else(|| RailwayError::EnvironmentNotFound(environment.to_string()))?;
+    let environment = get_matched_environment_edge(project, environment.to_string())?;
     ensure_status_environment(&environment.node)?;
     Ok(environment)
 }
@@ -231,7 +226,6 @@ fn find_environment<'a>(
 fn ensure_status_environment(
     environment: &queries::project::ProjectProjectEnvironmentsEdgesNode,
 ) -> Result<()> {
-    ensure_environment_accessible(environment)?;
     if environment.deleted_at.is_some() {
         bail!(RailwayError::EnvironmentDeleted);
     }
