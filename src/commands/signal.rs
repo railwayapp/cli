@@ -10,7 +10,6 @@ use crate::{
 /// Manage Railway Signals (feature flags)
 #[derive(Parser)]
 #[clap(
-    visible_alias = "signals",
     after_help = "Examples:\n\n  railway signal list --json\n  railway signal create checkout.v2 --type bool --default false\n  railway signal set checkout.v2 true --when '{\"attr\":\"plan\",\"op\":\"eq\",\"value\":\"enterprise\"}'\n  railway signal unset checkout.v2 --rule-id enterprise-on\n"
 )]
 pub struct Args {
