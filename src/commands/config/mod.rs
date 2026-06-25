@@ -443,6 +443,13 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
     if graph
         .resources
         .iter()
+        .any(|resource| resource.r#type == "volume")
+    {
+        imports.push("volume");
+    }
+    if graph
+        .resources
+        .iter()
         .any(|resource| resource.r#type == "group" || resource.group_id.is_some())
     {
         imports.push("group");
@@ -510,10 +517,11 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
     let mut resource_names = std::collections::HashMap::new();
     let mut group_names = std::collections::HashMap::new();
     let import_names: std::collections::HashSet<&str> = imports.iter().copied().collect();
-    for resource in &graph.resources {
-        if resource.r#type == "group" {
-            continue;
-        }
+    for resource in graph
+        .resources
+        .iter()
+        .filter(|resource| resource.r#type != "group")
+    {
         let var_name =
             unique_resource_ident(&resource.name, &resource.r#type, &import_names, &names);
         let resource_key = resource
@@ -522,6 +530,31 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
             .unwrap_or(&resource.name)
             .to_string();
         resource_names.insert(resource_key, var_name.clone());
+        names.push(var_name);
+    }
+
+    let mut render_resources = graph
+        .resources
+        .iter()
+        .filter(|resource| resource.r#type != "group")
+        .collect::<Vec<_>>();
+    render_resources.sort_by_key(|resource| match resource.r#type.as_str() {
+        "database" => 0,
+        "volume" => 1,
+        "bucket" => 2,
+        "service" => 3,
+        _ => 4,
+    });
+
+    for resource in render_resources {
+        let resource_key = resource
+            .address
+            .as_deref()
+            .unwrap_or(&resource.name)
+            .to_string();
+        let Some(var_name) = resource_names.get(&resource_key).cloned() else {
+            continue;
+        };
         match resource.r#type.as_str() {
             "database" => {
                 let helper = match resource.engine.as_deref() {
@@ -542,20 +575,23 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
                         resource.name
                     ));
                 }
-                names.push(var_name);
             }
             "service" => {
                 out.push_str(&format!(
                     "  const {var_name} = service(\"{}\"",
                     resource.name
                 ));
-                let body = render_service_body(resource, &source_aliases, preserve_variables);
+                let body = render_service_body(
+                    resource,
+                    &source_aliases,
+                    &resource_names,
+                    preserve_variables,
+                );
                 if body.is_empty() {
                     out.push_str(");\n");
                 } else {
                     out.push_str(&format!(", {body});\n"));
                 }
-                names.push(var_name);
             }
             "bucket" => {
                 let config = resource.config.as_ref().map(ts_value).unwrap_or_default();
@@ -570,7 +606,20 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
                         resource.name
                     ));
                 }
-                names.push(var_name);
+            }
+            "volume" => {
+                let config = resource.config.as_ref().map(ts_value).unwrap_or_default();
+                if config.is_empty() {
+                    out.push_str(&format!(
+                        "  const {var_name} = volume(\"{}\");\n",
+                        resource.name
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "  const {var_name} = volume(\"{}\", {config});\n",
+                        resource.name
+                    ));
+                }
             }
             _ => {}
         }
@@ -685,6 +734,7 @@ fn shared_github_sources(
         "github",
         "image",
         "bucket",
+        "volume",
     ]);
     let mut used = Vec::new();
     counts
@@ -702,6 +752,7 @@ fn shared_github_sources(
 fn render_service_body(
     resource: &runner::DesiredResource,
     source_aliases: &std::collections::BTreeMap<String, String>,
+    resource_names: &std::collections::HashMap<String, String>,
     preserve_variables: bool,
 ) -> String {
     let mut lines = Vec::new();
@@ -745,11 +796,44 @@ fn render_service_body(
     render_build(resource.build.as_ref(), &mut lines);
     render_deploy(resource.deploy.as_ref(), &mut lines);
     render_networking(resource.networking.as_ref(), &mut lines);
+    render_volume_attachments(
+        resource.volume_attachments.as_ref(),
+        resource_names,
+        &mut lines,
+    );
     render_variables(resource.variables.as_ref(), &mut lines, preserve_variables);
     if lines.is_empty() {
         return String::new();
     }
     format!("{{\n{}\n  }}", lines.join("\n"))
+}
+
+fn render_volume_attachments(
+    attachments: Option<&serde_json::Map<String, serde_json::Value>>,
+    resource_names: &std::collections::HashMap<String, String>,
+    lines: &mut Vec<String>,
+) {
+    let Some(attachments) = attachments else {
+        return;
+    };
+    let mut rendered = attachments
+        .values()
+        .filter_map(|attachment| {
+            let volume = attachment.get("volume").and_then(|value| value.as_str())?;
+            let mount_path = attachment
+                .get("mountPath")
+                .and_then(|value| value.as_str())?;
+            let volume_var = resource_names.get(volume)?;
+            Some(format!("      {:?}: {volume_var},", mount_path))
+        })
+        .collect::<Vec<_>>();
+    rendered.sort();
+    if rendered.is_empty() {
+        return;
+    }
+    lines.push("    volumeMounts: {".to_string());
+    lines.extend(rendered);
+    lines.push("    },".to_string());
 }
 
 fn render_variables(
