@@ -67,6 +67,7 @@ commands!(
     service,
     setup,
     shell,
+    signal(signals),
     skills,
     ssh,
     starship,

@@ -1,0 +1,54 @@
+scalar JSON
+scalar BigInt
+
+enum SignalType {
+  BOOL
+  STRING
+  NUMBER
+  JSON
+}
+
+type Signal {
+  id: ID!
+  name: String!
+  type: SignalType!
+  owner: String!
+  writableBy: [String!]!
+  default: JSON!
+  rules: JSON!
+  version: BigInt!
+  createdAt: String!
+  updatedAt: String!
+}
+
+input SignalCreateInput {
+  owner: String!
+  name: String!
+  type: SignalType!
+  default: JSON!
+  writableBy: [String!]
+}
+
+input SignalRuleSetInput {
+  owner: String!
+  name: String!
+  ruleId: String!
+  expression: JSON!
+  value: JSON!
+}
+
+input SignalRuleUnsetInput {
+  owner: String!
+  name: String!
+  ruleId: String!
+}
+
+type Query {
+  signals(owner: String!): [Signal!]!
+}
+
+type Mutation {
+  signalCreate(input: SignalCreateInput!): Signal!
+  signalRuleSet(input: SignalRuleSetInput!): Signal!
+  signalRuleUnset(input: SignalRuleUnsetInput!): Signal!
+}
