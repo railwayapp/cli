@@ -173,16 +173,47 @@ pub(crate) fn auth_failure_error() -> RailwayError {
 }
 
 /// Ensures the OAuth access token is still valid, refreshing if needed.
+///
+/// The refresh is a read-modify-write of the on-disk credentials, and the
+/// backboard server rotates (and reuse-detects) the refresh token on every
+/// refresh. If two CLI invocations refresh concurrently, the second presents
+/// an already-consumed refresh token and the server revokes the entire grant —
+/// a hard logout. To prevent this we serialize the refresh behind an exclusive
+/// file lock on a dedicated lockfile under `~/.railway/`, then re-read the
+/// config and re-check expiry after acquiring the lock: whichever process wins
+/// the lock performs the single refresh, and the others pick up its result.
 pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
     // Env var tokens are not managed by us
     if Configs::get_railway_token().is_some() || Configs::get_railway_api_token().is_some() {
         return Ok(());
     }
 
+    // Fast path: nothing to refresh.
     if !configs.has_oauth_token() || !configs.is_token_expired() {
         return Ok(());
     }
 
+    // Serialize the refresh across concurrent CLI processes. If we can't take
+    // the lock (e.g. a stale/wedged lock, unsupported filesystem), fall back to
+    // refreshing without it rather than wedging the CLI — see `refresh_tokens`.
+    let lock_guard = ConfigLockGuard::acquire();
+
+    // Re-read credentials now that we hold the lock: another process may have
+    // already refreshed while we were waiting, in which case we skip the
+    // refresh entirely and use the freshly-rotated token it wrote.
+    if lock_guard.is_some() {
+        configs.reload()?;
+        if !configs.has_oauth_token() || !configs.is_token_expired() {
+            return Ok(());
+        }
+    }
+
+    refresh_tokens(configs).await
+}
+
+/// Perform the actual OAuth refresh + persist. The caller is expected to hold
+/// the config lock (when available) and to have re-checked expiry.
+async fn refresh_tokens(configs: &mut Configs) -> Result<()> {
     let refresh_token = configs.get_refresh_token().ok_or_else(|| {
         RailwayError::OAuthRefreshFailed("No refresh token available".to_string())
     })?;
@@ -197,6 +228,84 @@ pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+/// How long to wait for the config lock before giving up and refreshing
+/// without it. Kept short so a stale lock can never wedge the CLI for long.
+const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Poll interval while waiting for the config lock.
+const CONFIG_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// RAII guard around an exclusive advisory lock on the config lockfile.
+/// Releasing the lock (and dropping the file handle) happens on drop, covering
+/// all error paths.
+struct ConfigLockGuard {
+    file: std::fs::File,
+}
+
+impl ConfigLockGuard {
+    /// Try to acquire the exclusive config lock, retrying up to
+    /// [`CONFIG_LOCK_TIMEOUT`]. Returns `None` (with a warning) on any failure
+    /// so the caller can fall back to an unlocked refresh rather than wedge.
+    fn acquire() -> Option<Self> {
+        use fs2::FileExt;
+
+        let lock_path = match Configs::config_lock_path() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!(
+                    "{}: {e}",
+                    "Warning: could not determine config lock path".yellow()
+                );
+                return None;
+            }
+        };
+
+        if let Some(parent) = lock_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "{}: {e}",
+                    "Warning: could not create config directory for lock".yellow()
+                );
+                return None;
+            }
+        }
+
+        let file = match std::fs::File::create(&lock_path) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!(
+                    "{}: {e}",
+                    "Warning: could not open config lock file".yellow()
+                );
+                return None;
+            }
+        };
+
+        let deadline = std::time::Instant::now() + CONFIG_LOCK_TIMEOUT;
+        loop {
+            if file.try_lock_exclusive().is_ok() {
+                return Some(Self { file });
+            }
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "{}",
+                    "Warning: timed out waiting for config lock; refreshing without it".yellow()
+                );
+                return None;
+            }
+            std::thread::sleep(CONFIG_LOCK_POLL_INTERVAL);
+        }
+    }
+}
+
+impl Drop for ConfigLockGuard {
+    fn drop(&mut self) {
+        use fs2::FileExt;
+        // Best-effort unlock; the lock is also released when the file handle is
+        // dropped immediately after.
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 /// Like post_graphql, but removes null values from the variables object before sending.

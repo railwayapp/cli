@@ -117,15 +117,7 @@ pub enum Environment {
 
 impl Configs {
     pub fn new() -> Result<Self> {
-        let environment = Self::get_environment_id();
-        let root_config_partial_path = match environment {
-            Environment::Production => ".railway/config.json",
-            Environment::Staging => ".railway/config-staging.json",
-            Environment::Dev => ".railway/config-dev.json",
-        };
-
-        let home_dir = dirs::home_dir().context("Unable to get home directory")?;
-        let root_config_path = std::path::Path::new(&home_dir).join(root_config_partial_path);
+        let root_config_path = Self::root_config_path()?;
 
         if let Ok(mut file) = File::open(&root_config_path) {
             let mut serialized_config = vec![];
@@ -149,6 +141,45 @@ impl Configs {
             root_config_path,
             root_config: RailwayConfig::default(),
         })
+    }
+
+    /// Absolute path to the root config file for the current environment.
+    fn root_config_path() -> Result<PathBuf> {
+        let root_config_partial_path = match Self::get_environment_id() {
+            Environment::Production => ".railway/config.json",
+            Environment::Staging => ".railway/config-staging.json",
+            Environment::Dev => ".railway/config-dev.json",
+        };
+
+        let home_dir = dirs::home_dir().context("Unable to get home directory")?;
+        Ok(std::path::Path::new(&home_dir).join(root_config_partial_path))
+    }
+
+    /// Path to the lockfile used to serialize credential read-modify-write
+    /// cycles (token refresh) across concurrent CLI invocations. This is a
+    /// dedicated lockfile, never `config.json` itself, so locking never
+    /// interferes with the atomic config write.
+    pub fn config_lock_path() -> Result<PathBuf> {
+        let home_dir = dirs::home_dir().context("Unable to get home directory")?;
+        Ok(home_dir.join(".railway").join(".config.lock"))
+    }
+
+    /// Re-read the root config from disk, discarding any in-memory state.
+    /// Used after acquiring the config lock so a refresh sees credentials
+    /// freshly written by another concurrent process.
+    pub fn reload(&mut self) -> Result<()> {
+        match File::open(&self.root_config_path) {
+            Ok(mut file) => {
+                let mut serialized_config = vec![];
+                file.read_to_end(&mut serialized_config)?;
+                self.root_config = serde_json::from_slice(&serialized_config)
+                    .unwrap_or_else(|_| RailwayConfig::default());
+            }
+            Err(_) => {
+                self.root_config = RailwayConfig::default();
+            }
+        }
+        Ok(())
     }
 
     pub fn reset(&mut self) -> Result<()> {
@@ -254,7 +285,13 @@ impl Configs {
         anyhow::ensure!(expires_in > 0, "Server returned non-positive expires_in");
         let expires_at = chrono::Utc::now().timestamp() + expires_in;
         self.root_config.user.access_token = Some(access_token.to_string());
-        self.root_config.user.refresh_token = refresh_token.map(|s| s.to_string());
+        // Only overwrite the stored refresh token when the server actually
+        // returned a new one. A 200 response that omits `refresh_token` means
+        // the existing refresh token is still valid, so preserve it rather than
+        // nulling it out (which would force a re-login on the next refresh).
+        if let Some(refresh_token) = refresh_token {
+            self.root_config.user.refresh_token = Some(refresh_token.to_string());
+        }
         self.root_config.user.token_expires_at = Some(expires_at);
         self.root_config.user.token = None; // Clear legacy token
         self.write()
