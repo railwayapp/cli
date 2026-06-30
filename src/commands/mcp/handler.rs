@@ -1823,6 +1823,18 @@ impl RailwayMcp {
     }
 }
 
+fn railway_mcp_server_info() -> ServerInfo {
+    let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        .with_server_info(Implementation::new("railway", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "Railway MCP server. Manage your Railway projects, services, deployments, and more.",
+        );
+    // Preserve the protocol version advertised by rmcp 0.16.0 so older MCP
+    // clients are not forced onto the newer 2025-06-18 protocol by this bump.
+    info.protocol_version = ProtocolVersion::V_2025_03_26;
+    info
+}
+
 impl ServerHandler for RailwayMcp {
     async fn initialize(
         &self,
@@ -1903,21 +1915,7 @@ impl ServerHandler for RailwayMcp {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "railway".to_string(),
-                title: None,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                description: None,
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
-                "Railway MCP server. Manage your Railway projects, services, deployments, and more.".to_string(),
-            ),
-        }
+        railway_mcp_server_info()
     }
 }
 
@@ -1938,6 +1936,16 @@ mod tests {
         assert!(names.contains(&"create_tcp_proxy"));
         assert!(names.contains(&"get_tcp_proxy"));
         assert!(names.contains(&"remove_tcp_proxy"));
+    }
+
+    #[test]
+    fn server_info_preserves_advertised_protocol_version() {
+        let info = railway_mcp_server_info();
+
+        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_03_26);
+        assert_eq!(info.server_info.name, "railway");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+        assert!(info.instructions.is_some());
     }
 
     fn sample_domain() -> McpDomainDetails {
