@@ -102,7 +102,7 @@ async-trait = "0.1.89"
 ratatui = "0.29"
 scopeguard = "1.2"
 schemars = "0.8"
-rmcp = { version = "0.16", features = ["transport-io"] }
+rmcp = { version = "1.4", features = ["transport-io"] }
 toml = "0.8"
 termimad = "0.28"
 csv = "1.3"
