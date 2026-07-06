@@ -34,3 +34,27 @@ pub struct SignalRuleSet;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct SignalRuleUnset;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/signals/schema.graphql",
+    query_path = "src/gql/signals/queries/Signal.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct Signal;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/signals/schema.graphql",
+    query_path = "src/gql/signals/mutations/SignalDefaultSet.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SignalDefaultSet;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/signals/schema.graphql",
+    query_path = "src/gql/signals/mutations/SignalReplace.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SignalReplace;

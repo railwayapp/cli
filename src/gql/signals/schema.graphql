@@ -43,12 +43,28 @@ input SignalRuleUnsetInput {
   ruleId: String!
 }
 
+input SignalDefaultSetInput {
+  owner: String!
+  name: String!
+  default: JSON!
+}
+
+input SignalReplaceInput {
+  owner: String!
+  name: String!
+  type: SignalType!
+  default: JSON!
+}
+
 type Query {
   signals(owner: String!): [Signal!]!
+  signal(owner: String!, name: String!): Signal
 }
 
 type Mutation {
   signalCreate(input: SignalCreateInput!): Signal!
   signalRuleSet(input: SignalRuleSetInput!): Signal!
   signalRuleUnset(input: SignalRuleUnsetInput!): Signal!
+  signalDefaultSet(input: SignalDefaultSetInput!): Signal!
+  signalReplace(input: SignalReplaceInput!): Signal!
 }
