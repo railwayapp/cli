@@ -172,7 +172,10 @@ async fn upsert_command(
         UpsertFlagResult::Created(_) => format!("Created flag {}", name.bold()),
         UpsertFlagResult::Updated(_) => format!("Updated flag {}", name.bold()),
         UpsertFlagResult::Replaced(_) => {
-            format!("Replaced flag {} (type changed; rules cleared)", name.bold())
+            format!(
+                "Replaced flag {} (type changed; rules cleared)",
+                name.bold()
+            )
         }
     };
 
@@ -197,28 +200,20 @@ async fn set_command(
     json: bool,
 ) -> Result<()> {
     let expression = parse_expression(&args.when)?;
-    let existing = get_signal(
-        client,
-        configs,
-        owner.clone(),
-        args.name.clone(),
-    )
-    .await?
-    .with_context(|| {
-        format!(
-            "flag {} not found; create it with `railway flag {} <value>`",
-            args.name, args.name
-        )
-    })?;
+    let existing = get_signal(client, configs, owner.clone(), args.name.clone())
+        .await?
+        .with_context(|| {
+            format!(
+                "flag {} not found; create it with `railway flag {} <value>`",
+                args.name, args.name
+            )
+        })?;
     let value = parse_value_for_query_type(&args.value, &existing.type_)?;
     let rule_id = args
         .rule_id
         .unwrap_or_else(|| default_rule_id(&args.name, &args.when));
 
-    let spinner = create_spinner_if(
-        !json,
-        format!("Setting rule on {}...", args.name.bold()),
-    );
+    let spinner = create_spinner_if(!json, format!("Setting rule on {}...", args.name.bold()));
     let signal = set_signal_rule(
         client,
         configs,
@@ -245,10 +240,7 @@ async fn unset_command(
     args: UnsetArgs,
     json: bool,
 ) -> Result<()> {
-    let spinner = create_spinner_if(
-        !json,
-        format!("Removing rule from {}...", args.name.bold()),
-    );
+    let spinner = create_spinner_if(!json, format!("Removing rule from {}...", args.name.bold()));
     let signal = unset_signal_rule(
         client,
         configs,

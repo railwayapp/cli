@@ -154,15 +154,7 @@ pub async fn upsert_flag_default(
 
     let signal = match existing {
         None => {
-            let created = create_signal(
-                client,
-                configs,
-                owner,
-                name,
-                inferred_type,
-                value,
-            )
-            .await?;
+            let created = create_signal(client, configs, owner, name, inferred_type, value).await?;
             UpsertFlagResult::Created(created)
         }
         Some(existing) => {
@@ -184,15 +176,8 @@ pub async fn upsert_flag_default(
                         format_signal_type(&forced_type),
                     );
                 }
-                let replaced = replace_signal(
-                    client,
-                    configs,
-                    owner,
-                    name,
-                    forced_type,
-                    value,
-                )
-                .await?;
+                let replaced =
+                    replace_signal(client, configs, owner, name, forced_type, value).await?;
                 UpsertFlagResult::Replaced(replaced)
             } else if !query_type_matches_value(&existing.type_, &value) {
                 bail!(
@@ -236,7 +221,9 @@ pub async fn set_signal_rule(
 ) -> Result<signal_rule_set::SignalRuleSetSignalRuleSet> {
     let existing = get_signal(client, configs, owner.clone(), name.clone())
         .await?
-        .with_context(|| format!("flag {name} not found; create it with `railway flag {name} <value>`"))?;
+        .with_context(|| {
+            format!("flag {name} not found; create it with `railway flag {name} <value>`")
+        })?;
     if !query_type_matches_value(&existing.type_, &value) {
         bail!(
             "rule value is not valid for {} flag {name}",
@@ -378,7 +365,8 @@ pub fn parse_signal_type(raw: &str) -> Result<SignalType> {
 }
 
 pub fn parse_expression(raw: &str) -> Result<Value> {
-    serde_json::from_str(raw).context("expression must be valid JSON (Radar clause or bucket compare)")
+    serde_json::from_str(raw)
+        .context("expression must be valid JSON (Radar clause or bucket compare)")
 }
 
 fn from_query_type(signal_type: &signal::SignalType) -> SignalType {
