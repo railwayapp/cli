@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     controllers::signals::{
         UpsertFlagResult, delete_signal, get_signal, list_signals, parse_expression,
-        parse_value_for_query_type, resolve_owner, set_signal_rule, unset_signal_rule,
+        parse_value_for_query_type, resolve_scope_owner, set_signal_rule, unset_signal_rule,
         upsert_flag_default,
     },
     util::progress::create_spinner_if,
@@ -18,8 +18,12 @@ pub struct Args {
     #[clap(subcommand)]
     command: Commands,
 
-    /// Owner scope (defaults to linked project's workspace)
+    /// Flag scope, e.g. workspace:<id> or project:<id> (defaults to linked project's workspace)
     #[clap(long, global = true)]
+    scope: Option<String>,
+
+    /// Deprecated. Use --scope.
+    #[clap(long, global = true, hide = true)]
     owner: Option<String>,
 
     /// Output in JSON format
@@ -29,7 +33,7 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// List feature flags for an owner scope
+    /// List feature flags for a scope
     #[clap(visible_alias = "ls")]
     List(ListArgs),
 
@@ -96,7 +100,7 @@ struct UnsetArgs {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let owner = resolve_owner(&client, &configs, args.owner).await?;
+    let owner = resolve_scope_owner(&client, &configs, args.scope.or(args.owner)).await?;
 
     match args.command {
         Commands::List(list_args) => {

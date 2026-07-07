@@ -17,22 +17,25 @@ use crate::{
 
 pub type SignalType = signal_create::SignalType;
 
-pub async fn resolve_owner(
+pub async fn resolve_scope_owner(
     client: &Client,
     configs: &Configs,
     explicit: Option<String>,
 ) -> Result<String> {
-    if let Some(owner) = explicit {
-        return Ok(owner);
+    if let Some(scope) = explicit {
+        return parse_scope(&scope);
+    }
+    if let Ok(from_env) = std::env::var("RAILWAY_FLAGS_SCOPE") {
+        return parse_scope(&from_env);
     }
     if let Ok(from_env) = std::env::var("RAILWAY_SIGNALS_OWNER") {
-        return Ok(from_env);
+        return parse_scope(&from_env);
     }
 
     let linked = configs
         .get_linked_project()
         .await
-        .context("No linked project. Link one with `railway link` or pass --owner.")?;
+        .context("No linked project. Link one with `railway link` or pass --scope.")?;
     let vars = queries::project::Variables {
         id: linked.project.clone(),
     };
@@ -41,8 +44,16 @@ pub async fn resolve_owner(
         .project;
     let workspace_id = project
         .workspace_id
-        .context("Linked project has no workspace id; pass --owner explicitly.")?;
+        .context("Linked project has no workspace id; pass --scope explicitly.")?;
     Ok(format!("workspace:{workspace_id}"))
+}
+
+fn parse_scope(raw: &str) -> Result<String> {
+    let scope = raw.trim();
+    if scope.starts_with("workspace:") || scope.starts_with("project:") {
+        return Ok(scope.to_string());
+    }
+    bail!("scope must be workspace:<id> or project:<id>");
 }
 
 pub async fn list_signals(
