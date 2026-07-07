@@ -55,6 +55,7 @@ pub mod templates;
 pub mod unlink;
 pub mod up;
 pub mod upgrade;
+pub mod usage;
 pub mod variable;
 pub mod volume;
 pub mod waf;
