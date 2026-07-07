@@ -1,27 +1,22 @@
 use super::*;
 use crate::{
     controllers::signals::{
-        UpsertFlagResult, get_signal, list_signals, parse_expression, parse_value_for_query_type,
-        resolve_owner, set_signal_rule, unset_signal_rule, upsert_flag_default,
+        UpsertFlagResult, delete_signal, get_signal, list_signals, parse_expression,
+        parse_value_for_query_type, resolve_owner, set_signal_rule, unset_signal_rule,
+        upsert_flag_default,
     },
     util::progress::create_spinner_if,
 };
 
-/// Manage feature flags (Railway Signals)
+/// Manage feature flags
 #[derive(Parser)]
-#[command(subcommand_required = false, arg_required_else_help = true)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
 #[clap(
-    after_help = "Examples:\n\n  railway flag list\n  railway flag checkout.v2 true\n  railway flag theme \"blue\"\n  railway flag set checkout.v2 true --when '{\"attr\":\"plan\",\"op\":\"eq\",\"value\":\"enterprise\"}'\n  railway flag unset checkout.v2 --rule-id enterprise-on\n"
+    after_help = "Examples:\n\n  railway flag list\n  railway flag set checkout.v2 true\n  railway flag set theme \"blue\"\n  railway flag set checkout.v2 true --when 'workspace_plan == \"enterprise\"'\n  railway flag set checkout.v2 true --when \"bucket(workspace_id) < 0.25\"\n  railway flag delete checkout.v2\n  railway flag unset checkout.v2 --rule-id enterprise-on\n"
 )]
 pub struct Args {
     #[clap(subcommand)]
-    command: Option<Commands>,
-
-    /// Flag name (upsert default when no subcommand is given)
-    name: Option<String>,
-
-    /// Flag value (upsert default when no subcommand is given)
-    value: Option<String>,
+    command: Commands,
 
     /// Owner scope (defaults to linked project's workspace)
     #[clap(long, global = true)]
@@ -30,28 +25,30 @@ pub struct Args {
     /// Output in JSON format
     #[clap(long, global = true)]
     json: bool,
-
-    /// Flag type: bool, string, number, json (inferred from value when omitted)
-    #[clap(long, global = true)]
-    r#type: Option<String>,
-
-    /// Allow replacing an existing flag's type (clears rules)
-    #[clap(long, global = true)]
-    force: bool,
 }
 
 #[derive(Parser)]
 enum Commands {
     /// List feature flags for an owner scope
     #[clap(visible_alias = "ls")]
-    List,
+    List(ListArgs),
 
-    /// Set a targeting rule on a flag
+    /// Set a flag's default value, or set a targeting rule with --when
     Set(SetArgs),
 
-    /// Remove a rule from a flag
+    /// Delete a feature flag
     #[clap(visible_alias = "rm", visible_alias = "remove")]
+    Delete(DeleteArgs),
+
+    /// Remove a rule from a flag
     Unset(UnsetArgs),
+}
+
+#[derive(Parser)]
+struct ListArgs {
+    /// Show rule IDs and empty rule sections
+    #[clap(long)]
+    full: bool,
 }
 
 #[derive(Parser)]
@@ -59,16 +56,31 @@ struct SetArgs {
     /// Flag name
     name: String,
 
-    /// Value when the expression matches
+    /// Default value, or rule value when --when is passed
     value: String,
 
-    /// JSON expression (Radar clause or bucket compare)
+    /// CEL expression subset, e.g. workspace_plan == "enterprise" or bucket(workspace_id) < 0.25
+    /// (also accepts raw JSON)
     #[clap(long)]
-    when: String,
+    when: Option<String>,
 
-    /// Stable rule id (defaults to a hash of name + expression)
+    /// Stable rule id for --when (defaults to a hash of name + expression)
     #[clap(long)]
     rule_id: Option<String>,
+
+    /// Flag type: bool, string, number, json (inferred from value when omitted)
+    #[clap(long)]
+    r#type: Option<String>,
+
+    /// Allow replacing an existing flag's type (clears rules)
+    #[clap(long)]
+    force: bool,
+}
+
+#[derive(Parser)]
+struct DeleteArgs {
+    /// Flag name
+    name: String,
 }
 
 #[derive(Parser)]
@@ -87,31 +99,15 @@ pub async fn command(args: Args) -> Result<()> {
     let owner = resolve_owner(&client, &configs, args.owner).await?;
 
     match args.command {
-        Some(Commands::List) => list_command(&client, &configs, owner, args.json).await,
-        Some(Commands::Set(set_args)) => {
-            set_command(&client, &configs, owner, set_args, args.json).await
+        Commands::List(list_args) => {
+            list_command(&client, &configs, owner, list_args, args.json).await
         }
-        Some(Commands::Unset(unset_args)) => {
+        Commands::Set(set_args) => set_command(&client, &configs, owner, set_args, args.json).await,
+        Commands::Delete(delete_args) => {
+            delete_command(&client, &configs, owner, delete_args, args.json).await
+        }
+        Commands::Unset(unset_args) => {
             unset_command(&client, &configs, owner, unset_args, args.json).await
-        }
-        None => {
-            let name = args
-                .name
-                .context("flag name required (e.g. `railway flag checkout.v2 true`)")?;
-            let value = args
-                .value
-                .context("flag value required (e.g. `railway flag checkout.v2 true`)")?;
-            upsert_command(
-                &client,
-                &configs,
-                owner,
-                name,
-                value,
-                args.r#type.as_deref(),
-                args.force,
-                args.json,
-            )
-            .await
         }
     }
 }
@@ -120,6 +116,7 @@ async fn list_command(
     client: &reqwest::Client,
     configs: &Configs,
     owner: String,
+    args: ListArgs,
     json: bool,
 ) -> Result<()> {
     let signals = list_signals(client, configs, owner.clone()).await?;
@@ -134,15 +131,7 @@ async fn list_command(
         return Ok(());
     }
 
-    for signal in &signals {
-        println!(
-            "{}  type={:?}  version={}  default={}",
-            signal.name.bold(),
-            signal.type_,
-            signal.version,
-            signal.default
-        );
-    }
+    print_flags_tree(&signals, args.full);
     Ok(())
 }
 
@@ -199,19 +188,33 @@ async fn set_command(
     args: SetArgs,
     json: bool,
 ) -> Result<()> {
-    let expression = parse_expression(&args.when)?;
+    let Some(when) = args.when else {
+        return upsert_command(
+            client,
+            configs,
+            owner,
+            args.name,
+            args.value,
+            args.r#type.as_deref(),
+            args.force,
+            json,
+        )
+        .await;
+    };
+
+    let expression = parse_expression(&when)?;
     let existing = get_signal(client, configs, owner.clone(), args.name.clone())
         .await?
         .with_context(|| {
             format!(
-                "flag {} not found; create it with `railway flag {} <value>`",
+                "flag {} not found; create it with `railway flag set {} <value>`",
                 args.name, args.name
             )
         })?;
     let value = parse_value_for_query_type(&args.value, &existing.type_)?;
     let rule_id = args
         .rule_id
-        .unwrap_or_else(|| default_rule_id(&args.name, &args.when));
+        .unwrap_or_else(|| default_rule_id(&args.name, &when));
 
     let spinner = create_spinner_if(!json, format!("Setting rule on {}...", args.name.bold()));
     let signal = set_signal_rule(
@@ -227,6 +230,24 @@ async fn set_command(
 
     if let Some(sp) = spinner {
         sp.finish_with_message(format!("Updated flag {}", args.name.bold()));
+    } else {
+        println!("{}", serde_json::to_string_pretty(&signal)?);
+    }
+    Ok(())
+}
+
+async fn delete_command(
+    client: &reqwest::Client,
+    configs: &Configs,
+    owner: String,
+    args: DeleteArgs,
+    json: bool,
+) -> Result<()> {
+    let spinner = create_spinner_if(!json, format!("Deleting {}...", args.name.bold()));
+    let signal = delete_signal(client, configs, owner, args.name.clone()).await?;
+
+    if let Some(sp) = spinner {
+        sp.finish_with_message(format!("Deleted flag {}", args.name.bold()));
     } else {
         println!("{}", serde_json::to_string_pretty(&signal)?);
     }
@@ -267,4 +288,256 @@ fn default_rule_id(name: &str, when: &str) -> String {
     name.hash(&mut hasher);
     when.hash(&mut hasher);
     format!("rule-{:x}", hasher.finish())
+}
+
+fn print_flags_tree(signals: &[crate::gql::signals::signals::SignalsSignals], full: bool) {
+    for (index, signal) in signals.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+
+        let rules = signal.rules.as_array().map(Vec::as_slice).unwrap_or(&[]);
+        println!(
+            "{} {} {}",
+            signal.name.bold(),
+            format!("({:?})", signal.type_).dimmed(),
+            format!("v{}", signal.version).dimmed(),
+        );
+        println!(
+            "  {} {}",
+            "value".dimmed(),
+            format_value_for_display(&signal.default)
+        );
+
+        if rules.is_empty() {
+            if full {
+                println!("  {} {}", "rules".dimmed(), "none".dimmed());
+            }
+            continue;
+        }
+
+        for (rule_index, rule) in rules.iter().enumerate() {
+            let is_last = rule_index + 1 == rules.len();
+            let branch = if is_last { "└─" } else { "├─" };
+            let child_prefix = if is_last { "  " } else { "│ " };
+            let rule_id = rule
+                .get("id")
+                .or_else(|| rule.get("ruleId"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(no id)");
+            let expression = rule
+                .get("when")
+                .or_else(|| rule.get("expression"))
+                .map(format_radar_expression)
+                .unwrap_or_else(|| "(no condition)".to_string());
+            let value = rule_value(rule)
+                .map(format_value_for_display)
+                .unwrap_or_else(|| "(no value)".dimmed().to_string());
+
+            println!("  {} {}", branch.dimmed(), expression.bold());
+            if full {
+                println!("  {}  {} {}", child_prefix.dimmed(), "id".dimmed(), rule_id);
+            }
+            println!(
+                "  {}  {} {}",
+                child_prefix.dimmed(),
+                "value".dimmed(),
+                value
+            );
+        }
+    }
+}
+
+fn rule_value(rule: &serde_json::Value) -> Option<&serde_json::Value> {
+    rule.get("source")
+        .and_then(|source| {
+            let source_type = source.get("type").and_then(serde_json::Value::as_str);
+            if source_type == Some("literal") {
+                source.get("value")
+            } else {
+                None
+            }
+        })
+        .or_else(|| rule.get("value"))
+        .or_else(|| rule.get("then"))
+}
+
+fn format_value_for_display(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone().green().to_string(),
+        serde_json::Value::Number(value) => value.to_string().cyan().to_string(),
+        serde_json::Value::Bool(value) => value.to_string().yellow().to_string(),
+        serde_json::Value::Null => "null".magenta().to_string(),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            format!("`{}`", compact_json(value)).cyan().to_string()
+        }
+    }
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+        }
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            value.to_string()
+        }
+    }
+}
+
+fn format_radar_expression(value: &serde_json::Value) -> String {
+    if let Some(items) = value.get("and").and_then(serde_json::Value::as_array) {
+        return items
+            .iter()
+            .map(format_radar_expression)
+            .collect::<Vec<_>>()
+            .join(" AND ");
+    }
+
+    if let Some(items) = value.get("or").and_then(serde_json::Value::as_array) {
+        return format!(
+            "({})",
+            items
+                .iter()
+                .map(format_radar_expression)
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        );
+    }
+
+    if let Some(inner) = value.get("not") {
+        return format!("NOT ({})", format_radar_expression(inner));
+    }
+
+    let Some(attr) = value.get("attr").and_then(serde_json::Value::as_str) else {
+        if let Some(bucket) = value.get("bucket").and_then(serde_json::Value::as_object) {
+            let attr = bucket
+                .get("attr")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(missing-attr)");
+            let salt = bucket
+                .get("salt")
+                .and_then(serde_json::Value::as_str)
+                .map(|salt| format!(", salt: {salt}"))
+                .unwrap_or_default();
+            let op = value
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            let symbol = match op {
+                "lt" => "<",
+                "lte" => "<=",
+                "gt" => ">",
+                "gte" => ">=",
+                _ => op,
+            };
+            let comparison = value
+                .get("value")
+                .map(format_radar_value)
+                .unwrap_or_else(|| "(missing-value)".to_string());
+            return format!("bucket(:{}{}) {} {}", attr, salt, symbol, comparison);
+        }
+        return compact_json(value);
+    };
+    let Some(op) = value.get("op").and_then(serde_json::Value::as_str) else {
+        return compact_json(value);
+    };
+
+    match op {
+        "in_list" | "not_in_list" => {
+            let symbol = if op == "in_list" { "IN" } else { "NOT IN" };
+            let list = value
+                .get("list")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(missing-list)");
+            let suffix =
+                if value.get("match").and_then(serde_json::Value::as_str) == Some("substring") {
+                    " (substring)"
+                } else {
+                    ""
+                };
+            format!(":{} {} @{}{}", attr, symbol, list, suffix)
+        }
+        "matches" => {
+            let pattern = value
+                .get("value")
+                .map(format_radar_value)
+                .unwrap_or_else(|| "(missing-value)".to_string());
+            format!(":{} matches /{}/", attr, pattern)
+        }
+        "contains" | "not_contains" => {
+            let symbol = if op == "contains" {
+                "contains"
+            } else {
+                "not contains"
+            };
+            let comparison = value
+                .get("value")
+                .map(format_radar_value)
+                .unwrap_or_else(|| "(missing-value)".to_string());
+            format!(":{} {} {:?}", attr, symbol, comparison)
+        }
+        _ => {
+            let symbol = match op {
+                "eq" => "==",
+                "neq" => "!=",
+                "gt" => ">",
+                "lt" => "<",
+                "gte" => ">=",
+                "lte" => "<=",
+                _ => op,
+            };
+            let comparison = value
+                .get("value")
+                .map(format_radar_value)
+                .unwrap_or_else(|| "(missing-value)".to_string());
+            format!(":{} {} {}", attr, symbol, comparison)
+        }
+    }
+}
+
+fn format_radar_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            value.to_string()
+        }
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => compact_json(value),
+    }
+}
+
+#[cfg(test)]
+mod flag_list_tests {
+    use super::*;
+
+    #[test]
+    fn formats_json_defaults_compactly_for_tree_values() {
+        let value = serde_json::json!({ "theme": "dark", "rollout": 10 });
+        assert_eq!(compact_json(&value), r#"{"rollout":10,"theme":"dark"}"#);
+    }
+
+    #[test]
+    fn formats_radar_rule_expression() {
+        let expression = serde_json::json!({
+            "and": [
+                { "attr": "workspace_age_hours", "op": "lt", "value": 24 },
+                { "attr": "workspace_plan", "op": "eq", "value": "free" },
+            ],
+        });
+        assert_eq!(
+            format_radar_expression(&expression),
+            ":workspace_age_hours < 24 AND :workspace_plan == free"
+        );
+    }
+
+    #[test]
+    fn reads_literal_rule_source_value() {
+        let rule = serde_json::json!({
+            "id": "enterprise-on",
+            "expression": { "attr": "plan", "op": "eq", "value": "enterprise" },
+            "source": { "type": "literal", "value": true },
+        });
+        assert_eq!(rule_value(&rule), Some(&serde_json::Value::Bool(true)));
+    }
 }

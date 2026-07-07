@@ -2,10 +2,10 @@ scalar JSON
 scalar BigInt
 
 enum SignalType {
-  BOOL
-  STRING
-  NUMBER
-  JSON
+  bool
+  string
+  number
+  json
 }
 
 type Signal {
@@ -49,6 +49,11 @@ input SignalDefaultSetInput {
   default: JSON!
 }
 
+input SignalDeleteInput {
+  owner: String!
+  name: String!
+}
+
 input SignalReplaceInput {
   owner: String!
   name: String!
@@ -66,5 +71,6 @@ type Mutation {
   signalRuleSet(input: SignalRuleSetInput!): Signal!
   signalRuleUnset(input: SignalRuleUnsetInput!): Signal!
   signalDefaultSet(input: SignalDefaultSetInput!): Signal!
+  signalDelete(input: SignalDeleteInput!): Signal!
   signalReplace(input: SignalReplaceInput!): Signal!
 }

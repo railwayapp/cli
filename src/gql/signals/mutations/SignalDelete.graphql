@@ -1,0 +1,10 @@
+mutation SignalDelete($input: SignalDeleteInput!) {
+  signalDelete(input: $input) {
+    id
+    name
+    type
+    owner
+    default
+    version
+  }
+}

@@ -54,6 +54,14 @@ pub struct SignalDefaultSet;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/signals/schema.graphql",
+    query_path = "src/gql/signals/mutations/SignalDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SignalDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/signals/schema.graphql",
     query_path = "src/gql/signals/mutations/SignalReplace.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

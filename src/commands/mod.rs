@@ -46,7 +46,6 @@ pub mod scale;
 pub mod service;
 pub mod setup;
 pub mod shell;
-pub mod signal;
 pub mod skills;
 pub mod ssh;
 pub mod starship;
