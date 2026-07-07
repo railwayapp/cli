@@ -36,6 +36,7 @@ commands!(
     autoupdate,
     bucket,
     cdn,
+    changes(change),
     completion,
     config,
     connect,
@@ -448,6 +449,11 @@ async fn main() -> Result<()> {
     }
 
     if let Err(e) = exec_result {
+        if let Some(exit) = e.downcast_ref::<errors::ExitCode>() {
+            handle_update_task(check_updates_handle).await;
+            std::process::exit(exit.0);
+        }
+
         let root_cause = e.root_cause().to_string();
         if root_cause == inquire::InquireError::OperationInterrupted.to_string()
             || root_cause == inquire::InquireError::OperationCanceled.to_string()
@@ -749,6 +755,32 @@ mod cli_tests {
             assert_parses(&["tcp-proxy", "create", "--port", "5432"]);
             assert_parses(&["tcp-proxy", "status", "proxy-id"]);
             assert_parses(&["tcp-proxy", "delete", "proxy-id", "--yes"]);
+        }
+
+        #[test]
+        fn changes_subcommands() {
+            assert_subcommand(&["changes"], "changes");
+            assert_subcommand(&["staged-changes", "status"], "changes");
+            assert_parses(&["changes", "status"]);
+            assert_parses(&["changes", "status", "--json"]);
+            assert_parses(&["changes", "status", "--detailed-exit-code"]);
+            assert_parses(&["changes", "deploy", "--yes"]);
+            assert_parses(&["changes", "deploy", "--message", "Update settings"]);
+            assert_parses(&["changes", "deploy", "--skip-deploys", "--json"]);
+            assert_parses(&["changes", "apply", "--yes"]);
+            assert_parses(&["changes", "discard", "--all", "--yes"]);
+            assert_parses(&[
+                "changes",
+                "discard",
+                "--path",
+                "services.svc_123.deploy.ipv6EgressEnabled",
+                "--path",
+                "services.svc_123.deploy.startCommand",
+                "--yes",
+                "--json",
+            ]);
+            assert!(parse(&["changes", "discard", "--all", "--path", "services.svc"]).is_err());
+            assert!(parse(&["changes", "deploy", "--detach"]).is_err());
         }
 
         #[test]
