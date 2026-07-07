@@ -825,6 +825,7 @@ pub fn prettify_patch(
     collect_group_changes(patch, environment_config, &mut groups);
     collect_shared_variable_changes(patch, environment_config, &mut groups);
     collect_private_networking_change(patch, environment_config, &mut groups);
+    collect_raw_fallback_changes(patch, environment_config, names, &mut groups);
 
     // The backend substitutes a sentinel for values it refuses to decrypt
     // (sealed variables, missing permission); mark those sealed so no output
@@ -837,6 +838,7 @@ pub fn prettify_patch(
                 change.is_sealed = true;
             }
         }
+        group.summary = group_summary(&group.changes);
     }
 
     let total_changes = groups.iter().map(|group| group.changes.len()).sum();
@@ -857,7 +859,7 @@ pub fn filter_view_by_paths(
         return Ok(view.clone());
     }
     // Validate patterns against the raw patch so near-miss hints list real paths.
-    match_staged_paths(&view.patch.patch, patterns)?;
+    let matched_paths = match_staged_paths(&view.patch.patch, patterns)?;
 
     let mut groups = Vec::new();
     for group in &view.pretty.groups {
@@ -868,6 +870,9 @@ pub fn filter_view_by_paths(
                 patterns
                     .iter()
                     .any(|pattern| paths_match(pattern, &change.path))
+                    || matched_paths
+                        .iter()
+                        .any(|raw_path| change_represents_raw_path(&change.path, raw_path))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -944,6 +949,129 @@ pub fn mask_view_values(view: &StagedChangesView) -> StagedChangesView {
         }
     }
     masked
+}
+
+fn collect_raw_fallback_changes(
+    patch: &Value,
+    environment_config: &Value,
+    names: &ResourceNames,
+    groups: &mut Vec<PrettyChangeGroup>,
+) {
+    let raw_patch = flatten_value(patch);
+    if raw_patch.is_empty() {
+        return;
+    }
+
+    let raw_config = flatten_value(environment_config);
+    for (path, patch_value) in raw_patch {
+        if raw_path_represented(&path, groups) {
+            continue;
+        }
+
+        let (kind, resource_id, resource_name, display_name) = raw_fallback_context(&path, names);
+        let mut change = pretty_change(
+            display_name,
+            raw_config.get(&path),
+            Some(&patch_value),
+            change_type(raw_config.get(&path), &patch_value),
+            &path,
+            false,
+            kind,
+            resource_id.as_deref(),
+            Some(&resource_name),
+        );
+        if change.current_value == SEALED_VALUE_SENTINEL
+            || change.new_value == SEALED_VALUE_SENTINEL
+        {
+            change.is_sealed = true;
+        }
+        push_change_to_group(groups, kind, resource_id, resource_name, change);
+    }
+}
+
+fn raw_path_represented(path: &str, groups: &[PrettyChangeGroup]) -> bool {
+    groups
+        .iter()
+        .flat_map(|group| group.changes.iter())
+        .any(|change| change_represents_raw_path(&change.path, path))
+}
+
+fn change_represents_raw_path(change_path: &str, raw_path: &str) -> bool {
+    change_path == raw_path
+        || (change_path.ends_with(".source.autoUpdates")
+            && raw_path.strip_prefix(change_path) == Some(".schedule"))
+}
+
+fn raw_fallback_context(
+    path: &str,
+    names: &ResourceNames,
+) -> (ResourceKind, Option<String>, String, DisplayName) {
+    let segments = split_escaped_path(path);
+    let key = |idx: usize| segments.get(idx).map(|segment| segment.key.as_str());
+    let display_name = DisplayName {
+        display_name: segments
+            .last()
+            .map(|segment| camel_case_to_title(&segment.key))
+            .unwrap_or_else(|| path.into()),
+        additional_info: Some("Raw change".into()),
+    };
+
+    match (key(0), key(1)) {
+        (Some("services"), Some(service_id)) => (
+            ResourceKind::Service,
+            Some(service_id.into()),
+            names.service_name(service_id).to_string(),
+            display_name,
+        ),
+        (Some("volumes"), Some(volume_id)) => (
+            ResourceKind::Volume,
+            Some(volume_id.into()),
+            names.volume_name(volume_id).to_string(),
+            display_name,
+        ),
+        (Some("buckets"), Some(bucket_id)) => (
+            ResourceKind::Bucket,
+            Some(bucket_id.into()),
+            names.bucket_name(bucket_id).to_string(),
+            display_name,
+        ),
+        (Some("groups"), Some(group_id)) => (
+            ResourceKind::Group,
+            Some(group_id.into()),
+            group_id.into(),
+            display_name,
+        ),
+        (Some("sharedVariables"), _) => (
+            ResourceKind::SharedVariables,
+            None,
+            "Shared Variables".into(),
+            display_name,
+        ),
+        _ => (
+            ResourceKind::Environment,
+            None,
+            "Environment".into(),
+            display_name,
+        ),
+    }
+}
+
+fn push_change_to_group(
+    groups: &mut Vec<PrettyChangeGroup>,
+    kind: ResourceKind,
+    resource_id: Option<String>,
+    resource_name: String,
+    change: PrettyChange,
+) {
+    if let Some(group) = groups
+        .iter_mut()
+        .find(|group| group.resource_kind == kind && group.resource_id == resource_id)
+    {
+        group.changes.push(change);
+        return;
+    }
+
+    groups.push(change_group(kind, resource_id, resource_name, vec![change]));
 }
 
 fn collect_service_changes(
@@ -2314,6 +2442,71 @@ mod tests {
             }),
             &json!({})
         ));
+    }
+
+    #[test]
+    fn filter_matches_raw_path_represented_by_summarized_change() {
+        let patch = json!({
+            "services": {
+                "svc_123": {
+                    "source": {
+                        "autoUpdates": {
+                            "schedule": [{ "day": 1, "startHour": 2, "endHour": 3 }]
+                        }
+                    }
+                }
+            }
+        });
+        let pretty = prettify_patch(&patch, &json!({}), &names());
+        let view = StagedChangesView {
+            environment_id: "env_123".into(),
+            environment_name: "production".into(),
+            patch: StagedPatch {
+                id: "patch_123".into(),
+                status: "STAGED".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_applied_error: None,
+                patch,
+            },
+            pretty,
+            current_config: json!({}),
+        };
+
+        let filtered = filter_view_by_paths(
+            &view,
+            &["services.svc_123.source.autoUpdates.schedule".into()],
+        )
+        .unwrap();
+
+        assert_eq!(filtered.pretty.total_changes, 1);
+        assert_eq!(
+            filtered.pretty.groups[0].changes[0].path,
+            "services.svc_123.source.autoUpdates"
+        );
+    }
+
+    #[test]
+    fn raw_fallback_keeps_unknown_staged_paths_visible() {
+        let patch = json!({
+            "newTopLevelFeature": {
+                "enabled": true
+            }
+        });
+
+        let pretty = prettify_patch(&patch, &json!({}), &names());
+
+        assert_eq!(pretty.total_changes, 1);
+        assert_eq!(pretty.groups[0].resource_kind, ResourceKind::Environment);
+        assert_eq!(
+            pretty.groups[0].changes[0].path,
+            "newTopLevelFeature.enabled"
+        );
+        assert_eq!(pretty.groups[0].changes[0].display_name, "Enabled");
+        assert_eq!(
+            pretty.groups[0].changes[0].additional_info.as_deref(),
+            Some("Raw change")
+        );
     }
 
     #[test]

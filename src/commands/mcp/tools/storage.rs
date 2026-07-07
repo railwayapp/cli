@@ -7,6 +7,7 @@ use crate::{
     controllers::{
         config::{BucketInstance, EnvironmentConfig},
         regions::BucketRegion,
+        staged_changes::{discard_staged_change_paths_with, fetch_staged_patch},
     },
     gql::mutations,
 };
@@ -135,6 +136,32 @@ impl RailwayMcp {
         let ctx = self
             .resolve_context(params.project_id, params.environment_id)
             .await?;
+
+        let staged = fetch_staged_patch(&self.client, &self.configs, &ctx.environment_id)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to inspect staged changes: {e}"), None)
+            })?;
+        if bucket_is_staged_creation(&staged.patch, &params.bucket_id) {
+            discard_staged_change_paths_with(
+                &self.client,
+                &self.configs,
+                &ctx.environment_id,
+                &[format!("buckets.{}", params.bucket_id)],
+            )
+            .await
+            .map_err(|e| {
+                McpError::internal_error(
+                    format!("Failed to discard staged bucket creation: {e}"),
+                    None,
+                )
+            })?;
+
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Bucket {} removed from staged changes before deployment.",
+                params.bucket_id
+            ))]));
+        }
 
         let mut buckets = BTreeMap::new();
         buckets.insert(
@@ -288,5 +315,37 @@ impl RailwayMcp {
         Ok(CallToolResult::success(vec![Content::text(
             "Volume removed successfully.".to_string(),
         )]))
+    }
+}
+
+fn bucket_is_staged_creation(patch: &serde_json::Value, bucket_id: &str) -> bool {
+    patch
+        .pointer(&format!("/buckets/{bucket_id}/isCreated"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detects_bucket_that_only_exists_as_staged_creation() {
+        let patch = json!({
+            "buckets": {
+                "bucket_123": {
+                    "isCreated": true,
+                    "region": "sjc"
+                },
+                "bucket_456": {
+                    "isDeleted": true
+                }
+            }
+        });
+
+        assert!(bucket_is_staged_creation(&patch, "bucket_123"));
+        assert!(!bucket_is_staged_creation(&patch, "bucket_456"));
+        assert!(!bucket_is_staged_creation(&patch, "missing"));
     }
 }
