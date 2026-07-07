@@ -280,7 +280,7 @@ pub fn staged_tcp_proxy_ports_from_patch(patch: &serde_json::Value, service_id: 
             proxies
                 .iter()
                 .filter(|(_, value)| !value.is_null())
-                .filter_map(|(port, _)| port.parse().ok())
+                .filter_map(|(port, _)| port.parse::<u16>().ok())
                 .collect()
         })
         .unwrap_or_default()
