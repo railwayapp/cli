@@ -1,0 +1,10 @@
+mutation SignalCreate($input: SignalCreateInput!) {
+  signalCreate(input: $input) {
+    id
+    name
+    type
+    owner
+    default
+    version
+  }
+}

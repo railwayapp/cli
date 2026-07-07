@@ -2,6 +2,7 @@ query Project($id: String!) {
   project(id: $id) {
     id
     name
+    workspaceId
     deletedAt
     workspace {
       name

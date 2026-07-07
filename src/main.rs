@@ -50,6 +50,7 @@ commands!(
     docs,
     down,
     environment(env),
+    flag(flags),
     init,
     link,
     list,
