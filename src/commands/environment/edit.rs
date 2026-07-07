@@ -8,6 +8,7 @@ use crate::{
         config::{self, EnvironmentConfig},
         environment::get_matched_environment,
         project::{ProjectEnvironmentInstances, get_environment_instances, get_project},
+        staged_changes::{flatten_value, staged_changes_notice},
     },
     errors::RailwayError,
     util::prompt::{fake_select, prompt_confirm_with_default},
@@ -67,7 +68,7 @@ pub async fn edit_environment(args: Args) -> Result<()> {
                 "{}",
                 serde_json::json!({"staged": false, "committed": false, "message": "No changes to apply"})
             );
-        } else if is_interactive {
+        } else {
             println!("{}", "No changes to apply".yellow());
         }
         return Ok(());
@@ -88,6 +89,9 @@ pub async fn edit_environment(args: Args) -> Result<()> {
     };
 
     if should_stage_only {
+        let staged_count = serde_json::to_value(&env_config)
+            .map(|value| flatten_value(&value).len())
+            .unwrap_or(1);
         // Stage only: use environmentStageChanges with merge=true
         let stage_vars = mutations::environment_stage_changes::Variables {
             environment_id: environment_id.clone(),
@@ -114,11 +118,11 @@ pub async fn edit_environment(args: Args) -> Result<()> {
             );
         } else {
             println!(
-                "{} {} {}",
+                "{} {}",
                 "Changes staged for".green(),
                 environment_name.magenta().bold(),
-                "(use 'railway environment edit' to commit)".dimmed()
             );
+            println!("{}", staged_changes_notice(staged_count));
         }
         return Ok(());
     }
@@ -215,14 +219,16 @@ async fn get_edit_config(
     let all_configs = args.config.get_all_service_configs();
     let has_cli_flags = !all_configs.is_empty();
 
-    // Priority 1: Piped stdin JSON (auto-detected)
-    if !stdin_is_terminal {
-        return read_config_from_stdin(environment_instances);
-    }
-
-    // Priority 2: CLI flags (--service-config, --service-variable)
+    // Priority 1: CLI flags (--service-config, --service-variable). Flags must
+    // win over piped stdin: scripts commonly run with a non-terminal stdin, and
+    // reading (empty) stdin first would silently drop the flags.
     if has_cli_flags {
         return parse_non_interactive_configs(&all_configs, environment_instances);
+    }
+
+    // Priority 2: Piped stdin JSON (auto-detected)
+    if !stdin_is_terminal {
+        return read_config_from_stdin(environment_instances);
     }
 
     // Priority 3: Interactive prompts (terminal only)
@@ -255,35 +261,45 @@ fn read_config_from_stdin(
     }
 
     // Try to parse as EnvironmentConfig directly
-    let config: EnvironmentConfig = serde_json::from_str(input)
+    let mut config: EnvironmentConfig = serde_json::from_str(input)
         .context("Failed to parse stdin as JSON. Expected EnvironmentConfig format.")?;
 
-    // Validate that referenced services exist
+    // Resolve service keys (IDs or names) to canonical service IDs so the
+    // staged patch is always keyed by ID. Staging under a name key would
+    // produce a patch the rest of the platform doesn't recognize.
     let services = get_environment_services(environment_instances);
-    let service_ids: Vec<&str> = services
-        .iter()
-        .map(|s| s.node.service_id.as_str())
-        .collect();
-
-    for service_id in config.services.keys() {
-        if !service_ids.contains(&service_id.as_str()) {
-            // Check if it's a service name instead of ID
-            let found = services
-                .iter()
-                .any(|s| s.node.service_name.to_lowercase() == service_id.to_lowercase());
-            if !found {
-                bail!(
-                    "Service '{}' not found in environment. Available services: {}",
-                    service_id,
-                    services
-                        .iter()
-                        .map(|s| s.node.service_name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
+    let mut services_by_id = std::collections::BTreeMap::new();
+    for (key, service_config) in std::mem::take(&mut config.services) {
+        let service = services
+            .iter()
+            .find(|s| s.node.service_id.to_lowercase() == key.to_lowercase())
+            .or_else(|| {
+                services
+                    .iter()
+                    .find(|s| s.node.service_name.to_lowercase() == key.to_lowercase())
+            });
+        let Some(service) = service else {
+            bail!(
+                "Service '{}' not found in environment. Available services: {}",
+                key,
+                services
+                    .iter()
+                    .map(|s| s.node.service_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
+        if services_by_id
+            .insert(service.node.service_id.clone(), service_config)
+            .is_some()
+        {
+            bail!(
+                "Service '{}' is configured more than once (e.g. by both name and ID)",
+                service.node.service_name
+            );
         }
     }
+    config.services = services_by_id;
 
     fake_select("Input", "stdin (JSON)");
 
