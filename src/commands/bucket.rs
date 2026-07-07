@@ -5,6 +5,9 @@ use crate::{
         environment::get_matched_environment,
         project::{ensure_project_and_environment_exist, get_project},
         regions::BucketRegion,
+        staged_changes::{
+            discard_staged_change_paths_with, fetch_staged_patch, staged_changes_notice,
+        },
     },
     errors::RailwayError,
     resources::project_bucket_name,
@@ -22,7 +25,7 @@ use std::{collections::BTreeMap, fmt::Display};
 /// Manage project buckets
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway bucket list --json\n  railway bucket create uploads --region sjc --json\n  railway bucket info --bucket uploads --json\n  railway bucket credentials --bucket uploads --json\n  railway bucket rename --bucket uploads --name assets --json\n  railway bucket delete --bucket assets --yes --json\n\nAliases:\n  list: ls\n  create: add, new\n  delete: remove, rm\n  info: show, get\n  credentials: creds\n  rename: mv\n\nAutomation notes:\n  `railway bucket credentials` prints access keys and secret keys. Avoid sharing command output."
+    after_help = "Examples:\n\n  railway bucket list --json\n  railway bucket create uploads --region sjc --json\n  railway bucket info --bucket uploads --json\n  railway bucket credentials --bucket uploads --json\n  railway bucket rename --bucket uploads --name assets --json\n  railway bucket delete --bucket assets --yes --json\n\nAliases:\n  list: ls\n  create: add, new\n  delete: remove, rm\n  info: show, get\n  credentials: creds\n  rename: mv\n\nAutomation notes:\n  `railway bucket create` and `railway bucket delete` stage the change; apply it with `railway changes deploy`.\n  `railway bucket credentials` prints access keys and secret keys. Avoid sharing command output."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -219,12 +222,6 @@ struct BucketInfo {
     object_count: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BucketPatchMode {
-    Commit,
-    Stage,
-}
-
 fn list(context: &CommandContext, args: ListArgs) -> Result<()> {
     let buckets = resolve_environment_buckets(&context.project, &context.environment_config);
 
@@ -286,21 +283,12 @@ async fn create(context: &CommandContext, args: CreateArgs) -> Result<()> {
         ..EnvironmentConfig::default()
     };
 
-    let patch_mode = apply_bucket_patch(context, patch, Some(format!("Create bucket {bucket_name}")))
-        .await
-        .with_context(|| {
-            let verb = if bucket_patch_mode(context.environment.unmerged_changes_count)
-                == BucketPatchMode::Stage
-            {
-                "staged for"
-            } else {
-                "committed to"
-            };
-            format!(
-                "Bucket \"{}\" was created in project \"{}\", but it could not be {} environment \"{}\".",
-                bucket_name, context.project.name, verb, context.environment.name
-            )
-        })?;
+    stage_bucket_patch(context, patch).await.with_context(|| {
+        format!(
+            "Bucket \"{}\" was created in project \"{}\", but it could not be staged for environment \"{}\".",
+            bucket_name, context.project.name, context.environment.name
+        )
+    })?;
 
     if json {
         println!(
@@ -309,37 +297,48 @@ async fn create(context: &CommandContext, args: CreateArgs) -> Result<()> {
                 "id": bucket.id,
                 "name": bucket.name,
                 "region": region.code(),
-                "staged": patch_mode == BucketPatchMode::Stage,
-                "committed": patch_mode == BucketPatchMode::Commit,
+                "staged": true,
+                "committed": false,
             }))?
         );
     } else {
-        let msg = match patch_mode {
-            BucketPatchMode::Commit => format!(
-                "Created bucket {} ({})",
-                bucket.name.blue(),
-                region.to_string().cyan()
-            ),
-            BucketPatchMode::Stage => format!(
-                "Created bucket {} ({}) and staged it for {} {}",
-                bucket.name.blue(),
-                region.to_string().cyan(),
-                context.environment.name.magenta().bold(),
-                "(use 'railway environment edit' to commit)".dimmed()
-            ),
-        };
+        let msg = format!(
+            "Created bucket {} ({}) and staged it for {}",
+            bucket.name.blue(),
+            region.to_string().cyan(),
+            context.environment.name.magenta().bold(),
+        );
         if let Some(spinner) = spinner {
             spinner.finish_with_message(msg);
         } else {
             println!("{msg}");
         }
+        println!("{}", staged_changes_notice(1));
     }
 
     Ok(())
 }
 
 async fn delete(context: &CommandContext, bucket: Option<String>, args: DeleteArgs) -> Result<()> {
-    let bucket = select_bucket(context, bucket)?;
+    let bucket = match select_bucket(context, bucket.clone()) {
+        Ok(bucket) => bucket,
+        Err(select_error) => {
+            // Not in the environment — it may exist only as a staged (not yet
+            // deployed) creation. Matching the dashboard, deleting a staged
+            // bucket drops its pending creation from the patch instead of
+            // staging a deletion.
+            let Some(staged) = bucket
+                .as_deref()
+                .map(|input| find_staged_created_bucket(context, input))
+            else {
+                return Err(select_error);
+            };
+            let Some(staged) = staged.await? else {
+                return Err(select_error);
+            };
+            return delete_staged(context, staged, args).await;
+        }
+    };
 
     let confirmed = if args.yes {
         true
@@ -384,12 +383,7 @@ async fn delete(context: &CommandContext, bucket: Option<String>, args: DeleteAr
         ..EnvironmentConfig::default()
     };
 
-    let patch_mode = apply_bucket_patch(
-        context,
-        patch,
-        Some(format!("Delete bucket {}", bucket.name)),
-    )
-    .await?;
+    stage_bucket_patch(context, patch).await?;
 
     if args.json {
         println!(
@@ -397,20 +391,17 @@ async fn delete(context: &CommandContext, bucket: Option<String>, args: DeleteAr
             serde_json::to_string_pretty(&serde_json::json!({
                 "id": bucket.id,
                 "name": bucket.name,
-                "staged": patch_mode == BucketPatchMode::Stage,
-                "committed": patch_mode == BucketPatchMode::Commit,
+                "staged": true,
+                "committed": false,
             }))?
         );
     } else {
-        match patch_mode {
-            BucketPatchMode::Commit => println!("Deleted bucket {}", bucket.name.blue()),
-            BucketPatchMode::Stage => println!(
-                "Staged deletion of bucket {} for {} {}",
-                bucket.name.blue(),
-                context.environment.name.magenta().bold(),
-                "(use 'railway environment edit' to commit)".dimmed()
-            ),
-        }
+        println!(
+            "Staged deletion of bucket {} for {}",
+            bucket.name.blue(),
+            context.environment.name.magenta().bold(),
+        );
+        println!("{}", staged_changes_notice(1));
     }
 
     Ok(())
@@ -693,6 +684,99 @@ fn resolve_environment_buckets(
     buckets
 }
 
+/// Find a project bucket matching `input` whose environment instance exists
+/// only as a staged `isCreated` entry in the environment's pending patch.
+async fn find_staged_created_bucket(
+    context: &CommandContext,
+    input: &str,
+) -> Result<Option<BucketRecord>> {
+    let staged =
+        fetch_staged_patch(&context.client, &context.configs, &context.environment.id).await?;
+
+    Ok(context
+        .project
+        .buckets
+        .edges
+        .iter()
+        .find(|edge| {
+            (edge.node.id.eq_ignore_ascii_case(input) || edge.node.name.eq_ignore_ascii_case(input))
+                && staged
+                    .patch
+                    .pointer(&format!("/buckets/{}/isCreated", edge.node.id))
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+        })
+        .map(|edge| BucketRecord {
+            id: edge.node.id.clone(),
+            name: edge.node.name.clone(),
+            region: None,
+        }))
+}
+
+/// Remove a bucket that only exists as a staged creation: drop its pending
+/// `buckets.<id>` entry from the staged patch (matching the dashboard's
+/// deleteBucket behavior) so nothing is provisioned on deploy. The bucket
+/// model itself stays in the project, as it does when discarding from the
+/// dashboard.
+async fn delete_staged(
+    context: &CommandContext,
+    bucket: BucketRecord,
+    args: DeleteArgs,
+) -> Result<()> {
+    let confirmed = if args.yes {
+        true
+    } else if context.is_terminal {
+        prompt_confirm_with_default(
+            format!(
+                "Remove staged bucket \"{}\"? It has not been deployed yet.",
+                bucket.name
+            )
+            .as_str(),
+            false,
+        )?
+    } else {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
+        );
+    };
+
+    if !confirmed {
+        if !args.json {
+            println!("Deletion cancelled.");
+        }
+        return Ok(());
+    }
+
+    discard_staged_change_paths_with(
+        &context.client,
+        &context.configs,
+        &context.environment.id,
+        &[format!("buckets.{}", bucket.id)],
+    )
+    .await?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": bucket.id,
+                "name": bucket.name,
+                "discardedStagedCreation": true,
+                "staged": false,
+                "committed": false,
+            }))?
+        );
+    } else {
+        println!(
+            "Removed staged bucket {} from pending changes for {}",
+            bucket.name.blue(),
+            context.environment.name.magenta().bold(),
+        );
+    }
+
+    Ok(())
+}
+
 fn project_has_bucket(project: &queries::RailwayProject, bucket_input: &str) -> bool {
     project.buckets.edges.iter().any(|edge| {
         edge.node.id.eq_ignore_ascii_case(bucket_input)
@@ -700,49 +784,22 @@ fn project_has_bucket(project: &queries::RailwayProject, bucket_input: &str) -> 
     })
 }
 
-async fn apply_bucket_patch(
-    context: &CommandContext,
-    patch: EnvironmentConfig,
-    commit_message: Option<String>,
-) -> Result<BucketPatchMode> {
-    let patch_mode = bucket_patch_mode(context.environment.unmerged_changes_count);
+/// Stage a bucket change into the environment patch. Bucket changes always go
+/// through the staged-changes workflow (matching the dashboard); they take
+/// effect on `railway changes deploy`.
+async fn stage_bucket_patch(context: &CommandContext, patch: EnvironmentConfig) -> Result<()> {
+    post_graphql::<mutations::EnvironmentStageChanges, _>(
+        &context.client,
+        context.configs.get_backboard(),
+        mutations::environment_stage_changes::Variables {
+            environment_id: context.environment.id.clone(),
+            input: patch,
+            merge: Some(true),
+        },
+    )
+    .await?;
 
-    match patch_mode {
-        BucketPatchMode::Commit => {
-            post_graphql::<mutations::EnvironmentPatchCommit, _>(
-                &context.client,
-                context.configs.get_backboard(),
-                mutations::environment_patch_commit::Variables {
-                    environment_id: context.environment.id.clone(),
-                    patch,
-                    commit_message,
-                },
-            )
-            .await?;
-        }
-        BucketPatchMode::Stage => {
-            post_graphql::<mutations::EnvironmentStageChanges, _>(
-                &context.client,
-                context.configs.get_backboard(),
-                mutations::environment_stage_changes::Variables {
-                    environment_id: context.environment.id.clone(),
-                    input: patch,
-                    merge: Some(true),
-                },
-            )
-            .await?;
-        }
-    }
-
-    Ok(patch_mode)
-}
-
-fn bucket_patch_mode(unmerged_changes_count: Option<i64>) -> BucketPatchMode {
-    if unmerged_changes_count.unwrap_or_default() > 0 {
-        BucketPatchMode::Stage
-    } else {
-        BucketPatchMode::Commit
-    }
+    Ok(())
 }
 
 fn resolve_region(region: Option<String>, is_terminal: bool, json: bool) -> Result<BucketRegion> {

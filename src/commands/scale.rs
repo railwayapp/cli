@@ -44,7 +44,10 @@ pub struct Args {
     json: bool,
 }
 
-const SCALE_AFTER_HELP: &str = r#"Examples:
+const SCALE_AFTER_HELP: &str = r#"Notes:
+  Scaling commits and applies immediately — unlike staged flows (buckets, TCP proxies, outbound IPv6, environment edit), it does not go through `railway changes`.
+
+Examples:
 
   railway scale eu-west=2
   railway scale --service worker eu-west=2 us-east=1

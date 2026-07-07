@@ -1,26 +1,18 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::Client;
 use serde::Serialize;
 
 use crate::{
-    client::post_graphql,
+    client::{post_graphql, post_graphql_raw},
     config::Configs,
     controllers::config::{EnvironmentConfig, ServiceInstance, ServiceNetworking, TcpProxyConfig},
     gql::{mutations, queries},
 };
 
-const VERIFY_ATTEMPTS: usize = 8;
-const VERIFY_DELAY_MS: u64 = 250;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PatchMode {
-    Commit,
-    Stage,
-}
+const ENVIRONMENT_STAGE_CHANGES_MUTATION: &str =
+    include_str!("../gql/mutations/strings/EnvironmentStageChanges.graphql");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,49 +203,30 @@ pub fn normalize_proxy_identifier(identifier: &str) -> NormalizedProxyIdentifier
     }
 }
 
-pub async fn apply_tcp_proxy_patch(
+/// Stage a TCP proxy creation into the environment patch. TCP proxy creation
+/// always goes through the staged-changes workflow (matching the dashboard);
+/// the proxy is provisioned on `railway changes deploy`.
+pub async fn stage_tcp_proxy_patch(
     client: &Client,
     configs: &Configs,
-    project: &queries::RailwayProject,
     environment_id: &str,
     service_id: &str,
-    service_name: &str,
     port: u16,
-) -> Result<PatchMode> {
+) -> Result<()> {
     let patch = tcp_proxy_patch(service_id, port);
-    let mode = patch_mode(project, environment_id);
 
-    match mode {
-        PatchMode::Commit => {
-            post_graphql::<mutations::EnvironmentPatchCommit, _>(
-                client,
-                configs.get_backboard(),
-                mutations::environment_patch_commit::Variables {
-                    environment_id: environment_id.to_string(),
-                    patch,
-                    commit_message: Some(format!(
-                        "Create TCP proxy for {} on port {}",
-                        service_name, port
-                    )),
-                },
-            )
-            .await?;
-        }
-        PatchMode::Stage => {
-            post_graphql::<mutations::EnvironmentStageChanges, _>(
-                client,
-                configs.get_backboard(),
-                mutations::environment_stage_changes::Variables {
-                    environment_id: environment_id.to_string(),
-                    input: patch,
-                    merge: Some(true),
-                },
-            )
-            .await?;
-        }
-    }
+    post_graphql::<mutations::EnvironmentStageChanges, _>(
+        client,
+        configs.get_backboard(),
+        mutations::environment_stage_changes::Variables {
+            environment_id: environment_id.to_string(),
+            input: patch,
+            merge: Some(true),
+        },
+    )
+    .await?;
 
-    Ok(mode)
+    Ok(())
 }
 
 pub fn tcp_proxy_patch(service_id: &str, port: u16) -> EnvironmentConfig {
@@ -275,47 +248,80 @@ pub fn tcp_proxy_patch(service_id: &str, port: u16) -> EnvironmentConfig {
     }
 }
 
-pub fn patch_mode(project: &queries::RailwayProject, environment_id: &str) -> PatchMode {
-    let unmerged_changes = project
-        .environments
-        .edges
-        .iter()
-        .find(|env| env.node.id == environment_id)
-        .and_then(|env| env.node.unmerged_changes_count)
-        .unwrap_or_default();
+/// Application ports of TCP proxies that are staged for creation (but not yet
+/// deployed) for a service, read from the environment's staged patch.
+pub async fn staged_tcp_proxy_ports(
+    client: &Client,
+    configs: &Configs,
+    environment_id: &str,
+    service_id: &str,
+) -> Result<Vec<u16>> {
+    let response = post_graphql::<queries::EnvironmentStagedChanges, _>(
+        client,
+        configs.get_backboard(),
+        queries::environment_staged_changes::Variables {
+            environment_id: environment_id.to_string(),
+            decrypt_variables: Some(false),
+        },
+    )
+    .await?;
 
-    if unmerged_changes > 0 {
-        PatchMode::Stage
-    } else {
-        PatchMode::Commit
-    }
+    Ok(staged_tcp_proxy_ports_from_patch(
+        &response.environment_staged_changes.patch,
+        service_id,
+    ))
 }
 
-pub async fn verify_tcp_proxy_configured(
+pub fn staged_tcp_proxy_ports_from_patch(patch: &serde_json::Value, service_id: &str) -> Vec<u16> {
+    patch
+        .pointer(&format!("/services/{service_id}/networking/tcpProxies"))
+        .and_then(|proxies| proxies.as_object())
+        .map(|proxies| {
+            proxies
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .filter_map(|(port, _)| port.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Remove a staged (not yet deployed) TCP proxy by staging `null` over its
+/// port entry, matching the dashboard. The pending creation nets out to no
+/// change, so nothing is provisioned on deploy.
+pub async fn stage_tcp_proxy_removal(
     client: &Client,
     configs: &Configs,
     environment_id: &str,
     service_id: &str,
     port: u16,
 ) -> Result<()> {
-    for attempt in 0..VERIFY_ATTEMPTS {
-        let proxies = fetch_tcp_proxies(client, configs, environment_id, service_id).await?;
-        if proxies
-            .iter()
-            .any(|proxy| proxy.application_port == i64::from(port))
-        {
-            return Ok(());
-        }
+    // The typed EnvironmentConfig cannot express an explicit null map entry,
+    // so send the patch as raw JSON (same approach as the IPv6 clear flow).
+    let port_key = port.to_string();
+    post_graphql_raw::<mutations::environment_stage_changes::ResponseData, _>(
+        client,
+        configs.get_backboard(),
+        ENVIRONMENT_STAGE_CHANGES_MUTATION,
+        serde_json::json!({
+            "environmentId": environment_id,
+            "input": {
+                "services": {
+                    service_id: {
+                        "networking": {
+                            "tcpProxies": {
+                                port_key: null
+                            }
+                        }
+                    }
+                }
+            },
+            "merge": true,
+        }),
+    )
+    .await?;
 
-        if attempt + 1 < VERIFY_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(VERIFY_DELAY_MS)).await;
-        }
-    }
-
-    bail!(
-        "TCP proxy configuration was requested, but port {} was not present after verification.",
-        port
-    );
+    Ok(())
 }
 
 pub async fn delete_tcp_proxy(
