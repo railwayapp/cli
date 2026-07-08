@@ -29,6 +29,9 @@ const PRICE_MINUTELY_VCPU: f64 = 20.0 / MINUTES_IN_MONTH;
 const PRICE_EGRESS_GB: f64 = 0.00005 * 1_000.0;
 const PRICE_MINUTELY_DISK_GB: f64 = 0.15 / MINUTES_IN_MONTH;
 const PRICE_MINUTELY_BACKUP_GB: f64 = PRICE_MINUTELY_DISK_GB;
+const MIN_SOFT_USAGE_LIMIT_DOLLARS: u32 = 5;
+const MIN_HARD_USAGE_LIMIT_DOLLARS: u32 = 10;
+const MAX_USAGE_LIMIT_DOLLARS: u32 = 500_000;
 
 const USAGE_MEASUREMENTS: &[&str] = &[
     "MEMORY_USAGE_GB",
@@ -165,10 +168,28 @@ mutation UsageLimitRemove($input: UsageLimitRemoveInput!) {
 }
 "#;
 
-/// Show workspace usage and manage compute usage limits
+const AGENT_USAGE_QUERY: &str = r#"
+query AgentUsage($workspaceId: String!) {
+  agentUsage(workspaceId: $workspaceId) {
+    totalUsedCents
+    hardLimitCents
+    softLimitCents
+    usageRemaining
+    billingPeriodEnd
+  }
+}
+"#;
+
+const AGENT_USAGE_LIMIT_SET_MUTATION: &str = r#"
+mutation AgentUsageLimitSet($input: AgentUsageLimitSetInput!) {
+  agentUsageLimitSet(input: $input)
+}
+"#;
+
+/// Show workspace usage and manage usage limits
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway usage\n  railway usage --period previous --json\n  railway usage projects --limit 10\n  railway usage projects --project api --period 2026-07\n  railway usage limit status\n  railway usage limit set --soft 75 --hard 125\n  railway usage limit set --hard 125\n  railway usage limit update --soft 75\n  railway usage limit remove --yes --json\n\nAutomation notes:\n  Usage is scoped to a workspace billing period. --period accepts current, previous, or YYYY-MM and applies to usage summaries and project breakdowns only.\n  usage projects prints the top 25 projects by default; --json returns all projects unless --limit is supplied."
+    after_help = "Examples:\n\n  railway usage\n  railway usage --period previous --json\n  railway usage projects --limit 10\n  railway usage projects --project api --period 2026-07\n  railway usage limit status\n  railway usage limit status --target agent\n  railway usage limit set --target workspace --soft 75 --hard 125\n  railway usage limit set --target agent --soft 7.50 --hard 20 --workspace Acme\n  railway usage limit update --soft 75\n  railway usage limit remove --yes --json\n\nAutomation notes:\n  Usage is scoped to a workspace billing period. --period accepts current, previous, or YYYY-MM and applies to usage summaries and project breakdowns only.\n  usage projects prints the top 25 projects by default; --json returns all projects unless --limit is supplied."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -192,7 +213,7 @@ enum Commands {
     /// Show usage by project
     Projects(ProjectsArgs),
 
-    /// Show or update compute usage limits
+    /// Show or update usage limits
     Limit(LimitArgs),
 }
 
@@ -219,17 +240,24 @@ struct LimitArgs {
 
 #[derive(Parser)]
 enum LimitCommands {
-    /// Show compute usage limit status
-    Status,
+    /// Show usage limit status
+    Status(StatusLimitArgs),
 
-    /// Set compute usage limits
+    /// Set usage limits
     Set(SetLimitArgs),
 
     /// Update compute usage limits
-    Update(SetLimitArgs),
+    Update(UpdateLimitArgs),
 
     /// Remove compute usage limits
     Remove(RemoveLimitArgs),
+}
+
+#[derive(Parser)]
+struct StatusLimitArgs {
+    /// Limit target to show
+    #[clap(long, value_enum)]
+    target: Option<LimitTarget>,
 }
 
 #[derive(Parser)]
@@ -240,13 +268,34 @@ enum LimitCommands {
         .args(["soft", "hard"])
 ))]
 struct SetLimitArgs {
+    /// Limit target to set
+    #[clap(long, value_enum)]
+    target: LimitTarget,
+
+    /// Email alert in dollars
+    #[clap(long, value_parser = parse_limit_amount)]
+    soft: Option<LimitAmount>,
+
+    /// Hard limit in dollars
+    #[clap(long, value_parser = parse_limit_amount)]
+    hard: Option<LimitAmount>,
+}
+
+#[derive(Parser)]
+#[clap(group(
+    clap::ArgGroup::new("limit_value")
+        .required(true)
+        .multiple(true)
+        .args(["soft", "hard"])
+))]
+struct UpdateLimitArgs {
     /// Compute email alert in whole dollars
-    #[clap(long)]
-    soft: Option<u32>,
+    #[clap(long, value_parser = parse_limit_amount)]
+    soft: Option<LimitAmount>,
 
     /// Compute hard limit in whole dollars
-    #[clap(long)]
-    hard: Option<u32>,
+    #[clap(long, value_parser = parse_limit_amount)]
+    hard: Option<LimitAmount>,
 }
 
 #[derive(Parser)]
@@ -383,22 +432,104 @@ async fn limit(
     let workspace = resolve_workspace(client, configs, workspace_arg, spinner.as_ref()).await?;
 
     match args.command {
-        LimitCommands::Status => {
-            let summary =
-                fetch_workspace_usage_summary(client, configs, workspace.id(), None).await?;
-            if let Some(spinner) = spinner {
-                spinner.finish_and_clear();
+        LimitCommands::Status(status_args) => match status_args.target {
+            Some(LimitTarget::Workspace) => {
+                let summary =
+                    fetch_workspace_usage_summary(client, configs, workspace.id(), None).await?;
+                if let Some(spinner) = spinner {
+                    spinner.finish_and_clear();
+                }
+                if json {
+                    print_limit_json("status", &summary)?;
+                } else {
+                    print_limit_status(&summary);
+                }
             }
-            if json {
-                print_limit_json("status", &summary)?;
-            } else {
-                print_limit_status(&summary);
+            Some(LimitTarget::Agent) => {
+                let agent_usage = fetch_agent_usage(client, configs, workspace.id()).await?;
+                if let Some(spinner) = spinner {
+                    spinner.finish_and_clear();
+                }
+                if json {
+                    print_agent_limit_json("status", &workspace, &agent_usage)?;
+                } else {
+                    print_agent_limit_status(&workspace, &agent_usage);
+                }
             }
-        }
-        LimitCommands::Set(set_args) | LimitCommands::Update(set_args) => {
+            None => {
+                let summary =
+                    fetch_workspace_usage_summary(client, configs, workspace.id(), None).await?;
+                let agent_usage = fetch_agent_usage(client, configs, workspace.id()).await?;
+                if let Some(spinner) = spinner {
+                    spinner.finish_and_clear();
+                }
+                if json {
+                    print_combined_limit_json(&summary, &agent_usage)?;
+                } else {
+                    print_combined_limit_status(&summary, &agent_usage);
+                }
+            }
+        },
+        LimitCommands::Set(set_args) => match set_args.target {
+            LimitTarget::Workspace => {
+                let before =
+                    fetch_workspace_usage_summary(client, configs, workspace.id(), None).await?;
+                let request = usage_limit_set_request(
+                    set_args.soft,
+                    set_args.hard,
+                    before.usage_limit.as_ref(),
+                )?;
+                set_usage_limit(
+                    client,
+                    configs,
+                    &before.customer.id,
+                    request.soft_limit,
+                    request.hard_limit,
+                )
+                .await?;
+                let after =
+                    fetch_workspace_usage_summary(client, configs, workspace.id(), None).await?;
+                let action = if before.usage_limit.is_some() {
+                    "updated"
+                } else {
+                    "created"
+                };
+
+                if let Some(spinner) = spinner {
+                    spinner.finish_and_clear();
+                }
+
+                if json {
+                    print_limit_json(action, &after)?;
+                } else {
+                    print_limit_action(action, &after);
+                }
+            }
+            LimitTarget::Agent => {
+                let before = fetch_agent_usage(client, configs, workspace.id()).await?;
+                let request = agent_usage_limit_set_request(&set_args, Some(&before))?;
+                set_agent_usage_limit(client, configs, workspace.id(), &request).await?;
+                let agent_usage = fetch_agent_usage(client, configs, workspace.id()).await?;
+
+                if let Some(spinner) = spinner {
+                    spinner.finish_and_clear();
+                }
+
+                if json {
+                    print_agent_limit_json("updated", &workspace, &agent_usage)?;
+                } else {
+                    print_agent_limit_action("updated", &workspace, &agent_usage);
+                }
+            }
+        },
+        LimitCommands::Update(update_args) => {
             let before =
                 fetch_workspace_usage_summary(client, configs, workspace.id(), None).await?;
-            let request = usage_limit_set_request(&set_args, before.usage_limit.as_ref())?;
+            let request = usage_limit_set_request(
+                update_args.soft,
+                update_args.hard,
+                before.usage_limit.as_ref(),
+            )?;
             set_usage_limit(
                 client,
                 configs,
@@ -503,6 +634,13 @@ fn workspace_for_project(workspaces: &[Workspace], project_id: &str) -> Option<W
                 .any(|project| project.id() == project_id)
         })
         .cloned()
+}
+
+fn summary_workspace_from_workspace(workspace: &Workspace) -> SummaryWorkspace {
+    SummaryWorkspace {
+        id: workspace.id().to_string(),
+        name: workspace.name().to_string(),
+    }
 }
 
 fn loading_spinner(json: bool, message: &str) -> Option<indicatif::ProgressBar> {
@@ -728,6 +866,47 @@ async fn set_usage_limit(
                 "customerId": customer_id,
                 "softLimitDollars": soft_limit,
                 "hardLimitDollars": hard_limit,
+            }
+        }),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn fetch_agent_usage(
+    client: &reqwest::Client,
+    configs: &Configs,
+    workspace_id: &str,
+) -> Result<AgentUsageSummary> {
+    let response: AgentUsageResponse = post_graphql_raw(
+        client,
+        configs.get_backboard(),
+        AGENT_USAGE_QUERY,
+        serde_json::json!({
+            "workspaceId": workspace_id,
+        }),
+    )
+    .await?;
+
+    Ok(response.agent_usage)
+}
+
+async fn set_agent_usage_limit(
+    client: &reqwest::Client,
+    configs: &Configs,
+    workspace_id: &str,
+    request: &AgentUsageLimitSetRequest,
+) -> Result<()> {
+    let _response: serde_json::Value = post_graphql_raw(
+        client,
+        configs.get_backboard(),
+        AGENT_USAGE_LIMIT_SET_MUTATION,
+        serde_json::json!({
+            "input": {
+                "workspaceId": workspace_id,
+                "hardLimitCents": request.hard_limit_cents,
+                "softLimitCents": request.soft_limit_cents,
             }
         }),
     )
@@ -1006,21 +1185,23 @@ fn confirm_remove_usage_limit(yes: bool, workspace_name: &str) -> Result<()> {
 }
 
 fn usage_limit_set_request(
-    args: &SetLimitArgs,
+    soft: Option<LimitAmount>,
+    hard: Option<LimitAmount>,
     existing: Option<&UsageLimitSummary>,
 ) -> Result<UsageLimitSetRequest> {
-    if args.soft.is_none() && args.hard.is_none() {
+    if soft.is_none() && hard.is_none() {
         bail!("At least one of --soft or --hard is required");
     }
 
     let request = UsageLimitSetRequest {
-        soft_limit: args
-            .soft
-            .or_else(|| existing.map(|limit| limit.soft_limit))
-            .unwrap_or(0),
-        hard_limit: args
-            .hard
-            .or_else(|| existing.and_then(|limit| limit.hard_limit)),
+        soft_limit: match soft {
+            Some(soft) => soft.whole_dollars("Compute email alert")?,
+            None => existing.map(|limit| limit.soft_limit).unwrap_or(0),
+        },
+        hard_limit: match hard {
+            Some(hard) => Some(hard.whole_dollars("Compute hard limit")?),
+            None => existing.and_then(|limit| limit.hard_limit),
+        },
     };
 
     validate_limit_values(request.soft_limit, request.hard_limit)?;
@@ -1029,25 +1210,66 @@ fn usage_limit_set_request(
 }
 
 fn validate_limit_values(soft: u32, hard: Option<u32>) -> Result<()> {
-    if soft != 0 && soft < 5 {
+    if soft != 0 && soft < MIN_SOFT_USAGE_LIMIT_DOLLARS {
         bail!("Compute email alert must be at least $5, or exactly $0");
     }
 
-    if soft > 500_000 {
+    if soft > MAX_USAGE_LIMIT_DOLLARS {
         bail!("Compute email alert must be at most $500,000");
     }
 
     if let Some(hard) = hard.filter(|hard| *hard != 0) {
-        if hard < 10 {
+        if hard < MIN_HARD_USAGE_LIMIT_DOLLARS {
             bail!("Compute hard limit must be at least $10, or exactly $0");
         }
 
-        if hard > 500_000 {
+        if hard > MAX_USAGE_LIMIT_DOLLARS {
             bail!("Compute hard limit must be at most $500,000");
         }
 
         if hard < soft {
             bail!("Compute hard limit must be greater than or equal to compute email alert");
+        }
+    }
+
+    Ok(())
+}
+
+fn agent_usage_limit_set_request(
+    args: &SetLimitArgs,
+    existing: Option<&AgentUsageSummary>,
+) -> Result<AgentUsageLimitSetRequest> {
+    let hard = args
+        .hard
+        .ok_or_else(|| anyhow::anyhow!("Agent hard limit is required"))?;
+    let hard_limit_cents = hard.cents("Agent hard limit")?;
+    let soft_limit_cents = match args.soft {
+        Some(soft) => Some(soft.cents("Agent email alert")?),
+        None => existing.and_then(|usage| usage.soft_limit_cents),
+    };
+
+    validate_agent_limit_values(soft_limit_cents, hard_limit_cents)?;
+
+    Ok(AgentUsageLimitSetRequest {
+        soft_limit_cents,
+        hard_limit_cents,
+    })
+}
+
+fn validate_agent_limit_values(soft: Option<u32>, hard: u32) -> Result<()> {
+    let max_cents = MAX_USAGE_LIMIT_DOLLARS * 100;
+
+    if hard > max_cents {
+        bail!("Agent hard limit must be at most $500,000.");
+    }
+
+    if let Some(soft) = soft {
+        if soft > max_cents {
+            bail!("Agent email alert must be at most $500,000.");
+        }
+
+        if soft > hard {
+            bail!("Agent hard limit must be greater than or equal to agent email alert.");
         }
     }
 
@@ -1234,6 +1456,42 @@ fn print_limit_action(action: &str, summary: &WorkspaceUsageSummary) {
     print_usage_limit_fields(summary.usage_limit.as_ref());
 }
 
+fn print_combined_limit_status(summary: &WorkspaceUsageSummary, agent_usage: &AgentUsageSummary) {
+    println!("{}", "Usage limits".bold());
+    println!();
+    print_field("Workspace:", &summary.workspace.name, FIELD_LABEL_WIDTH);
+    println!();
+    println!("{}", "Workspace".bold());
+    print_field(
+        "Current usage:",
+        &format_money(summary.current_usage_dollars),
+        FIELD_LABEL_WIDTH,
+    );
+    print_usage_limit_fields(summary.usage_limit.as_ref());
+    println!();
+    println!("{}", "Agent".bold());
+    print_agent_usage_fields(agent_usage);
+}
+
+fn print_agent_limit_status(workspace: &Workspace, agent_usage: &AgentUsageSummary) {
+    println!("{}", "Agent usage limit".bold());
+    println!();
+    print_field("Workspace:", &workspace.name(), FIELD_LABEL_WIDTH);
+    print_agent_usage_fields(agent_usage);
+}
+
+fn print_agent_limit_action(action: &str, workspace: &Workspace, agent_usage: &AgentUsageSummary) {
+    let title = match action {
+        "updated" => "Agent usage limit updated",
+        _ => "Agent usage limit",
+    };
+
+    println!("{}", title.bold());
+    println!();
+    print_field("Workspace:", &workspace.name(), FIELD_LABEL_WIDTH);
+    print_agent_usage_fields(agent_usage);
+}
+
 fn print_usage_limit_fields(limit: Option<&UsageLimitSummary>) {
     match limit {
         Some(limit) => {
@@ -1264,6 +1522,34 @@ fn print_usage_limit_fields(limit: Option<&UsageLimitSummary>) {
     }
 }
 
+fn print_agent_usage_fields(agent_usage: &AgentUsageSummary) {
+    print_field(
+        "Current usage:",
+        &format_cents(agent_usage.total_used_cents),
+        FIELD_LABEL_WIDTH,
+    );
+    print_field(
+        "Period end:",
+        &format_iso_date(&agent_usage.billing_period_end),
+        FIELD_LABEL_WIDTH,
+    );
+    print_field(
+        "Soft limit:",
+        &format_agent_soft_limit(agent_usage.soft_limit_cents),
+        FIELD_LABEL_WIDTH,
+    );
+    print_field(
+        "Hard limit:",
+        &format_agent_hard_limit(agent_usage.hard_limit_cents),
+        FIELD_LABEL_WIDTH,
+    );
+    print_field(
+        "Remaining:",
+        &format_agent_remaining(agent_usage),
+        FIELD_LABEL_WIDTH,
+    );
+}
+
 fn print_usage_summary_json(summary: &WorkspaceUsageSummary) -> Result<()> {
     println!(
         "{}",
@@ -1290,6 +1576,29 @@ fn print_limit_json(action: &str, summary: &WorkspaceUsageSummary) -> Result<()>
     println!(
         "{}",
         serde_json::to_string_pretty(&limit_json(action, summary))?
+    );
+    Ok(())
+}
+
+fn print_agent_limit_json(
+    action: &str,
+    workspace: &Workspace,
+    agent_usage: &AgentUsageSummary,
+) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&agent_limit_json(action, workspace, agent_usage))?
+    );
+    Ok(())
+}
+
+fn print_combined_limit_json(
+    summary: &WorkspaceUsageSummary,
+    agent_usage: &AgentUsageSummary,
+) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&combined_limit_json(summary, agent_usage))?
     );
     Ok(())
 }
@@ -1344,6 +1653,47 @@ fn limit_json(action: &str, summary: &WorkspaceUsageSummary) -> serde_json::Valu
         "customer": summary.customer,
         "currentUsageDollars": summary.current_usage_dollars,
         "usageLimit": summary.usage_limit,
+    })
+}
+
+fn agent_limit_json(
+    action: &str,
+    workspace: &Workspace,
+    agent_usage: &AgentUsageSummary,
+) -> serde_json::Value {
+    serde_json::json!({
+        "action": action,
+        "workspace": summary_workspace_from_workspace(workspace),
+        "agentUsage": agent_usage_json(agent_usage),
+    })
+}
+
+fn combined_limit_json(
+    summary: &WorkspaceUsageSummary,
+    agent_usage: &AgentUsageSummary,
+) -> serde_json::Value {
+    serde_json::json!({
+        "action": "status",
+        "workspace": summary.workspace,
+        "customer": summary.customer,
+        "workspaceUsage": {
+            "currentUsageDollars": summary.current_usage_dollars,
+            "usageLimit": summary.usage_limit,
+        },
+        "agentUsage": agent_usage_json(agent_usage),
+    })
+}
+
+fn agent_usage_json(agent_usage: &AgentUsageSummary) -> serde_json::Value {
+    serde_json::json!({
+        "totalUsedCents": agent_usage.total_used_cents,
+        "totalUsedDollars": cents_to_dollars(agent_usage.total_used_cents),
+        "hardLimitCents": agent_usage.hard_limit_cents,
+        "hardLimitDollars": agent_usage.hard_limit_cents.map(cents_to_dollars),
+        "softLimitCents": agent_usage.soft_limit_cents,
+        "softLimitDollars": agent_usage.soft_limit_cents.map(cents_to_dollars),
+        "usageRemaining": agent_usage.usage_remaining,
+        "billingPeriodEnd": agent_usage.billing_period_end,
     })
 }
 
@@ -1482,6 +1832,61 @@ fn parse_limit(limit: &str) -> std::result::Result<usize, String> {
     }
 }
 
+fn parse_limit_amount(value: &str) -> std::result::Result<LimitAmount, String> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('-') || value.starts_with('+') {
+        return Err("limit must be a non-negative dollar amount".to_string());
+    }
+
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        return Err("limit must be a dollar amount with at most two decimal places".to_string());
+    }
+
+    let fraction = fraction.unwrap_or_default();
+    if whole.is_empty() && fraction.is_empty() {
+        return Err("limit must be a non-negative dollar amount".to_string());
+    }
+
+    if !whole.chars().all(|c| c.is_ascii_digit())
+        || !fraction.chars().all(|c| c.is_ascii_digit())
+        || fraction.len() > 2
+    {
+        return Err("limit must be a dollar amount with at most two decimal places".to_string());
+    }
+
+    let whole_dollars = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse::<u64>()
+            .map_err(|_| "limit is too large".to_string())?
+    };
+    let whole_cents = whole_dollars
+        .checked_mul(100)
+        .ok_or_else(|| "limit is too large".to_string())?;
+    let fractional_cents = match fraction.len() {
+        0 => 0,
+        1 => {
+            fraction.parse::<u64>().map_err(|_| {
+                "limit must be a dollar amount with at most two decimal places".to_string()
+            })? * 10
+        }
+        2 => fraction.parse::<u64>().map_err(|_| {
+            "limit must be a dollar amount with at most two decimal places".to_string()
+        })?,
+        _ => unreachable!(),
+    };
+
+    Ok(LimitAmount {
+        cents: whole_cents
+            .checked_add(fractional_cents)
+            .ok_or_else(|| "limit is too large".to_string())?,
+    })
+}
+
 fn format_billing_period(period: &BillingPeriod) -> String {
     format!(
         "{} - {}",
@@ -1508,6 +1913,20 @@ fn format_money(value: f64) -> String {
     format!("{sign}${}.{}", format_number_with_commas(whole), fractional)
 }
 
+fn format_cents(cents: u32) -> String {
+    let whole = cents / 100;
+    let fractional = cents % 100;
+    format!(
+        "${}.{:02}",
+        format_number_with_commas(whole.into()),
+        fractional
+    )
+}
+
+fn cents_to_dollars(cents: u32) -> f64 {
+    cents as f64 / 100.0
+}
+
 fn format_whole_dollars(value: u32) -> String {
     format!("${}", format_number_with_commas(value.into()))
 }
@@ -1517,6 +1936,29 @@ fn format_soft_limit(value: u32) -> String {
         "not set".to_string()
     } else {
         format_whole_dollars(value)
+    }
+}
+
+fn format_agent_soft_limit(value: Option<u32>) -> String {
+    match value {
+        Some(value) if value > 0 => format_cents(value),
+        _ => "not set".to_string(),
+    }
+}
+
+fn format_agent_hard_limit(value: Option<u32>) -> String {
+    match value {
+        Some(0) => "$0.00 (blocked)".to_string(),
+        Some(value) => format_cents(value),
+        None => "unlimited".to_string(),
+    }
+}
+
+fn format_agent_remaining(agent_usage: &AgentUsageSummary) -> String {
+    match (agent_usage.hard_limit_cents, agent_usage.usage_remaining) {
+        (Some(0), _) => "blocked".to_string(),
+        (_, Some(remaining)) => format!("{:.1}%", (remaining * 1000.0).round() / 10.0),
+        _ => "n/a".to_string(),
     }
 }
 
@@ -1550,6 +1992,31 @@ fn deleted_on_label(deleted_at: &str) -> String {
 
 fn yes_no(value: bool) -> impl Display {
     if value { "yes" } else { "no" }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum LimitTarget {
+    Agent,
+    Workspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LimitAmount {
+    cents: u64,
+}
+
+impl LimitAmount {
+    fn whole_dollars(self, label: &str) -> Result<u32> {
+        if self.cents % 100 != 0 {
+            bail!("{label} must be a whole dollar amount");
+        }
+
+        u32::try_from(self.cents / 100).map_err(|_| anyhow::anyhow!("{label} is too large"))
+    }
+
+    fn cents(self, label: &str) -> Result<u32> {
+        u32::try_from(self.cents).map_err(|_| anyhow::anyhow!("{label} is too large"))
+    }
 }
 
 #[derive(Debug)]
@@ -1627,6 +2094,22 @@ struct WorkspaceUsageResponse {
 #[serde(rename_all = "camelCase")]
 struct WorkspaceEstimatedUsageResponse {
     estimated_usage: Vec<EstimatedUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentUsageResponse {
+    agent_usage: AgentUsageSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentUsageSummary {
+    total_used_cents: u32,
+    hard_limit_cents: Option<u32>,
+    soft_limit_cents: Option<u32>,
+    usage_remaining: Option<f64>,
+    billing_period_end: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1833,9 +2316,23 @@ struct UsageLimitSetRequest {
     hard_limit: Option<u32>,
 }
 
+#[derive(Debug, PartialEq)]
+struct AgentUsageLimitSetRequest {
+    soft_limit_cents: Option<u32>,
+    hard_limit_cents: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dollars(value: u64) -> LimitAmount {
+        cents(value * 100)
+    }
+
+    fn cents(value: u64) -> LimitAmount {
+        LimitAmount { cents: value }
+    }
 
     #[test]
     fn parses_usage_projects_with_filters() {
@@ -1874,6 +2371,8 @@ mod tests {
             "usage",
             "limit",
             "set",
+            "--target",
+            "workspace",
             "--soft",
             "75",
             "--hard",
@@ -1887,8 +2386,25 @@ mod tests {
         match set.command.unwrap() {
             Commands::Limit(limit_args) => match limit_args.command {
                 LimitCommands::Set(set_args) => {
-                    assert_eq!(set_args.soft, Some(75));
-                    assert_eq!(set_args.hard, Some(125));
+                    assert_eq!(set_args.target, LimitTarget::Workspace);
+                    assert_eq!(set_args.soft, Some(dollars(75)));
+                    assert_eq!(set_args.hard, Some(dollars(125)));
+                }
+                _ => panic!("expected set command"),
+            },
+            _ => panic!("expected limit command"),
+        }
+
+        let agent = Args::try_parse_from([
+            "usage", "limit", "set", "--target", "agent", "--soft", "7.50", "--hard", "20",
+        ])
+        .unwrap();
+        match agent.command.unwrap() {
+            Commands::Limit(limit_args) => match limit_args.command {
+                LimitCommands::Set(set_args) => {
+                    assert_eq!(set_args.target, LimitTarget::Agent);
+                    assert_eq!(set_args.soft, Some(cents(750)));
+                    assert_eq!(set_args.hard, Some(dollars(20)));
                 }
                 _ => panic!("expected set command"),
             },
@@ -1899,7 +2415,7 @@ mod tests {
         match update.command.unwrap() {
             Commands::Limit(limit_args) => match limit_args.command {
                 LimitCommands::Update(set_args) => {
-                    assert_eq!(set_args.soft, Some(75));
+                    assert_eq!(set_args.soft, Some(dollars(75)));
                     assert_eq!(set_args.hard, None);
                 }
                 _ => panic!("expected update command"),
@@ -1907,14 +2423,47 @@ mod tests {
             _ => panic!("expected limit command"),
         }
 
-        let hard_only = Args::try_parse_from(["usage", "limit", "set", "--hard", "125"]).unwrap();
+        let hard_only = Args::try_parse_from([
+            "usage",
+            "limit",
+            "set",
+            "--target",
+            "workspace",
+            "--hard",
+            "125",
+        ])
+        .unwrap();
         match hard_only.command.unwrap() {
             Commands::Limit(limit_args) => match limit_args.command {
                 LimitCommands::Set(set_args) => {
                     assert_eq!(set_args.soft, None);
-                    assert_eq!(set_args.hard, Some(125));
+                    assert_eq!(set_args.hard, Some(dollars(125)));
                 }
                 _ => panic!("expected set command"),
+            },
+            _ => panic!("expected limit command"),
+        }
+    }
+
+    #[test]
+    fn parses_usage_limit_status_target() {
+        let default = Args::try_parse_from(["usage", "limit", "status"]).unwrap();
+        match default.command.unwrap() {
+            Commands::Limit(limit_args) => match limit_args.command {
+                LimitCommands::Status(status_args) => assert_eq!(status_args.target, None),
+                _ => panic!("expected status command"),
+            },
+            _ => panic!("expected limit command"),
+        }
+
+        let agent =
+            Args::try_parse_from(["usage", "limit", "status", "--target", "agent"]).unwrap();
+        match agent.command.unwrap() {
+            Commands::Limit(limit_args) => match limit_args.command {
+                LimitCommands::Status(status_args) => {
+                    assert_eq!(status_args.target, Some(LimitTarget::Agent));
+                }
+                _ => panic!("expected status command"),
             },
             _ => panic!("expected limit command"),
         }
@@ -1939,6 +2488,7 @@ mod tests {
         assert!(Args::try_parse_from(["usage", "list"]).is_err());
         assert!(Args::try_parse_from(["usage", "limit"]).is_err());
         assert!(Args::try_parse_from(["usage", "limit", "set"]).is_err());
+        assert!(Args::try_parse_from(["usage", "limit", "set", "--hard", "125"]).is_err());
         assert!(Args::try_parse_from(["usage", "limit", "update"]).is_err());
         assert!(Args::try_parse_from(["usage", "--period", "tomorrow"]).is_err());
         assert!(Args::try_parse_from(["usage", "projects", "--period", "2026-13"]).is_err());
@@ -1959,19 +2509,84 @@ mod tests {
     }
 
     #[test]
+    fn validates_agent_usage_limit_set_inputs() {
+        assert!(validate_agent_limit_values(Some(750), 2000).is_ok());
+        assert!(validate_agent_limit_values(None, 0).is_ok());
+        assert!(validate_agent_limit_values(Some(2001), 2000).is_err());
+        assert!(validate_agent_limit_values(None, 50_000_001).is_err());
+
+        let request = agent_usage_limit_set_request(
+            &SetLimitArgs {
+                target: LimitTarget::Agent,
+                soft: Some(cents(750)),
+                hard: Some(dollars(20)),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            AgentUsageLimitSetRequest {
+                soft_limit_cents: Some(750),
+                hard_limit_cents: 2000,
+            }
+        );
+
+        let existing = sample_agent_usage_summary();
+        let request = agent_usage_limit_set_request(
+            &SetLimitArgs {
+                target: LimitTarget::Agent,
+                soft: None,
+                hard: Some(dollars(30)),
+            },
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            AgentUsageLimitSetRequest {
+                soft_limit_cents: Some(750),
+                hard_limit_cents: 3000,
+            }
+        );
+
+        let request = agent_usage_limit_set_request(
+            &SetLimitArgs {
+                target: LimitTarget::Agent,
+                soft: Some(dollars(0)),
+                hard: Some(dollars(30)),
+            },
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            AgentUsageLimitSetRequest {
+                soft_limit_cents: Some(0),
+                hard_limit_cents: 3000,
+            }
+        );
+
+        assert!(
+            agent_usage_limit_set_request(
+                &SetLimitArgs {
+                    target: LimitTarget::Agent,
+                    soft: Some(dollars(5)),
+                    hard: None,
+                },
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn usage_limit_set_request_preserves_omitted_existing_limits() {
         let summary = sample_workspace_summary();
         let existing = summary.usage_limit.as_ref();
 
         assert_eq!(
-            usage_limit_set_request(
-                &SetLimitArgs {
-                    soft: None,
-                    hard: Some(125),
-                },
-                existing,
-            )
-            .unwrap(),
+            usage_limit_set_request(None, Some(dollars(125)), existing,).unwrap(),
             UsageLimitSetRequest {
                 soft_limit: 100,
                 hard_limit: Some(125),
@@ -1979,14 +2594,7 @@ mod tests {
         );
 
         assert_eq!(
-            usage_limit_set_request(
-                &SetLimitArgs {
-                    soft: Some(75),
-                    hard: None,
-                },
-                existing,
-            )
-            .unwrap(),
+            usage_limit_set_request(Some(dollars(75)), None, existing,).unwrap(),
             UsageLimitSetRequest {
                 soft_limit: 75,
                 hard_limit: Some(150),
@@ -1994,14 +2602,7 @@ mod tests {
         );
 
         assert_eq!(
-            usage_limit_set_request(
-                &SetLimitArgs {
-                    soft: Some(0),
-                    hard: None,
-                },
-                existing,
-            )
-            .unwrap(),
+            usage_limit_set_request(Some(dollars(0)), None, existing,).unwrap(),
             UsageLimitSetRequest {
                 soft_limit: 0,
                 hard_limit: Some(150),
@@ -2009,14 +2610,7 @@ mod tests {
         );
 
         assert_eq!(
-            usage_limit_set_request(
-                &SetLimitArgs {
-                    soft: None,
-                    hard: Some(0),
-                },
-                existing,
-            )
-            .unwrap(),
+            usage_limit_set_request(None, Some(dollars(0)), existing,).unwrap(),
             UsageLimitSetRequest {
                 soft_limit: 100,
                 hard_limit: Some(0),
@@ -2024,30 +2618,15 @@ mod tests {
         );
 
         assert_eq!(
-            usage_limit_set_request(
-                &SetLimitArgs {
-                    soft: None,
-                    hard: Some(125),
-                },
-                None,
-            )
-            .unwrap(),
+            usage_limit_set_request(None, Some(dollars(125)), None,).unwrap(),
             UsageLimitSetRequest {
                 soft_limit: 0,
                 hard_limit: Some(125),
             },
         );
 
-        assert!(
-            usage_limit_set_request(
-                &SetLimitArgs {
-                    soft: None,
-                    hard: None,
-                },
-                existing,
-            )
-            .is_err()
-        );
+        assert!(usage_limit_set_request(None, None, existing).is_err());
+        assert!(usage_limit_set_request(Some(cents(7550)), None, existing).is_err());
     }
 
     #[test]
@@ -2156,6 +2735,16 @@ mod tests {
                     share: 0.1,
                 },
             ],
+        }
+    }
+
+    fn sample_agent_usage_summary() -> AgentUsageSummary {
+        AgentUsageSummary {
+            total_used_cents: 250,
+            hard_limit_cents: Some(2000),
+            soft_limit_cents: Some(750),
+            usage_remaining: Some(0.875),
+            billing_period_end: "2026-08-01T00:00:00Z".to_string(),
         }
     }
 
