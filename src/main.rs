@@ -78,6 +78,7 @@ commands!(
     unlink,
     up,
     upgrade,
+    usage,
     variable(variables, vars, var),
     waf,
     whoami,
