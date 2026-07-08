@@ -506,7 +506,8 @@ async fn limit(
                 }
             }
             LimitTarget::Agent => {
-                let request = agent_usage_limit_set_request(&set_args)?;
+                let before = fetch_agent_usage(client, configs, workspace.id()).await?;
+                let request = agent_usage_limit_set_request(&set_args, Some(&before))?;
                 set_agent_usage_limit(client, configs, workspace.id(), &request).await?;
                 let agent_usage = fetch_agent_usage(client, configs, workspace.id()).await?;
 
@@ -1234,15 +1235,18 @@ fn validate_limit_values(soft: u32, hard: Option<u32>) -> Result<()> {
     Ok(())
 }
 
-fn agent_usage_limit_set_request(args: &SetLimitArgs) -> Result<AgentUsageLimitSetRequest> {
+fn agent_usage_limit_set_request(
+    args: &SetLimitArgs,
+    existing: Option<&AgentUsageSummary>,
+) -> Result<AgentUsageLimitSetRequest> {
     let hard = args
         .hard
         .ok_or_else(|| anyhow::anyhow!("Agent hard limit is required"))?;
     let hard_limit_cents = hard.cents("Agent hard limit")?;
-    let soft_limit_cents = args
-        .soft
-        .map(|soft| soft.cents("Agent email alert"))
-        .transpose()?;
+    let soft_limit_cents = match args.soft {
+        Some(soft) => Some(soft.cents("Agent email alert")?),
+        None => existing.and_then(|usage| usage.soft_limit_cents),
+    };
 
     validate_agent_limit_values(soft_limit_cents, hard_limit_cents)?;
 
@@ -2511,11 +2515,14 @@ mod tests {
         assert!(validate_agent_limit_values(Some(2001), 2000).is_err());
         assert!(validate_agent_limit_values(None, 50_000_001).is_err());
 
-        let request = agent_usage_limit_set_request(&SetLimitArgs {
-            target: LimitTarget::Agent,
-            soft: Some(cents(750)),
-            hard: Some(dollars(20)),
-        })
+        let request = agent_usage_limit_set_request(
+            &SetLimitArgs {
+                target: LimitTarget::Agent,
+                soft: Some(cents(750)),
+                hard: Some(dollars(20)),
+            },
+            None,
+        )
         .unwrap();
         assert_eq!(
             request,
@@ -2525,12 +2532,50 @@ mod tests {
             }
         );
 
-        assert!(
-            agent_usage_limit_set_request(&SetLimitArgs {
+        let existing = sample_agent_usage_summary();
+        let request = agent_usage_limit_set_request(
+            &SetLimitArgs {
                 target: LimitTarget::Agent,
-                soft: Some(dollars(5)),
-                hard: None,
-            })
+                soft: None,
+                hard: Some(dollars(30)),
+            },
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            AgentUsageLimitSetRequest {
+                soft_limit_cents: Some(750),
+                hard_limit_cents: 3000,
+            }
+        );
+
+        let request = agent_usage_limit_set_request(
+            &SetLimitArgs {
+                target: LimitTarget::Agent,
+                soft: Some(dollars(0)),
+                hard: Some(dollars(30)),
+            },
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            AgentUsageLimitSetRequest {
+                soft_limit_cents: Some(0),
+                hard_limit_cents: 3000,
+            }
+        );
+
+        assert!(
+            agent_usage_limit_set_request(
+                &SetLimitArgs {
+                    target: LimitTarget::Agent,
+                    soft: Some(dollars(5)),
+                    hard: None,
+                },
+                None,
+            )
             .is_err()
         );
     }
@@ -2690,6 +2735,16 @@ mod tests {
                     share: 0.1,
                 },
             ],
+        }
+    }
+
+    fn sample_agent_usage_summary() -> AgentUsageSummary {
+        AgentUsageSummary {
+            total_used_cents: 250,
+            hard_limit_cents: Some(2000),
+            soft_limit_cents: Some(750),
+            usage_remaining: Some(0.875),
+            billing_period_end: "2026-08-01T00:00:00Z".to_string(),
         }
     }
 
