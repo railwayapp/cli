@@ -407,6 +407,15 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
     let _ = fs::remove_file(temp_file);
     let _ = fs::remove_dir(temp_dir);
 
+    if response.sdk_version.is_none() {
+        println!(
+            "{} The installed {} package is outdated and may omit resources (like volumes) from the imported config. Upgrade it with {}.",
+            "Warning:".yellow().bold(),
+            "railway".cyan(),
+            "npm install railway@latest".cyan()
+        );
+    }
+
     if !response.ok {
         let diagnostics = response
             .diagnostics
@@ -1410,5 +1419,72 @@ mod tests {
 
         assert!(rendered.contains("source: image"));
         assert!(rendered.contains("registryCredentials"));
+    }
+
+    #[test]
+    fn pull_renderer_declares_volumes_and_attachments() {
+        let graph: runner::DesiredGraph = serde_json::from_value(json!({
+            "project": { "name": "acme" },
+            "resources": [
+                {
+                    "address": "service.web",
+                    "type": "service",
+                    "name": "web",
+                    "source": { "type": "image", "image": "ghcr.io/acme/api:1.2.3" },
+                    "deploy": { "startCommand": "node index.js" },
+                    "volumeAttachments": {
+                        "web": { "volume": "volume.web", "mountPath": "/data" }
+                    }
+                },
+                {
+                    "address": "database.db",
+                    "type": "database",
+                    "engine": "postgres",
+                    "name": "db",
+                    "deploy": { "requiredMountPath": "/var/lib/postgresql/data" }
+                },
+                { "address": "volume.web", "type": "volume", "name": "web", "config": { "name": "web", "sizeMB": 1024 } },
+                { "address": "volume.db-volume", "type": "volume", "name": "db-volume", "config": { "name": "db-volume", "sizeMB": 2048 } },
+                { "address": "volume.scratch", "type": "volume", "name": "scratch", "config": { "name": "scratch", "sizeMB": 512 } }
+            ]
+        }))
+        .expect("valid graph json");
+
+        let out = render_graph_as_railway_ts(&graph, false);
+
+        // Volume names colliding with service names, database volumes, and
+        // unattached volumes must all be declared and referenced.
+        assert!(out.contains("volume(\"web\""), "missing volume(web): {out}");
+        assert!(
+            out.contains("volume(\"db-volume\""),
+            "missing volume(db-volume): {out}"
+        );
+        assert!(
+            out.contains("volume(\"scratch\""),
+            "missing volume(scratch): {out}"
+        );
+        assert!(out.contains("volumeMounts"), "missing attachment: {out}");
+    }
+
+    #[test]
+    fn runner_response_surfaces_sdk_version() {
+        let with_version: runner::RunnerResponse = serde_json::from_value(json!({
+            "ok": true,
+            "command": "current",
+            "file": "railway.ts",
+            "sdkVersion": "3.5.3",
+            "diagnostics": []
+        }))
+        .expect("valid response");
+        assert_eq!(with_version.sdk_version.as_deref(), Some("3.5.3"));
+
+        let without_version: runner::RunnerResponse = serde_json::from_value(json!({
+            "ok": true,
+            "command": "current",
+            "file": "railway.ts",
+            "diagnostics": []
+        }))
+        .expect("valid response");
+        assert!(without_version.sdk_version.is_none());
     }
 }

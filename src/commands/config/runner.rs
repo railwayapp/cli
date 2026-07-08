@@ -70,6 +70,9 @@ pub(super) struct RunnerResponse {
     pub(super) ok: bool,
     command: String,
     file: String,
+    /// Absent when the installed railway SDK predates the version handshake.
+    #[serde(default)]
+    pub(super) sdk_version: Option<String>,
     current_environment: Option<CurrentEnvironment>,
     pub(super) change_set: Option<ChangeSet>,
     diff: Option<String>,
