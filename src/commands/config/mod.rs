@@ -794,7 +794,11 @@ fn render_service_body(
         }
     }
     render_build(resource.build.as_ref(), &mut lines);
-    render_deploy(resource.deploy.as_ref(), &mut lines);
+    render_deploy(
+        resource.deploy.as_ref(),
+        resource.source.as_ref(),
+        &mut lines,
+    );
     render_networking(resource.networking.as_ref(), &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
@@ -911,7 +915,11 @@ fn render_build(build: Option<&serde_json::Value>, lines: &mut Vec<String>) {
     }
 }
 
-fn render_deploy(deploy: Option<&serde_json::Value>, lines: &mut Vec<String>) {
+fn render_deploy(
+    deploy: Option<&serde_json::Value>,
+    source: Option<&serde_json::Value>,
+    lines: &mut Vec<String>,
+) {
     let Some(deploy) = deploy.and_then(|value| value.as_object()) else {
         return;
     };
@@ -934,6 +942,10 @@ fn render_deploy(deploy: Option<&serde_json::Value>, lines: &mut Vec<String>) {
     }
     if let Some(regions) = remaining.remove("multiRegionConfig") {
         lines.push(format!("    replicas: {},", render_replicas(&regions)));
+    }
+
+    if !is_image_source(source) {
+        remaining.remove("registryCredentials");
     }
 
     if remaining
@@ -960,6 +972,13 @@ fn render_deploy(deploy: Option<&serde_json::Value>, lines: &mut Vec<String>) {
             ts_value(&serde_json::Value::Object(remaining))
         ));
     }
+}
+
+fn is_image_source(source: Option<&serde_json::Value>) -> bool {
+    source
+        .and_then(|value| value.get("image"))
+        .and_then(|value| value.as_str())
+        .is_some()
 }
 
 fn render_replicas(value: &serde_json::Value) -> String {
@@ -1326,4 +1345,70 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
     init_config(InitArgs { force: false }).await?;
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn service_resource(
+        source: serde_json::Value,
+        deploy: serde_json::Value,
+    ) -> runner::DesiredResource {
+        runner::DesiredResource {
+            address: Some("service.web".to_string()),
+            r#type: "service".to_string(),
+            name: "web".to_string(),
+            engine: None,
+            variables: None,
+            source: Some(source),
+            build: None,
+            deploy: Some(deploy),
+            networking: None,
+            volume_attachments: None,
+            config: None,
+            group_id: None,
+        }
+    }
+
+    #[test]
+    fn pull_renderer_omits_registry_credentials_for_github_sources() {
+        let resource = service_resource(
+            json!({ "repo": "railwayapp/api" }),
+            json!({
+                "registryCredentials": { "username": "*****", "password": "*****" },
+                "startCommand": "pnpm start"
+            }),
+        );
+
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+        );
+
+        assert!(rendered.contains("source: github"));
+        assert!(rendered.contains("start: \"pnpm start\""));
+        assert!(!rendered.contains("registryCredentials"));
+    }
+
+    #[test]
+    fn pull_renderer_preserves_registry_credentials_for_image_sources() {
+        let resource = service_resource(
+            json!({ "image": "ghcr.io/acme/private:latest" }),
+            json!({ "registryCredentials": { "username": "*****", "password": "*****" } }),
+        );
+
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+        );
+
+        assert!(rendered.contains("source: image"));
+        assert!(rendered.contains("registryCredentials"));
+    }
 }
