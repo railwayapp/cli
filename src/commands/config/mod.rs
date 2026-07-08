@@ -407,15 +407,6 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
     let _ = fs::remove_file(temp_file);
     let _ = fs::remove_dir(temp_dir);
 
-    if response.sdk_version.is_none() {
-        println!(
-            "{} The installed {} package is outdated and may omit resources (like volumes) from the imported config. Upgrade it with {}.",
-            "Warning:".yellow().bold(),
-            "railway".cyan(),
-            "npm install railway@latest".cyan()
-        );
-    }
-
     if !response.ok {
         let diagnostics = response
             .diagnostics
