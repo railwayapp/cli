@@ -6,7 +6,7 @@ use crate::client::{GQLClient, post_graphql};
 use crate::commands::sandbox::{
     create_and_store, resolve_project_and_env, spawn_heartbeat, variables_to_input,
 };
-use crate::commands::ssh::{ensure_ssh_key, run_native_ssh, run_native_ssh_captured};
+use crate::commands::ssh::{ensure_ssh_key, run_native_ssh_captured, run_native_ssh_with_opts};
 use crate::config::Configs;
 use crate::gql::{mutations, queries};
 use crate::util::progress::{create_shimmer_spinner, fail_spinner};
@@ -61,7 +61,13 @@ pub struct Args {
     agent_args: Vec<String>,
 }
 
-/// Sandbox-side seeds, safe to re-run:
+/// The whole sandbox-side provision as ONE script over ONE connection — the
+/// credential arrives on stdin (never an argv) into a 0600 file, then the
+/// seeds and the codex install run. One connection instead of three matters:
+/// success/failure markers ride stdout so a relay-level failure is
+/// distinguishable from "npm missing" / "install failed".
+///
+/// Seeds, all idempotent:
 /// - COLORTERM: the relay forwards TERM but not COLORTERM; without it TUIs
 ///   render a greyed/degraded palette.
 /// - config.toml: pre-trust the dirs codex lands in ($HOME via `cd ~`, and /
@@ -73,8 +79,9 @@ pub struct Args {
 ///   not), so any interactive reconnect drops into codex. Not `exec`, so
 ///   quitting codex lands in a shell instead of closing the connection. The
 ///   `[ -t 1 ]` guard keeps scp-style and command sessions out.
-const CODEX_SEED: &str = r#"umask 077
+const CODEX_PROVISION: &str = r#"umask 077
 mkdir -p ~/.codex
+cat > ~/.codex/auth.json
 grep -q "^COLORTERM=" /etc/environment 2>/dev/null || echo "COLORTERM=truecolor" >> /etc/environment 2>/dev/null || true
 if [ ! -f ~/.codex/config.toml ]; then
 cat > ~/.codex/config.toml <<'EOF'
@@ -94,18 +101,43 @@ if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && command -v codex >/dev/null
   cd "$HOME" && codex
 fi
 PROFEOF
-fi"#;
-
-/// The credential rides ssh stdin (never an argv) into a 0600 file.
-const CODEX_INJECT_AUTH: &str = "umask 077; mkdir -p ~/.codex && cat > ~/.codex/auth.json";
-
-/// Make sure the codex CLI exists in the sandbox; install it if not. Markers
-/// on stdout (not exit codes) so a relay-level ssh failure is distinguishable
-/// from "npm missing" / "install failed".
-const CODEX_ENSURE_INSTALLED: &str = r#"if command -v codex >/dev/null 2>&1; then echo CODEX-READY; exit 0; fi
+fi
+if command -v codex >/dev/null 2>&1; then echo CODEX-READY; exit 0; fi
 command -v npm >/dev/null 2>&1 || { echo CODEX-NO-NPM; exit 0; }
 npm install -g @openai/codex >/dev/null 2>&1
 if command -v codex >/dev/null 2>&1; then echo CODEX-READY; else echo CODEX-INSTALL-FAILED; fi"#;
+
+/// OpenSSH connection-multiplexing options shared by every ssh this command
+/// runs. The relay fleet answers with per-instance host keys, so each fresh
+/// TCP connection is a new host-key roll — but a multiplexed session rides
+/// the master's already-verified connection. With these, one `railway code`
+/// run makes exactly one host-key decision (like `railway sandbox ssh`)
+/// instead of one per provisioning step. ControlPersist keeps the master
+/// alive briefly so the interactive launch reuses the provisioning master.
+fn mux_opts() -> Result<Vec<String>> {
+    let ssh_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow!("Unable to get home directory"))?
+        .join(".ssh");
+    if !ssh_dir.exists() {
+        std::fs::create_dir_all(&ssh_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    // %C hashes (local host, remote user, host, port) — short & per-target,
+    // safely under the unix socket path length limit.
+    let control_path = ssh_dir.join("railway-cm-%C");
+    Ok(vec![
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        format!("ControlPath={}", control_path.display()),
+        "-o".into(),
+        "ControlPersist=90s".into(),
+    ])
+}
 
 fn codex_auth_path() -> Result<std::path::PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
@@ -123,11 +155,13 @@ fn ssh_plumbing(
     command: &str,
     identity: Option<&std::path::Path>,
     stdin_payload: Option<&[u8]>,
+    extra_opts: &[String],
 ) -> Result<Vec<u8>> {
     const ATTEMPTS: u32 = 3;
     let mut last = (1, String::new());
     for attempt in 1..=ATTEMPTS {
-        let (code, out, err) = run_native_ssh_captured(target, command, identity, stdin_payload)?;
+        let (code, out, err) =
+            run_native_ssh_captured(target, command, identity, stdin_payload, extra_opts)?;
         if code == 0 {
             return Ok(out);
         }
@@ -278,20 +312,25 @@ pub async fn command(args: Args) -> Result<()> {
         sandbox_id.clone(),
     );
 
-    // --- Provision: seeds + credential (stdin) + make sure codex exists.
+    // Multiplex every ssh in this run over one verified connection: the
+    // provisioning call establishes the master, the interactive launch rides
+    // it — one host-key decision per run, not one per connection.
+    let mux = mux_opts()?;
+
+    // --- Provision: credential (stdin) + seeds + codex install, one script.
     {
         let target = target.clone();
         let identity = identity.clone();
+        let mux = mux.clone();
         let mut spinner = create_shimmer_spinner("Provisioning codex");
         let provision = tokio::task::spawn_blocking(move || -> Result<()> {
-            ssh_plumbing(&target, CODEX_SEED, identity.as_deref(), None)?;
-            ssh_plumbing(
+            let out = ssh_plumbing(
                 &target,
-                CODEX_INJECT_AUTH,
+                CODEX_PROVISION,
                 identity.as_deref(),
                 Some(&auth_bytes),
+                &mux,
             )?;
-            let out = ssh_plumbing(&target, CODEX_ENSURE_INSTALLED, identity.as_deref(), None)?;
             let out = String::from_utf8_lossy(&out);
             if out.contains("CODEX-READY") {
                 Ok(())
@@ -316,7 +355,8 @@ pub async fn command(args: Args) -> Result<()> {
         }
     }
 
-    // --- Launch: interactive codex over the relay (a real PTY is allocated).
+    // --- Launch: interactive codex over the relay (a real PTY is allocated),
+    // multiplexed over the provisioning master.
     let mut remote_cmd = String::from("cd ~ && exec codex");
     if !args.agent_args.is_empty() {
         remote_cmd.push(' ');
@@ -326,7 +366,7 @@ pub async fn command(args: Args) -> Result<()> {
     println!("Launching codex…");
     let cmd = vec![remote_cmd];
     let exit_code = tokio::task::spawn_blocking(move || {
-        run_native_ssh(&target, Some(&cmd), identity.as_deref(), None)
+        run_native_ssh_with_opts(&target, Some(&cmd), identity.as_deref(), None, &mux)
     })
     .await
     .map_err(anyhow::Error::from)
