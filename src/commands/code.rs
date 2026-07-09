@@ -92,6 +92,45 @@ fn codex_auth_path() -> Result<std::path::PathBuf> {
     Ok(home.join(".codex").join("auth.json"))
 }
 
+/// Plumbing ssh with transient-failure retries. A fresh sandbox can take a
+/// beat before it accepts connections, and the relay can blip — those retry
+/// with a short backoff. A host-key failure does NOT retry: it's a security
+/// signal, so it fails immediately with the remediation instead of being
+/// silently re-rolled. The remote scripts are idempotent, so re-running a
+/// partially-applied attempt is safe.
+fn ssh_plumbing(
+    target: &str,
+    command: &str,
+    identity: Option<&std::path::Path>,
+    stdin_payload: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    const ATTEMPTS: u32 = 3;
+    let mut last = (1, String::new());
+    for attempt in 1..=ATTEMPTS {
+        let (code, out, err) = run_native_ssh_captured(target, command, identity, stdin_payload)?;
+        if code == 0 {
+            return Ok(out);
+        }
+        let err_text = String::from_utf8_lossy(&err).trim().to_string();
+        if err_text.contains("Host key verification failed")
+            || err_text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+        {
+            bail!(
+                "SSH host key verification failed for the Railway relay.\n\n{err_text}\n\nIf the relay's key legitimately rotated, refresh your entry with:\n  ssh-keygen -R ssh.railway.com && ssh-keyscan -t ed25519 ssh.railway.com >> ~/.ssh/known_hosts"
+            );
+        }
+        last = (code, err_text);
+        if attempt < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    let (code, err_text) = last;
+    if err_text.is_empty() {
+        bail!("SSH to the sandbox failed after {ATTEMPTS} attempts (exit {code}).")
+    }
+    bail!("SSH to the sandbox failed after {ATTEMPTS} attempts (exit {code}):\n{err_text}")
+}
+
 pub async fn command(args: Args) -> Result<()> {
     use colored::Colorize;
 
@@ -218,18 +257,14 @@ pub async fn command(args: Args) -> Result<()> {
         let identity = identity.clone();
         let mut spinner = create_shimmer_spinner("Provisioning codex");
         let provision = tokio::task::spawn_blocking(move || -> Result<()> {
-            run_native_ssh_captured(&target, CODEX_SEED, identity.as_deref(), None)?;
-            let (code, _) = run_native_ssh_captured(
+            ssh_plumbing(&target, CODEX_SEED, identity.as_deref(), None)?;
+            ssh_plumbing(
                 &target,
                 CODEX_INJECT_AUTH,
                 identity.as_deref(),
                 Some(&auth_bytes),
             )?;
-            if code != 0 {
-                bail!("Failed to inject the Codex credential (ssh exit {code})");
-            }
-            let (code, out) =
-                run_native_ssh_captured(&target, CODEX_ENSURE_INSTALLED, identity.as_deref(), None)?;
+            let out = ssh_plumbing(&target, CODEX_ENSURE_INSTALLED, identity.as_deref(), None)?;
             let out = String::from_utf8_lossy(&out);
             if out.contains("CODEX-READY") {
                 Ok(())
@@ -238,7 +273,7 @@ pub async fn command(args: Args) -> Result<()> {
             } else if out.contains("CODEX-INSTALL-FAILED") {
                 bail!("`npm install -g @openai/codex` failed in the sandbox.")
             } else {
-                bail!("Provisioning connection failed (ssh exit {code}).")
+                bail!("Provisioning produced no status marker — the connection likely dropped mid-script.")
             }
         })
         .await
