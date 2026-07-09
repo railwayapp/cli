@@ -9,6 +9,7 @@ pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
 }
 
 pub mod add;
+pub mod api;
 pub mod autoupdate;
 pub mod bucket;
 pub mod cdn;
