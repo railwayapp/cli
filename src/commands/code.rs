@@ -134,9 +134,6 @@ pub async fn command(args: Args) -> Result<()> {
                 "Aborted — nothing was read. Tip: you can instead sign in inside a sandbox with `codex login --device-auth`."
             ),
         }
-        eprintln!(
-            "  (This is the auth flow OpenAI documents for remote machines; note the sandbox\n   session and your local one share a sign-in, and a refresh on one side can\n   occasionally sign the other out.)"
-        );
     }
     let auth_bytes = std::fs::read(&auth_path)?;
     if auth_bytes.is_empty() {
