@@ -39,6 +39,7 @@ commands!(
     autoupdate,
     bucket,
     cdn,
+    code,
     completion,
     config,
     connect,

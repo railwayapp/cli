@@ -476,3 +476,38 @@ fn wait_for_forward_ready(guard: &mut ForwardGuard, forwards: &[PortForward]) ->
         sleep(Duration::from_millis(150));
     }
 }
+
+/// Run a non-interactive command on the target with optional bytes fed to its
+/// stdin and stdout captured. Built for agent-launcher plumbing (`railway
+/// code`): secret payloads (credentials) ride stdin so they never appear in
+/// an argv, and small reads come back on stdout. stderr is discarded — these
+/// are silent plumbing calls, not user sessions.
+pub fn run_native_ssh_captured(
+    ssh_target: &str,
+    command: &str,
+    identity_file: Option<&Path>,
+    stdin_payload: Option<&[u8]>,
+) -> Result<(i32, Vec<u8>)> {
+    use std::io::Write;
+
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    ssh_cmd.arg("-T");
+    ssh_cmd.arg(&target);
+    ssh_cmd.arg(command);
+    ssh_cmd.stdin(if stdin_payload.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    ssh_cmd.stdout(Stdio::piped());
+    ssh_cmd.stderr(Stdio::null());
+
+    let mut child = ssh_cmd.spawn().context("Failed to execute ssh command")?;
+    if let Some(payload) = stdin_payload {
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        stdin.write_all(payload)?;
+        // Drop closes the pipe so the remote `cat` sees EOF.
+    }
+    let output = child.wait_with_output()?;
+    Ok((output.status.code().unwrap_or(1), output.stdout))
+}
