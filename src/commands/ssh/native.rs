@@ -478,16 +478,17 @@ fn wait_for_forward_ready(guard: &mut ForwardGuard, forwards: &[PortForward]) ->
 }
 
 /// Run a non-interactive command on the target with optional bytes fed to its
-/// stdin and stdout captured. Built for agent-launcher plumbing (`railway
-/// code`): secret payloads (credentials) ride stdin so they never appear in
-/// an argv, and small reads come back on stdout. stderr is discarded — these
-/// are silent plumbing calls, not user sessions.
+/// stdin, and stdout + stderr captured. Built for agent-launcher plumbing
+/// (`railway code`): secret payloads (credentials) ride stdin so they never
+/// appear in an argv, small reads come back on stdout, and stderr comes back
+/// so callers can tell transport failures (host key, relay refusal) apart
+/// from remote-command failures instead of showing a bare exit code.
 pub fn run_native_ssh_captured(
     ssh_target: &str,
     command: &str,
     identity_file: Option<&Path>,
     stdin_payload: Option<&[u8]>,
-) -> Result<(i32, Vec<u8>)> {
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
     use std::io::Write;
 
     let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
@@ -500,7 +501,7 @@ pub fn run_native_ssh_captured(
         Stdio::null()
     });
     ssh_cmd.stdout(Stdio::piped());
-    ssh_cmd.stderr(Stdio::null());
+    ssh_cmd.stderr(Stdio::piped());
 
     let mut child = ssh_cmd.spawn().context("Failed to execute ssh command")?;
     if let Some(payload) = stdin_payload {
@@ -509,5 +510,9 @@ pub fn run_native_ssh_captured(
         // Drop closes the pipe so the remote `cat` sees EOF.
     }
     let output = child.wait_with_output()?;
-    Ok((output.status.code().unwrap_or(1), output.stdout))
+    Ok((
+        output.status.code().unwrap_or(1),
+        output.stdout,
+        output.stderr,
+    ))
 }
