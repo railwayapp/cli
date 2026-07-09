@@ -107,17 +107,36 @@ command -v npm >/dev/null 2>&1 || { echo CODEX-NO-NPM; exit 0; }
 npm install -g @openai/codex >/dev/null 2>&1
 if command -v codex >/dev/null 2>&1; then echo CODEX-READY; else echo CODEX-INSTALL-FAILED; fi"#;
 
-/// OpenSSH connection-multiplexing options shared by every ssh this command
-/// runs. The relay fleet answers with per-instance host keys, so each fresh
-/// TCP connection is a new host-key roll — but a multiplexed session rides
-/// the master's already-verified connection. With these, one `railway code`
-/// run makes exactly one host-key decision (like `railway sandbox ssh`)
-/// instead of one per provisioning step. ControlPersist keeps the master
-/// alive briefly so the interactive launch reuses the provisioning master.
-fn mux_opts() -> Result<Vec<String>> {
-    let ssh_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow!("Unable to get home directory"))?
-        .join(".ssh");
+/// SSH options shared by every connection this command runs, plus the info
+/// needed to self-heal our relay known-hosts file. Two layers:
+///
+/// **Multiplexing** — the relay fleet answers with per-instance host keys, so
+/// each fresh TCP connection is a new host-key roll; a multiplexed session
+/// rides the master's already-verified connection. One `railway code` run
+/// makes exactly one host-key decision instead of one per step.
+/// ControlPersist keeps the master alive briefly so the interactive launch
+/// reuses the provisioning master.
+///
+/// **Dedicated known-hosts** — the fleet currently presents many distinct
+/// per-instance keys behind one hostname (7+ observed), so pinning a single
+/// key is both futile (most connections mismatch) and security theater (a
+/// fresh TOFU accept is indistinguishable from a MITM anyway). Relay
+/// connections from this command therefore verify against the CLI's own
+/// file (`~/.railway/known_hosts_relay`) with accept-new, leaving the user's
+/// ~/.ssh/known_hosts untouched, and `ssh_plumbing` may heal THIS file (and
+/// only this file) on a mismatch. Revisit when the relay ships a stable
+/// shared host key or CA: flip to strict checking against the published key.
+#[derive(Clone)]
+struct RelaySsh {
+    opts: Vec<String>,
+    known_hosts: std::path::PathBuf,
+    /// known-hosts pattern for ssh-keygen -R: `host` or `[host]:port`.
+    host_pattern: String,
+}
+
+fn relay_ssh() -> Result<RelaySsh> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
+    let ssh_dir = home.join(".ssh");
     if !ssh_dir.exists() {
         std::fs::create_dir_all(&ssh_dir)?;
         #[cfg(unix)]
@@ -126,17 +145,48 @@ fn mux_opts() -> Result<Vec<String>> {
             std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
         }
     }
+    let railway_dir = home.join(".railway");
+    std::fs::create_dir_all(&railway_dir)?;
+    let known_hosts = railway_dir.join("known_hosts_relay");
+
+    let (host, port) = Configs::get_ssh_relay();
+    let host_pattern = match port {
+        Some(p) if p != 22 => format!("[{host}]:{p}"),
+        _ => host.to_string(),
+    };
+
     // %C hashes (local host, remote user, host, port) — short & per-target,
     // safely under the unix socket path length limit.
     let control_path = ssh_dir.join("railway-cm-%C");
-    Ok(vec![
-        "-o".into(),
-        "ControlMaster=auto".into(),
-        "-o".into(),
-        format!("ControlPath={}", control_path.display()),
-        "-o".into(),
-        "ControlPersist=90s".into(),
-    ])
+    Ok(RelaySsh {
+        opts: vec![
+            "-o".into(),
+            "ControlMaster=auto".into(),
+            "-o".into(),
+            format!("ControlPath={}", control_path.display()),
+            "-o".into(),
+            "ControlPersist=90s".into(),
+            "-o".into(),
+            format!("UserKnownHostsFile={}", known_hosts.display()),
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
+        ],
+        known_hosts,
+        host_pattern,
+    })
+}
+
+impl RelaySsh {
+    /// Drop the relay's entry from OUR known-hosts file so the next attempt
+    /// re-accepts whichever fleet key answers. Never touches ~/.ssh.
+    fn heal_known_hosts(&self) {
+        let _ = std::process::Command::new("ssh-keygen")
+            .arg("-R")
+            .arg(&self.host_pattern)
+            .arg("-f")
+            .arg(&self.known_hosts)
+            .output();
+    }
 }
 
 fn codex_auth_path() -> Result<std::path::PathBuf> {
@@ -144,37 +194,36 @@ fn codex_auth_path() -> Result<std::path::PathBuf> {
     Ok(home.join(".codex").join("auth.json"))
 }
 
-/// Plumbing ssh with transient-failure retries. A fresh sandbox can take a
-/// beat before it accepts connections, and the relay can blip — those retry
-/// with a short backoff. A host-key failure does NOT retry: it's a security
-/// signal, so it fails immediately with the remediation instead of being
-/// silently re-rolled. The remote scripts are idempotent, so re-running a
+/// Plumbing ssh with retries. A fresh sandbox can take a beat before it
+/// accepts connections, and the relay can blip — those retry with a short
+/// backoff. A host-key mismatch heals the CLI's OWN relay known-hosts file
+/// (the fleet presents per-instance keys, so a mismatch there is expected,
+/// not a signal — see `relay_ssh`) and retries; the user's ~/.ssh files are
+/// never modified. The remote scripts are idempotent, so re-running a
 /// partially-applied attempt is safe.
 fn ssh_plumbing(
     target: &str,
     command: &str,
     identity: Option<&std::path::Path>,
     stdin_payload: Option<&[u8]>,
-    extra_opts: &[String],
+    relay: &RelaySsh,
 ) -> Result<Vec<u8>> {
-    const ATTEMPTS: u32 = 3;
+    const ATTEMPTS: u32 = 4;
     let mut last = (1, String::new());
     for attempt in 1..=ATTEMPTS {
         let (code, out, err) =
-            run_native_ssh_captured(target, command, identity, stdin_payload, extra_opts)?;
+            run_native_ssh_captured(target, command, identity, stdin_payload, &relay.opts)?;
         if code == 0 {
             return Ok(out);
         }
         let err_text = String::from_utf8_lossy(&err).trim().to_string();
-        if err_text.contains("Host key verification failed")
-            || err_text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
-        {
-            bail!(
-                "SSH host key verification failed for the Railway relay.\n\n{err_text}\n\nIf the relay's key legitimately rotated, refresh your entry with:\n  ssh-keygen -R ssh.railway.com && ssh-keyscan -t ed25519 ssh.railway.com >> ~/.ssh/known_hosts"
-            );
+        let hostkey_mismatch = err_text.contains("Host key verification failed")
+            || err_text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED");
+        if hostkey_mismatch {
+            relay.heal_known_hosts();
         }
         last = (code, err_text);
-        if attempt < ATTEMPTS {
+        if attempt < ATTEMPTS && !hostkey_mismatch {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     }
@@ -315,13 +364,13 @@ pub async fn command(args: Args) -> Result<()> {
     // Multiplex every ssh in this run over one verified connection: the
     // provisioning call establishes the master, the interactive launch rides
     // it — one host-key decision per run, not one per connection.
-    let mux = mux_opts()?;
+    let relay = relay_ssh()?;
 
     // --- Provision: credential (stdin) + seeds + codex install, one script.
     {
         let target = target.clone();
         let identity = identity.clone();
-        let mux = mux.clone();
+        let relay = relay.clone();
         let mut spinner = create_shimmer_spinner("Provisioning codex");
         let provision = tokio::task::spawn_blocking(move || -> Result<()> {
             let out = ssh_plumbing(
@@ -329,7 +378,7 @@ pub async fn command(args: Args) -> Result<()> {
                 CODEX_PROVISION,
                 identity.as_deref(),
                 Some(&auth_bytes),
-                &mux,
+                &relay,
             )?;
             let out = String::from_utf8_lossy(&out);
             if out.contains("CODEX-READY") {
@@ -366,7 +415,7 @@ pub async fn command(args: Args) -> Result<()> {
     println!("Launching codex…");
     let cmd = vec![remote_cmd];
     let exit_code = tokio::task::spawn_blocking(move || {
-        run_native_ssh_with_opts(&target, Some(&cmd), identity.as_deref(), None, &mux)
+        run_native_ssh_with_opts(&target, Some(&cmd), identity.as_deref(), None, &relay.opts)
     })
     .await
     .map_err(anyhow::Error::from)
