@@ -74,8 +74,24 @@ struct NetworkFlowLogWindow {
     after_limit: Option<i64>,
 }
 
-fn format_network_flow_log_timestamp(date: DateTime<Utc>) -> String {
+#[derive(Debug, PartialEq, Eq)]
+struct HttpLogWindow {
+    before_date: Option<String>,
+    anchor_date: Option<String>,
+}
+
+fn format_log_cursor_timestamp(date: DateTime<Utc>) -> String {
     date.to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+fn http_log_window(
+    start_date: Option<DateTime<Utc>>,
+    end_date: Option<DateTime<Utc>>,
+) -> HttpLogWindow {
+    HttpLogWindow {
+        before_date: start_date.map(format_log_cursor_timestamp),
+        anchor_date: end_date.map(format_log_cursor_timestamp),
+    }
 }
 
 fn network_flow_log_window(
@@ -89,26 +105,26 @@ fn network_flow_log_window(
     match (start_date, end_date) {
         (Some(start), Some(end)) => NetworkFlowLogWindow {
             before_limit,
-            before_date: Some(format_network_flow_log_timestamp(start)),
-            anchor_date: Some(format_network_flow_log_timestamp(end)),
-            after_date: Some(format_network_flow_log_timestamp(end)),
+            before_date: Some(format_log_cursor_timestamp(start)),
+            anchor_date: Some(format_log_cursor_timestamp(end)),
+            after_date: Some(format_log_cursor_timestamp(end)),
             after_limit: Some(0),
         },
         (Some(start), None) => NetworkFlowLogWindow {
             before_limit,
-            before_date: Some(format_network_flow_log_timestamp(start)),
-            anchor_date: Some(format_network_flow_log_timestamp(now)),
-            after_date: Some(format_network_flow_log_timestamp(now)),
+            before_date: Some(format_log_cursor_timestamp(start)),
+            anchor_date: Some(format_log_cursor_timestamp(now)),
+            after_date: Some(format_log_cursor_timestamp(now)),
             after_limit: Some(0),
         },
         (None, Some(end)) => NetworkFlowLogWindow {
             before_limit,
-            before_date: Some(format_network_flow_log_timestamp(
+            before_date: Some(format_log_cursor_timestamp(
                 DateTime::<Utc>::from_timestamp(0, 0)
                     .expect("Unix epoch should be a valid timestamp"),
             )),
-            anchor_date: Some(format_network_flow_log_timestamp(end)),
-            after_date: Some(format_network_flow_log_timestamp(end)),
+            anchor_date: Some(format_log_cursor_timestamp(end)),
+            after_date: Some(format_log_cursor_timestamp(end)),
             after_limit: Some(0),
         },
         (None, None) => NetworkFlowLogWindow {
@@ -178,12 +194,13 @@ pub async fn fetch_http_logs(
     mut on_log: impl FnMut(queries::http_logs::HttpLogFields),
 ) -> Result<()> {
     let before_limit = params.limit.unwrap_or(500);
+    let window = http_log_window(params.start_date, params.end_date);
     let vars = queries::http_logs::Variables {
         deployment_id: params.deployment_id,
         filter: params.filter,
         before_limit,
-        before_date: params.start_date.map(|date| date.to_rfc3339()),
-        anchor_date: params.end_date.map(|date| date.to_rfc3339()),
+        before_date: window.before_date,
+        anchor_date: window.anchor_date,
         after_date: None,
         after_limit: None,
     };
@@ -408,7 +425,7 @@ impl NetworkFlowLogDedupe {
 
 fn network_flow_stream_before_date(max_capture_end: Option<DateTime<Utc>>) -> String {
     let anchor = max_capture_end.unwrap_or_else(Utc::now);
-    format_network_flow_log_timestamp(
+    format_log_cursor_timestamp(
         anchor - ChronoDuration::seconds(NETWORK_FLOW_STREAM_LOOKBACK_SECONDS),
     )
 }
@@ -810,6 +827,22 @@ mod tests {
         let before_date = network_flow_stream_before_date(Some(dt("2026-06-18T04:43:00Z")));
 
         assert_eq!(before_date, "2026-06-18T04:42:30.000000000Z");
+    }
+
+    #[test]
+    fn test_http_log_window_uses_cursor_timestamp_format() {
+        let start = dt("2026-06-18T04:41:00Z");
+        let end = dt("2026-06-18T04:42:00Z");
+
+        let window = http_log_window(Some(start), Some(end));
+
+        assert_eq!(
+            window,
+            HttpLogWindow {
+                before_date: Some("2026-06-18T04:41:00.000000000Z".to_string()),
+                anchor_date: Some("2026-06-18T04:42:00.000000000Z".to_string()),
+            }
+        );
     }
 
     #[test]
