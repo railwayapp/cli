@@ -337,11 +337,18 @@ pub async fn command(args: Args) -> Result<()> {
     }
     let auth_bytes = std::fs::read(&auth_path)?;
     if auth_bytes.is_empty() {
-        bail!("{} is empty — run `codex login` locally first.", auth_path.display());
+        bail!(
+            "{} is empty — run `codex login` locally first.",
+            auth_path.display()
+        );
     }
     // Read the GitHub token before spending a sandbox, so a missing gh login
     // fails fast and cheap.
-    let gh_token = if args.gh { Some(host_gh_token()?) } else { None };
+    let gh_token = if args.gh {
+        Some(host_gh_token()?)
+    } else {
+        None
+    };
 
     // --- Resolve where the sandbox lives.
     let mut configs = Configs::new()?;
