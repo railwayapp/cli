@@ -43,6 +43,11 @@ pub struct Args {
     #[clap(long, short = 'y')]
     yes: bool,
 
+    /// Minutes the sandbox may sit idle (disconnected) before it is
+    /// auto-destroyed
+    #[clap(long, value_name = "MINUTES", default_value = "30")]
+    idle_timeout: i64,
+
     /// Environment name or ID (defaults to the linked environment)
     #[clap(long, short)]
     environment: Option<String>,
@@ -200,8 +205,10 @@ pub async fn command(args: Args) -> Result<()> {
     let (project_id, environment_id) =
         resolve_project_and_env(&mut configs, &client, args.project, args.environment).await?;
 
-    // Reuse the active sandbox when it's still RUNNING here — repeated runs
-    // shouldn't mint a fleet of boxes. `--new` forces a fresh one.
+    // Reuse the active sandbox when it's still alive here — repeated runs
+    // shouldn't mint a fleet of boxes. CREATING counts as alive: a re-run
+    // seconds after a launch (flaky connection, ctrl-c) must reuse the box
+    // that's still booting, not spawn a duplicate. `--new` forces a fresh one.
     let reusable = if args.new {
         None
     } else {
@@ -223,7 +230,11 @@ pub async fn command(args: Args) -> Result<()> {
                     .map(|e| e.node)
                     .find(|n| {
                         n.id == stored.id
-                            && matches!(n.status, queries::sandboxes::SandboxStatus::RUNNING)
+                            && matches!(
+                                n.status,
+                                queries::sandboxes::SandboxStatus::RUNNING
+                                    | queries::sandboxes::SandboxStatus::CREATING
+                            )
                     })
                     .map(|n| n.id)
             }
@@ -237,9 +248,10 @@ pub async fn command(args: Args) -> Result<()> {
     } else {
         let input = mutations::sandbox_create::SandboxCreateInput {
             environment_id: environment_id.clone(),
-            // Shorter idle window for a credential-bearing box than the CLI
-            // default; it's interactive, so this only reaps forgotten ones.
-            idle_timeout_minutes: Some(30),
+            // Default is a shorter idle window for a credential-bearing box
+            // than the CLI default; it's interactive, so this only reaps
+            // forgotten ones. `--idle-timeout` overrides.
+            idle_timeout_minutes: Some(args.idle_timeout),
             template: None,
             source_sandbox_id: None,
             network_isolation: None,
@@ -248,7 +260,7 @@ pub async fn command(args: Args) -> Result<()> {
         create_and_store(
             &mut configs,
             &client,
-            project_id,
+            project_id.clone(),
             environment_id.clone(),
             input,
             false,
@@ -262,7 +274,7 @@ pub async fn command(args: Args) -> Result<()> {
     let heartbeat = spawn_heartbeat(
         client.clone(),
         configs.get_backboard(),
-        environment_id,
+        environment_id.clone(),
         sandbox_id.clone(),
     );
 
@@ -311,9 +323,7 @@ pub async fn command(args: Args) -> Result<()> {
         remote_cmd.push_str(&shell_join(&args.agent_args));
     }
 
-    println!(
-        "Launching codex (sandbox persists after exit; reconnecting with `railway sandbox ssh` drops back into codex)"
-    );
+    println!("Launching codex…");
     let cmd = vec![remote_cmd];
     let exit_code = tokio::task::spawn_blocking(move || {
         run_native_ssh(&target, Some(&cmd), identity.as_deref(), None)
@@ -323,6 +333,20 @@ pub async fn command(args: Args) -> Result<()> {
     .and_then(|r| r)?;
 
     heartbeat.abort();
+
+    // Where-did-my-sandbox-go breadcrumbs: the box outlives the session but
+    // only for the idle window, and `sandbox list` is environment-scoped —
+    // spell out the commands that find it from anywhere.
+    println!(
+        "\nDisconnected — sandbox {sandbox_id} stays up for ~{}m of idle time.",
+        args.idle_timeout
+    );
+    println!("Get back in:");
+    println!("  railway sandbox ssh      # drops straight back into codex");
+    println!("  railway code --codex     # same, from any dir linked to this project");
+    println!("Find it later (sandbox list is per-environment):");
+    println!("  railway sandbox list -p {project_id} -e {environment_id}");
+
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
