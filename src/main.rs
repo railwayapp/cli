@@ -47,6 +47,7 @@ commands!(
     deployment,
     dev(develop),
     domain,
+    domains,
     docs,
     down,
     environment(env),
@@ -530,6 +531,14 @@ mod cli_tests {
         );
     }
 
+    fn assert_does_not_parse(args: &[&str]) {
+        assert!(
+            parse(args).is_err(),
+            "Command should not parse: railway {}",
+            args.join(" ")
+        );
+    }
+
     fn assert_subcommand(args: &[&str], expected: &str) {
         let matches = parse(args).unwrap_or_else(|_| panic!("Failed to parse: {:?}", args));
         assert_eq!(
@@ -693,6 +702,68 @@ mod cli_tests {
             assert_parses(&["variable", "delete", "KEY"]);
             assert_parses(&["variable", "rm", "KEY"]); // alias
             assert_parses(&["variable", "delete", "KEY", "--json"]);
+        }
+
+        #[test]
+        fn purchased_domains_subcommands() {
+            assert_subcommand(&["domain", "list"], "domain");
+            assert_subcommand(&["domains", "list"], "domains");
+            assert_does_not_parse(&["domains"]);
+            assert_parses(&["domains", "search", "example", "--limit", "5", "--json"]);
+            assert_parses(&["domains", "check", "example.com", "example.dev", "--json"]);
+            assert_parses(&[
+                "domains",
+                "list",
+                "--workspace",
+                "workspace-id",
+                "--status",
+                "active",
+                "--json",
+            ]);
+            assert_parses(&["domains", "status", "example.com", "--workspace", "team"]);
+            assert_parses(&["domains", "auto-renew", "status", "example.com"]);
+            assert_parses(&["domains", "auto-renew", "enable", "example.com", "--json"]);
+            assert_parses(&["domains", "auto-renew", "disable", "example.com"]);
+            assert_parses(&["domains", "dns", "list", "example.com"]);
+            assert_parses(&[
+                "domains",
+                "dns",
+                "create",
+                "example.com",
+                "--type",
+                "A",
+                "--host",
+                "@",
+                "--answer",
+                "1.2.3.4",
+                "--ttl",
+                "300",
+            ]);
+            assert_parses(&[
+                "domains",
+                "dns",
+                "update",
+                "example.com",
+                "123",
+                "--type",
+                "TXT",
+                "--host",
+                "_verify",
+                "--answer",
+                "value",
+            ]);
+            assert_parses(&["domains", "dns", "delete", "example.com", "123", "--yes"]);
+            assert_parses(&["domains", "nameservers", "list", "example.com"]);
+            assert_parses(&[
+                "domains",
+                "nameservers",
+                "set",
+                "example.com",
+                "ns1.example.com",
+                "ns2.example.com",
+                "--yes",
+            ]);
+            assert_parses(&["domains", "nameservers", "reset", "example.com", "--yes"]);
         }
 
         #[test]

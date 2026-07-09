@@ -1,0 +1,16 @@
+mutation RailwayDomainDnsRecordCreate($input: RailwayDomainDnsRecordCreateInput!) {
+  railwayDomainDnsRecordCreate(input: $input) {
+    ...RailwayDomainDnsRecordFields
+  }
+}
+
+fragment RailwayDomainDnsRecordFields on RailwayDomainDnsRecord {
+  id
+  domainName
+  host
+  fqdn
+  type
+  answer
+  ttl
+  priority
+}

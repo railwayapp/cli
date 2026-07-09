@@ -315,6 +315,49 @@ pub struct CustomDomainIssueCertificate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/RailwayDomainUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct RailwayDomainUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/RailwayDomainDnsRecordCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct RailwayDomainDnsRecordCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/RailwayDomainDnsRecordUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct RailwayDomainDnsRecordUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/RailwayDomainDnsRecordDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct RailwayDomainDnsRecordDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/RailwayDomainNameserversSet.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct RailwayDomainNameserversSet;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/TcpProxyDelete.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]

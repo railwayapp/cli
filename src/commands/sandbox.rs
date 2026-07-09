@@ -896,6 +896,7 @@ async fn create(
         idle_timeout_minutes: args.idle_timeout_minutes,
         template,
         source_sandbox_id: None,
+        region: None,
         network_isolation: args
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
@@ -1362,6 +1363,7 @@ async fn fork(
         idle_timeout_minutes: args.idle_timeout_minutes,
         template: None,
         source_sandbox_id: Some(source_sandbox_id),
+        region: None,
         network_isolation: args
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
