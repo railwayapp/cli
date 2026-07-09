@@ -498,13 +498,18 @@ pub async fn command(args: Args) -> Result<()> {
     // multiplexed over the provisioning master. Command sessions don't source
     // ~/.profile, so the GH_TOKEN export is inlined here (no-op when --gh
     // wasn't used — the guard keeps an empty var from shadowing gh's config).
-    let mut remote_cmd = String::from(
-        "[ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; cd ~ && exec codex",
-    );
-    if !args.agent_args.is_empty() {
-        remote_cmd.push(' ');
-        remote_cmd.push_str(&shell_join(&args.agent_args));
-    }
+    let env_prefix = "[ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; cd ~ && ";
+    let remote_cmd = if args.agent_args.is_empty() {
+        // Interactive: no `exec` — quitting codex lands in a sandbox shell
+        // (matching the ~/.profile autostart behavior) instead of tearing the
+        // whole session down. The exported guard keeps the login shell's
+        // profile autostart from relaunching codex on top of the user.
+        format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; codex; exec bash -l")
+    } else {
+        // Scripted (`-- exec …`, `-- --version`): exit when codex does — a
+        // trailing shell would hang pipelines waiting on it.
+        format!("{env_prefix}exec codex {}", shell_join(&args.agent_args))
+    };
 
     println!("Launching codex…");
     let cmd = vec![remote_cmd];
