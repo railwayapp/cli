@@ -274,10 +274,26 @@ pub fn run_native_ssh(
     identity_file: Option<&Path>,
     durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
+    run_native_ssh_with_opts(service_instance_id, command, identity_file, durable, &[])
+}
+
+/// `run_native_ssh` with extra `ssh` options (each element one argv entry,
+/// e.g. `["-o", "ControlMaster=auto"]`). Lets callers opt into connection
+/// multiplexing without changing the shared default path.
+pub fn run_native_ssh_with_opts(
+    service_instance_id: &str,
+    command: Option<&[String]>,
+    identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
+    extra_opts: &[String],
+) -> Result<i32> {
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
     let (mut ssh_cmd, target) = base_ssh_command(service_instance_id, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
 
     if let Some(durable) = durable {
         // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
@@ -488,10 +504,14 @@ pub fn run_native_ssh_captured(
     command: &str,
     identity_file: Option<&Path>,
     stdin_payload: Option<&[u8]>,
+    extra_opts: &[String],
 ) -> Result<(i32, Vec<u8>, Vec<u8>)> {
     use std::io::Write;
 
     let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
     ssh_cmd.arg("-T");
     ssh_cmd.arg(&target);
     ssh_cmd.arg(command);
