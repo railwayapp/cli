@@ -28,7 +28,7 @@ use crate::util::shell::shell_join;
 /// Launch a coding agent in a Railway sandbox
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway code --codex              # sandbox + your local Codex sign-in\n  railway code --codex --new        # force a fresh sandbox\n  railway code --codex -- exec \"explain this codebase\"\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway code --codex              # sandbox + your local Codex sign-in\n  railway code --codex --new        # force a fresh sandbox\n  railway code --codex --gh         # also inject your GitHub auth (gh auth token)\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     /// Launch OpenAI Codex using your local ChatGPT sign-in (~/.codex/auth.json)
@@ -47,6 +47,23 @@ pub struct Args {
     /// auto-destroyed
     #[clap(long, value_name = "MINUTES", default_value = "30")]
     idle_timeout: i64,
+
+    /// Set a variable on the sandbox (repeatable, comma-separable). Values
+    /// may reference other variables — `DB_URL=postgres.DATABASE_URL` or the
+    /// full `${{postgres.DATABASE_URL}}` form — resolved server-side at
+    /// create time. Applies to newly created sandboxes (combine with --new)
+    #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
+    variables: Vec<String>,
+
+    /// Load variables from a .env file (repeatable). `--variable` flags
+    /// override file entries with the same key
+    #[clap(long = "env-file", value_name = "PATH")]
+    env_files: Vec<std::path::PathBuf>,
+
+    /// Also inject your GitHub auth (read via `gh auth token`) so git and gh
+    /// can reach your repos over HTTPS inside the sandbox
+    #[clap(long)]
+    gh: bool,
 
     /// Environment name or ID (defaults to the linked environment)
     #[clap(long, short)]
@@ -98,6 +115,7 @@ cat >> ~/.profile <<'PROFEOF'
 # railway-code codex autostart (connecting drops into codex; exit it for a shell)
 if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && command -v codex >/dev/null 2>&1; then
   export RAILWAY_CODE_AUTOSTARTED=1
+  [ -f "$HOME/.gh-token" ] && export GH_TOKEN="$(cat "$HOME/.gh-token")"
   cd "$HOME" && codex
 fi
 PROFEOF
@@ -106,6 +124,39 @@ if command -v codex >/dev/null 2>&1; then echo CODEX-READY; exit 0; fi
 command -v npm >/dev/null 2>&1 || { echo CODEX-NO-NPM; exit 0; }
 npm install -g @openai/codex >/dev/null 2>&1
 if command -v codex >/dev/null 2>&1; then echo CODEX-READY; else echo CODEX-INSTALL-FAILED; fi"#;
+
+/// `--gh` provision (rungate-proven recipe): the token arrives on stdin into
+/// a 0600 file, an idempotent ~/.profile line exports GH_TOKEN for login
+/// shells, and a git credential helper reads the file for HTTPS pulls/pushes.
+/// Deliberately no `gh auth login` and no gh install requirement: GH_TOKEN is
+/// gh's own documented env var, so gh works if present, and git works either
+/// way. The helper re-reads the file per invocation, so refreshing the token
+/// is just re-running with --gh.
+const GH_PROVISION: &str = r##"umask 077
+cat > ~/.gh-token
+chmod 600 ~/.gh-token
+grep -q "railway-code gh-token" ~/.profile 2>/dev/null || printf '\n%s\n%s\n' "# railway-code gh-token" 'export GH_TOKEN="$(cat ~/.gh-token 2>/dev/null)"' >> ~/.profile
+git config --global credential."https://github.com".helper "!f(){ echo username=x-access-token; echo \"password=\$(cat ~/.gh-token)\"; };f" 2>/dev/null || true
+git config --global credential."https://gist.github.com".helper "!f(){ echo username=x-access-token; echo \"password=\$(cat ~/.gh-token)\"; };f" 2>/dev/null || true
+echo GH-OK"##;
+
+/// Read the host's GitHub token via the gh CLI — the source of truth that
+/// works regardless of where gh stores it (macOS keychain, hosts.yml, env).
+fn host_gh_token() -> Result<String> {
+    let out = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .map_err(|_| {
+            anyhow!(
+                "--gh needs the GitHub CLI on this machine (brew install gh), or drop the flag."
+            )
+        })?;
+    let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || tok.is_empty() {
+        bail!("`gh auth token` returned nothing — run `gh auth login` first, or drop --gh.");
+    }
+    Ok(tok)
+}
 
 /// SSH options shared by every connection this command runs, plus the info
 /// needed to self-heal our relay known-hosts file. Two layers:
@@ -266,10 +317,17 @@ pub async fn command(args: Args) -> Result<()> {
                 auth_path.display()
             );
         }
-        let msg = format!(
-            "Copy your local Codex sign-in ({}) into this sandbox?",
-            auth_path.display()
-        );
+        let msg = if args.gh {
+            format!(
+                "Copy your local Codex sign-in ({}) and GitHub token (`gh auth token`) into this sandbox?",
+                auth_path.display()
+            )
+        } else {
+            format!(
+                "Copy your local Codex sign-in ({}) into this sandbox?",
+                auth_path.display()
+            )
+        };
         match prompt_confirm_with_default_with_cancel(&msg, true)? {
             Some(true) => {}
             _ => bail!(
@@ -281,6 +339,9 @@ pub async fn command(args: Args) -> Result<()> {
     if auth_bytes.is_empty() {
         bail!("{} is empty — run `codex login` locally first.", auth_path.display());
     }
+    // Read the GitHub token before spending a sandbox, so a missing gh login
+    // fails fast and cheap.
+    let gh_token = if args.gh { Some(host_gh_token()?) } else { None };
 
     // --- Resolve where the sandbox lives.
     let mut configs = Configs::new()?;
@@ -327,6 +388,13 @@ pub async fn command(args: Args) -> Result<()> {
 
     let sandbox_id = if let Some(id) = reusable {
         println!("Reusing active sandbox {id} (use --new for a fresh one)");
+        if !args.variables.is_empty() || !args.env_files.is_empty() {
+            eprintln!(
+                "{}",
+                "Note: --variable/--env-file only apply when a sandbox is created — reusing the active one. Add --new to create with these variables."
+                    .yellow()
+            );
+        }
         id
     } else {
         let input = mutations::sandbox_create::SandboxCreateInput {
@@ -338,7 +406,7 @@ pub async fn command(args: Args) -> Result<()> {
             template: None,
             source_sandbox_id: None,
             network_isolation: None,
-            variables: variables_to_input(&[], &[])?,
+            variables: variables_to_input(&args.env_files, &args.variables)?,
         };
         create_and_store(
             &mut configs,
@@ -371,6 +439,7 @@ pub async fn command(args: Args) -> Result<()> {
         let target = target.clone();
         let identity = identity.clone();
         let relay = relay.clone();
+        let gh_token = gh_token.clone();
         let mut spinner = create_shimmer_spinner("Provisioning codex");
         let provision = tokio::task::spawn_blocking(move || -> Result<()> {
             let out = ssh_plumbing(
@@ -382,7 +451,7 @@ pub async fn command(args: Args) -> Result<()> {
             )?;
             let out = String::from_utf8_lossy(&out);
             if out.contains("CODEX-READY") {
-                Ok(())
+                // ok
             } else if out.contains("CODEX-NO-NPM") {
                 bail!("The sandbox image has no npm, so codex can't be installed automatically.")
             } else if out.contains("CODEX-INSTALL-FAILED") {
@@ -390,6 +459,20 @@ pub async fn command(args: Args) -> Result<()> {
             } else {
                 bail!("Provisioning produced no status marker — the connection likely dropped mid-script.")
             }
+            if let Some(tok) = gh_token {
+                // Rides the same multiplexed connection — no new host-key roll.
+                let out = ssh_plumbing(
+                    &target,
+                    GH_PROVISION,
+                    identity.as_deref(),
+                    Some(tok.as_bytes()),
+                    &relay,
+                )?;
+                if !String::from_utf8_lossy(&out).contains("GH-OK") {
+                    bail!("GitHub auth provisioning did not complete in the sandbox.")
+                }
+            }
+            Ok(())
         })
         .await
         .map_err(anyhow::Error::from)
@@ -405,8 +488,12 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     // --- Launch: interactive codex over the relay (a real PTY is allocated),
-    // multiplexed over the provisioning master.
-    let mut remote_cmd = String::from("cd ~ && exec codex");
+    // multiplexed over the provisioning master. Command sessions don't source
+    // ~/.profile, so the GH_TOKEN export is inlined here (no-op when --gh
+    // wasn't used — the guard keeps an empty var from shadowing gh's config).
+    let mut remote_cmd = String::from(
+        "[ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; cd ~ && exec codex",
+    );
     if !args.agent_args.is_empty() {
         remote_cmd.push(' ');
         remote_cmd.push_str(&shell_join(&args.agent_args));
