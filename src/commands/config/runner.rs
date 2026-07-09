@@ -70,6 +70,9 @@ pub(super) struct RunnerResponse {
     pub(super) ok: bool,
     command: String,
     file: String,
+    /// Absent when the installed railway SDK predates the version handshake.
+    #[serde(default)]
+    pub(super) sdk_version: Option<String>,
     current_environment: Option<CurrentEnvironment>,
     pub(super) change_set: Option<ChangeSet>,
     diff: Option<String>,
@@ -441,7 +444,28 @@ async fn invoke_runner(
         format!("IaC runner returned non-JSON output.\nstdout:\n{stdout}\nstderr:\n{stderr}")
     })?;
 
+    warn_outdated_runner(&response);
+
     Ok(response)
+}
+
+/// Responses without sdkVersion come from SDKs that predate the version
+/// handshake. Warn once per invocation, on stderr so --json output stays clean.
+fn warn_outdated_runner(response: &RunnerResponse) {
+    use colored::Colorize;
+
+    static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+    if response.sdk_version.is_some() {
+        return;
+    }
+    WARN_ONCE.call_once(|| {
+        eprintln!(
+            "{} You are running an outdated version of the {} SDK, which may result in undesired behavior. Upgrade it with {}.",
+            "Warning:".yellow().bold(),
+            "railway".cyan(),
+            "npm install railway@latest".cyan(),
+        );
+    });
 }
 
 struct ResolvedRunner {
