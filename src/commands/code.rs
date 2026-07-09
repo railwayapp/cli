@@ -63,6 +63,11 @@ pub struct Args {
 ///   where the relay drops non-cd sessions) or the TUI stops at a folder-trust
 ///   prompt even when authenticated. Only seeded when no config exists, so a
 ///   user-customized config is never clobbered.
+/// - ~/.profile autostart: plain connects (`railway sandbox ssh`) run bash as
+///   a login shell (verified: ~/.profile IS sourced; command sessions are
+///   not), so any interactive reconnect drops into codex. Not `exec`, so
+///   quitting codex lands in a shell instead of closing the connection. The
+///   `[ -t 1 ]` guard keeps scp-style and command sessions out.
 const CODEX_SEED: &str = r#"umask 077
 mkdir -p ~/.codex
 grep -q "^COLORTERM=" /etc/environment 2>/dev/null || echo "COLORTERM=truecolor" >> /etc/environment 2>/dev/null || true
@@ -74,6 +79,16 @@ trust_level = "trusted"
 [projects."/"]
 trust_level = "trusted"
 EOF
+fi
+if ! grep -q "railway-code codex autostart" ~/.profile 2>/dev/null; then
+cat >> ~/.profile <<'PROFEOF'
+
+# railway-code codex autostart (connecting drops into codex; exit it for a shell)
+if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && command -v codex >/dev/null 2>&1; then
+  export RAILWAY_CODE_AUTOSTARTED=1
+  cd "$HOME" && codex
+fi
+PROFEOF
 fi"#;
 
 /// The credential rides ssh stdin (never an argv) into a 0600 file.
@@ -297,7 +312,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     println!(
-        "Launching codex (sandbox persists after exit: railway sandbox ssh --id {sandbox_id})"
+        "Launching codex (sandbox persists after exit; reconnecting with `railway sandbox ssh` drops back into codex)"
     );
     let cmd = vec![remote_cmd];
     let exit_code = tokio::task::spawn_blocking(move || {
