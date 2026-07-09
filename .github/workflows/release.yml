@@ -230,6 +230,11 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      # Node 24 bundles npm 12, whose publish provenance path crashes
+      # (npm/cli#9722); npm 11.5+ keeps Trusted Publisher support
+      - name: Pin npm 11
+        run: npm install -g npm@11
+
       - name: NPM publish
         run: npm publish --access public
 
