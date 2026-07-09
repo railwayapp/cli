@@ -96,6 +96,10 @@ pub struct Args {
 ///   not), so any interactive reconnect drops into codex. Not `exec`, so
 ///   quitting codex lands in a shell instead of closing the connection. The
 ///   `[ -t 1 ]` guard keeps scp-style and command sessions out.
+/// - bubblewrap: codex warns at startup when distro bwrap is absent (it falls
+///   back to its bundled copy, so this is cosmetic). Best-effort apt install
+///   (~8s) until the sandbox image ships it — the `command -v` guard makes
+///   this a free no-op once it does.
 const CODEX_PROVISION: &str = r#"umask 077
 mkdir -p ~/.codex
 cat > ~/.codex/auth.json
@@ -120,6 +124,7 @@ if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && command -v codex >/dev/null
 fi
 PROFEOF
 fi
+command -v bwrap >/dev/null 2>&1 || { apt-get update >/dev/null 2>&1 && apt-get install -y bubblewrap >/dev/null 2>&1; } || true
 if command -v codex >/dev/null 2>&1; then echo CODEX-READY; exit 0; fi
 command -v npm >/dev/null 2>&1 || { echo CODEX-NO-NPM; exit 0; }
 npm install -g @openai/codex >/dev/null 2>&1
