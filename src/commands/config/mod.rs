@@ -982,19 +982,8 @@ fn is_image_source(source: Option<&serde_json::Value>) -> bool {
 }
 
 fn render_replicas(value: &serde_json::Value) -> String {
-    let Some(regions) = value.as_object() else {
-        return ts_value(value);
-    };
-    let active = regions
-        .iter()
-        .filter_map(|(region, config)| {
-            let replicas = config.get("numReplicas").and_then(|value| value.as_u64())?;
-            Some((region, config, replicas))
-        })
-        .collect::<Vec<_>>();
-    if active.len() == 1 {
-        return active[0].2.to_string();
-    }
+    // A single-region map is still placement intent. Flattening it to a number
+    // makes pull lossy and relies on a later plan remembering remote state.
     render_regions(value)
 }
 
@@ -1370,6 +1359,14 @@ mod tests {
             config: None,
             group_id: None,
         }
+    }
+
+    #[test]
+    fn pull_renderer_preserves_single_region_placement() {
+        assert_eq!(
+            render_replicas(&json!({ "europe-west4": { "numReplicas": 2 } })),
+            "{ \"europe-west4\": 2 }",
+        );
     }
 
     #[test]
