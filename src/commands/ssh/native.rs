@@ -72,6 +72,22 @@ pub async fn get_service_instance_id(
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
 pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, true).await
+}
+
+/// `ensure_ssh_key` without the "Using SSH key from ..." announcement when a
+/// registered key is already in place — for flows like `railway code` where
+/// ssh is plumbing, not the product. First-run registration still prompts
+/// and prints normally.
+pub async fn ensure_ssh_key_quiet(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, false).await
+}
+
+async fn ensure_ssh_key_impl(
+    client: &Client,
+    configs: &Configs,
+    announce: bool,
+) -> Result<Option<PathBuf>> {
     let local_keys = find_local_ssh_keys().await?;
 
     if local_keys.is_empty() {
@@ -93,13 +109,15 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option
     });
 
     if let Some(key) = registered_local {
-        match &key.source {
-            SshKeySource::File(path) => eprintln!(
-                "Using SSH key from file {}: {}",
-                path.display(),
-                key.key_name()
-            ),
-            SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+        if announce {
+            match &key.source {
+                SshKeySource::File(path) => eprintln!(
+                    "Using SSH key from file {}: {}",
+                    path.display(),
+                    key.key_name()
+                ),
+                SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+            }
         }
         return Ok(identity_for(key));
     }

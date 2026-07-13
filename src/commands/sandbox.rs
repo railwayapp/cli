@@ -793,6 +793,16 @@ pub(crate) fn variables_to_input(
     ))
 }
 
+/// How `create_and_store` reports the new sandbox.
+pub(crate) enum CreateReport {
+    /// The full `sandbox create` block: id, status, region, connect hints.
+    Full,
+    Json,
+    /// One line — `railway code` wraps the sandbox in its own UX, so the
+    /// status/region/connect-hints block is noise there.
+    Quiet,
+}
+
 /// Run `sandboxCreate` with the given input, persist the result as the active
 /// sandbox (create and fork both retarget `ssh`/`exec` at the new sandbox),
 /// and print create-style output. Returns the new sandbox's id (`pub(crate)`
@@ -803,7 +813,7 @@ pub(crate) async fn create_and_store(
     project_id: String,
     environment_id: String,
     input: mutations::sandbox_create::SandboxCreateInput,
-    json: bool,
+    report: CreateReport,
     forked: bool,
 ) -> Result<String> {
     let (doing, did, failed) = if forked {
@@ -839,16 +849,18 @@ pub(crate) async fn create_and_store(
     );
     configs.write()?;
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&sandbox)?);
-    } else {
-        println!("✓ {did} sandbox {} (now active)", sandbox.id);
-        println!("  status: {:?}", sandbox.status);
-        println!("  region: {}", sandbox.region);
-        if let Some(idle) = sandbox.idle_timeout_minutes {
-            println!("  idle timeout: {idle}m");
+    match report {
+        CreateReport::Json => println!("{}", serde_json::to_string_pretty(&sandbox)?),
+        CreateReport::Quiet => println!("✓ {did} sandbox {}", sandbox.id),
+        CreateReport::Full => {
+            println!("✓ {did} sandbox {} (now active)", sandbox.id);
+            println!("  status: {:?}", sandbox.status);
+            println!("  region: {}", sandbox.region);
+            if let Some(idle) = sandbox.idle_timeout_minutes {
+                println!("  idle timeout: {idle}m");
+            }
+            println!("\nConnect with:\n  railway sandbox ssh");
         }
-        println!("\nConnect with:\n  railway sandbox ssh");
     }
     Ok(sandbox.id)
 }
@@ -908,7 +920,11 @@ async fn create(
         project_id,
         environment_id,
         input,
-        args.json,
+        if args.json {
+            CreateReport::Json
+        } else {
+            CreateReport::Full
+        },
         false,
     )
     .await
@@ -1375,7 +1391,11 @@ async fn fork(
         project_id,
         environment_id,
         input,
-        args.json,
+        if args.json {
+            CreateReport::Json
+        } else {
+            CreateReport::Full
+        },
         true,
     )
     .await

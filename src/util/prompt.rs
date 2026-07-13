@@ -53,6 +53,17 @@ pub fn prompt_text(message: &str) -> Result<String> {
         .context("Failed to prompt for options")
 }
 
+/// Prompt for a secret (token, key): input is masked as it's typed and never
+/// echoed back, with no confirmation round-trip.
+pub fn prompt_secret(message: &str) -> Result<String> {
+    inquire::Password::new(message)
+        .with_render_config(Configs::get_render_config())
+        .with_display_mode(inquire::PasswordDisplayMode::Masked)
+        .without_confirmation()
+        .prompt()
+        .context("Failed to prompt for secret")
+}
+
 pub fn prompt_u64_with_placeholder_and_validation_and_cancel(
     message: &str,
     placeholder: &str,
