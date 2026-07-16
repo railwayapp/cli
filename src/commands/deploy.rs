@@ -213,9 +213,8 @@ pub async fn fetch_and_create(
         .iter()
         .find(|s| !old_service_ids.contains(&s.node.id));
 
-    // Auto-link if should_link is true and no service is currently linked.
     // Env-var / token targeted runs have no on-disk link entry to update;
-    // attempting to would fail with ProjectNotFound after the template was
+    // linking there would fail with ProjectNotFound after the template was
     // already deployed.
     let should_auto_link = options.should_link
         && linked_project.service.is_none()

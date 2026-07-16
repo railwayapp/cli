@@ -338,9 +338,12 @@ async fn create_service(
     let s =
         post_graphql::<mutations::ServiceCreate, _>(client, &configs.get_backboard(), vars).await?;
 
+    // Env-var / token targeted runs have no on-disk link entry to update;
+    // linking there would fail with ProjectNotFound.
+    let will_link = !Configs::uses_env_project_targeting();
+
     // Report the created service before local-link bookkeeping so a config
     // write failure can never mask a successful creation.
-    let will_link = !Configs::uses_env_project_targeting();
     if json {
         println!(
             "{}",
@@ -354,8 +357,6 @@ async fn create_service(
         ));
     }
 
-    // Env-var / token targeted runs have no on-disk link entry to update;
-    // attempting to would fail with ProjectNotFound.
     if will_link {
         configs.link_service(s.service_create.id.clone())?;
         configs.write()?;
