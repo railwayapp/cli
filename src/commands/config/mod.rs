@@ -846,10 +846,14 @@ fn render_source(source: &serde_json::Value) -> String {
 }
 
 fn supports_image_auto_updates(image: &str) -> bool {
-    if !image.contains('/') {
+    let normalized = image.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if !normalized.contains('/') {
         return true;
     }
-    let registry = image.split('/').next().unwrap_or_default();
+    let registry = normalized.split('/').next().unwrap_or_default();
     (!registry.contains('.') && !registry.contains(':') && registry != "localhost")
         || registry == "docker.io"
         || registry == "ghcr.io"
