@@ -506,8 +506,8 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
     out.push_str("export default defineRailway(() => {\n");
 
     let source_aliases = shared_github_sources(graph);
-    for (alias, repo) in &source_aliases {
-        out.push_str(&format!("  const {alias} = github({:?});\n", repo));
+    for (alias, source) in &source_aliases {
+        out.push_str(&format!("  const {alias} = {};\n", render_source(source)));
     }
     if !source_aliases.is_empty() {
         out.push('\n');
@@ -570,10 +570,12 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
                         resource.name
                     ));
                 } else {
-                    out.push_str(&format!(
-                        "  const {var_name} = {helper}(\"{}\");\n",
-                        resource.name
-                    ));
+                    let region = database_region(resource.deploy.as_ref());
+                    let args = region
+                        .map(|region| format!("{:?}, {{ region: {:?} }}", resource.name, region))
+                        .unwrap_or_else(|| format!("{:?}", resource.name));
+                    out.push_str(&format!("  const {var_name} = {helper}({args});\n"));
+                    render_database_deploy_overrides(resource.deploy.as_ref(), &var_name, &mut out);
                 }
             }
             "service" => {
@@ -711,20 +713,27 @@ fn has_preserved_variables(resource: &runner::DesiredResource) -> bool {
 
 fn shared_github_sources(
     graph: &runner::DesiredGraph,
-) -> std::collections::BTreeMap<String, String> {
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut sources = std::collections::BTreeMap::<String, (usize, serde_json::Value)>::new();
     for resource in &graph.resources {
         if resource.r#type != "service" {
             continue;
         }
-        if let Some(repo) = resource
-            .source
-            .as_ref()
-            .and_then(|source| source.get("repo"))
+        let Some(source) = resource.source.as_ref() else {
+            continue;
+        };
+        if source
+            .get("repo")
             .and_then(|value| value.as_str())
+            .is_none()
         {
-            *counts.entry(repo.to_string()).or_default() += 1;
+            continue;
         }
+        // Source aliases are safe only when the complete source configuration is
+        // identical. Grouping by repository alone loses branch and auto-update intent.
+        let key = serde_json::to_string(source).unwrap_or_default();
+        let entry = sources.entry(key).or_insert_with(|| (0, source.clone()));
+        entry.0 += 1;
     }
 
     let reserved = std::collections::HashSet::from([
@@ -737,60 +746,46 @@ fn shared_github_sources(
         "volume",
     ]);
     let mut used = Vec::new();
-    counts
-        .into_iter()
-        .filter(|(_, count)| *count > 1)
-        .map(|(repo, _)| {
-            let repo_name = repo.rsplit('/').next().unwrap_or(&repo);
+    sources
+        .into_values()
+        .filter(|(count, _)| *count > 1)
+        .filter_map(|(_, source)| {
+            let repo = source.get("repo")?.as_str()?;
+            let repo_name = repo.rsplit('/').next().unwrap_or(repo);
             let alias = unique_resource_ident(repo_name, "source", &reserved, &used);
             used.push(alias.clone());
-            (alias, repo)
+            Some((alias, source))
         })
         .collect()
 }
 
 fn render_service_body(
     resource: &runner::DesiredResource,
-    source_aliases: &std::collections::BTreeMap<String, String>,
+    source_aliases: &std::collections::BTreeMap<String, serde_json::Value>,
     resource_names: &std::collections::HashMap<String, String>,
     preserve_variables: bool,
 ) -> String {
     let mut lines = Vec::new();
     if let Some(source) = &resource.source {
-        if let Some(repo) = source.get("repo").and_then(|value| value.as_str()) {
+        if source
+            .get("repo")
+            .and_then(|value| value.as_str())
+            .is_some()
+        {
             let alias = source_aliases
                 .iter()
-                .find_map(|(alias, shared_repo)| (shared_repo == repo).then_some(alias));
-            let root = source
-                .get("rootDirectory")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty());
-            let branch = source
-                .get("branch")
-                .and_then(|value| value.as_str())
-                .filter(|branch| *branch != "main");
+                .find_map(|(alias, shared_source)| (shared_source == source).then_some(alias));
             if let Some(alias) = alias {
                 lines.push(format!("    source: {alias},"));
-                if let Some(root) = root {
-                    lines.push(format!("    root: {:?},", root));
-                }
             } else {
-                let mut options = Vec::new();
-                if let Some(branch) = branch {
-                    options.push(format!("branch: {:?}", branch));
-                }
-                if let Some(root) = root {
-                    options.push(format!("rootDirectory: {:?}", root));
-                }
-                let args = if options.is_empty() {
-                    format!("{:?}", repo)
-                } else {
-                    format!("{:?}, {{ {} }}", repo, options.join(", "))
-                };
-                lines.push(format!("    source: github({args}),"));
+                lines.push(format!("    source: {},", render_source(source)));
             }
-        } else if let Some(image_name) = source.get("image").and_then(|value| value.as_str()) {
-            lines.push(format!("    source: image({:?}),", image_name));
+        } else if source
+            .get("image")
+            .and_then(|value| value.as_str())
+            .is_some()
+        {
+            lines.push(format!("    source: {},", render_source(source)));
         }
     }
     render_build(resource.build.as_ref(), &mut lines);
@@ -810,6 +805,75 @@ fn render_service_body(
         return String::new();
     }
     format!("{{\n{}\n  }}", lines.join("\n"))
+}
+
+fn render_source(source: &serde_json::Value) -> String {
+    let (helper, identifier) =
+        if let Some(repo) = source.get("repo").and_then(|value| value.as_str()) {
+            ("github", repo)
+        } else if let Some(image) = source.get("image").and_then(|value| value.as_str()) {
+            ("image", image)
+        } else {
+            return ts_value(source);
+        };
+
+    let mut options = source.as_object().cloned().unwrap_or_default();
+    options.remove("type");
+    options.remove("repo");
+    options.remove("image");
+    if options.get("branch").and_then(|value| value.as_str()) == Some("main") {
+        options.remove("branch");
+    }
+    if options
+        .get("rootDirectory")
+        .and_then(|value| value.as_str())
+        == Some("")
+    {
+        options.remove("rootDirectory");
+    }
+
+    if options.is_empty() {
+        format!("{helper}({identifier:?})")
+    } else {
+        format!(
+            "{helper}({identifier:?}, {})",
+            ts_value(&serde_json::Value::Object(options))
+        )
+    }
+}
+
+fn database_region(deploy: Option<&serde_json::Value>) -> Option<&str> {
+    let regions = deploy?.get("multiRegionConfig")?.as_object()?;
+    if regions.len() != 1 {
+        return None;
+    }
+    regions.keys().next().map(String::as_str)
+}
+
+fn render_database_deploy_overrides(
+    deploy: Option<&serde_json::Value>,
+    var_name: &str,
+    out: &mut String,
+) {
+    let Some(deploy) = deploy.and_then(|value| value.as_object()) else {
+        return;
+    };
+    let overrides = ["startCommand", "limitOverride"]
+        .into_iter()
+        .filter_map(|key| {
+            deploy
+                .get(key)
+                .cloned()
+                .map(|value| (key.to_string(), value))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    if overrides.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "  {var_name}.deploy = {};\n",
+        ts_value(&serde_json::Value::Object(overrides))
+    ));
 }
 
 fn render_volume_attachments(
@@ -1389,6 +1453,41 @@ mod tests {
         assert!(rendered.contains("source: github"));
         assert!(rendered.contains("start: \"pnpm start\""));
         assert!(!rendered.contains("registryCredentials"));
+    }
+
+    #[test]
+    fn pull_renderer_preserves_source_branch_and_auto_updates() {
+        let source = json!({
+            "repo": "railwayapp/nixpacks",
+            "branch": "feature",
+            "autoUpdates": {
+                "type": "patch",
+                "schedule": [{ "day": 0, "startHour": 0, "endHour": 24 }]
+            }
+        });
+
+        let rendered = render_source(&source);
+        assert!(rendered.contains("branch: \"feature\""));
+        assert!(rendered.contains("autoUpdates"));
+        assert!(rendered.contains("schedule"));
+    }
+
+    #[test]
+    fn pull_renderer_preserves_database_deploy_overrides() {
+        let mut rendered = String::new();
+        render_database_deploy_overrides(
+            Some(&json!({
+                "startCommand": "redis-server --save 60 1",
+                "limitOverride": { "containers": { "cpu": 4 } },
+                "requiredMountPath": "/data"
+            })),
+            "cache",
+            &mut rendered,
+        );
+
+        assert!(rendered.contains("startCommand"));
+        assert!(rendered.contains("limitOverride"));
+        assert!(!rendered.contains("requiredMountPath"));
     }
 
     #[test]
