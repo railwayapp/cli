@@ -24,7 +24,7 @@ use super::*;
 /// Connect to a database's shell (psql for Postgres, mongosh for MongoDB, etc.)
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway connect postgres\n  railway connect redis --environment production\n\nAutomation notes:\n  Non-interactive runs must pass the database service name.\n  The local database client must be installed before connecting."
+    after_help = "Examples:\n\n  railway connect postgres\n  railway connect redis --environment production\n  railway connect postgres --tunnel-only\n\nAutomation notes:\n  Non-interactive runs must pass the database service name.\n  The local database client must be installed before connecting.\n  --tunnel-only skips the client and just opens the tunnel, for pointing\n  external tools (TablePlus, DBeaver, pgAdmin, ...) at a private database."
 )]
 pub struct Args {
     /// The name of the database to connect to
@@ -47,6 +47,12 @@ pub struct Args {
     /// Force the public TCP proxy path and never fall back to SSH.
     #[clap(long = "no-ssh", conflicts_with = "ssh")]
     no_ssh: bool,
+
+    /// Open the local tunnel without launching a database client. Prints
+    /// connection details for external tools (TablePlus, DBeaver, pgAdmin,
+    /// ...) and holds the tunnel open until Ctrl+C. Implies --ssh.
+    #[clap(long, conflicts_with = "no_ssh")]
+    tunnel_only: bool,
 
     /// Local port to bind for the SSH tunnel (defaults to an ephemeral port).
     #[clap(short = 'P', long)]
@@ -148,14 +154,25 @@ pub async fn command(args: Args) -> Result<()> {
     if let Some(db_type) = database_type {
         let use_ssh = if args.no_ssh {
             false
-        } else if args.ssh {
-            true
         } else {
-            // Auto: fall back to SSH when there's no public proxy URL to use.
-            !has_public_proxy(&db_type, &variables)
+            // --tunnel-only implies --ssh (and clap's conflicts_with rules
+            // out --no-ssh alongside it, so this can't fall through to the
+            // legacy public-proxy path below).
+            args.ssh || args.tunnel_only || !has_public_proxy(&db_type, &variables)
         };
 
-        if use_ssh {
+        if args.tunnel_only {
+            run_tunnel_only(
+                &client,
+                &configs,
+                &db_type,
+                &variables,
+                &environment_id,
+                &service_id,
+                args.port,
+            )
+            .await?;
+        } else if use_ssh {
             run_ssh_connect(
                 &client,
                 &configs,
@@ -288,6 +305,82 @@ async fn run_ssh_connect(
         .await?;
 
     Ok(())
+}
+
+/// Open a local SSH tunnel to the database without launching a client, for
+/// pointing external GUI tools (TablePlus, DBeaver, pgAdmin, ...) at a
+/// private-only database. Prints the connection details and holds the tunnel
+/// open until Ctrl+C.
+async fn run_tunnel_only(
+    client: &Client,
+    configs: &Configs,
+    database_type: &DatabaseType,
+    variables: &BTreeMap<String, String>,
+    environment_id: &str,
+    service_id: &str,
+    requested_port: Option<u16>,
+) -> Result<()> {
+    let local_port = match requested_port {
+        Some(port) => port,
+        None => pick_ephemeral_port()?,
+    };
+
+    let (url, remote_port) = local_tunnel_url(database_type, variables, local_port)?;
+
+    let identity = ensure_ssh_key(client, configs).await?;
+    let ssh_target = get_service_instance_id(client, configs, environment_id, service_id).await?;
+
+    // Held for the tunnel's lifetime; dropping it (when this function
+    // returns) kills the underlying ssh process.
+    let _forward = spawn_native_ssh_forward(
+        &ssh_target,
+        identity.as_deref(),
+        &[PortForward {
+            local_port,
+            remote_port,
+        }],
+    )?;
+
+    print_tunnel_info(database_type, &url);
+
+    // Unlike run_ssh_connect, there's no client process to hand SIGINT to —
+    // the tunnel itself is the session, so we let the default Ctrl+C
+    // behavior stand (no ctrlc::set_handler override) and just wait on it.
+    tokio::signal::ctrl_c()
+        .await
+        .context("Failed to listen for Ctrl+C")?;
+    eprintln!("\nTunnel closed.");
+
+    Ok(())
+}
+
+/// Print the local tunnel's connection details in the shape GUI clients
+/// (TablePlus, DBeaver, pgAdmin, ...) expect: host/port/user/password/db
+/// broken out, plus the full URL for tools that just want one string.
+fn print_tunnel_info(database_type: &DatabaseType, url: &Url) {
+    let host = url.host_str().unwrap_or("127.0.0.1");
+    let port = url.port().unwrap_or_default();
+
+    eprintln!();
+    eprintln!("{database_type} tunnel open — point an external client at:");
+    eprintln!();
+    eprintln!("  Host:     {host}");
+    eprintln!("  Port:     {port}");
+    if !url.username().is_empty() {
+        eprintln!("  User:     {}", url.username());
+    }
+    if let Some(password) = url.password() {
+        eprintln!("  Password: {password}");
+    }
+    let database = url.path().trim_start_matches('/');
+    if !database.is_empty() {
+        eprintln!("  Database: {database}");
+    }
+    eprintln!();
+    eprintln!("  URL:      {url}");
+    eprintln!();
+    eprintln!("Press Ctrl+C to close the tunnel.");
+    eprintln!();
 }
 
 /// Reserve an ephemeral local port by binding then immediately releasing it so
