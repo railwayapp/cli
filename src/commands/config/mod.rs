@@ -821,6 +821,9 @@ fn render_source(source: &serde_json::Value) -> String {
     options.remove("type");
     options.remove("repo");
     options.remove("image");
+    if helper != "image" || !supports_image_auto_updates(identifier) {
+        options.remove("autoUpdates");
+    }
     if options.get("branch").and_then(|value| value.as_str()) == Some("main") {
         options.remove("branch");
     }
@@ -840,6 +843,20 @@ fn render_source(source: &serde_json::Value) -> String {
             ts_value(&serde_json::Value::Object(options))
         )
     }
+}
+
+fn supports_image_auto_updates(image: &str) -> bool {
+    let normalized = image.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if !normalized.contains('/') {
+        return true;
+    }
+    let registry = normalized.split('/').next().unwrap_or_default();
+    (!registry.contains('.') && !registry.contains(':') && registry != "localhost")
+        || registry == "docker.io"
+        || registry == "ghcr.io"
 }
 
 fn database_region(deploy: Option<&serde_json::Value>) -> Option<&str> {
@@ -1456,20 +1473,32 @@ mod tests {
     }
 
     #[test]
-    fn pull_renderer_preserves_source_branch_and_auto_updates() {
-        let source = json!({
+    fn pull_renderer_preserves_supported_image_auto_updates_only() {
+        let policy = json!({
+            "type": "patch",
+            "schedule": [{ "day": 0, "startHour": 0, "endHour": 24 }]
+        });
+        let image_source = json!({
+            "image": "ghcr.io/railwayapp/nixpacks:latest",
+            "autoUpdates": policy
+        });
+        let github_source = json!({
             "repo": "railwayapp/nixpacks",
             "branch": "feature",
-            "autoUpdates": {
-                "type": "patch",
-                "schedule": [{ "day": 0, "startHour": 0, "endHour": 24 }]
-            }
+            "autoUpdates": policy
+        });
+        let unsupported_source = json!({
+            "image": "registry.example.com/acme/api:latest",
+            "autoUpdates": policy
         });
 
-        let rendered = render_source(&source);
-        assert!(rendered.contains("branch: \"feature\""));
-        assert!(rendered.contains("autoUpdates"));
-        assert!(rendered.contains("schedule"));
+        let rendered_image = render_source(&image_source);
+        assert!(rendered_image.contains("autoUpdates"));
+        assert!(rendered_image.contains("schedule"));
+        let rendered_github = render_source(&github_source);
+        assert!(rendered_github.contains("branch: \"feature\""));
+        assert!(!rendered_github.contains("autoUpdates"));
+        assert!(!render_source(&unsupported_source).contains("autoUpdates"));
     }
 
     #[test]
