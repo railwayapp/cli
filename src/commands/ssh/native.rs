@@ -72,6 +72,22 @@ pub async fn get_service_instance_id(
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
 pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, true).await
+}
+
+/// `ensure_ssh_key` without the "Using SSH key from ..." announcement when a
+/// registered key is already in place — for flows like `railway code` where
+/// ssh is plumbing, not the product. First-run registration still prompts
+/// and prints normally.
+pub async fn ensure_ssh_key_quiet(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, false).await
+}
+
+async fn ensure_ssh_key_impl(
+    client: &Client,
+    configs: &Configs,
+    announce: bool,
+) -> Result<Option<PathBuf>> {
     let local_keys = find_local_ssh_keys().await?;
 
     if local_keys.is_empty() {
@@ -93,13 +109,15 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option
     });
 
     if let Some(key) = registered_local {
-        match &key.source {
-            SshKeySource::File(path) => eprintln!(
-                "Using SSH key from file {}: {}",
-                path.display(),
-                key.key_name()
-            ),
-            SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+        if announce {
+            match &key.source {
+                SshKeySource::File(path) => eprintln!(
+                    "Using SSH key from file {}: {}",
+                    path.display(),
+                    key.key_name()
+                ),
+                SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+            }
         }
         return Ok(identity_for(key));
     }
@@ -274,10 +292,26 @@ pub fn run_native_ssh(
     identity_file: Option<&Path>,
     durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
+    run_native_ssh_with_opts(service_instance_id, command, identity_file, durable, &[])
+}
+
+/// `run_native_ssh` with extra `ssh` options (each element one argv entry,
+/// e.g. `["-o", "ControlMaster=auto"]`). Lets callers opt into connection
+/// multiplexing without changing the shared default path.
+pub fn run_native_ssh_with_opts(
+    service_instance_id: &str,
+    command: Option<&[String]>,
+    identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
+    extra_opts: &[String],
+) -> Result<i32> {
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
     let (mut ssh_cmd, target) = base_ssh_command(service_instance_id, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
 
     if let Some(durable) = durable {
         // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
@@ -475,4 +509,48 @@ fn wait_for_forward_ready(guard: &mut ForwardGuard, forwards: &[PortForward]) ->
         }
         sleep(Duration::from_millis(150));
     }
+}
+
+/// Run a non-interactive command on the target with optional bytes fed to its
+/// stdin, and stdout + stderr captured. Built for agent-launcher plumbing
+/// (`railway code`): secret payloads (credentials) ride stdin so they never
+/// appear in an argv, small reads come back on stdout, and stderr comes back
+/// so callers can tell transport failures (host key, relay refusal) apart
+/// from remote-command failures instead of showing a bare exit code.
+pub fn run_native_ssh_captured(
+    ssh_target: &str,
+    command: &str,
+    identity_file: Option<&Path>,
+    stdin_payload: Option<&[u8]>,
+    extra_opts: &[String],
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    use std::io::Write;
+
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
+    ssh_cmd.arg("-T");
+    ssh_cmd.arg(&target);
+    ssh_cmd.arg(command);
+    ssh_cmd.stdin(if stdin_payload.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    ssh_cmd.stdout(Stdio::piped());
+    ssh_cmd.stderr(Stdio::piped());
+
+    let mut child = ssh_cmd.spawn().context("Failed to execute ssh command")?;
+    if let Some(payload) = stdin_payload {
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        stdin.write_all(payload)?;
+        // Drop closes the pipe so the remote `cat` sees EOF.
+    }
+    let output = child.wait_with_output()?;
+    Ok((
+        output.status.code().unwrap_or(1),
+        output.stdout,
+        output.stderr,
+    ))
 }

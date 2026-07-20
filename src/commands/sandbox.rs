@@ -458,7 +458,7 @@ impl std::fmt::Display for Choice {
 /// explicit `--project`/`--environment` flags → the linked project/environment
 /// → an interactive picker (when attached to a TTY) → a helpful error in
 /// non-interactive contexts.
-async fn resolve_project_and_env(
+pub(crate) async fn resolve_project_and_env(
     configs: &mut Configs,
     client: &reqwest::Client,
     project: Option<String>,
@@ -774,7 +774,7 @@ fn parse_env_file(path: &std::path::Path) -> Result<Vec<Variable>> {
 /// scalar, wrapping bare references. Files load first (in order), then flags —
 /// so a `--variable` overrides a file entry with the same key. `None` when
 /// empty so `skip_serializing_none` omits the field from the mutation input.
-fn variables_to_input(
+pub(crate) fn variables_to_input(
     env_files: &[std::path::PathBuf],
     args: &[String],
 ) -> Result<Option<BTreeMap<String, String>>> {
@@ -793,18 +793,29 @@ fn variables_to_input(
     ))
 }
 
+/// How `create_and_store` reports the new sandbox.
+pub(crate) enum CreateReport {
+    /// The full `sandbox create` block: id, status, region, connect hints.
+    Full,
+    Json,
+    /// One line — `railway code` wraps the sandbox in its own UX, so the
+    /// status/region/connect-hints block is noise there.
+    Quiet,
+}
+
 /// Run `sandboxCreate` with the given input, persist the result as the active
 /// sandbox (create and fork both retarget `ssh`/`exec` at the new sandbox),
-/// and print create-style output.
-async fn create_and_store(
+/// and print create-style output. Returns the new sandbox's id (`pub(crate)`
+/// so `railway code` can reuse the create flow).
+pub(crate) async fn create_and_store(
     configs: &mut Configs,
     client: &reqwest::Client,
     project_id: String,
     environment_id: String,
     input: mutations::sandbox_create::SandboxCreateInput,
-    json: bool,
+    report: CreateReport,
     forked: bool,
-) -> Result<()> {
+) -> Result<String> {
     let (doing, did, failed) = if forked {
         ("Forking sandbox", "Forked", "Failed to fork sandbox")
     } else {
@@ -838,18 +849,20 @@ async fn create_and_store(
     );
     configs.write()?;
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&sandbox)?);
-    } else {
-        println!("✓ {did} sandbox {} (now active)", sandbox.id);
-        println!("  status: {:?}", sandbox.status);
-        println!("  region: {}", sandbox.region);
-        if let Some(idle) = sandbox.idle_timeout_minutes {
-            println!("  idle timeout: {idle}m");
+    match report {
+        CreateReport::Json => println!("{}", serde_json::to_string_pretty(&sandbox)?),
+        CreateReport::Quiet => println!("✓ {did} sandbox {}", sandbox.id),
+        CreateReport::Full => {
+            println!("✓ {did} sandbox {} (now active)", sandbox.id);
+            println!("  status: {:?}", sandbox.status);
+            println!("  region: {}", sandbox.region);
+            if let Some(idle) = sandbox.idle_timeout_minutes {
+                println!("  idle timeout: {idle}m");
+            }
+            println!("\nConnect with:\n  railway sandbox ssh");
         }
-        println!("\nConnect with:\n  railway sandbox ssh");
     }
-    Ok(())
+    Ok(sandbox.id)
 }
 
 async fn create(
@@ -907,10 +920,15 @@ async fn create(
         project_id,
         environment_id,
         input,
-        args.json,
+        if args.json {
+            CreateReport::Json
+        } else {
+            CreateReport::Full
+        },
         false,
     )
     .await
+    .map(|_| ())
 }
 
 async fn template(
@@ -1373,10 +1391,15 @@ async fn fork(
         project_id,
         environment_id,
         input,
-        args.json,
+        if args.json {
+            CreateReport::Json
+        } else {
+            CreateReport::Full
+        },
         true,
     )
     .await
+    .map(|_| ())
 }
 
 async fn list(
@@ -2039,7 +2062,7 @@ async fn fetch_sandbox_status(
     Ok(res.sandbox.map(|s| s.status))
 }
 
-fn spawn_heartbeat(
+pub(crate) fn spawn_heartbeat(
     client: reqwest::Client,
     backboard: String,
     environment_id: String,
