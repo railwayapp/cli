@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     config::{Configs, Environment},
+    consts,
     errors::RailwayError,
 };
 
@@ -31,6 +32,7 @@ fn get_oauth_base_url(host: &str) -> String {
 
 fn build_http_client() -> Result<reqwest::Client> {
     let client = reqwest::Client::builder()
+        .user_agent(consts::get_user_agent())
         .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
         .timeout(Duration::from_secs(30))
         .build()?;
