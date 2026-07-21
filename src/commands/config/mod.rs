@@ -7,10 +7,14 @@ use std::{
 };
 
 use is_terminal::IsTerminal;
+use sha2::{Digest, Sha256};
 
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
 use super::*;
+
+const LEGACY_CONFIG_SKILL_SHA256: &str =
+    "08dff6674cd2df2d8a37fd2c0f3ef8aa506b353e88005331910387514430e00e";
 
 /// Define, import, preview, and apply your Railway project from .railway/railway.ts
 #[derive(Parser)]
@@ -131,6 +135,21 @@ struct PullArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    if let Ok(cwd) = std::env::current_dir() {
+        match remove_generated_legacy_skill(&cwd, LEGACY_CONFIG_SKILL_SHA256) {
+            Ok(true) => eprintln!(
+                "{} {}",
+                "Removed".dimmed(),
+                ".agents/skills/railway-config".cyan()
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "{} Failed to remove the generated railway-config skill: {error}",
+                "Warning:".yellow()
+            ),
+        }
+    }
+
     match args.command {
         Command::Plan(args) => {
             if args.yes {
@@ -155,6 +174,26 @@ pub async fn command(args: Args) -> Result<()> {
     }
 }
 
+fn remove_generated_legacy_skill(cwd: &Path, expected_hash: &str) -> Result<bool> {
+    let skill_dir = cwd.join(".agents").join("skills").join("railway-config");
+    let skill_file = skill_dir.join("SKILL.md");
+    let contents = match fs::read(&skill_file) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to read {}", skill_file.display()));
+        }
+    };
+
+    if format!("{:x}", Sha256::digest(&contents)) != expected_hash {
+        return Ok(false);
+    }
+
+    fs::remove_dir_all(&skill_dir)
+        .with_context(|| format!("Failed to remove {}", skill_dir.display()))?;
+    Ok(true)
+}
+
 async fn init_config(args: InitArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
     let project_name = cwd
@@ -166,11 +205,8 @@ async fn init_config(args: InitArgs) -> Result<()> {
     let railway_dir = cwd.join(".railway");
     let railway_file = railway_dir.join("railway.ts");
     let readme_file = railway_dir.join("README.md");
-    let skill_dir = cwd.join(".agents").join("skills").join("railway-config");
-    let skill_file = skill_dir.join("SKILL.md");
 
     create_parent(&railway_file)?;
-    create_parent(&skill_file)?;
 
     let init_mode = if railway_file.exists() || !std::io::stdout().is_terminal() {
         InitMode::GenerateFromRepo
@@ -208,12 +244,8 @@ async fn init_config(args: InitArgs) -> Result<()> {
     }
     write_new(
         &readme_file,
-        include_str!("../../../assets/railway-config/README.md"),
+        include_str!("../../../assets/iac/README.md"),
         args.force,
-    )?;
-    let wrote_skill = write_asset_if_missing(
-        &skill_file,
-        include_str!("../../../assets/railway-config/SKILL.md"),
     )?;
 
     println!("{}", "Railway configuration initialized".green().bold());
@@ -231,13 +263,6 @@ async fn init_config(args: InitArgs) -> Result<()> {
         "Created".dimmed(),
         readme_file.display().to_string().cyan()
     );
-    if wrote_skill {
-        println!(
-            "{} {}",
-            "Created".dimmed(),
-            skill_file.display().to_string().cyan()
-        );
-    }
     println!();
     println!("{}", "Next steps".bold());
     println!(
@@ -294,11 +319,6 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
     let railway_file = cwd.join(".railway").join("railway.ts");
     let readme_file = cwd.join(".railway").join("README.md");
-    let skill_file = cwd
-        .join(".agents")
-        .join("skills")
-        .join("railway-config")
-        .join("SKILL.md");
 
     if args.json {
         let graph = load_current_graph(args.runner).await?;
@@ -307,7 +327,6 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     }
 
     create_parent(&railway_file)?;
-    create_parent(&skill_file)?;
     write_pulled_config(
         &railway_file,
         args.force,
@@ -315,14 +334,8 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         !args.omit_preserved_variables,
     )
     .await?;
-    let wrote_readme = write_asset_if_missing(
-        &readme_file,
-        include_str!("../../../assets/railway-config/README.md"),
-    )?;
-    let wrote_skill = write_asset_if_missing(
-        &skill_file,
-        include_str!("../../../assets/railway-config/SKILL.md"),
-    )?;
+    let wrote_readme =
+        write_asset_if_missing(&readme_file, include_str!("../../../assets/iac/README.md"))?;
 
     println!("{}", "Railway configuration imported".green().bold());
     println!(
@@ -335,13 +348,6 @@ async fn pull_config(args: PullArgs) -> Result<()> {
             "{} {}",
             "Created".dimmed(),
             readme_file.display().to_string().cyan()
-        );
-    }
-    if wrote_skill {
-        println!(
-            "{} {}",
-            "Created".dimmed(),
-            skill_file.display().to_string().cyan()
         );
     }
     println!();
@@ -1421,6 +1427,29 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn removes_generated_legacy_skill_when_contents_match() {
+        let cwd = tempfile::tempdir().unwrap();
+        let skill_dir = cwd.path().join(".agents/skills/railway-config");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "generated skill").unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"generated skill"));
+
+        assert!(remove_generated_legacy_skill(cwd.path(), &hash).unwrap());
+        assert!(!skill_dir.exists());
+    }
+
+    #[test]
+    fn preserves_modified_legacy_skill() {
+        let cwd = tempfile::tempdir().unwrap();
+        let skill_dir = cwd.path().join(".agents/skills/railway-config");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "user changes").unwrap();
+
+        assert!(!remove_generated_legacy_skill(cwd.path(), "different").unwrap());
+        assert!(skill_dir.exists());
+    }
 
     fn service_resource(
         source: serde_json::Value,
