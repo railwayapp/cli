@@ -693,6 +693,14 @@ mod cli_tests {
             assert_parses(&["variable", "delete", "KEY"]);
             assert_parses(&["variable", "rm", "KEY"]); // alias
             assert_parses(&["variable", "delete", "KEY", "--json"]);
+            assert_parses(&["variable", "import", "--file", ".env"]);
+            assert_parses(&["variable", "import", "-f", "vars.json"]);
+            assert_parses(&["variable", "import", "--file", ".env", "--yes"]);
+            assert_parses(&["variable", "import", "--file", ".env", "--skip-deploys"]);
+            assert_parses(&["variable", "import", "-s", "myservice", "-e", "prod", "-f", ".env"]);
+            assert_parses(&["variable", "export", "--file", "backup.env"]);
+            assert_parses(&["variable", "export", "-f", "backup.json"]);
+            assert_parses(&["variable", "export", "-s", "myservice", "-f", "out.env"]);
         }
 
         #[test]
