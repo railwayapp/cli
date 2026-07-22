@@ -36,6 +36,7 @@ mod telemetry;
 commands!(
     add,
     agent,
+    api,
     autoupdate,
     bucket,
     cdn,
@@ -876,6 +877,51 @@ mod cli_tests {
             assert_parses(&["setup", "agent", "-y"]);
             assert_parses(&["setup", "agent", "--remote"]);
             assert_parses(&["setup", "agent", "--remote", "-y"]);
+        }
+
+        #[test]
+        fn api_command_parses() {
+            assert_subcommand(&["api", "{ me { id } }"], "api");
+            assert_parses(&["api", "--file", "query.graphql"]);
+            assert_parses(&[
+                "api",
+                "--file",
+                "query.graphql",
+                "--variables",
+                "@vars.json",
+                "--var",
+                "limit=10",
+                "--raw-var",
+                "name=web",
+                "--operation-name",
+                "Project",
+                "--compact",
+            ]);
+            assert_parses(&[
+                "api",
+                "--file",
+                "query.graphql",
+                "--variables",
+                "@vars.json",
+                "--allow-errors",
+            ]);
+            assert_parses(&["api", "schema"]);
+            assert_parses(&["api", "schema", "--compact"]);
+            assert_parses(&["api", "search", "deployment", "--kind", "mutation"]);
+            assert_parses(&["api", "describe", "ServiceInstanceUpdateInput"]);
+        }
+
+        #[test]
+        fn api_commands_need_auth_refresh() {
+            let search = parse(&["api", "search", "serviceInstance"]).unwrap();
+            let describe = parse(&["api", "describe", "ServiceInstanceUpdateInput"]).unwrap();
+            let schema = parse(&["api", "schema"]).unwrap();
+            let execute = parse(&["api", "{ me { id } }"]).unwrap();
+
+            assert!(command_needs_refresh(&search));
+            assert!(command_needs_refresh(&describe));
+            assert!(command_needs_refresh(&schema));
+            assert!(command_needs_refresh(&execute));
         }
 
         #[test]

@@ -3548,6 +3548,7 @@ dependencies = [
  "fs2",
  "futures 0.3.31",
  "futures-util",
+ "graphql-parser",
  "graphql-ws-client",
  "graphql_client",
  "gzp",
