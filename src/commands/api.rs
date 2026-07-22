@@ -1,15 +1,21 @@
 use std::{
     fs,
     io::{self, Read, Write},
+    time::Instant,
 };
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
+use graphql_parser::query::{Definition, OperationDefinition, Selection};
 use is_terminal::IsTerminal;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::telemetry;
+
 use super::*;
+
+const MAX_OPERATION_SUMMARY_FIELDS: usize = 5;
 
 /// Query the Railway public GraphQL API
 #[derive(Parser, Debug)]
@@ -144,7 +150,31 @@ async fn run_describe(args: DescribeArgs) -> Result<()> {
 }
 
 async fn run_execute(args: ExecuteArgs) -> Result<()> {
+    let started = Instant::now();
     let query = resolve_query_source(args.query.as_deref(), args.file.as_deref(), false)?;
+    let summary = operation_summary(&query.document, args.operation_name.as_deref());
+
+    let result = execute_document(&args, &query).await;
+
+    if let Some(summary) = summary {
+        telemetry::send(telemetry::CliTrackEvent {
+            command: "api".to_string(),
+            sub_command: Some(format!("execute:{summary}")),
+            duration_ms: started.elapsed().as_millis() as u64,
+            success: result.is_ok(),
+            error_message: None,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            is_ci: Configs::env_is_ci(),
+        })
+        .await;
+    }
+
+    result
+}
+
+async fn execute_document(args: &ExecuteArgs, query: &QuerySource) -> Result<()> {
     let variables = parse_variables(&VariableArgs {
         variables: args.variables.as_deref(),
         vars: &args.vars,
@@ -175,6 +205,66 @@ async fn run_execute(args: ExecuteArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Summarizes the operation that will execute as `<type>:<field>[+<field>...]`,
+/// e.g. `mutation:serviceInstanceUpdate`. Only operation types and top-level
+/// field names are captured — never arguments or values — so this is safe to
+/// report in telemetry for understanding which API capabilities get used.
+fn operation_summary(document: &str, operation_name: Option<&str>) -> Option<String> {
+    let ast = graphql_parser::parse_query::<&str>(document).ok()?;
+    let operations: Vec<&OperationDefinition<&str>> = ast
+        .definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            Definition::Operation(operation) => Some(operation),
+            Definition::Fragment(_) => None,
+        })
+        .collect();
+
+    let operation = match operation_name {
+        Some(name) => *operations
+            .iter()
+            .find(|operation| operation_definition_name(operation) == Some(name))?,
+        None => match operations.as_slice() {
+            [single] => single,
+            _ => return None,
+        },
+    };
+
+    let (operation_type, selection_set) = match operation {
+        OperationDefinition::Query(query) => ("query", &query.selection_set),
+        OperationDefinition::Mutation(mutation) => ("mutation", &mutation.selection_set),
+        OperationDefinition::Subscription(subscription) => {
+            ("subscription", &subscription.selection_set)
+        }
+        OperationDefinition::SelectionSet(selection_set) => ("query", selection_set),
+    };
+
+    let fields: Vec<&str> = selection_set
+        .items
+        .iter()
+        .filter_map(|selection| match selection {
+            Selection::Field(field) => Some(field.name),
+            _ => None,
+        })
+        .take(MAX_OPERATION_SUMMARY_FIELDS)
+        .collect();
+
+    if fields.is_empty() {
+        return None;
+    }
+
+    Some(format!("{operation_type}:{}", fields.join("+")))
+}
+
+fn operation_definition_name<'a>(operation: &OperationDefinition<'a, &'a str>) -> Option<&'a str> {
+    match operation {
+        OperationDefinition::Query(query) => query.name,
+        OperationDefinition::Mutation(mutation) => mutation.name,
+        OperationDefinition::Subscription(subscription) => subscription.name,
+        OperationDefinition::SelectionSet(_) => None,
+    }
 }
 
 #[derive(Debug)]
@@ -1044,6 +1134,54 @@ mod tests {
         });
 
         assert_eq!(type_ref_to_string(&non_null_list), "[String!]!");
+    }
+
+    #[test]
+    fn summarizes_single_operations() {
+        assert_eq!(
+            operation_summary("query { me { id } }", None),
+            Some("query:me".to_string())
+        );
+        assert_eq!(
+            operation_summary("{ me { id } }", None),
+            Some("query:me".to_string())
+        );
+        assert_eq!(
+            operation_summary(
+                "mutation Update($id: String!) { serviceInstanceUpdate(serviceId: $id) }",
+                None
+            ),
+            Some("mutation:serviceInstanceUpdate".to_string())
+        );
+        assert_eq!(
+            operation_summary(
+                "query { me { id } projects { edges { node { id } } } }",
+                None
+            ),
+            Some("query:me+projects".to_string())
+        );
+    }
+
+    #[test]
+    fn summarizes_operation_selected_by_name() {
+        let document = "query A { me { id } } mutation B { projectDelete(id: \"x\") }";
+
+        assert_eq!(
+            operation_summary(document, Some("B")),
+            Some("mutation:projectDelete".to_string())
+        );
+        assert_eq!(
+            operation_summary(document, Some("A")),
+            Some("query:me".to_string())
+        );
+        assert_eq!(operation_summary(document, Some("C")), None);
+        assert_eq!(operation_summary(document, None), None);
+    }
+
+    #[test]
+    fn summarizes_nothing_for_invalid_documents() {
+        assert_eq!(operation_summary("not graphql", None), None);
+        assert_eq!(operation_summary("", None), None);
     }
 
     #[test]
