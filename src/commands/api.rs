@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::{self, Read, Write},
     time::Instant,
@@ -6,7 +7,7 @@ use std::{
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use graphql_parser::query::{Definition, OperationDefinition, Selection};
+use graphql_parser::query::{Definition, OperationDefinition, Selection, SelectionSet};
 use is_terminal::IsTerminal;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -139,8 +140,11 @@ async fn run_schema(args: SchemaArgs) -> Result<()> {
 
 async fn run_search(args: SearchArgs) -> Result<()> {
     let schema = fetch_live_schema().await?;
-    let results = search_schema(&schema, &args.term, &args.kind, args.limit)?;
-    print_json(&json!({ "results": results }), args.compact)
+    let search = search_schema(&schema, &args.term, &args.kind, args.limit)?;
+    print_json(
+        &json!({ "results": search.results, "total": search.total }),
+        args.compact,
+    )
 }
 
 async fn run_describe(args: DescribeArgs) -> Result<()> {
@@ -161,7 +165,10 @@ async fn run_execute(args: ExecuteArgs) -> Result<()> {
             command: "api".to_string(),
             sub_command: Some(format!("execute:{summary}")),
             duration_ms: started.elapsed().as_millis() as u64,
-            success: result.is_ok(),
+            // Only an operation that ran without GraphQL errors counts as a
+            // successfully used capability; `--allow-errors` changes the exit
+            // status, never this flag.
+            success: matches!(result, Ok(0)),
             error_message: None,
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -171,10 +178,14 @@ async fn run_execute(args: ExecuteArgs) -> Result<()> {
         .await;
     }
 
-    result
+    result.map(|_| ())
 }
 
-async fn execute_document(args: &ExecuteArgs, query: &QuerySource) -> Result<()> {
+/// Executes the document and returns the number of GraphQL errors in the
+/// response. The count is computed even when `--allow-errors` downgrades
+/// those errors to a zero exit status, so telemetry never records a
+/// rejected operation as a successfully used capability.
+async fn execute_document(args: &ExecuteArgs, query: &QuerySource) -> Result<usize> {
     let variables = parse_variables(&VariableArgs {
         variables: args.variables.as_deref(),
         vars: &args.vars,
@@ -194,23 +205,24 @@ async fn execute_document(args: &ExecuteArgs, query: &QuerySource) -> Result<()>
         bail!("Railway API request failed with HTTP {}", response.status);
     }
 
-    if !args.allow_errors {
-        let error_count = serde_json::from_str::<Value>(&response.body)
-            .ok()
-            .and_then(|value| graphql_error_count(&value))
-            .unwrap_or(0);
-        if error_count > 0 {
-            bail!("Railway API returned {error_count} GraphQL error(s)");
-        }
+    let error_count = serde_json::from_str::<Value>(&response.body)
+        .ok()
+        .and_then(|value| graphql_error_count(&value))
+        .unwrap_or(0);
+
+    if !args.allow_errors && error_count > 0 {
+        bail!("Railway API returned {error_count} GraphQL error(s)");
     }
 
-    Ok(())
+    Ok(error_count)
 }
 
 /// Summarizes the operation that will execute as `<type>:<field>[+<field>...]`,
-/// e.g. `mutation:serviceInstanceUpdate`. Only operation types and top-level
-/// field names are captured — never arguments or values — so this is safe to
-/// report in telemetry for understanding which API capabilities get used.
+/// e.g. `mutation:serviceInstanceUpdate`. Root-level fragment spreads and
+/// inline fragments are resolved to the fields they select. Only operation
+/// types and top-level field names are captured — never arguments or values —
+/// so this is safe to report in telemetry for understanding which API
+/// capabilities get used.
 fn operation_summary(document: &str, operation_name: Option<&str>) -> Option<String> {
     let ast = graphql_parser::parse_query::<&str>(document).ok()?;
     let operations: Vec<&OperationDefinition<&str>> = ast
@@ -219,6 +231,14 @@ fn operation_summary(document: &str, operation_name: Option<&str>) -> Option<Str
         .filter_map(|definition| match definition {
             Definition::Operation(operation) => Some(operation),
             Definition::Fragment(_) => None,
+        })
+        .collect();
+    let fragments: HashMap<&str, &SelectionSet<&str>> = ast
+        .definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            Definition::Fragment(fragment) => Some((fragment.name, &fragment.selection_set)),
+            Definition::Operation(_) => None,
         })
         .collect();
 
@@ -241,13 +261,15 @@ fn operation_summary(document: &str, operation_name: Option<&str>) -> Option<Str
         OperationDefinition::SelectionSet(selection_set) => ("query", selection_set),
     };
 
-    let fields: Vec<&str> = selection_set
-        .items
-        .iter()
-        .filter_map(|selection| match selection {
-            Selection::Field(field) => Some(field.name),
-            _ => None,
-        })
+    let mut fields = Vec::new();
+    collect_root_fields(selection_set, &fragments, &mut HashSet::new(), &mut fields);
+
+    // GraphQL merges a field selected both directly and via a fragment, so
+    // report each root field once.
+    let mut seen = HashSet::new();
+    let fields: Vec<&str> = fields
+        .into_iter()
+        .filter(|field| seen.insert(*field))
         .take(MAX_OPERATION_SUMMARY_FIELDS)
         .collect();
 
@@ -256,6 +278,32 @@ fn operation_summary(document: &str, operation_name: Option<&str>) -> Option<Str
     }
 
     Some(format!("{operation_type}:{}", fields.join("+")))
+}
+
+/// Collects the root-level field names of a selection set, following
+/// fragment spreads and inline fragments. `visited` breaks cycles between
+/// fragment spreads, which are invalid GraphQL but still parse.
+fn collect_root_fields<'a>(
+    selection_set: &'a SelectionSet<'a, &'a str>,
+    fragments: &HashMap<&'a str, &'a SelectionSet<'a, &'a str>>,
+    visited: &mut HashSet<&'a str>,
+    fields: &mut Vec<&'a str>,
+) {
+    for selection in &selection_set.items {
+        match selection {
+            Selection::Field(field) => fields.push(field.name),
+            Selection::FragmentSpread(spread) => {
+                if visited.insert(spread.fragment_name) {
+                    if let Some(fragment) = fragments.get(spread.fragment_name) {
+                        collect_root_fields(fragment, fragments, visited, fields);
+                    }
+                }
+            }
+            Selection::InlineFragment(inline) => {
+                collect_root_fields(&inline.selection_set, fragments, visited, fields);
+            }
+        }
+    }
 }
 
 fn operation_definition_name<'a>(operation: &OperationDefinition<'a, &'a str>) -> Option<&'a str> {
@@ -650,6 +698,78 @@ fn type_to_json(ty: &Value) -> Value {
         "fields": fields,
         "inputFields": input_fields,
         "enumValues": enum_values,
+        "interfaces": type_name_list(ty, "interfaces"),
+        "possibleTypes": type_name_list(ty, "possibleTypes"),
+    })
+}
+
+/// Renders a type's `interfaces` or `possibleTypes` introspection list as
+/// type names, so `describe` exposes union members, interface implementors,
+/// and implemented interfaces — enough to construct inline fragments without
+/// reading the full schema.
+fn type_name_list(ty: &Value, key: &str) -> Vec<Value> {
+    ty.get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| json!(type_ref_to_string(item)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Search results after ranking and truncation. `total` counts every match
+/// in the schema so callers can tell when `limit` cut the list short.
+struct SearchResults {
+    results: Vec<Value>,
+    total: usize,
+}
+
+/// Result buckets, best first: executable root operations, then types, then
+/// object fields, then input-object fields. Ranking the whole schema before
+/// truncating keeps a small `--limit` from being exhausted by alphabetically
+/// early type/field matches while every executable operation is dropped.
+const RANK_OPERATION: u8 = 0;
+const RANK_TYPE: u8 = 1;
+const RANK_FIELD: u8 = 2;
+const RANK_INPUT_FIELD: u8 = 3;
+
+/// Match quality returned by [`field_match_quality`] for a field that only
+/// matched because its parent type name did. Every field of a matching type
+/// matches this way, so these rank below any name or description match.
+const QUALITY_PARENT_TYPE: u8 = 4;
+
+/// Ranks how well `needle` (lowercased) matches a schema member, lower being
+/// better: exact name, name prefix, name substring, description substring.
+fn match_quality(needle: &str, name: &str, description: &str) -> Option<u8> {
+    let name = name.to_ascii_lowercase();
+    if name == needle {
+        return Some(0);
+    }
+    if name.starts_with(needle) {
+        return Some(1);
+    }
+    if name.contains(needle) {
+        return Some(2);
+    }
+    if description.to_ascii_lowercase().contains(needle) {
+        return Some(3);
+    }
+    None
+}
+
+fn field_match_quality(
+    needle: &str,
+    name: &str,
+    description: &str,
+    parent_type_name: &str,
+) -> Option<u8> {
+    match_quality(needle, name, description).or_else(|| {
+        parent_type_name
+            .to_ascii_lowercase()
+            .contains(needle)
+            .then_some(QUALITY_PARENT_TYPE)
     })
 }
 
@@ -658,9 +778,9 @@ fn search_schema(
     term: &str,
     kind: &SearchKind,
     limit: usize,
-) -> Result<Vec<Value>> {
+) -> Result<SearchResults> {
     let needle = term.to_ascii_lowercase();
-    let mut results = Vec::new();
+    let mut matches: Vec<(u8, u8, Value)> = Vec::new();
     let root = schema_root(schema)?;
     let types = root
         .get("types")
@@ -668,35 +788,27 @@ fn search_schema(
         .ok_or_else(|| anyhow!("GraphQL schema is missing types"))?;
 
     for ty in types {
-        if results.len() >= limit {
-            break;
-        }
-
         let type_name = ty.get("name").and_then(Value::as_str).unwrap_or("");
         let type_kind = ty.get("kind").and_then(Value::as_str).unwrap_or("");
         let type_description = ty.get("description").and_then(Value::as_str).unwrap_or("");
 
-        if matches_kind_for_type(type_kind, kind)
-            && text_matches(&needle, &[type_name, type_description])
-        {
-            results.push(json!({
-                "kind": type_kind.to_ascii_lowercase(),
-                "name": type_name,
-                "description": ty.get("description").cloned().unwrap_or(Value::Null),
-            }));
-        }
-
-        if results.len() >= limit {
-            break;
+        if matches_kind_for_type(type_kind, kind) {
+            if let Some(quality) = match_quality(&needle, type_name, type_description) {
+                matches.push((
+                    RANK_TYPE,
+                    quality,
+                    json!({
+                        "kind": type_kind.to_ascii_lowercase(),
+                        "name": type_name,
+                        "description": ty.get("description").cloned().unwrap_or(Value::Null),
+                    }),
+                ));
+            }
         }
 
         let field_kind = operation_kind_for_root_type(schema, type_name)?;
         if let Some(fields) = ty.get("fields").and_then(Value::as_array) {
             for field in fields {
-                if results.len() >= limit {
-                    break;
-                }
-
                 let result_kind = field_kind.as_deref().unwrap_or("field");
                 if !matches_kind_for_field(result_kind, kind) {
                     continue;
@@ -706,17 +818,25 @@ fn search_schema(
                     .get("description")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if text_matches(&needle, &[field_name, field_description, type_name]) {
-                    results.push(field_to_json(type_name, field_kind.as_deref(), field));
+                if let Some(quality) =
+                    field_match_quality(&needle, field_name, field_description, type_name)
+                {
+                    let rank = if field_kind.is_some() {
+                        RANK_OPERATION
+                    } else {
+                        RANK_FIELD
+                    };
+                    matches.push((
+                        rank,
+                        quality,
+                        field_to_json(type_name, field_kind.as_deref(), field),
+                    ));
                 }
             }
         }
 
         if let Some(input_fields) = ty.get("inputFields").and_then(Value::as_array) {
             for field in input_fields {
-                if results.len() >= limit {
-                    break;
-                }
                 if !matches!(
                     kind,
                     SearchKind::All | SearchKind::Input | SearchKind::Field
@@ -728,17 +848,28 @@ fn search_schema(
                     .get("description")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if text_matches(&needle, &[field_name, field_description, type_name]) {
+                if let Some(quality) =
+                    field_match_quality(&needle, field_name, field_description, type_name)
+                {
                     let mut value = arg_to_json(field);
                     value["kind"] = json!("inputField");
                     value["parent"] = json!(type_name);
-                    results.push(value);
+                    matches.push((RANK_INPUT_FIELD, quality, value));
                 }
             }
         }
     }
 
-    Ok(results)
+    // Stable sort: schema order breaks ties within a (rank, quality) bucket.
+    matches.sort_by_key(|(rank, quality, _)| (*rank, *quality));
+    let total = matches.len();
+    let results = matches
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, value)| value)
+        .collect();
+
+    Ok(SearchResults { results, total })
 }
 
 fn matches_kind_for_type(type_kind: &str, wanted: &SearchKind) -> bool {
@@ -761,12 +892,6 @@ fn matches_kind_for_field(result_kind: &str, wanted: &SearchKind) -> bool {
         SearchKind::Subscription => result_kind == "subscription",
         SearchKind::Type | SearchKind::Input | SearchKind::Enum => false,
     }
-}
-
-fn text_matches(needle: &str, values: &[&str]) -> bool {
-    values
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(needle))
 }
 
 fn operation_kind_for_root_type(schema: &Value, type_name: &str) -> Result<Option<String>> {
@@ -993,6 +1118,9 @@ mod tests {
                             "kind": "OBJECT",
                             "name": "Project",
                             "description": "A Railway project.",
+                            "interfaces": [
+                                { "kind": "INTERFACE", "name": "Node", "ofType": null }
+                            ],
                             "fields": [
                                 {
                                     "name": "id",
@@ -1032,6 +1160,18 @@ mod tests {
                                 }
                             ],
                             "enumValues": null
+                        },
+                        {
+                            "kind": "UNION",
+                            "name": "InvitationTarget",
+                            "description": null,
+                            "fields": null,
+                            "inputFields": null,
+                            "enumValues": null,
+                            "possibleTypes": [
+                                { "kind": "OBJECT", "name": "InviteCode", "ofType": null },
+                                { "kind": "OBJECT", "name": "ProjectInvitation", "ofType": null }
+                            ]
                         }
                     ]
                 }
@@ -1049,8 +1189,8 @@ mod tests {
     #[test]
     fn search_finds_types_and_fields() {
         let schema = fixture_schema();
-        let results = search_schema(&schema, "project", &SearchKind::All, 25).unwrap();
-        let names = result_names(&results);
+        let search = search_schema(&schema, "project", &SearchKind::All, 25).unwrap();
+        let names = result_names(&search.results);
 
         assert!(names.contains(&"Project"));
         assert!(names.contains(&"project"));
@@ -1063,17 +1203,47 @@ mod tests {
         let schema = fixture_schema();
 
         let mutations = search_schema(&schema, "project", &SearchKind::Mutation, 25).unwrap();
-        assert_eq!(result_names(&mutations), vec!["projectDelete"]);
+        assert_eq!(result_names(&mutations.results), vec!["projectDelete"]);
 
         let queries = search_schema(&schema, "project", &SearchKind::Query, 25).unwrap();
-        assert_eq!(result_names(&queries), vec!["project"]);
+        assert_eq!(result_names(&queries.results), vec!["project"]);
     }
 
     #[test]
-    fn search_respects_limit() {
+    fn search_ranks_operations_before_types_and_fields() {
         let schema = fixture_schema();
-        let results = search_schema(&schema, "project", &SearchKind::All, 2).unwrap();
-        assert_eq!(results.len(), 2);
+        let search = search_schema(&schema, "project", &SearchKind::All, 25).unwrap();
+
+        // Root operations first (exact match before prefix), then types,
+        // then fields that only matched via their parent type name, then
+        // input fields.
+        assert_eq!(
+            result_names(&search.results),
+            vec![
+                "project",
+                "projectDelete",
+                "Project",
+                "ProjectUpdateInput",
+                "id",
+                "name",
+                "name"
+            ]
+        );
+        assert_eq!(search.total, 7);
+    }
+
+    #[test]
+    fn search_truncates_after_ranking() {
+        let schema = fixture_schema();
+        let search = search_schema(&schema, "project", &SearchKind::All, 2).unwrap();
+
+        // A small limit keeps the best-ranked results — the executable
+        // operations — and still reports how many matches exist in total.
+        assert_eq!(
+            result_names(&search.results),
+            vec!["project", "projectDelete"]
+        );
+        assert_eq!(search.total, 7);
     }
 
     #[test]
@@ -1084,8 +1254,24 @@ mod tests {
         assert_eq!(descriptions.len(), 1);
         assert_eq!(descriptions[0]["kind"], json!("OBJECT"));
         assert_eq!(descriptions[0]["name"], json!("Project"));
+        assert_eq!(descriptions[0]["interfaces"], json!(["Node"]));
+        assert_eq!(descriptions[0]["possibleTypes"], json!([]));
         let fields = descriptions[0]["fields"].as_array().unwrap();
         assert_eq!(result_names(fields), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn describe_lists_union_members() {
+        let schema = fixture_schema();
+        let descriptions = describe_schema_member(&schema, "InvitationTarget").unwrap();
+
+        assert_eq!(descriptions.len(), 1);
+        assert_eq!(descriptions[0]["kind"], json!("UNION"));
+        assert_eq!(
+            descriptions[0]["possibleTypes"],
+            json!(["InviteCode", "ProjectInvitation"])
+        );
+        assert_eq!(descriptions[0]["fields"], json!([]));
     }
 
     #[test]
@@ -1176,6 +1362,53 @@ mod tests {
         );
         assert_eq!(operation_summary(document, Some("C")), None);
         assert_eq!(operation_summary(document, None), None);
+    }
+
+    #[test]
+    fn summarizes_fragment_based_operations() {
+        assert_eq!(
+            operation_summary(
+                "query Q { ...Root } fragment Root on Query { me { id } }",
+                None
+            ),
+            Some("query:me".to_string())
+        );
+        assert_eq!(
+            operation_summary(
+                "query { me { id } ...Rest } fragment Rest on Query { projects { id } }",
+                None
+            ),
+            Some("query:me+projects".to_string())
+        );
+        assert_eq!(
+            operation_summary("query { ... on Query { me { id } } }", None),
+            Some("query:me".to_string())
+        );
+    }
+
+    #[test]
+    fn summarizes_cyclic_and_duplicate_fragments_safely() {
+        // Cyclic spreads are invalid GraphQL but still parse; the summary
+        // must terminate and keep the fields it can reach.
+        assert_eq!(
+            operation_summary(
+                "query { ...A } fragment A on Query { ...B } fragment B on Query { ...A me { id } }",
+                None
+            ),
+            Some("query:me".to_string())
+        );
+        // GraphQL merges a field selected both directly and via a fragment,
+        // so it is reported once.
+        assert_eq!(
+            operation_summary(
+                "query { me { id } ...R } fragment R on Query { me { name } }",
+                None
+            ),
+            Some("query:me".to_string())
+        );
+        // A spread without a matching fragment definition contributes
+        // nothing, so the document produces no summary.
+        assert_eq!(operation_summary("query { ...Missing }", None), None);
     }
 
     #[test]
