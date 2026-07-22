@@ -505,22 +505,9 @@ fn command_needs_refresh(cli: &clap::ArgMatches) -> bool {
             )
     );
 
-    let is_offline_api_discovery_command = matches!(
-        cli.subcommand(),
-        Some(("api", api_matches))
-            if matches!(api_matches.subcommand_name(), Some("search" | "describe"))
-                || matches!(
-                    api_matches.subcommand(),
-                    Some(("schema", schema_matches)) if !schema_matches.get_flag("refresh")
-                )
-    );
-
     cli.subcommand_name()
         .map(|cmd| {
-            !NO_AUTH_COMMANDS.contains(&cmd)
-                && !is_mcp_install
-                && !is_public_templates_command
-                && !is_offline_api_discovery_command
+            !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install && !is_public_templates_command
         })
         .unwrap_or(false)
 }
@@ -919,23 +906,21 @@ mod cli_tests {
                 "--allow-errors",
             ]);
             assert_parses(&["api", "schema"]);
-            assert_parses(&["api", "schema", "--refresh", "--compact"]);
+            assert_parses(&["api", "schema", "--compact"]);
             assert_parses(&["api", "search", "deployment", "--kind", "mutation"]);
             assert_parses(&["api", "describe", "ServiceInstanceUpdateInput"]);
         }
 
         #[test]
-        fn api_discovery_auth_refresh_is_subcommand_aware() {
+        fn api_commands_need_auth_refresh() {
             let search = parse(&["api", "search", "serviceInstance"]).unwrap();
             let describe = parse(&["api", "describe", "ServiceInstanceUpdateInput"]).unwrap();
             let schema = parse(&["api", "schema"]).unwrap();
-            let live_schema = parse(&["api", "schema", "--refresh"]).unwrap();
             let execute = parse(&["api", "{ me { id } }"]).unwrap();
 
-            assert!(!command_needs_refresh(&search));
-            assert!(!command_needs_refresh(&describe));
-            assert!(!command_needs_refresh(&schema));
-            assert!(command_needs_refresh(&live_schema));
+            assert!(command_needs_refresh(&search));
+            assert!(command_needs_refresh(&describe));
+            assert!(command_needs_refresh(&schema));
             assert!(command_needs_refresh(&execute));
         }
 

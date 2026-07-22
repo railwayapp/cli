@@ -16,7 +16,6 @@ use crate::telemetry::{self, CliApiTrackEvent};
 
 use super::*;
 
-const BUNDLED_SCHEMA: &str = include_str!("../gql/schema.json");
 const MAX_TELEMETRY_QUERY_BYTES: usize = 8192;
 
 /// Query the Railway public GraphQL API
@@ -35,7 +34,7 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Print the bundled or live GraphQL introspection schema
+    /// Print the live GraphQL introspection schema
     Schema(SchemaArgs),
     /// Search GraphQL types and fields
     Search(SearchArgs),
@@ -80,10 +79,6 @@ struct ExecuteArgs {
 
 #[derive(ClapArgs, Debug)]
 struct SchemaArgs {
-    /// Fetch live introspection from the API instead of printing the bundled schema.
-    #[arg(long)]
-    refresh: bool,
-
     /// Print compact JSON.
     #[arg(long)]
     compact: bool,
@@ -141,25 +136,10 @@ pub async fn command(args: Args) -> Result<()> {
 async fn run_schema(args: SchemaArgs) -> Result<()> {
     let started = Instant::now();
     let mut event = CliApiTrackEvent::new("schema");
-    event.schema_source = Some(if args.refresh { "live" } else { "bundled" }.to_string());
+    event.schema_source = Some("live".to_string());
 
     let result = async {
-        let schema = if args.refresh {
-            let configs = Configs::new()?;
-            let client = GQLClient::new_authorized(&configs)?;
-            let response = send_graphql_request(
-                &client,
-                &configs.get_backboard(),
-                json!({ "query": introspection_query() }),
-            )
-            .await?;
-            event.http_status = Some(response.status.as_u16());
-            event.response_bytes = Some(response.body.len());
-            response_json(&response)?
-        } else {
-            bundled_schema()?
-        };
-
+        let schema = fetch_live_schema(&mut event).await?;
         print_json(&schema, args.compact)?;
         Ok(())
     }
@@ -172,11 +152,11 @@ async fn run_schema(args: SchemaArgs) -> Result<()> {
 async fn run_search(args: SearchArgs) -> Result<()> {
     let started = Instant::now();
     let mut event = CliApiTrackEvent::new("search");
-    event.schema_source = Some("bundled".to_string());
+    event.schema_source = Some("live".to_string());
     event.search_term = Some(args.term.clone());
 
     let result = async {
-        let schema = bundled_schema()?;
+        let schema = fetch_live_schema(&mut event).await?;
         let results = search_schema(&schema, &args.term, &args.kind, args.limit)?;
         print_json(&json!({ "results": results }), args.compact)?;
         Ok(())
@@ -190,11 +170,11 @@ async fn run_search(args: SearchArgs) -> Result<()> {
 async fn run_describe(args: DescribeArgs) -> Result<()> {
     let started = Instant::now();
     let mut event = CliApiTrackEvent::new("describe");
-    event.schema_source = Some("bundled".to_string());
+    event.schema_source = Some("live".to_string());
     event.describe_name = Some(args.name.clone());
 
     let result = async {
-        let schema = bundled_schema()?;
+        let schema = fetch_live_schema(&mut event).await?;
         let descriptions = describe_schema_member(&schema, &args.name)?;
         let output = if descriptions.len() == 1 {
             descriptions.into_iter().next().unwrap()
@@ -468,8 +448,26 @@ fn auth_mode(configs: &Configs) -> String {
     "none".to_string()
 }
 
-fn bundled_schema() -> Result<Value> {
-    serde_json::from_str(BUNDLED_SCHEMA).context("Bundled GraphQL schema is invalid JSON")
+async fn fetch_live_schema(event: &mut CliApiTrackEvent) -> Result<Value> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let response = send_graphql_request(
+        &client,
+        &configs.get_backboard(),
+        json!({ "query": introspection_query() }),
+    )
+    .await?;
+    event.http_status = Some(response.status.as_u16());
+    event.response_bytes = Some(response.body.len());
+
+    if !response.status.is_success() {
+        bail!(
+            "Failed to fetch the GraphQL schema: Railway API returned HTTP {}",
+            response.status
+        );
+    }
+
+    response_json(&response)
 }
 
 fn schema_root(schema: &Value) -> Result<&Value> {
