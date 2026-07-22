@@ -1,8 +1,6 @@
 use std::{
-    collections::BTreeMap,
     fs,
     io::{self, Read, Write},
-    time::Instant,
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -10,13 +8,8 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use is_terminal::IsTerminal;
 use serde::Serialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-
-use crate::telemetry::{self, CliApiTrackEvent};
 
 use super::*;
-
-const MAX_TELEMETRY_QUERY_BYTES: usize = 8192;
 
 /// Query the Railway public GraphQL API
 #[derive(Parser, Debug)]
@@ -134,72 +127,23 @@ pub async fn command(args: Args) -> Result<()> {
 }
 
 async fn run_schema(args: SchemaArgs) -> Result<()> {
-    let started = Instant::now();
-    let mut event = CliApiTrackEvent::new("schema");
-    event.schema_source = Some("live".to_string());
-
-    let result = async {
-        let schema = fetch_live_schema(&mut event).await?;
-        print_json(&schema, args.compact)?;
-        Ok(())
-    }
-    .await;
-
-    finish_api_event(&mut event, started, &result).await;
-    result
+    let schema = fetch_live_schema().await?;
+    print_json(&schema, args.compact)
 }
 
 async fn run_search(args: SearchArgs) -> Result<()> {
-    let started = Instant::now();
-    let mut event = CliApiTrackEvent::new("search");
-    event.schema_source = Some("live".to_string());
-    event.search_term = Some(args.term.clone());
-
-    let result = async {
-        let schema = fetch_live_schema(&mut event).await?;
-        let results = search_schema(&schema, &args.term, &args.kind, args.limit)?;
-        print_json(&json!({ "results": results }), args.compact)?;
-        Ok(())
-    }
-    .await;
-
-    finish_api_event(&mut event, started, &result).await;
-    result
+    let schema = fetch_live_schema().await?;
+    let results = search_schema(&schema, &args.term, &args.kind, args.limit)?;
+    print_json(&json!({ "results": results }), args.compact)
 }
 
 async fn run_describe(args: DescribeArgs) -> Result<()> {
-    let started = Instant::now();
-    let mut event = CliApiTrackEvent::new("describe");
-    event.schema_source = Some("live".to_string());
-    event.describe_name = Some(args.name.clone());
-
-    let result = async {
-        let schema = fetch_live_schema(&mut event).await?;
-        let descriptions = describe_schema_member(&schema, &args.name)?;
-        let output = if descriptions.len() == 1 {
-            descriptions.into_iter().next().unwrap()
-        } else {
-            json!({ "matches": descriptions })
-        };
-        print_json(&output, args.compact)?;
-        Ok(())
-    }
-    .await;
-
-    finish_api_event(&mut event, started, &result).await;
-    result
+    let schema = fetch_live_schema().await?;
+    let descriptions = describe_schema_member(&schema, &args.name)?;
+    print_json(&json!({ "matches": descriptions }), args.compact)
 }
 
 async fn run_execute(args: ExecuteArgs) -> Result<()> {
-    let started = Instant::now();
-    let mut event = CliApiTrackEvent::new("execute");
-
-    let result = execute_inner(args, &mut event).await;
-    finish_api_event(&mut event, started, &result).await;
-    result
-}
-
-async fn execute_inner(args: ExecuteArgs, event: &mut CliApiTrackEvent) -> Result<()> {
     let query = resolve_query_source(args.query.as_deref(), args.file.as_deref(), false)?;
     let variables = parse_variables(&VariableArgs {
         variables: args.variables.as_deref(),
@@ -208,55 +152,29 @@ async fn execute_inner(args: ExecuteArgs, event: &mut CliApiTrackEvent) -> Resul
         query_reads_stdin: query.read_from_stdin,
     })?;
 
-    event.operation_name = args.operation_name.clone();
-    event.query_hash = Some(hash_query(&query.document));
-    event.query_document = telemetry_query_document(&query.document);
-    event.variable_keys = variable_keys(&variables);
-    event.variable_shape = Some(variable_shape(&variables));
-
     let configs = Configs::new()?;
-    event.auth_mode = Some(auth_mode(&configs));
-
     let client = GQLClient::new_authorized(&configs)?;
-    let body = graphql_body(
-        &query.document,
-        args.operation_name.as_deref(),
-        variables.clone(),
-    );
+    let body = graphql_body(&query.document, args.operation_name.as_deref(), variables);
 
     let response = send_graphql_request(&client, &configs.get_backboard(), body).await?;
-    event.http_status = Some(response.status.as_u16());
-    event.response_bytes = Some(response.body.len());
 
     print_response_body(&response.body, args.compact)?;
-
-    let response_json = serde_json::from_str::<Value>(&response.body).ok();
-    if let Some(value) = response_json.as_ref() {
-        event.graphql_error_count = graphql_error_count(value);
-        event.graphql_error_codes = graphql_error_codes(value);
-    }
 
     if !response.status.is_success() {
         bail!("Railway API request failed with HTTP {}", response.status);
     }
 
-    if !args.allow_errors && event.graphql_error_count.unwrap_or(0) > 0 {
-        bail!(
-            "Railway API returned {} GraphQL error(s)",
-            event.graphql_error_count.unwrap_or(0)
-        );
+    if !args.allow_errors {
+        let error_count = serde_json::from_str::<Value>(&response.body)
+            .ok()
+            .and_then(|value| graphql_error_count(&value))
+            .unwrap_or(0);
+        if error_count > 0 {
+            bail!("Railway API returned {error_count} GraphQL error(s)");
+        }
     }
 
     Ok(())
-}
-
-async fn finish_api_event(event: &mut CliApiTrackEvent, started: Instant, result: &Result<()>) {
-    event.duration_ms = started.elapsed().as_millis() as u64;
-    event.success = result.is_ok();
-    if let Err(error) = result {
-        event.error_message = Some(truncate_for_telemetry(&error.to_string()));
-    }
-    telemetry::send_api_event(event.clone()).await;
 }
 
 #[derive(Debug)]
@@ -435,20 +353,7 @@ fn print_json<T: Serialize>(value: &T, compact: bool) -> Result<()> {
     Ok(())
 }
 
-fn auth_mode(configs: &Configs) -> String {
-    if Configs::get_railway_token().is_some() {
-        return "project_token".to_string();
-    }
-    if Configs::get_railway_api_token().is_some() {
-        return "api_token".to_string();
-    }
-    if configs.get_railway_auth_token().is_some() {
-        return "login".to_string();
-    }
-    "none".to_string()
-}
-
-async fn fetch_live_schema(event: &mut CliApiTrackEvent) -> Result<Value> {
+async fn fetch_live_schema() -> Result<Value> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let response = send_graphql_request(
@@ -457,8 +362,6 @@ async fn fetch_live_schema(event: &mut CliApiTrackEvent) -> Result<Value> {
         json!({ "query": introspection_query() }),
     )
     .await?;
-    event.http_status = Some(response.status.as_u16());
-    event.response_bytes = Some(response.body.len());
 
     if !response.status.is_success() {
         bail!(
@@ -467,7 +370,25 @@ async fn fetch_live_schema(event: &mut CliApiTrackEvent) -> Result<Value> {
         );
     }
 
-    response_json(&response)
+    let schema = response_json(&response)?;
+
+    if let Some(errors) = schema
+        .get("errors")
+        .and_then(Value::as_array)
+        .filter(|errors| !errors.is_empty())
+    {
+        let detail = errors
+            .first()
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        bail!(
+            "Failed to fetch the GraphQL schema: Railway API returned {} GraphQL error(s): {detail}",
+            errors.len()
+        );
+    }
+
+    Ok(schema)
 }
 
 fn schema_root(schema: &Value) -> Result<&Value> {
@@ -818,102 +739,6 @@ fn graphql_error_count(value: &Value) -> Option<usize> {
     value.get("errors").and_then(Value::as_array).map(Vec::len)
 }
 
-fn graphql_error_codes(value: &Value) -> Vec<String> {
-    value
-        .get("errors")
-        .and_then(Value::as_array)
-        .map(|errors| {
-            errors
-                .iter()
-                .filter_map(|error| {
-                    error
-                        .pointer("/extensions/code")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn variable_keys(variables: &Value) -> Vec<String> {
-    variables
-        .as_object()
-        .map(|object| object.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
-fn variable_shape(value: &Value) -> Value {
-    match value {
-        Value::Null => json!({ "type": "null" }),
-        Value::Bool(_) => json!({ "type": "boolean" }),
-        Value::Number(number) => {
-            let number_type = if number.is_i64() || number.is_u64() {
-                "integer"
-            } else {
-                "number"
-            };
-            json!({ "type": number_type })
-        }
-        Value::String(_) => json!({ "type": "string" }),
-        Value::Array(values) => {
-            let item_shapes: Vec<Value> = values.iter().take(5).map(variable_shape).collect();
-            json!({ "type": "array", "length": values.len(), "items": item_shapes })
-        }
-        Value::Object(object) => {
-            let fields: BTreeMap<String, Value> = object
-                .iter()
-                .map(|(key, value)| (key.clone(), variable_shape(value)))
-                .collect();
-            json!({ "type": "object", "fields": fields })
-        }
-    }
-}
-
-fn hash_query(query: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(query.as_bytes());
-    hex_encode(&hasher.finalize())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-fn telemetry_query_document(query: &str) -> Option<String> {
-    if query.len() <= MAX_TELEMETRY_QUERY_BYTES {
-        Some(query.to_string())
-    } else {
-        let end = query
-            .char_indices()
-            .map(|(idx, _)| idx)
-            .take_while(|idx| *idx <= MAX_TELEMETRY_QUERY_BYTES)
-            .last()
-            .unwrap_or(0);
-        Some(query[..end].to_string())
-    }
-}
-
-fn truncate_for_telemetry(value: &str) -> String {
-    if value.len() > 256 {
-        let end = value
-            .char_indices()
-            .map(|(idx, _)| idx)
-            .take_while(|idx| *idx <= 256)
-            .last()
-            .unwrap_or(0);
-        value[..end].to_string()
-    } else {
-        value.to_string()
-    }
-}
-
 fn introspection_query() -> &'static str {
     r#"
 query IntrospectionQuery {
@@ -1005,6 +830,221 @@ fragment TypeRef on __Type {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_schema() -> Value {
+        json!({
+            "data": {
+                "__schema": {
+                    "queryType": { "name": "Query" },
+                    "mutationType": { "name": "Mutation" },
+                    "subscriptionType": null,
+                    "types": [
+                        {
+                            "kind": "OBJECT",
+                            "name": "Query",
+                            "description": null,
+                            "fields": [
+                                {
+                                    "name": "project",
+                                    "description": "Look up a project by ID.",
+                                    "args": [
+                                        {
+                                            "name": "id",
+                                            "description": null,
+                                            "type": {
+                                                "kind": "NON_NULL",
+                                                "name": null,
+                                                "ofType": { "kind": "SCALAR", "name": "String", "ofType": null }
+                                            },
+                                            "defaultValue": null
+                                        }
+                                    ],
+                                    "type": {
+                                        "kind": "NON_NULL",
+                                        "name": null,
+                                        "ofType": { "kind": "OBJECT", "name": "Project", "ofType": null }
+                                    },
+                                    "isDeprecated": false,
+                                    "deprecationReason": null
+                                }
+                            ],
+                            "inputFields": null,
+                            "enumValues": null
+                        },
+                        {
+                            "kind": "OBJECT",
+                            "name": "Mutation",
+                            "description": null,
+                            "fields": [
+                                {
+                                    "name": "projectDelete",
+                                    "description": null,
+                                    "args": [
+                                        {
+                                            "name": "id",
+                                            "description": null,
+                                            "type": {
+                                                "kind": "NON_NULL",
+                                                "name": null,
+                                                "ofType": { "kind": "SCALAR", "name": "String", "ofType": null }
+                                            },
+                                            "defaultValue": null
+                                        }
+                                    ],
+                                    "type": { "kind": "SCALAR", "name": "Boolean", "ofType": null },
+                                    "isDeprecated": false,
+                                    "deprecationReason": null
+                                }
+                            ],
+                            "inputFields": null,
+                            "enumValues": null
+                        },
+                        {
+                            "kind": "OBJECT",
+                            "name": "Project",
+                            "description": "A Railway project.",
+                            "fields": [
+                                {
+                                    "name": "id",
+                                    "description": null,
+                                    "args": [],
+                                    "type": {
+                                        "kind": "NON_NULL",
+                                        "name": null,
+                                        "ofType": { "kind": "SCALAR", "name": "String", "ofType": null }
+                                    },
+                                    "isDeprecated": false,
+                                    "deprecationReason": null
+                                },
+                                {
+                                    "name": "name",
+                                    "description": null,
+                                    "args": [],
+                                    "type": { "kind": "SCALAR", "name": "String", "ofType": null },
+                                    "isDeprecated": false,
+                                    "deprecationReason": null
+                                }
+                            ],
+                            "inputFields": null,
+                            "enumValues": null
+                        },
+                        {
+                            "kind": "INPUT_OBJECT",
+                            "name": "ProjectUpdateInput",
+                            "description": null,
+                            "fields": null,
+                            "inputFields": [
+                                {
+                                    "name": "name",
+                                    "description": null,
+                                    "type": { "kind": "SCALAR", "name": "String", "ofType": null },
+                                    "defaultValue": null
+                                }
+                            ],
+                            "enumValues": null
+                        }
+                    ]
+                }
+            }
+        })
+    }
+
+    fn result_names(results: &[Value]) -> Vec<&str> {
+        results
+            .iter()
+            .filter_map(|result| result.get("name").and_then(Value::as_str))
+            .collect()
+    }
+
+    #[test]
+    fn search_finds_types_and_fields() {
+        let schema = fixture_schema();
+        let results = search_schema(&schema, "project", &SearchKind::All, 25).unwrap();
+        let names = result_names(&results);
+
+        assert!(names.contains(&"Project"));
+        assert!(names.contains(&"project"));
+        assert!(names.contains(&"projectDelete"));
+        assert!(names.contains(&"ProjectUpdateInput"));
+    }
+
+    #[test]
+    fn search_restricts_results_by_kind() {
+        let schema = fixture_schema();
+
+        let mutations = search_schema(&schema, "project", &SearchKind::Mutation, 25).unwrap();
+        assert_eq!(result_names(&mutations), vec!["projectDelete"]);
+
+        let queries = search_schema(&schema, "project", &SearchKind::Query, 25).unwrap();
+        assert_eq!(result_names(&queries), vec!["project"]);
+    }
+
+    #[test]
+    fn search_respects_limit() {
+        let schema = fixture_schema();
+        let results = search_schema(&schema, "project", &SearchKind::All, 2).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn describe_returns_type_with_fields() {
+        let schema = fixture_schema();
+        let descriptions = describe_schema_member(&schema, "Project").unwrap();
+
+        assert_eq!(descriptions.len(), 1);
+        assert_eq!(descriptions[0]["kind"], json!("OBJECT"));
+        assert_eq!(descriptions[0]["name"], json!("Project"));
+        let fields = descriptions[0]["fields"].as_array().unwrap();
+        assert_eq!(result_names(fields), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn describe_returns_root_field_with_required_args() {
+        let schema = fixture_schema();
+        let descriptions = describe_schema_member(&schema, "project").unwrap();
+
+        assert_eq!(descriptions.len(), 1);
+        assert_eq!(descriptions[0]["kind"], json!("query"));
+        assert_eq!(descriptions[0]["type"], json!("Project!"));
+        assert_eq!(descriptions[0]["requiredArgs"], json!(["id"]));
+    }
+
+    #[test]
+    fn describe_resolves_parent_dot_field() {
+        let schema = fixture_schema();
+        let descriptions = describe_schema_member(&schema, "Project.name").unwrap();
+
+        assert_eq!(descriptions.len(), 1);
+        assert_eq!(descriptions[0]["parent"], json!("Project"));
+        assert_eq!(descriptions[0]["name"], json!("name"));
+        assert_eq!(descriptions[0]["type"], json!("String"));
+    }
+
+    #[test]
+    fn describe_fails_for_unknown_name() {
+        let schema = fixture_schema();
+        assert!(describe_schema_member(&schema, "DoesNotExist").is_err());
+        assert!(describe_schema_member(&schema, "Project.doesNotExist").is_err());
+    }
+
+    #[test]
+    fn type_refs_render_wrapped_types() {
+        let non_null_list = json!({
+            "kind": "NON_NULL",
+            "name": null,
+            "ofType": {
+                "kind": "LIST",
+                "name": null,
+                "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": { "kind": "SCALAR", "name": "String", "ofType": null }
+                }
+            }
+        });
+
+        assert_eq!(type_ref_to_string(&non_null_list), "[String!]!");
+    }
 
     #[test]
     fn parses_variables_from_json_and_flags() {

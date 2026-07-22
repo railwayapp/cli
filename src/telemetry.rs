@@ -32,51 +32,6 @@ pub struct SetupAgentTrackEvent {
     pub configured_clients: Option<Vec<String>>,
 }
 
-#[derive(Clone)]
-pub struct CliApiTrackEvent {
-    pub action: &'static str,
-    pub duration_ms: u64,
-    pub success: bool,
-    pub error_message: Option<String>,
-    pub operation_name: Option<String>,
-    pub query_hash: Option<String>,
-    pub query_document: Option<String>,
-    pub variable_keys: Vec<String>,
-    pub variable_shape: Option<Value>,
-    pub auth_mode: Option<String>,
-    pub http_status: Option<u16>,
-    pub graphql_error_count: Option<usize>,
-    pub graphql_error_codes: Vec<String>,
-    pub response_bytes: Option<usize>,
-    pub schema_source: Option<String>,
-    pub search_term: Option<String>,
-    pub describe_name: Option<String>,
-}
-
-impl CliApiTrackEvent {
-    pub fn new(action: &'static str) -> Self {
-        Self {
-            action,
-            duration_ms: 0,
-            success: false,
-            error_message: None,
-            operation_name: None,
-            query_hash: None,
-            query_document: None,
-            variable_keys: Vec::new(),
-            variable_shape: None,
-            auth_mode: None,
-            http_status: None,
-            graphql_error_count: None,
-            graphql_error_codes: Vec::new(),
-            response_bytes: None,
-            schema_source: None,
-            search_term: None,
-            describe_name: None,
-        }
-    }
-}
-
 pub enum SetupAgentPhase {
     Start,
     Finish,
@@ -2173,63 +2128,6 @@ pub async fn send_auth_event(event: CliAuthTrackEvent) {
 
     let body = json!({
         "query": "mutation CliAuthEventTrack($input: CliAuthEventTrackInput!) { cliAuthEventTrack(input: $input) }",
-        "variables": { "input": input },
-    });
-
-    let _ = post_telemetry_body(&client, configs.get_backboard(), body).await;
-}
-
-pub async fn send_api_event(event: CliApiTrackEvent) {
-    if is_telemetry_disabled() {
-        return;
-    }
-
-    let configs = match Configs::new() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let client = GQLClient::new_authorized(&configs)
-        .or_else(|_| GQLClient::new_public())
-        .ok();
-    let Some(client) = client else {
-        return;
-    };
-
-    let context = TelemetryContext::current(&configs);
-    let input = json!({
-        "action": event.action,
-        "durationMs": event.duration_ms as i64,
-        "success": event.success,
-        "errorMessage": event.error_message,
-        "operationName": event.operation_name,
-        "queryHash": event.query_hash,
-        "queryDocument": event.query_document,
-        "variableKeys": event.variable_keys,
-        "variableShape": event.variable_shape,
-        "authMode": event.auth_mode,
-        "httpStatus": event.http_status,
-        "graphqlErrorCount": event.graphql_error_count,
-        "graphqlErrorCodes": event.graphql_error_codes,
-        "responseBytes": event.response_bytes,
-        "schemaSource": event.schema_source,
-        "searchTerm": event.search_term,
-        "describeName": event.describe_name,
-        "sessionId": context.session_id,
-        "caller": context.caller,
-        "agentSessionId": context.agent_session_id,
-        "installRequestId": context.install_request_id,
-        "projectId": context.project_id,
-        "environmentId": context.environment_id,
-        "serviceId": context.service_id,
-        "cliVersion": env!("CARGO_PKG_VERSION"),
-        "os": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-        "isCi": Configs::env_is_ci(),
-    });
-
-    let body = json!({
-        "query": "mutation CliApiEventTrack($input: CliApiEventTrackInput!) { cliApiEventTrack(input: $input) }",
         "variables": { "input": input },
     });
 
