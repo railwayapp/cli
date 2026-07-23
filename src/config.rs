@@ -220,6 +220,13 @@ impl Configs {
         Self::get_railway_token().is_some() || Self::get_railway_api_token().is_some()
     }
 
+    /// True when project targeting comes from env vars or RAILWAY_TOKEN rather
+    /// than an on-disk link (e.g. CI, cloud agents). In this mode there is no
+    /// local link entry to read or update.
+    pub fn uses_env_project_targeting() -> bool {
+        Self::has_env_var_project_config() || Self::get_railway_token().is_some()
+    }
+
     /// True when the `CI` env var is set to any truthy value (`true`,
     /// `1`, `yes`, ...). Runners differ on the value they export, so
     /// treat anything except empty / `false` / `0` as CI — consistent
@@ -348,7 +355,7 @@ impl Configs {
     }
 
     pub fn get_closest_linked_project_directory(&self) -> Result<String> {
-        if Self::has_env_var_project_config() || Self::get_railway_token().is_some() {
+        if Self::uses_env_project_targeting() {
             return self.get_current_directory();
         }
 

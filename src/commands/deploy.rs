@@ -213,8 +213,13 @@ pub async fn fetch_and_create(
         .iter()
         .find(|s| !old_service_ids.contains(&s.node.id));
 
-    // Auto-link if should_link is true and no service is currently linked
-    if options.should_link && linked_project.service.is_none() {
+    // Env-var / token targeted runs have no on-disk link entry to update;
+    // linking there would fail with ProjectNotFound after the template was
+    // already deployed.
+    let should_auto_link = options.should_link
+        && linked_project.service.is_none()
+        && !Configs::uses_env_project_targeting();
+    if should_auto_link {
         if let Some(service) = new_service {
             configs.link_service(service.node.id.clone())?;
             configs.write()?;
@@ -241,7 +246,7 @@ pub async fn fetch_and_create(
         println!("{}", output);
     } else if let Some(spinner) = spinner {
         let mut msg = format!("🎉 Added {} to project", template_name.green().bold());
-        if options.should_link && linked_project.service.is_none() && new_service.is_some() {
+        if should_auto_link && new_service.is_some() {
             msg.push_str(" and linked");
         }
         spinner.finish_with_message(msg);
