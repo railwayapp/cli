@@ -116,6 +116,14 @@ pub struct NetworkFlowLogs;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/DnsQueryLogs.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DnsQueryLogs;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/Domains.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
