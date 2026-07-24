@@ -1,6 +1,6 @@
 [package]
 name = "railwayapp"
-version = "5.28.0"
+version = "5.28.1"
 edition = "2024"
 license = "MIT"
 authors = ["Railway <contact@railway.com>"]
