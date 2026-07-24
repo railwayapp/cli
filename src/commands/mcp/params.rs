@@ -479,6 +479,54 @@ pub struct EnvironmentStatusParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StagedChangesParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Show variable values in plaintext. Defaults to false: variable values
+    /// are masked, and sealed values are always null regardless.
+    #[serde(default)]
+    pub show_values: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeployStagedChangesParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Commit message for the staged changes.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Commit staged changes without triggering deploys.
+    #[serde(default)]
+    pub skip_deploys: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DiscardStagedChangesParams {
+    /// The project ID. If omitted, uses the currently linked project.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The environment ID or name. If omitted, uses the currently linked environment.
+    #[serde(default)]
+    pub environment_id: Option<String>,
+    /// Discard all staged changes.
+    #[serde(default)]
+    pub all: Option<bool>,
+    /// Dot paths to discard, such as "services.svc_123.deploy.ipv6EgressEnabled".
+    /// A prefix such as "services.svc_123" discards the whole subtree; "*"
+    /// matches one segment; escape literal dots in variable names as "\\.".
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetServiceConfigParams {
     /// The project ID. If omitted, uses the currently linked project.
     #[serde(default)]

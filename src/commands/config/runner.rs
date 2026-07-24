@@ -683,6 +683,17 @@ pub(super) fn print_response_with_options_and_next(
                 println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
             }
         }
+        if response
+            .staged_patch_id
+            .as_ref()
+            .or(apply_result.staged_patch_id.as_ref())
+            .is_some()
+        {
+            println!(
+                "{}",
+                crate::controllers::staged_changes::staged_changes_notice(changes.len().max(1))
+            );
+        }
         return;
     }
 

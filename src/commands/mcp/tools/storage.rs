@@ -7,6 +7,7 @@ use crate::{
     controllers::{
         config::{BucketInstance, EnvironmentConfig},
         regions::BucketRegion,
+        staged_changes::{discard_staged_change_paths_with, fetch_staged_patch},
     },
     gql::mutations,
 };
@@ -17,58 +18,50 @@ use super::super::params::{
     UpdateVolumeParams,
 };
 
-pub(crate) enum PatchMode {
-    Commit,
-    Stage,
-}
-
 impl RailwayMcp {
-    /// Apply an environment config patch, staging instead of committing when
-    /// the environment has unmerged changes (matches CLI behavior).
-    pub(crate) async fn apply_env_patch(
+    /// Stage an environment config patch into the staged-changes workflow
+    /// (matching the dashboard). Applied via staged_changes_deploy or
+    /// `railway changes deploy`.
+    pub(crate) async fn stage_env_patch(
+        &self,
+        ctx: &ResolvedContext,
+        patch: EnvironmentConfig,
+    ) -> Result<(), McpError> {
+        post_graphql::<mutations::EnvironmentStageChanges, _>(
+            &self.client,
+            self.configs.get_backboard(),
+            mutations::environment_stage_changes::Variables {
+                environment_id: ctx.environment_id.clone(),
+                input: patch,
+                merge: Some(true),
+            },
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("Failed to stage changes: {e}"), None))?;
+        Ok(())
+    }
+
+    /// Commit an environment config patch immediately, bypassing the
+    /// staged-changes workflow. Used for operations that are documented to
+    /// apply right away (e.g. scaling).
+    pub(crate) async fn commit_env_patch(
         &self,
         ctx: &ResolvedContext,
         patch: EnvironmentConfig,
         commit_message: Option<String>,
-    ) -> Result<PatchMode, McpError> {
-        let unmerged = ctx
-            .project
-            .environments
-            .edges
-            .iter()
-            .find(|e| e.node.id == ctx.environment_id)
-            .and_then(|e| e.node.unmerged_changes_count)
-            .unwrap_or(0);
-
-        if unmerged > 0 {
-            post_graphql::<mutations::EnvironmentStageChanges, _>(
-                &self.client,
-                self.configs.get_backboard(),
-                mutations::environment_stage_changes::Variables {
-                    environment_id: ctx.environment_id.clone(),
-                    input: patch,
-                    merge: Some(true),
-                },
-            )
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to stage changes: {e}"), None))?;
-            Ok(PatchMode::Stage)
-        } else {
-            post_graphql::<mutations::EnvironmentPatchCommit, _>(
-                &self.client,
-                self.configs.get_backboard(),
-                mutations::environment_patch_commit::Variables {
-                    environment_id: ctx.environment_id.clone(),
-                    patch,
-                    commit_message,
-                },
-            )
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to commit changes: {e}"), None)
-            })?;
-            Ok(PatchMode::Commit)
-        }
+    ) -> Result<(), McpError> {
+        post_graphql::<mutations::EnvironmentPatchCommit, _>(
+            &self.client,
+            self.configs.get_backboard(),
+            mutations::environment_patch_commit::Variables {
+                environment_id: ctx.environment_id.clone(),
+                patch,
+                commit_message,
+            },
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("Failed to commit changes: {e}"), None))?;
+        Ok(())
     }
 
     pub(crate) async fn do_create_bucket(
@@ -118,30 +111,20 @@ impl RailwayMcp {
             ..Default::default()
         };
 
-        let mode = self
-            .apply_env_patch(&ctx, patch, Some(format!("Create bucket {}", bucket.name)))
-            .await
-            .map_err(|e| {
-                McpError::internal_error(
-                    format!(
-                        "Bucket '{}' (id: {}) was created in the project but could not be \
-                         applied to the environment: {e}. You can complete the deployment \
-                         manually from the Railway dashboard.",
-                        bucket.name, bucket.id
-                    ),
-                    None,
-                )
-            })?;
-
-        let status = match mode {
-            PatchMode::Commit => "committed",
-            PatchMode::Stage => {
-                "staged (environment has pending changes — use 'railway environment edit' to commit)"
-            }
-        };
+        self.stage_env_patch(&ctx, patch).await.map_err(|e| {
+            McpError::internal_error(
+                format!(
+                    "Bucket '{}' (id: {}) was created in the project but could not be \
+                     staged for the environment: {e}. You can complete the deployment \
+                     manually from the Railway dashboard.",
+                    bucket.name, bucket.id
+                ),
+                None,
+            )
+        })?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Bucket created: {} (id: {}, region: {}) — {status}",
+            "Bucket created: {} (id: {}, region: {}) — staged (call staged_changes_deploy or run `railway changes deploy` to provision it)",
             bucket.name, bucket.id, region
         ))]))
     }
@@ -153,6 +136,32 @@ impl RailwayMcp {
         let ctx = self
             .resolve_context(params.project_id, params.environment_id)
             .await?;
+
+        let staged = fetch_staged_patch(&self.client, &self.configs, &ctx.environment_id)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to inspect staged changes: {e}"), None)
+            })?;
+        if bucket_is_staged_creation(&staged.patch, &params.bucket_id) {
+            discard_staged_change_paths_with(
+                &self.client,
+                &self.configs,
+                &ctx.environment_id,
+                &[format!("buckets.{}", params.bucket_id)],
+            )
+            .await
+            .map_err(|e| {
+                McpError::internal_error(
+                    format!("Failed to discard staged bucket creation: {e}"),
+                    None,
+                )
+            })?;
+
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Bucket {} removed from staged changes before deployment.",
+                params.bucket_id
+            ))]));
+        }
 
         let mut buckets = BTreeMap::new();
         buckets.insert(
@@ -169,24 +178,12 @@ impl RailwayMcp {
             ..Default::default()
         };
 
-        let mode = self
-            .apply_env_patch(
-                &ctx,
-                patch,
-                Some(format!("Remove bucket {}", params.bucket_id)),
-            )
+        self.stage_env_patch(&ctx, patch)
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to remove bucket: {e}"), None))?;
 
-        let status = match mode {
-            PatchMode::Commit => "removed from environment",
-            PatchMode::Stage => {
-                "staged for removal (environment has pending changes — use 'railway environment edit' to commit)"
-            }
-        };
-
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Bucket {} {status}.",
+            "Bucket {} staged for removal (call staged_changes_deploy or run `railway changes deploy` to apply it).",
             params.bucket_id
         ))]))
     }
@@ -318,5 +315,37 @@ impl RailwayMcp {
         Ok(CallToolResult::success(vec![Content::text(
             "Volume removed successfully.".to_string(),
         )]))
+    }
+}
+
+fn bucket_is_staged_creation(patch: &serde_json::Value, bucket_id: &str) -> bool {
+    patch
+        .pointer(&format!("/buckets/{bucket_id}/isCreated"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detects_bucket_that_only_exists_as_staged_creation() {
+        let patch = json!({
+            "buckets": {
+                "bucket_123": {
+                    "isCreated": true,
+                    "region": "sjc"
+                },
+                "bucket_456": {
+                    "isDeleted": true
+                }
+            }
+        });
+
+        assert!(bucket_is_staged_creation(&patch, "bucket_123"));
+        assert!(!bucket_is_staged_creation(&patch, "bucket_456"));
+        assert!(!bucket_is_staged_creation(&patch, "missing"));
     }
 }

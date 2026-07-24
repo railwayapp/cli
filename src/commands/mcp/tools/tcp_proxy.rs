@@ -1,6 +1,6 @@
 use rmcp::{ErrorData as McpError, model::*};
 
-use crate::controllers::tcp_proxy::{self, PatchMode, TcpProxy};
+use crate::controllers::tcp_proxy::{self, TcpProxy};
 
 use super::super::handler::{RailwayMcp, ResolvedServiceContext};
 use super::super::params::{
@@ -57,48 +57,18 @@ impl RailwayMcp {
             ))]));
         }
 
-        let service_name = service_name(&ctx);
-        let mode = tcp_proxy::apply_tcp_proxy_patch(
+        tcp_proxy::stage_tcp_proxy_patch(
             &self.client,
             &self.configs,
-            &ctx.context.project,
             &ctx.environment_id,
             &ctx.service_id,
-            &service_name,
             port,
         )
         .await
-        .map_err(|e| {
-            McpError::internal_error(format!("Failed to configure TCP proxy: {e}"), None)
-        })?;
-
-        if mode == PatchMode::Commit {
-            tcp_proxy::verify_tcp_proxy_configured(
-                &self.client,
-                &self.configs,
-                &ctx.environment_id,
-                &ctx.service_id,
-                port,
-            )
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to verify TCP proxy config: {e}"), None)
-            })?;
-        }
-
-        let active_proxy = tcp_proxy::fetch_tcp_proxies(
-            &self.client,
-            &self.configs,
-            &ctx.environment_id,
-            &ctx.service_id,
-        )
-        .await
-        .map_err(|e| McpError::internal_error(format!("Failed to fetch TCP proxies: {e}"), None))?
-        .into_iter()
-        .find(|proxy| proxy.application_port == i64::from(port));
+        .map_err(|e| McpError::internal_error(format!("Failed to stage TCP proxy: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(
-            format_tcp_proxy_create(&ctx, port, mode, active_proxy.as_ref()),
+            format_tcp_proxy_create(&ctx, port),
         )]))
     }
 
@@ -203,43 +173,15 @@ fn format_tcp_proxy_list(ctx: &ResolvedServiceContext, proxies: &[TcpProxy]) -> 
     output
 }
 
-fn format_tcp_proxy_create(
-    ctx: &ResolvedServiceContext,
-    port: u16,
-    mode: PatchMode,
-    active_proxy: Option<&TcpProxy>,
-) -> String {
+fn format_tcp_proxy_create(ctx: &ResolvedServiceContext, port: u16) -> String {
     let service_name = service_name(ctx);
-    format_tcp_proxy_create_for_service(&service_name, &ctx.service_id, port, mode, active_proxy)
+    format_tcp_proxy_create_for_service(&service_name, &ctx.service_id, port)
 }
 
-fn format_tcp_proxy_create_for_service(
-    service_name: &str,
-    service_id: &str,
-    port: u16,
-    mode: PatchMode,
-    active_proxy: Option<&TcpProxy>,
-) -> String {
-    let change = match mode {
-        PatchMode::Commit => "committed",
-        PatchMode::Stage => {
-            "staged (environment has pending changes; use `railway environment edit` to commit)"
-        }
-    };
-    let mut output = format!(
-        "TCP proxy configured for service {service_name} (id: {}) on application port {port}.\nChange: {change}",
-        service_id
-    );
-
-    if let Some(proxy) = active_proxy {
-        output.push_str(&format!("\n{}", format_tcp_proxy_details(proxy)));
-    } else {
-        output.push_str(
-            "\nThe TCP proxy is configured but is not readable yet. Call list_tcp_proxies shortly; if it does not become active, redeploy the service.",
-        );
-    }
-
-    output
+fn format_tcp_proxy_create_for_service(service_name: &str, service_id: &str, port: u16) -> String {
+    format!(
+        "TCP proxy staged for service {service_name} (id: {service_id}) on application port {port}.\nChange: staged (call staged_changes_deploy or run `railway changes deploy` to provision the proxy)"
+    )
 }
 
 fn format_tcp_proxy_details(proxy: &TcpProxy) -> String {
@@ -319,25 +261,5 @@ mod tests {
         assert!(output.contains("confirm: true"));
         assert!(output.contains("tcp_123"));
         assert!(output.contains("5432"));
-    }
-
-    #[test]
-    fn tcp_proxy_create_output_reports_staged_or_committed() {
-        let proxy = sample_proxy();
-
-        let committed = format_tcp_proxy_create_for_service(
-            "redis",
-            "svc_123",
-            5432,
-            PatchMode::Commit,
-            Some(&proxy),
-        );
-        assert!(committed.contains("Change: committed"));
-        assert!(committed.contains("Endpoint: containers-us-west.railway.app:15432"));
-
-        let staged =
-            format_tcp_proxy_create_for_service("redis", "svc_123", 5432, PatchMode::Stage, None);
-        assert!(staged.contains("Change: staged"));
-        assert!(staged.contains("if it does not become active, redeploy the service"));
     }
 }

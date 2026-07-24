@@ -5,18 +5,17 @@ use crate::commands::output::fields::{print_field, print_service_environment_con
 use crate::controllers::{
     outbound_networking::{self, FeatureAction, Ipv6Status, StaticIpStatus},
     project::{ServiceContext, resolve_service_context},
+    staged_changes::staged_changes_notice,
 };
 
 use super::*;
 
 const FIELD_LABEL_WIDTH: usize = 20;
-const STAGED_IPV6_MESSAGE: &str =
-    "Commit staged environment changes to trigger redeploy: railway environment edit";
 
 /// Manage outbound networking for a service
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway outbound-network status --service api\n  railway outbound-network static-ip enable --service api\n  railway outbound-network static-ip status --service api --json\n  railway outbound-network static-ip disable --service api\n  railway outbound-network ipv6 enable --service api\n  railway outbound-network ipv6 status --service api --json\n  railway outbound-network ipv6 disable --service api\n\nAutomation notes:\n  Static Outbound IP changes require a redeploy before outbound traffic changes.\n  Outbound IPv6 changes are staged; commit them with `railway environment edit` to trigger redeploy."
+    after_help = "Examples:\n\n  railway outbound-network status --service api\n  railway outbound-network static-ip enable --service api\n  railway outbound-network static-ip status --service api --json\n  railway outbound-network static-ip disable --service api\n  railway outbound-network ipv6 enable --service api\n  railway outbound-network ipv6 status --service api --json\n  railway outbound-network ipv6 disable --service api\n\nAutomation notes:\n  Static Outbound IP changes require a redeploy before outbound traffic changes.\n  Outbound IPv6 changes are staged; deploy them with `railway changes deploy` to trigger redeploy."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -398,7 +397,7 @@ fn print_ipv6_action(output: &Ipv6ActionOutput) {
                 output.environment.name.bold()
             );
         }
-        println!("{STAGED_IPV6_MESSAGE}");
+        println!("{}", staged_changes_notice(1));
     } else {
         println!(
             "Cleared staged Outbound IPv6 change for service {} in environment {}.",
@@ -441,7 +440,7 @@ fn print_ipv6_fields(ipv6: &Ipv6Status) {
                 .yellow(),
             FIELD_LABEL_WIDTH,
         );
-        print_field("Message:", &STAGED_IPV6_MESSAGE, FIELD_LABEL_WIDTH);
+        print_field("Message:", &staged_changes_notice(1), FIELD_LABEL_WIDTH);
     }
 }
 
