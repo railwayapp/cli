@@ -949,9 +949,11 @@ run_agent_setup() {
 
   # Record login state (and the "Logged in as …" line) for the next-steps
   # block; don't warn here. whoami exits non-zero and prints nothing when
-  # unauthenticated.
-  AGENT_WHOAMI="$("$railway_bin" whoami 2>/dev/null)"
-  if [ $? -eq 0 ] && [ -n "$AGENT_WHOAMI" ]; then
+  # unauthenticated — the `|| true` matters under `set -e`: without it, this
+  # assignment itself aborts the whole script for the (extremely common)
+  # not-logged-in-yet case, and print_agent_next_steps() below never runs.
+  AGENT_WHOAMI="$("$railway_bin" whoami 2>/dev/null || true)"
+  if [ -n "$AGENT_WHOAMI" ]; then
     AGENT_LOGGED_IN=1
   else
     AGENT_LOGGED_IN=0
@@ -1047,6 +1049,19 @@ if [ "$AGENTS" = 1 ] && has railway; then
 
   if [ "$NEEDS_UPGRADE" = 0 ]; then
     info "No PATH changes were made."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
+  # Refuse to self-upgrade inside a Railway Sandbox. The sandbox's own
+  # exec/SSH bridge is served by the resident `railway` process, so
+  # replacing that binary in place isn't possible there (extracting or
+  # renaming a new binary over it fails, with no user-facing workaround).
+  # The sandbox's pre-installed CLI is managed by Railway, so continue
+  # with it instead of attempting an upgrade that cannot succeed.
+  if [ -n "${RAILWAY_SANDBOX_ID-}" ]; then
+    info "Running inside a Railway Sandbox — the pre-installed CLI is managed by Railway."
+    info "Continuing with $CURRENT_VERSION."
     run_agent_setup "$RAILWAY_BIN"
     exit 0
   fi
