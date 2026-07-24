@@ -78,6 +78,10 @@ fn format_network_flow_log_timestamp(date: DateTime<Utc>) -> String {
     date.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
+fn format_http_log_timestamp(date: DateTime<Utc>) -> String {
+    format_network_flow_log_timestamp(date)
+}
+
 fn network_flow_log_window(
     limit: Option<i64>,
     start_date: Option<DateTime<Utc>>,
@@ -182,8 +186,8 @@ pub async fn fetch_http_logs(
         deployment_id: params.deployment_id,
         filter: params.filter,
         before_limit,
-        before_date: params.start_date.map(|date| date.to_rfc3339()),
-        anchor_date: params.end_date.map(|date| date.to_rfc3339()),
+        before_date: params.start_date.map(format_http_log_timestamp),
+        anchor_date: params.end_date.map(format_http_log_timestamp),
         after_date: None,
         after_limit: None,
     };
@@ -810,6 +814,14 @@ mod tests {
         let before_date = network_flow_stream_before_date(Some(dt("2026-06-18T04:43:00Z")));
 
         assert_eq!(before_date, "2026-06-18T04:42:30.000000000Z");
+    }
+
+    #[test]
+    fn test_http_log_timestamp_uses_cursor_timestamp_format() {
+        assert_eq!(
+            format_http_log_timestamp(dt("2026-06-18T04:41:00Z")),
+            "2026-06-18T04:41:00.000000000Z"
+        );
     }
 
     #[test]
