@@ -124,6 +124,38 @@ pub struct Domains;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/RailwayDomains.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct RailwayDomains;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/RailwayDomain.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct RailwayDomain;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/RailwayDomainByName.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct RailwayDomainByName;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/RailwayDomainDnsRecords.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct RailwayDomainDnsRecords;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/ServiceEdgeConfig.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
