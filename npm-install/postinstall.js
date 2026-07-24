@@ -19,9 +19,20 @@ async function install() {
 
 	// Fetch Static Config
 	let { name: binName, path: binPath, url } = CONFIG;
-	let triple = triples.platformArchTriples[process.platform][process.arch][0];
+	// Linux: statically linked musl builds, same policy as install.sh (the gnu
+	// build crashes on some hosts, see #998; arm/arm64 only publish musl).
+	const linuxTargets = {
+		x64: "x86_64-unknown-linux-musl",
+		arm64: "aarch64-unknown-linux-musl",
+		ia32: "i686-unknown-linux-musl",
+		arm: "arm-unknown-linux-musleabihf",
+	};
+	const triple =
+		process.platform === "linux"
+			? linuxTargets[process.arch]
+			: triples.platformArchTriples[process.platform][process.arch][0].raw;
 
-	url = url.replace(/{{triple}}/g, triple.raw);
+	url = url.replace(/{{triple}}/g, triple);
 	url = url.replace(/{{version}}/g, version);
 	url = url.replace(/{{bin_name}}/g, binName);
 	console.log(url);

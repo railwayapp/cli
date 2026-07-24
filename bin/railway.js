@@ -12,5 +12,10 @@ try {
 		stdio: "inherit",
 	});
 } catch (e) {
-	exit(1);
+	if (e.signal) {
+		console.error(
+			`The railway binary crashed with ${e.signal}. Please report this at https://github.com/railwayapp/cli/issues`,
+		);
+	}
+	exit(typeof e.status === "number" ? e.status : 1);
 }
