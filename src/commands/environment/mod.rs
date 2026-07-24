@@ -62,6 +62,10 @@ structstruck::strike! {
             #[clap(long, short, visible_alias = "copy", visible_short_alias = 'c')]
             pub duplicate: Option<String>,
 
+            /// Don't wait for the duplicate to finish — run the copy in the background
+            #[clap(long)]
+            pub detach: bool,
+
             #[clap(flatten)]
             pub config: EnvironmentConfigOptions,
 
