@@ -6,16 +6,17 @@ use is_terminal::IsTerminal;
 use crate::{
     controllers::{
         deployment::{
-            FetchLogsParams, FetchNetworkFlowLogsParams, fetch_build_logs, fetch_deploy_logs,
-            fetch_http_logs, fetch_network_flow_logs, stream_build_logs, stream_deploy_logs,
-            stream_http_logs, stream_network_flow_logs,
+            FetchDnsQueryLogsParams, FetchLogsParams, FetchNetworkFlowLogsParams, fetch_build_logs,
+            fetch_deploy_logs, fetch_dns_query_logs, fetch_http_logs, fetch_network_flow_logs,
+            stream_build_logs, stream_deploy_logs, stream_dns_query_logs, stream_http_logs,
+            stream_network_flow_logs,
         },
         project::resolve_service_context,
     },
     util::{
         logs::{
-            LogFormat, format_network_flow_log_header, print_http_log, print_log,
-            print_network_flow_log,
+            LogFormat, format_dns_query_log_header, format_network_flow_log_header,
+            print_dns_query_log, print_http_log, print_log, print_network_flow_log,
         },
         time::parse_time,
     },
@@ -173,6 +174,82 @@ impl fmt::Display for NetworkFlowPeerKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum DnsRecordType {
+    #[value(name = "A")]
+    A,
+    #[value(name = "AAAA")]
+    Aaaa,
+    #[value(name = "CNAME")]
+    Cname,
+    #[value(name = "TXT")]
+    Txt,
+    #[value(name = "MX")]
+    Mx,
+    #[value(name = "SRV")]
+    Srv,
+    #[value(name = "NS")]
+    Ns,
+}
+
+impl fmt::Display for DnsRecordType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::A => write!(f, "A"),
+            Self::Aaaa => write!(f, "AAAA"),
+            Self::Cname => write!(f, "CNAME"),
+            Self::Txt => write!(f, "TXT"),
+            Self::Mx => write!(f, "MX"),
+            Self::Srv => write!(f, "SRV"),
+            Self::Ns => write!(f, "NS"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum DnsResponseCode {
+    #[value(name = "NOERROR")]
+    NoError,
+    #[value(name = "NXDOMAIN")]
+    Nxdomain,
+    #[value(name = "SERVFAIL")]
+    Servfail,
+    #[value(name = "REFUSED")]
+    Refused,
+    #[value(name = "TIMEOUT")]
+    Timeout,
+    #[value(name = "ERROR")]
+    Error,
+}
+
+impl fmt::Display for DnsResponseCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoError => write!(f, "NOERROR"),
+            Self::Nxdomain => write!(f, "NXDOMAIN"),
+            Self::Servfail => write!(f, "SERVFAIL"),
+            Self::Refused => write!(f, "REFUSED"),
+            Self::Timeout => write!(f, "TIMEOUT"),
+            Self::Error => write!(f, "ERROR"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum DnsZone {
+    Internal,
+    External,
+}
+
+impl fmt::Display for DnsZone {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Internal => write!(f, "internal"),
+            Self::External => write!(f, "external"),
+        }
+    }
+}
+
 fn build_http_filter(args: &Args) -> Result<Option<String>> {
     let status = args
         .status
@@ -188,6 +265,38 @@ fn build_http_filter(args: &Args) -> Result<Option<String>> {
         args.request_id.as_deref(),
         args.filter.as_deref(),
     ))
+}
+
+fn build_dns_filter(args: &Args) -> Result<Option<String>> {
+    let mut filters = Vec::new();
+
+    if let Some(domain) = args.domain.as_deref() {
+        filters.push(format!("@domain:{domain}"));
+    }
+    if let Some(qname) = args.qname.as_deref() {
+        filters.push(format!("@qname:{qname}"));
+    }
+    if let Some(qtype) = args.qtype {
+        filters.push(format!("@qtype:{qtype}"));
+    }
+    if let Some(rcode) = args.rcode {
+        filters.push(format!("@rcode:{rcode}"));
+    }
+    if let Some(zone) = args.zone {
+        filters.push(format!("@zone:{zone}"));
+    }
+    if let Some(status) = args.status.as_deref() {
+        let status = status.to_ascii_lowercase();
+        if status != "ok" && status != "failed" {
+            bail!("Invalid DNS status: {status}. Expected ok or failed.");
+        }
+        filters.push(format!("@status:{status}"));
+    }
+    if let Some(raw_filter) = args.filter.as_deref().filter(|filter| !filter.is_empty()) {
+        filters.push(raw_filter.to_string());
+    }
+
+    Ok((!filters.is_empty()).then(|| filters.join(" ")))
 }
 
 fn build_network_flow_filter(args: &Args) -> Result<Option<String>> {
@@ -212,8 +321,8 @@ fn build_network_flow_filter(args: &Args) -> Result<Option<String>> {
 }
 
 fn validate_filter_modes(args: &Args) -> Result<()> {
-    if args.status.is_some() && !args.http && !args.network {
-        bail!("--status can only be used with --http or --network");
+    if args.status.is_some() && !args.http && !args.network && !args.dns {
+        bail!("--status can only be used with --http, --network, or --dns");
     }
 
     if !args.http && (args.method.is_some() || args.path.is_some() || args.request_id.is_some()) {
@@ -226,7 +335,19 @@ fn validate_filter_modes(args: &Args) -> Result<()> {
         );
     }
 
+    if !args.dns && has_dns_filter_args(args) {
+        bail!("--domain, --qname, --qtype, --rcode, and --zone can only be used with --dns");
+    }
+
     Ok(())
+}
+
+fn has_dns_filter_args(args: &Args) -> bool {
+    args.domain.is_some()
+        || args.qname.is_some()
+        || args.qtype.is_some()
+        || args.rcode.is_some()
+        || args.zone.is_some()
 }
 
 fn has_network_flow_filter_args(args: &Args) -> bool {
@@ -371,8 +492,8 @@ pub fn compose_http_filter(
 
 #[derive(Parser)]
 #[clap(
-    about = "View build, deploy, HTTP, or network flow logs",
-    long_about = "View build, deploy, HTTP, or network flow logs. This will stream logs by default, or fetch historical logs if the --lines, --since, or --until flags are provided.",
+    about = "View build, deploy, HTTP, network flow, or DNS logs",
+    long_about = "View build, deploy, HTTP, network flow, or DNS logs. This will stream logs by default, or fetch historical logs if the --lines, --since, or --until flags are provided.",
     after_help = "Examples:
 
   Deployment logs:
@@ -406,7 +527,15 @@ pub fn compose_http_filter(
   railway logs --network --lines 100                                  # Pull a snapshot and exit
   railway logs --network --direction egress --protocol tcp            # Outbound TCP flows
   railway logs --network --peer postgres --port 5432                  # Flows to a service peer
-  railway logs --network --status dropped                             # Dropped flows"
+  railway logs --network --status dropped                             # Dropped flows
+
+  DNS logs:
+  railway logs --dns                                                  # Stream live DNS queries
+  railway logs --dns --status failed                                  # Failed lookups only
+  railway logs --dns --rcode NXDOMAIN                                 # Names that don't exist
+  railway logs --dns --zone internal                                  # Private network lookups
+  railway logs --dns --domain example.com --qtype AAAA                # IPv6 lookups for a domain
+  railway logs --dns --qname backend.railway.internal --lines 50      # History for an exact name"
 )]
 pub struct Args {
     /// Service to view logs from (defaults to linked service). Can be service name or service ID
@@ -436,6 +565,10 @@ pub struct Args {
     /// Show network flow logs
     #[clap(long, group = "log_type")]
     network: bool,
+
+    /// Show DNS query logs
+    #[clap(long, group = "log_type")]
+    dns: bool,
 
     /// Deployment ID to view logs from. Defaults to most recent successful deployment, or latest deployment if none succeeded
     deployment_id: Option<String>,
@@ -473,6 +606,9 @@ For network flow logs (--network), all filterable fields:
   Numeric: @port
   Boolean: @dropped
 
+For DNS logs (--dns), all filterable fields:
+  String:  @qname, @domain, @qtype, @rcode, @zone, @status
+
 Numeric operators: > >= < <= .. (range, e.g. @httpStatus:200..299)
 Logical operators: AND, OR, - (negation), parentheses for grouping
 
@@ -491,7 +627,7 @@ Examples:
     #[clap(long, requires = "http", value_enum, ignore_case = true)]
     method: Option<HttpMethod>,
 
-    /// Filter HTTP logs by status code, or network flow logs by status (ok, dropped)
+    /// Filter HTTP logs by status code, network flow logs by status (ok, dropped), or DNS logs by resolution status (ok, failed)
     #[clap(long, value_name = "STATUS")]
     status: Option<String>,
 
@@ -548,6 +684,26 @@ Examples:
     #[clap(long = "drop-cause", requires = "network", value_name = "CAUSE")]
     drop_cause: Option<String>,
 
+    /// Filter DNS logs by domain, including its subdomains
+    #[clap(long, requires = "dns", value_name = "DOMAIN")]
+    domain: Option<String>,
+
+    /// Filter DNS logs by the exact name looked up
+    #[clap(long, requires = "dns", value_name = "NAME")]
+    qname: Option<String>,
+
+    /// Filter DNS logs by record type
+    #[clap(long, requires = "dns", value_enum, ignore_case = true)]
+    qtype: Option<DnsRecordType>,
+
+    /// Filter DNS logs by response code
+    #[clap(long, requires = "dns", value_enum, ignore_case = true)]
+    rcode: Option<DnsResponseCode>,
+
+    /// Filter DNS logs by lookup zone
+    #[clap(long, requires = "dns", value_enum, ignore_case = true)]
+    zone: Option<DnsZone>,
+
     /// Always show logs from the latest deployment, even if it failed or is still building
     #[clap(long)]
     latest: bool,
@@ -576,6 +732,11 @@ pub async fn command(args: Args) -> Result<()> {
     };
     let network_filter = if args.network {
         build_network_flow_filter(&args)?
+    } else {
+        None
+    };
+    let dns_filter = if args.dns {
+        build_dns_filter(&args)?
     } else {
         None
     };
@@ -637,6 +798,50 @@ pub async fn command(args: Args) -> Result<()> {
 
             if !has_logs && !args.json {
                 println!("No network flows found");
+            }
+        }
+
+        return Ok(());
+    }
+
+    if args.dns {
+        if args.deployment_id.is_some() || args.latest {
+            bail!(
+                "deployment IDs and --latest can only be used with deployment, build, or HTTP logs"
+            );
+        }
+
+        if !args.json {
+            println!("{}", format_dns_query_log_header());
+        }
+
+        if should_stream {
+            stream_dns_query_logs(environment_id, Some(service), dns_filter, |log| {
+                print_dns_query_log(log, args.json)
+            })
+            .await?;
+        } else {
+            let mut has_logs = false;
+            fetch_dns_query_logs(
+                FetchDnsQueryLogsParams {
+                    client: &client,
+                    backboard: &backboard,
+                    environment_id,
+                    service_id: Some(service),
+                    limit: args.lines.or(Some(500)),
+                    filter: dns_filter,
+                    start_date,
+                    end_date,
+                },
+                |log| {
+                    has_logs = true;
+                    print_dns_query_log(log, args.json)
+                },
+            )
+            .await?;
+
+            if !has_logs && !args.json {
+                println!("No DNS queries found");
             }
         }
 
@@ -767,6 +972,7 @@ mod tests {
             build: false,
             http: false,
             network: false,
+            dns: false,
             deployment_id: None,
             json: false,
             lines: None,
@@ -785,6 +991,11 @@ mod tests {
             dst: None,
             host: None,
             drop_cause: None,
+            domain: None,
+            qname: None,
+            qtype: None,
+            rcode: None,
+            zone: None,
             latest: false,
             since: None,
             until: None,
@@ -875,6 +1086,76 @@ mod tests {
         assert!(Args::try_parse_from(["logs", "--network", "--http"]).is_err());
         assert!(Args::try_parse_from(["logs", "--network", "--build"]).is_err());
         assert!(Args::try_parse_from(["logs", "--network", "--deployment"]).is_err());
+    }
+
+    #[test]
+    fn build_dns_filter_composes_typed_and_raw() {
+        let args = Args::parse_from(["logs", "--dns"]);
+        assert_eq!(build_dns_filter(&args).unwrap(), None);
+
+        let args = Args::parse_from([
+            "logs",
+            "--dns",
+            "--domain",
+            "example.com",
+            "--qname",
+            "api.example.com",
+            "--qtype",
+            "aaaa",
+            "--rcode",
+            "nxdomain",
+            "--zone",
+            "external",
+            "--status",
+            "FAILED",
+            "--filter",
+            "@answers:10.0.0.1",
+        ]);
+        assert_eq!(
+            build_dns_filter(&args).unwrap(),
+            Some(
+                "@domain:example.com @qname:api.example.com @qtype:AAAA @rcode:NXDOMAIN @zone:external @status:failed @answers:10.0.0.1"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_dns_filter_rejects_invalid_status() {
+        let args = Args::parse_from(["logs", "--dns", "--status", "dropped"]);
+        assert!(build_dns_filter(&args).is_err());
+    }
+
+    #[test]
+    fn dns_logs_are_mutually_exclusive_with_other_log_modes() {
+        assert!(Args::try_parse_from(["logs", "--dns", "--http"]).is_err());
+        assert!(Args::try_parse_from(["logs", "--dns", "--build"]).is_err());
+        assert!(Args::try_parse_from(["logs", "--dns", "--deployment"]).is_err());
+        assert!(Args::try_parse_from(["logs", "--dns", "--network"]).is_err());
+    }
+
+    #[test]
+    fn dns_typed_flags_require_dns_mode() {
+        assert!(Args::try_parse_from(["logs", "--rcode", "NXDOMAIN"]).is_err());
+
+        let mut args = base_args();
+        args.http = true;
+        args.rcode = Some(DnsResponseCode::Nxdomain);
+        assert!(validate_filter_modes(&args).is_err());
+
+        let mut args = base_args();
+        args.dns = true;
+        args.rcode = Some(DnsResponseCode::Nxdomain);
+        assert!(validate_filter_modes(&args).is_ok());
+    }
+
+    #[test]
+    fn status_accepts_dns_mode() {
+        let mut args = base_args();
+        args.dns = true;
+        args.status = Some("failed".to_string());
+
+        assert!(validate_filter_modes(&args).is_ok());
     }
 
     #[test]

@@ -7146,6 +7146,216 @@
           "possibleTypes": null
         },
         {
+          "description": "A single DNS query resolved for a service (one row per query, not aggregated)",
+          "enumValues": null,
+          "fields": [
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The IP addresses the name resolved to",
+              "isDeprecated": false,
+              "name": "answers",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Ordered CNAME targets the queried name aliased through before the final answer (empty when the response had no CNAME)",
+              "isDeprecated": false,
+              "name": "cnameChain",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The deployment ID",
+              "isDeprecated": false,
+              "name": "deploymentId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The deployment instance ID",
+              "isDeprecated": false,
+              "name": "deploymentInstanceId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The domain name that was looked up",
+              "isDeprecated": false,
+              "name": "qname",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The DNS record type queried (A, AAAA, TXT, ...)",
+              "isDeprecated": false,
+              "name": "qtype",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "When the query was resolved (ISO timestamp)",
+              "isDeprecated": false,
+              "name": "queriedAt",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "Whether the query targeted the internal zone or the public internet",
+              "isDeprecated": false,
+              "name": "queryZone",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "ENUM",
+                  "name": "DnsQueryZone",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The DNS response code (NOERROR, NXDOMAIN, SERVFAIL, ...) or synthetic TIMEOUT/ERROR when no upstream response was received",
+              "isDeprecated": false,
+              "name": "rcode",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            },
+            {
+              "args": [],
+              "deprecationReason": null,
+              "description": "The service ID that made the queries",
+              "isDeprecated": false,
+              "name": "serviceId",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "SCALAR",
+                  "name": "String",
+                  "ofType": null
+                }
+              }
+            }
+          ],
+          "inputFields": null,
+          "interfaces": [],
+          "kind": "OBJECT",
+          "name": "DnsQueryLog",
+          "possibleTypes": null
+        },
+        {
+          "description": "Whether a DNS query targeted the internal zone or the public internet",
+          "enumValues": [
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "external"
+            },
+            {
+              "deprecationReason": null,
+              "description": null,
+              "isDeprecated": false,
+              "name": "internal"
+            }
+          ],
+          "fields": null,
+          "inputFields": null,
+          "interfaces": null,
+          "kind": "ENUM",
+          "name": "DnsQueryZone",
+          "possibleTypes": null
+        },
+        {
           "description": null,
           "enumValues": null,
           "fields": [
@@ -31358,6 +31568,125 @@
               "args": [
                 {
                   "defaultValue": null,
+                  "description": "Latest date to look for logs after the anchor",
+                  "name": "afterDate",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Limit logs returned after the anchor",
+                  "name": "afterLimit",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Target date time to look for logs",
+                  "name": "anchorDate",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Oldest date to look for logs before the anchor",
+                  "name": "beforeDate",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Limit logs returned before the anchor",
+                  "name": "beforeLimit",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by deployment instance / sandbox ID (optional)",
+                  "name": "deploymentInstanceId",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter expression (e.g., @rcode:NXDOMAIN @qtype:A @domain:example.com @status:failed). Prefix a term with - to exclude it; repeat a key to match any of its values",
+                  "name": "filter",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by service ID (optional)",
+                  "name": "serviceId",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Fetch individual DNS query logs for an environment",
+              "isDeprecated": false,
+              "name": "dnsQueryLogs",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "DnsQueryLog",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
                   "description": null,
                   "name": "id",
                   "type": {
@@ -35038,7 +35367,7 @@
                 }
               ],
               "deprecationReason": null,
-              "description": "Resumable sessions inside a sandbox — interactive shells and one-off exec commands, live or recently exited. Null when the sandbox can't report them (e.g. its vm-init predates session listing).",
+              "description": "Resumable sessions inside a sandbox \u2014 interactive shells and one-off exec commands, live or recently exited. Null when the sandbox can't report them (e.g. its vm-init predates session listing).",
               "isDeprecated": false,
               "name": "sandboxSessions",
               "type": {
@@ -44756,6 +45085,125 @@
                     "ofType": {
                       "kind": "OBJECT",
                       "name": "Log",
+                      "ofType": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "args": [
+                {
+                  "defaultValue": null,
+                  "description": "Latest date to look for logs after the anchor",
+                  "name": "afterDate",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Limit logs returned after the anchor",
+                  "name": "afterLimit",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Target date time to look for logs",
+                  "name": "anchorDate",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Oldest date to look for logs before the anchor",
+                  "name": "beforeDate",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Limit logs returned before the anchor",
+                  "name": "beforeLimit",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "Int",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by deployment instance / sandbox ID (optional)",
+                  "name": "deploymentInstanceId",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": null,
+                  "name": "environmentId",
+                  "type": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "SCALAR",
+                      "name": "String",
+                      "ofType": null
+                    }
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter expression (e.g., @rcode:NXDOMAIN @qtype:A @domain:example.com @status:failed). Prefix a term with - to exclude it; repeat a key to match any of its values",
+                  "name": "filter",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                },
+                {
+                  "defaultValue": null,
+                  "description": "Filter by service ID (optional)",
+                  "name": "serviceId",
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                }
+              ],
+              "deprecationReason": null,
+              "description": "Stream individual DNS query logs for an environment",
+              "isDeprecated": false,
+              "name": "dnsQueryLogs",
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "DnsQueryLog",
                       "ofType": null
                     }
                   }
