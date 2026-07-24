@@ -182,6 +182,8 @@ pub(crate) fn auth_failure_error() -> RailwayError {
 /// file lock on a dedicated lockfile under `~/.railway/`, then re-read the
 /// config and re-check expiry after acquiring the lock: whichever process wins
 /// the lock performs the single refresh, and the others pick up its result.
+/// If the lock can't be acquired we return [`RailwayError::ConfigLockBusy`]
+/// rather than ever refreshing unlocked.
 pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
     // Env var tokens are not managed by us
     if Configs::get_railway_token().is_some() || Configs::get_railway_api_token().is_some() {
@@ -193,26 +195,30 @@ pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
         return Ok(());
     }
 
-    // Serialize the refresh across concurrent CLI processes. If we can't take
-    // the lock (e.g. a stale/wedged lock, unsupported filesystem), fall back to
-    // refreshing without it rather than wedging the CLI — see `refresh_tokens`.
-    let lock_guard = ConfigLockGuard::acquire();
+    // Serialize the refresh across concurrent CLI processes. Refreshing
+    // without the lock is never safe: a parallel refresh would present an
+    // already-rotated refresh token, which the server treats as reuse and
+    // revokes the entire grant (a hard logout). If we can't take the lock
+    // (another process is refreshing, or the lockfile can't be created) we
+    // surface a retryable "busy" error — a retry is cheap and recoverable,
+    // a revoked grant is not.
+    let _lock_guard = ConfigLockGuard::acquire().ok_or(RailwayError::ConfigLockBusy)?;
 
     // Re-read credentials now that we hold the lock: another process may have
     // already refreshed while we were waiting, in which case we skip the
     // refresh entirely and use the freshly-rotated token it wrote.
-    if lock_guard.is_some() {
-        configs.reload()?;
-        if !configs.has_oauth_token() || !configs.is_token_expired() {
-            return Ok(());
-        }
+    configs.reload()?;
+    if !configs.has_oauth_token() || !configs.is_token_expired() {
+        return Ok(());
     }
 
     refresh_tokens(configs).await
+    // `_lock_guard` is dropped here (or at the early return above), releasing
+    // the lock only after the freshly-rotated token has been persisted.
 }
 
-/// Perform the actual OAuth refresh + persist. The caller is expected to hold
-/// the config lock (when available) and to have re-checked expiry.
+/// Perform the actual OAuth refresh + persist. The caller must hold the config
+/// lock and have re-checked expiry after acquiring it.
 async fn refresh_tokens(configs: &mut Configs) -> Result<()> {
     let refresh_token = configs.get_refresh_token().ok_or_else(|| {
         RailwayError::OAuthRefreshFailed("No refresh token available".to_string())
@@ -230,8 +236,9 @@ async fn refresh_tokens(configs: &mut Configs) -> Result<()> {
     Ok(())
 }
 
-/// How long to wait for the config lock before giving up and refreshing
-/// without it. Kept short so a stale lock can never wedge the CLI for long.
+/// How long to wait for the config lock before giving up and returning a
+/// retryable busy error. Kept short so a stale lock can never wedge the CLI
+/// for long.
 const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Poll interval while waiting for the config lock.
 const CONFIG_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -245,11 +252,11 @@ struct ConfigLockGuard {
 
 impl ConfigLockGuard {
     /// Try to acquire the exclusive config lock, retrying up to
-    /// [`CONFIG_LOCK_TIMEOUT`]. Returns `None` (with a warning) on any failure
-    /// so the caller can fall back to an unlocked refresh rather than wedge.
+    /// [`CONFIG_LOCK_TIMEOUT`]. Returns `None` on any failure — the lock is
+    /// held by another process, or the lockfile could not be created — and the
+    /// caller turns that into a retryable error rather than refreshing
+    /// unlocked.
     fn acquire() -> Option<Self> {
-        use fs2::FileExt;
-
         let lock_path = match Configs::config_lock_path() {
             Ok(path) => path,
             Err(e) => {
@@ -261,6 +268,20 @@ impl ConfigLockGuard {
             }
         };
 
+        Self::acquire_at(&lock_path, CONFIG_LOCK_TIMEOUT, CONFIG_LOCK_POLL_INTERVAL)
+    }
+
+    /// Core acquisition against an explicit path/timeout. Factored out from
+    /// [`acquire`] so the contention behaviour can be exercised hermetically
+    /// against a temp lockfile in tests. Returns `None` if the lockfile can't
+    /// be created or the lock is still held when the timeout elapses.
+    fn acquire_at(
+        lock_path: &std::path::Path,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Option<Self> {
+        use fs2::FileExt;
+
         if let Some(parent) = lock_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!(
@@ -271,7 +292,7 @@ impl ConfigLockGuard {
             }
         }
 
-        let file = match std::fs::File::create(&lock_path) {
+        let file = match std::fs::File::create(lock_path) {
             Ok(file) => file,
             Err(e) => {
                 eprintln!(
@@ -282,19 +303,15 @@ impl ConfigLockGuard {
             }
         };
 
-        let deadline = std::time::Instant::now() + CONFIG_LOCK_TIMEOUT;
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             if file.try_lock_exclusive().is_ok() {
                 return Some(Self { file });
             }
             if std::time::Instant::now() >= deadline {
-                eprintln!(
-                    "{}",
-                    "Warning: timed out waiting for config lock; refreshing without it".yellow()
-                );
                 return None;
             }
-            std::thread::sleep(CONFIG_LOCK_POLL_INTERVAL);
+            std::thread::sleep(poll_interval);
         }
     }
 }
@@ -489,5 +506,49 @@ mod tests {
         assert_eq!(response.template.id, "template-id");
         assert_eq!(response.template.name, "PostgreSQL");
         assert_eq!(response.template.serialized_config, None);
+    }
+
+    #[test]
+    fn config_lock_acquires_when_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".config.lock");
+
+        let guard =
+            ConfigLockGuard::acquire_at(&path, Duration::from_secs(1), Duration::from_millis(10));
+
+        assert!(guard.is_some(), "should acquire a free lock");
+    }
+
+    #[test]
+    fn config_lock_times_out_when_held_and_never_refreshes_unlocked() {
+        use fs2::FileExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".config.lock");
+
+        // Simulate another CLI process holding the exclusive lock. flock locks
+        // are per open-file-description, so a second handle to the same path
+        // contends even within this process.
+        let held = std::fs::File::create(&path).unwrap();
+        held.lock_exclusive().unwrap();
+
+        let timeout = Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let guard = ConfigLockGuard::acquire_at(&path, timeout, Duration::from_millis(20));
+        let elapsed = start.elapsed();
+
+        // The guard must be None (so the caller returns ConfigLockBusy rather
+        // than performing an unlocked refresh), and only after waiting out the
+        // full timeout.
+        assert!(
+            guard.is_none(),
+            "must not acquire a lock already held by another handle"
+        );
+        assert!(
+            elapsed >= timeout,
+            "should wait the full timeout before giving up (waited {elapsed:?})"
+        );
+
+        FileExt::unlock(&held).unwrap();
     }
 }

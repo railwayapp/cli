@@ -103,6 +103,11 @@ pub enum RailwayError {
     #[error("You are being ratelimited. Please try again later")]
     Ratelimited,
 
+    #[error(
+        "Another Railway process is refreshing credentials. Please try the command again in a moment."
+    )]
+    ConfigLockBusy,
+
     #[error("Device code expired. Please run `railway login` again.")]
     OAuthDeviceCodeExpired,
 
@@ -155,6 +160,7 @@ impl RailwayError {
             RailwayError::ConnectionVariableNotFound(_) => "CONNECTION_VARIABLE_NOT_FOUND",
             RailwayError::InvalidConnectionVariable => "INVALID_CONNECTION_VARIABLE",
             RailwayError::Ratelimited => "RATELIMITED",
+            RailwayError::ConfigLockBusy => "CONFIG_LOCK_BUSY",
             RailwayError::OAuthDeviceCodeExpired => "OAUTH_DEVICE_CODE_EXPIRED",
             RailwayError::OAuthAccessDenied => "OAUTH_ACCESS_DENIED",
             RailwayError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",
