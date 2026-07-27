@@ -362,12 +362,13 @@ struct StreamMessages {
 /// state only resets once a connection proves stable. Each reconnect re-anchors
 /// `beforeDate` to the newest timestamp seen minus a lookback window; rows at
 /// or before the previous connection's watermark are flagged as replays via
-/// `on_line`'s second argument.
+/// `on_line`'s second argument. The callback returns whether the row was
+/// emitted so replay-only connections do not reset retry state.
 async fn stream_anchored_logs<Q, Line>(
     mut build_vars: impl FnMut(String) -> Q::Variables,
     extract_lines: impl Fn(Q::ResponseData) -> Vec<Line>,
     line_timestamp: impl Fn(&Line) -> &str,
-    mut on_line: impl FnMut(Line, Option<DateTime<Utc>>),
+    mut on_line: impl FnMut(Line, Option<DateTime<Utc>>) -> bool,
     messages: StreamMessages,
 ) -> Result<()>
 where
@@ -382,7 +383,7 @@ where
 
     loop {
         let connected_at = Instant::now();
-        let mut received_any_logs = false;
+        let mut emitted_any_logs = false;
         let vars = build_vars(stream_before_date(max_timestamp));
 
         let mut stream = match subscribe_graphql::<Q>(vars).await {
@@ -408,11 +409,13 @@ where
                     .data
                     .context(messages.data_error)?;
 
-                for line in extract_lines(log) {
-                    update_max_stream_timestamp(line_timestamp(&line), &mut max_timestamp);
-                    received_any_logs = true;
-                    on_line(line, replay_cutoff);
-                }
+                emitted_any_logs |= process_anchored_stream_lines(
+                    extract_lines(log),
+                    &line_timestamp,
+                    replay_cutoff,
+                    &mut max_timestamp,
+                    &mut on_line,
+                );
             }
 
             Ok::<(), anyhow::Error>(())
@@ -422,7 +425,7 @@ where
         replay_cutoff = max_timestamp;
 
         let should_reset_retry_state =
-            should_reset_stream_retry_state(received_any_logs, connected_at.elapsed());
+            should_reset_stream_retry_state(emitted_any_logs, connected_at.elapsed());
 
         if should_reset_retry_state {
             attempt = 0;
@@ -446,6 +449,23 @@ where
                 .min(LOGS_RETRY_CONFIG.max_delay_ms);
         }
     }
+}
+
+fn process_anchored_stream_lines<Line>(
+    lines: Vec<Line>,
+    line_timestamp: &impl Fn(&Line) -> &str,
+    replay_cutoff: Option<DateTime<Utc>>,
+    max_timestamp: &mut Option<DateTime<Utc>>,
+    on_line: &mut impl FnMut(Line, Option<DateTime<Utc>>) -> bool,
+) -> bool {
+    let mut emitted_any_logs = false;
+
+    for line in lines {
+        update_max_stream_timestamp(line_timestamp(&line), max_timestamp);
+        emitted_any_logs |= on_line(line, replay_cutoff);
+    }
+
+    emitted_any_logs
 }
 
 pub async fn stream_network_flow_logs(
@@ -474,6 +494,9 @@ pub async fn stream_network_flow_logs(
             // of when it arrives
             if seen_flow_ids.insert(line.flow_id.clone()) {
                 on_log(line);
+                true
+            } else {
+                false
             }
         },
         StreamMessages {
@@ -514,11 +537,12 @@ pub async fn stream_dns_query_logs(
             if let Ok(row_key) = serde_json::to_string(&line) {
                 let already_seen = !seen_rows.insert(row_key);
                 if already_seen && is_replayed_row(&line.queried_at, replay_cutoff) {
-                    return;
+                    return false;
                 }
             }
 
             on_log(line);
+            true
         },
         StreamMessages {
             stream_error: "DNS query log stream error",
@@ -1041,6 +1065,33 @@ mod tests {
     fn test_should_not_reset_stream_retry_state_for_short_empty_connection() {
         assert!(!should_reset_stream_retry_state(
             false,
+            Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn test_replay_only_anchored_rows_do_not_reset_retry_state() {
+        let replay_cutoff = Some(dt("2026-06-18T04:43:00Z"));
+        let mut max_timestamp = replay_cutoff;
+        let mut seen_rows = HashSet::from(["replayed-row".to_string()]);
+
+        let emitted_any_logs = process_anchored_stream_lines(
+            vec![(
+                "replayed-row".to_string(),
+                "2026-06-18T04:43:00Z".to_string(),
+            )],
+            &|line: &(String, String)| line.1.as_str(),
+            replay_cutoff,
+            &mut max_timestamp,
+            &mut |line, cutoff| {
+                let already_seen = !seen_rows.insert(line.0);
+                !(already_seen && is_replayed_row(&line.1, cutoff))
+            },
+        );
+
+        assert!(!emitted_any_logs);
+        assert!(!should_reset_stream_retry_state(
+            emitted_any_logs,
             Duration::from_secs(1),
         ));
     }
