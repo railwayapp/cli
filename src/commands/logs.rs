@@ -175,67 +175,6 @@ impl fmt::Display for NetworkFlowPeerKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum DnsRecordType {
-    #[value(name = "A")]
-    A,
-    #[value(name = "AAAA")]
-    Aaaa,
-    #[value(name = "CNAME")]
-    Cname,
-    #[value(name = "TXT")]
-    Txt,
-    #[value(name = "MX")]
-    Mx,
-    #[value(name = "SRV")]
-    Srv,
-    #[value(name = "NS")]
-    Ns,
-}
-
-impl fmt::Display for DnsRecordType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::A => write!(f, "A"),
-            Self::Aaaa => write!(f, "AAAA"),
-            Self::Cname => write!(f, "CNAME"),
-            Self::Txt => write!(f, "TXT"),
-            Self::Mx => write!(f, "MX"),
-            Self::Srv => write!(f, "SRV"),
-            Self::Ns => write!(f, "NS"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum DnsResponseCode {
-    #[value(name = "NOERROR")]
-    NoError,
-    #[value(name = "NXDOMAIN")]
-    Nxdomain,
-    #[value(name = "SERVFAIL")]
-    Servfail,
-    #[value(name = "REFUSED")]
-    Refused,
-    #[value(name = "TIMEOUT")]
-    Timeout,
-    #[value(name = "ERROR")]
-    Error,
-}
-
-impl fmt::Display for DnsResponseCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoError => write!(f, "NOERROR"),
-            Self::Nxdomain => write!(f, "NXDOMAIN"),
-            Self::Servfail => write!(f, "SERVFAIL"),
-            Self::Refused => write!(f, "REFUSED"),
-            Self::Timeout => write!(f, "TIMEOUT"),
-            Self::Error => write!(f, "ERROR"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum DnsZone {
     Internal,
     External,
@@ -276,11 +215,11 @@ fn build_dns_filter(args: &Args) -> Result<Option<String>> {
     if let Some(qname) = args.qname.as_deref() {
         filters.push(format!("@qname:{qname}"));
     }
-    if let Some(qtype) = args.qtype {
-        filters.push(format!("@qtype:{qtype}"));
+    if let Some(qtype) = args.qtype.as_deref() {
+        filters.push(format!("@qtype:{}", qtype.to_ascii_uppercase()));
     }
-    if let Some(rcode) = args.rcode {
-        filters.push(format!("@rcode:{rcode}"));
+    if let Some(rcode) = args.rcode.as_deref() {
+        filters.push(format!("@rcode:{}", rcode.to_ascii_uppercase()));
     }
     if let Some(zone) = args.zone {
         filters.push(format!("@zone:{zone}"));
@@ -692,13 +631,13 @@ Examples:
     #[clap(long, requires = "dns", value_name = "NAME")]
     qname: Option<String>,
 
-    /// Filter DNS logs by record type
-    #[clap(long, requires = "dns", value_enum, ignore_case = true)]
-    qtype: Option<DnsRecordType>,
+    /// Filter DNS logs by record type (e.g. A, AAAA, CNAME, TXT)
+    #[clap(long, requires = "dns", value_name = "TYPE")]
+    qtype: Option<String>,
 
-    /// Filter DNS logs by response code
-    #[clap(long, requires = "dns", value_enum, ignore_case = true)]
-    rcode: Option<DnsResponseCode>,
+    /// Filter DNS logs by response code (e.g. NOERROR, NXDOMAIN, SERVFAIL)
+    #[clap(long, requires = "dns", value_name = "RCODE")]
+    rcode: Option<String>,
 
     /// Filter DNS logs by lookup zone
     #[clap(long, requires = "dns", value_enum, ignore_case = true)]
@@ -1140,13 +1079,23 @@ mod tests {
 
         let mut args = base_args();
         args.http = true;
-        args.rcode = Some(DnsResponseCode::Nxdomain);
+        args.rcode = Some("NXDOMAIN".to_string());
         assert!(validate_filter_modes(&args).is_err());
 
         let mut args = base_args();
         args.dns = true;
-        args.rcode = Some(DnsResponseCode::Nxdomain);
+        args.rcode = Some("NXDOMAIN".to_string());
         assert!(validate_filter_modes(&args).is_ok());
+    }
+
+    #[test]
+    fn build_dns_filter_accepts_uncommon_qtype_and_rcode_values() {
+        let args = Args::parse_from(["logs", "--dns", "--qtype", "ptr", "--rcode", "formerr"]);
+
+        assert_eq!(
+            build_dns_filter(&args).unwrap(),
+            Some("@qtype:PTR @rcode:FORMERR".to_string())
+        );
     }
 
     #[test]

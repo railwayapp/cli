@@ -28,7 +28,7 @@ const LOGS_RETRY_CONFIG: RetryConfig = RetryConfig {
 
 const HTTP_LOG_STREAM_AFTER_WINDOW: Duration = Duration::from_secs(60 * 60);
 const HTTP_LOG_STREAM_BATCH_SIZE: i64 = 500;
-const HTTP_LOG_STREAM_STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
+const STREAM_STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
 const ANCHORED_LOG_DEFAULT_LIMIT: i64 = 500;
 const STREAM_LOOKBACK_SECONDS: i64 = 30;
 const STREAM_DEDUPE_CACHE_SIZE: usize = 10_000;
@@ -350,31 +350,42 @@ pub async fn stream_http_logs(
     }
 }
 
-pub async fn stream_network_flow_logs(
-    environment_id: String,
-    service_id: Option<String>,
-    filter: Option<String>,
-    mut on_log: impl FnMut(network_flow_logs::NetworkFlowLogFields),
-) -> Result<()> {
-    let mut max_capture_end: Option<DateTime<Utc>> = None;
-    let mut seen_flow_ids = StreamedLogDedupe::new(STREAM_DEDUPE_CACHE_SIZE);
+struct StreamMessages {
+    stream_error: &'static str,
+    data_error: &'static str,
+    closed_without_events: &'static str,
+}
+
+/// Drives an anchored log subscription (network flow, DNS) with the same
+/// reconnect policy as `stream_http_logs_inner`: mid-stream errors are retried
+/// with backoff, every reconnect waits at least the initial delay, and retry
+/// state only resets once a connection proves stable. Each reconnect re-anchors
+/// `beforeDate` to the newest timestamp seen minus a lookback window; rows at
+/// or before the previous connection's watermark are flagged as replays via
+/// `on_line`'s second argument.
+async fn stream_anchored_logs<Q, Line>(
+    mut build_vars: impl FnMut(String) -> Q::Variables,
+    extract_lines: impl Fn(Q::ResponseData) -> Vec<Line>,
+    line_timestamp: impl Fn(&Line) -> &str,
+    mut on_line: impl FnMut(Line, Option<DateTime<Utc>>),
+    messages: StreamMessages,
+) -> Result<()>
+where
+    Q: graphql_client::GraphQLQuery + Send + Sync + Unpin + 'static,
+    Q::Variables: Send + Sync + Unpin,
+    Q::ResponseData: std::fmt::Debug,
+{
+    let mut max_timestamp: Option<DateTime<Utc>> = None;
+    let mut replay_cutoff: Option<DateTime<Utc>> = None;
     let mut attempt = 0;
     let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
 
     loop {
-        let before_date = stream_before_date(max_capture_end);
-        let vars = subscriptions::network_flow_logs::Variables {
-            environment_id: environment_id.clone(),
-            service_id: service_id.clone(),
-            filter: filter.clone(),
-            before_limit: Some(ANCHORED_LOG_DEFAULT_LIMIT),
-            before_date: Some(before_date),
-            anchor_date: None,
-            after_date: None,
-            after_limit: Some(0),
-        };
+        let connected_at = Instant::now();
+        let mut received_any_logs = false;
+        let vars = build_vars(stream_before_date(max_timestamp));
 
-        let mut stream = match subscribe_graphql::<subscriptions::NetworkFlowLogs>(vars).await {
+        let mut stream = match subscribe_graphql::<Q>(vars).await {
             Ok(stream) => stream,
             Err(e) => {
                 attempt += 1;
@@ -390,26 +401,88 @@ pub async fn stream_network_flow_logs(
             }
         };
 
-        attempt = 0;
-        delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+        let result = async {
+            while let Some(response) = stream.next().await {
+                let log = response
+                    .context(messages.stream_error)?
+                    .data
+                    .context(messages.data_error)?;
 
-        while let Some(response) = stream.next().await {
-            let log = response
-                .context("Network flow log stream error")?
-                .data
-                .context("Failed to retrieve network flow logs")?;
-
-            for line in log.network_flow_logs {
-                update_max_stream_timestamp(&line.capture_end, &mut max_capture_end);
-
-                if !seen_flow_ids.insert(line.flow_id.clone()) {
-                    continue;
+                for line in extract_lines(log) {
+                    update_max_stream_timestamp(line_timestamp(&line), &mut max_timestamp);
+                    received_any_logs = true;
+                    on_line(line, replay_cutoff);
                 }
+            }
 
-                on_log(line);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        replay_cutoff = max_timestamp;
+
+        let should_reset_retry_state =
+            should_reset_stream_retry_state(received_any_logs, connected_at.elapsed());
+
+        if should_reset_retry_state {
+            attempt = 0;
+            delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+        } else {
+            attempt += 1;
+
+            match result {
+                Err(e) if attempt >= LOGS_RETRY_CONFIG.max_attempts => return Err(e),
+                Ok(()) if attempt >= LOGS_RETRY_CONFIG.max_attempts => {
+                    return Err(anyhow!(messages.closed_without_events));
+                }
+                _ => {}
             }
         }
+
+        sleep(Duration::from_millis(delay_ms)).await;
+
+        if !should_reset_retry_state {
+            delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
+                .min(LOGS_RETRY_CONFIG.max_delay_ms);
+        }
     }
+}
+
+pub async fn stream_network_flow_logs(
+    environment_id: String,
+    service_id: Option<String>,
+    filter: Option<String>,
+    mut on_log: impl FnMut(network_flow_logs::NetworkFlowLogFields),
+) -> Result<()> {
+    let mut seen_flow_ids = StreamedLogDedupe::new(STREAM_DEDUPE_CACHE_SIZE);
+
+    stream_anchored_logs::<subscriptions::NetworkFlowLogs, _>(
+        |before_date| subscriptions::network_flow_logs::Variables {
+            environment_id: environment_id.clone(),
+            service_id: service_id.clone(),
+            filter: filter.clone(),
+            before_limit: Some(ANCHORED_LOG_DEFAULT_LIMIT),
+            before_date: Some(before_date),
+            anchor_date: None,
+            after_date: None,
+            after_limit: Some(0),
+        },
+        |data| data.network_flow_logs,
+        |line: &network_flow_logs::NetworkFlowLogFields| line.capture_end.as_str(),
+        |line, _replay_cutoff| {
+            // Flow IDs are unique, so any repeated ID is a replay regardless
+            // of when it arrives
+            if seen_flow_ids.insert(line.flow_id.clone()) {
+                on_log(line);
+            }
+        },
+        StreamMessages {
+            stream_error: "Network flow log stream error",
+            data_error: "Failed to retrieve network flow logs",
+            closed_without_events: "Network flow log stream closed before receiving any events",
+        },
+    )
+    .await
 }
 
 pub async fn stream_dns_query_logs(
@@ -418,16 +491,14 @@ pub async fn stream_dns_query_logs(
     filter: Option<String>,
     mut on_log: impl FnMut(dns_query_logs::DnsQueryLogFields),
 ) -> Result<()> {
-    let mut max_queried_at: Option<DateTime<Utc>> = None;
-    // DNS query logs carry no unique row ID, so reconnect overlap is deduped
-    // on the full serialized row instead.
+    // DNS query logs carry no unique row ID, so replays after a reconnect are
+    // recognized by their full serialized contents. Only rows at or before the
+    // reconnect watermark are eligible for deduplication: identical queries
+    // arriving live on a healthy connection are all emitted.
     let mut seen_rows = StreamedLogDedupe::new(STREAM_DEDUPE_CACHE_SIZE);
-    let mut attempt = 0;
-    let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
 
-    loop {
-        let before_date = stream_before_date(max_queried_at);
-        let vars = subscriptions::dns_query_logs::Variables {
+    stream_anchored_logs::<subscriptions::DnsQueryLogs, _>(
+        |before_date| subscriptions::dns_query_logs::Variables {
             environment_id: environment_id.clone(),
             service_id: service_id.clone(),
             filter: filter.clone(),
@@ -436,45 +507,36 @@ pub async fn stream_dns_query_logs(
             anchor_date: None,
             after_date: None,
             after_limit: Some(0),
-        };
-
-        let mut stream = match subscribe_graphql::<subscriptions::DnsQueryLogs>(vars).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                attempt += 1;
-
-                if attempt >= LOGS_RETRY_CONFIG.max_attempts {
-                    return Err(e);
+        },
+        |data| data.dns_query_logs,
+        |line: &dns_query_logs::DnsQueryLogFields| line.queried_at.as_str(),
+        |line, replay_cutoff| {
+            if let Ok(row_key) = serde_json::to_string(&line) {
+                let already_seen = !seen_rows.insert(row_key);
+                if already_seen && is_replayed_row(&line.queried_at, replay_cutoff) {
+                    return;
                 }
-
-                sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms = ((delay_ms as f64 * LOGS_RETRY_CONFIG.backoff_multiplier) as u64)
-                    .min(LOGS_RETRY_CONFIG.max_delay_ms);
-                continue;
             }
-        };
 
-        attempt = 0;
-        delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
+            on_log(line);
+        },
+        StreamMessages {
+            stream_error: "DNS query log stream error",
+            data_error: "Failed to retrieve DNS query logs",
+            closed_without_events: "DNS query log stream closed before receiving any events",
+        },
+    )
+    .await
+}
 
-        while let Some(response) = stream.next().await {
-            let log = response
-                .context("DNS query log stream error")?
-                .data
-                .context("Failed to retrieve DNS query logs")?;
+fn is_replayed_row(timestamp: &str, replay_cutoff: Option<DateTime<Utc>>) -> bool {
+    let Some(cutoff) = replay_cutoff else {
+        return false;
+    };
 
-            for line in log.dns_query_logs {
-                update_max_stream_timestamp(&line.queried_at, &mut max_queried_at);
-
-                let row_key = serde_json::to_string(&line).unwrap_or_default();
-                if !seen_rows.insert(row_key) {
-                    continue;
-                }
-
-                on_log(line);
-            }
-        }
-    }
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|ts| ts.with_timezone(&Utc) <= cutoff)
+        .unwrap_or(false)
 }
 
 struct StreamedLogDedupe {
@@ -510,20 +572,20 @@ impl StreamedLogDedupe {
     }
 }
 
-fn stream_before_date(max_capture_end: Option<DateTime<Utc>>) -> String {
-    let anchor = max_capture_end.unwrap_or_else(Utc::now);
+fn stream_before_date(max_timestamp: Option<DateTime<Utc>>) -> String {
+    let anchor = max_timestamp.unwrap_or_else(Utc::now);
     format_anchored_log_timestamp(anchor - ChronoDuration::seconds(STREAM_LOOKBACK_SECONDS))
 }
 
-fn update_max_stream_timestamp(capture_end: &str, max_capture_end: &mut Option<DateTime<Utc>>) {
-    let Ok(capture_end) =
-        DateTime::parse_from_rfc3339(capture_end).map(|date| date.with_timezone(&Utc))
+fn update_max_stream_timestamp(timestamp: &str, max_timestamp: &mut Option<DateTime<Utc>>) {
+    let Ok(timestamp) =
+        DateTime::parse_from_rfc3339(timestamp).map(|date| date.with_timezone(&Utc))
     else {
         return;
     };
 
-    if max_capture_end.is_none_or(|max| capture_end > max) {
-        *max_capture_end = Some(capture_end);
+    if max_timestamp.is_none_or(|max| timestamp > max) {
+        *max_timestamp = Some(timestamp);
     }
 }
 
@@ -623,7 +685,7 @@ async fn stream_http_logs_inner(
         .await;
 
         let should_reset_retry_state =
-            should_reset_http_stream_retry_state(received_any_logs, connected_at.elapsed());
+            should_reset_stream_retry_state(received_any_logs, connected_at.elapsed());
 
         if should_reset_retry_state {
             attempt = 0;
@@ -651,11 +713,8 @@ async fn stream_http_logs_inner(
     }
 }
 
-fn should_reset_http_stream_retry_state(
-    received_any_logs: bool,
-    connection_duration: Duration,
-) -> bool {
-    received_any_logs || connection_duration >= HTTP_LOG_STREAM_STABLE_CONNECTION_DURATION
+fn should_reset_stream_retry_state(received_any_logs: bool, connection_duration: Duration) -> bool {
+    received_any_logs || connection_duration >= STREAM_STABLE_CONNECTION_DURATION
 }
 
 fn is_new_http_log(
@@ -963,26 +1022,44 @@ mod tests {
     }
 
     #[test]
-    fn test_should_reset_http_stream_retry_state_after_logs() {
-        assert!(should_reset_http_stream_retry_state(
+    fn test_should_reset_stream_retry_state_after_logs() {
+        assert!(should_reset_stream_retry_state(
             true,
             Duration::from_secs(1),
         ));
     }
 
     #[test]
-    fn test_should_reset_http_stream_retry_state_after_stable_connection() {
-        assert!(should_reset_http_stream_retry_state(
+    fn test_should_reset_stream_retry_state_after_stable_connection() {
+        assert!(should_reset_stream_retry_state(
             false,
-            HTTP_LOG_STREAM_STABLE_CONNECTION_DURATION,
+            STREAM_STABLE_CONNECTION_DURATION,
         ));
     }
 
     #[test]
-    fn test_should_not_reset_http_stream_retry_state_for_short_empty_connection() {
-        assert!(!should_reset_http_stream_retry_state(
+    fn test_should_not_reset_stream_retry_state_for_short_empty_connection() {
+        assert!(!should_reset_stream_retry_state(
             false,
             Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn test_is_replayed_row_only_flags_rows_at_or_before_cutoff() {
+        let cutoff = Some(dt("2026-06-18T04:43:00Z"));
+
+        assert!(is_replayed_row("2026-06-18T04:42:59Z", cutoff));
+        assert!(is_replayed_row("2026-06-18T04:43:00Z", cutoff));
+        assert!(!is_replayed_row("2026-06-18T04:43:01Z", cutoff));
+    }
+
+    #[test]
+    fn test_is_replayed_row_fails_open_without_cutoff_or_valid_timestamp() {
+        assert!(!is_replayed_row("2026-06-18T04:42:59Z", None));
+        assert!(!is_replayed_row(
+            "not-a-timestamp",
+            Some(dt("2026-06-18T04:43:00Z"))
         ));
     }
 }
