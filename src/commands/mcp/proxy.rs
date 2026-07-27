@@ -36,6 +36,13 @@ use crate::consts;
 /// JSON-RPC error code for auth failures surfaced by the proxy itself.
 const AUTH_ERROR_CODE: i64 = -32001;
 
+/// Hard ceiling on a single upstream response (one SSE stream, or a non-SSE
+/// body). The proxy runs long-lived and attaches a live credential on every
+/// request, so a compromised edge (or a dev/http override MITM) streaming a
+/// boundary-less or unbounded body must not be able to grow memory without
+/// limit. Generous enough for the largest legitimate tool payloads.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
 const LOGIN_HINT: &str = "Not logged in to Railway. Run `railway login` in a terminal, then retry \
      — the proxy picks up the new login automatically, no restart needed.";
 
@@ -59,12 +66,18 @@ type Out = mpsc::UnboundedSender<String>;
 
 pub async fn serve_proxy() -> Result<()> {
     let configs = Configs::new()?;
-    let url = resolve_mcp_url(&configs);
+    let url = resolve_mcp_url(&configs)?;
 
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
         .user_agent(consts::get_user_agent())
         .connect_timeout(Duration::from_secs(15))
+        // An MCP JSON-RPC POST is never legitimately redirected. Following
+        // redirects on a request that carries a Bearer is unnecessary attack
+        // surface — reqwest strips the token cross-host, but a same-host 307/308
+        // would re-send the body and the redirected response is relayed blind.
+        // Refuse redirects outright.
+        .redirect(reqwest::redirect::Policy::none())
         // No overall timeout: tool calls (e.g. railway-agent) can legitimately
         // stream for minutes.
         .build()
@@ -159,14 +172,35 @@ fn ids_of(msg: &JsonValue) -> Vec<JsonValue> {
     }
 }
 
-fn resolve_mcp_url(configs: &Configs) -> String {
-    if let Ok(url) = std::env::var("RAILWAY_MCP_URL") {
-        let url = url.trim();
-        if !url.is_empty() {
-            return url.trim_end_matches('/').to_string();
+fn resolve_mcp_url(configs: &Configs) -> Result<String> {
+    let is_dev = matches!(Configs::get_environment_id(), Environment::Dev);
+    if let Ok(raw) = std::env::var("RAILWAY_MCP_URL") {
+        if let Some(url) = validate_mcp_override(&raw, is_dev)? {
+            return Ok(url);
         }
     }
-    format!("https://mcp.{}", configs.get_host())
+    Ok(format!("https://mcp.{}", configs.get_host()))
+}
+
+/// Validate a `RAILWAY_MCP_URL` override. Returns the normalized URL, `None`
+/// when the value is blank (caller falls back to the default), or an error
+/// when it would send the Bearer over a non-TLS connection.
+///
+/// The Bearer is attached to every request to this URL, and the cross-host
+/// redirect strip does not protect the *first* hop — so a plaintext target
+/// leaks the credential outright. Require https except in the local Dev
+/// environment, where a plaintext raildev endpoint is expected.
+fn validate_mcp_override(raw: &str, is_dev: bool) -> Result<Option<String>> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Ok(None);
+    }
+    if !url.starts_with("https://") && !is_dev {
+        anyhow::bail!(
+            "RAILWAY_MCP_URL must be an https:// URL (got {url:?}); refusing to send credentials over a non-TLS connection."
+        );
+    }
+    Ok(Some(url.trim_end_matches('/').to_string()))
 }
 
 async fn handle_message(state: &ProxyState, msg: JsonValue, out: &Out) {
@@ -367,7 +401,7 @@ async fn consume_response(
     }
 
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = read_body_capped(resp).await.unwrap_or_default();
         anyhow::bail!(
             "remote MCP server returned HTTP {status}: {}",
             truncate(&body, 300)
@@ -384,10 +418,29 @@ async fn consume_response(
     if content_type.starts_with("text/event-stream") {
         stream_sse(resp, out).await
     } else {
-        let body = resp.text().await?;
+        let body = read_body_capped(resp).await?;
         emit_json_line(body.trim(), out);
         Ok(())
     }
+}
+
+/// Read a full (non-streaming) response body, refusing to buffer more than
+/// [`MAX_RESPONSE_BYTES`]. `reqwest`'s `text()`/`bytes()` have no size cap, so
+/// a compromised or MITM'd upstream could otherwise stream an unbounded body
+/// into a long-lived proxy and exhaust memory.
+async fn read_body_capped(resp: reqwest::Response) -> Result<String> {
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("error reading response from remote MCP server")?;
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            anyhow::bail!(
+                "remote MCP server response exceeded {MAX_RESPONSE_BYTES} bytes; aborting."
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Relay every SSE `data:` payload to stdout as its own JSON-RPC line. The
@@ -402,6 +455,14 @@ async fn stream_sse(resp: reqwest::Response, out: &Out) -> Result<()> {
         while let Some((event_len, boundary_end)) = find_event_boundary(&buf) {
             let event: Vec<u8> = buf.drain(..boundary_end).collect();
             emit_sse_event(&event[..event_len], out);
+        }
+        // A boundary-less stream (or one giant event) would otherwise grow buf
+        // without limit. Cap it: past the ceiling, no legitimate single SSE
+        // event is pending — abort rather than let a bad upstream OOM us.
+        if buf.len() > MAX_RESPONSE_BYTES {
+            anyhow::bail!(
+                "remote MCP server SSE event exceeded {MAX_RESPONSE_BYTES} bytes; aborting."
+            );
         }
     }
     if !buf.is_empty() {
@@ -498,6 +559,24 @@ mod tests {
             out.push(line);
         }
         out
+    }
+
+    #[test]
+    fn mcp_override_rejects_plaintext_outside_dev() {
+        // http:// would send the Bearer in the clear — refused in prod/staging.
+        assert!(validate_mcp_override("http://evil.example/mcp", false).is_err());
+        // Blank falls back to the default (Ok(None), not an error).
+        assert_eq!(validate_mcp_override("  ", false).unwrap(), None);
+        // https is accepted and trailing slashes normalized.
+        assert_eq!(
+            validate_mcp_override("https://mcp.railway.com/", false).unwrap(),
+            Some("https://mcp.railway.com".to_string()),
+        );
+        // Dev allows plaintext for a local raildev endpoint.
+        assert_eq!(
+            validate_mcp_override("http://localhost:8080", true).unwrap(),
+            Some("http://localhost:8080".to_string()),
+        );
     }
 
     #[test]
