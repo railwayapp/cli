@@ -139,7 +139,14 @@ pub fn print_log<T>(log: T, json: bool, format: LogFormat)
 where
     T: LogLike + serde::Serialize,
 {
-    println!("{}", format_log_string(log, json, format));
+    let line = format_log_string(log, json, format);
+    // JSON is already escaped by serde; only the human path reaches a terminal
+    // with raw bytes in it.
+    if json {
+        println!("{line}");
+    } else {
+        println!("{}", strip_terminal_controls(&line));
+    }
 }
 
 pub trait HttpLogLike: serde::Serialize {
@@ -945,5 +952,99 @@ mod tests {
         assert_eq!(json["timestamp"], "2025-01-01T00:00:00Z");
         assert_eq!(json["level"], "warn");
         assert_eq!(json["count"], 42); // This parses as a number
+    }
+}
+
+/// Strip terminal control sequences from a remotely sourced log line.
+///
+/// Log text is written by whatever is running in the service, which in a shared
+/// project is not the same principal as whoever is reading it. Printing raw
+/// `ESC` bytes lets the writer drive the reader's terminal — retitling the
+/// window, repainting the screen, hiding or forging output. Colour is dropped
+/// along with everything else: the alternative is parsing which sequences are
+/// benign, and that varies by emulator.
+///
+/// JSON output is untouched; serde already escapes these bytes.
+pub fn strip_terminal_controls(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            // CSI (ESC [ ... final), OSC (ESC ] ... BEL or ST), and the
+            // two-character escapes. Consume the whole sequence.
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            // Keep tab and newline; drop the rest of C0 and DEL, which can
+            // reposition the cursor or erase what was already printed.
+            '\t' | '\n' => out.push(ch),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {}
+            // C1 controls, reachable directly in UTF-8.
+            c if ('\u{80}'..='\u{9f}').contains(&c) => {}
+            c => out.push(c),
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod terminal_control_tests {
+    use super::strip_terminal_controls;
+
+    #[test]
+    fn strips_osc_and_csi_sequences() {
+        assert_eq!(strip_terminal_controls("\u{1b}]0;pwned\u{7}hello"), "hello");
+        assert_eq!(strip_terminal_controls("\u{1b}[31mred\u{1b}[0m"), "red");
+        // OSC terminated by ST rather than BEL.
+        assert_eq!(strip_terminal_controls("\u{1b}]0;t\u{1b}\\after"), "after");
+    }
+
+    #[test]
+    fn strips_bare_control_bytes_but_keeps_tabs_and_newlines() {
+        assert_eq!(strip_terminal_controls("a\u{7}b"), "ab");
+        assert_eq!(strip_terminal_controls("a\rb"), "ab");
+        assert_eq!(strip_terminal_controls("a\u{8}b"), "ab");
+        assert_eq!(strip_terminal_controls("a\u{9b}[2Jb"), "a[2Jb");
+        assert_eq!(strip_terminal_controls("a\tb\nc"), "a\tb\nc");
+    }
+
+    #[test]
+    fn leaves_ordinary_text_alone() {
+        assert_eq!(
+            strip_terminal_controls("GET /health 200 12ms — ok ✓"),
+            "GET /health 200 12ms — ok ✓"
+        );
+    }
+
+    #[test]
+    fn output_never_contains_an_escape_byte() {
+        for raw in [
+            "\u{1b}]0;x\u{7}",
+            "\u{1b}[1;31m",
+            "\u{1b}P+q544e\u{1b}\\",
+            "plain",
+        ] {
+            assert!(!strip_terminal_controls(raw).contains('\u{1b}'));
+        }
     }
 }

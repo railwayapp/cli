@@ -720,17 +720,27 @@ impl Configs {
 
         // Ensure directory exists
         create_dir_all(config_dir)?;
+        // This file holds the OAuth access and refresh tokens, so its mode is a
+        // security invariant rather than something to inherit from the ambient
+        // umask — the common 022 would leave it world-readable.
+        secure_config_dir(config_dir)?;
 
         // Use temporary file to achieve atomic write:
         //  1. Open file ~/railway/config.tmp
         //  2. Serialize config to temporary file
         //  3. Rename temporary file to ~/railway/config.json (atomic operation)
         let tmp_file_path = self.root_config_path.with_extension("tmp");
-        let tmp_file = File::options()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_file_path)?;
+        let mut options = File::options();
+        options.create(true).write(true).truncate(true);
+        // Set the mode at creation so the tokens are never briefly readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let tmp_file = options.open(&tmp_file_path)?;
+        // An existing tmp file keeps its old mode, so enforce it either way.
+        secure_config_file(&tmp_file_path)?;
         serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
         tmp_file.sync_all()?;
 
@@ -857,4 +867,32 @@ mod tests {
 
         assert!(has_credentials);
     }
+}
+
+/// `~/.railway` holds OAuth tokens and resolved project secrets, so it is kept
+/// owner-only rather than left to the ambient umask. Existing directories are
+/// repaired, matching what the SSH config writer already does for `~/.ssh`.
+#[cfg(unix)]
+pub fn secure_config_dir(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("Failed to set permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub fn secure_config_dir(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+/// Owner-only mode for a file that carries credentials or resolved secrets.
+#[cfg(unix)]
+pub fn secure_config_file(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("Failed to set permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub fn secure_config_file(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }

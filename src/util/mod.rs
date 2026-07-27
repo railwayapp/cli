@@ -4,6 +4,7 @@ pub mod compare_semver;
 pub mod detect;
 pub mod editor;
 pub mod git;
+pub mod host_env;
 pub mod install_method;
 pub mod logs;
 pub mod progress;

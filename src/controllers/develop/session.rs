@@ -140,6 +140,13 @@ impl DevSession {
                 inject_mkcert_ca_vars(&mut vars);
             }
 
+            // These run as `sh -c` on the developer's machine, so the same
+            // startup-hook names have to be dropped here too.
+            let dropped = crate::util::host_env::strip_unsafe_host_vars(&mut vars);
+            if let Some(notice) = crate::util::host_env::dropped_notice(&dropped) {
+                eprintln!("{} {}", service_name, notice);
+            }
+
             if !use_tui {
                 print_code_service_summary(
                     &service_name,

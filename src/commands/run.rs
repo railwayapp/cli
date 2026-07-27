@@ -156,6 +156,13 @@ pub async fn command(args: Args) -> Result<()> {
         eprintln!("{}", "Using local develop services".yellow());
     }
 
+    // Service variables are project-writable, and this command runs as the local
+    // user. Drop the names a shell or runtime would execute during startup.
+    let dropped = crate::util::host_env::strip_unsafe_host_vars(&mut variables);
+    if let Some(notice) = crate::util::host_env::dropped_notice(&dropped) {
+        eprintln!("{}", notice.yellow());
+    }
+
     // a bit janky :/
     ctrlc::set_handler(move || {
         // do nothing, we just want to ignore CTRL+C

@@ -484,6 +484,34 @@ fn resolve_runner(explicit_runner: Option<&str>, cwd: &std::path::Path) -> Resol
     }
 }
 
+/// The directory the runner search is allowed to reach: the enclosing git
+/// repository, or `start` itself when there isn't one. Without a bound the
+/// search reaches `/`, so on a shared host any writable ancestor — a CI
+/// workspace root, `/tmp` — can offer the binary we are about to execute.
+fn project_search_root(start: &std::path::Path) -> PathBuf {
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(start)
+        .to_path_buf()
+}
+
+/// Whether `path` is writable by anyone other than its owner. A runner sitting
+/// in a group- or world-writable directory can be replaced by another local
+/// principal between now and exec, so it is not a trustworthy candidate.
+#[cfg(unix)]
+fn writable_by_others(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o022 != 0)
+        .unwrap_or(true)
+}
+
+#[cfg(not(unix))]
+fn writable_by_others(_path: &std::path::Path) -> bool {
+    false
+}
+
 fn find_project_runner(start: &std::path::Path) -> Option<PathBuf> {
     let binary = if cfg!(windows) {
         "railway-iac-ts.cmd"
@@ -491,10 +519,26 @@ fn find_project_runner(start: &std::path::Path) -> Option<PathBuf> {
         "railway-iac-ts"
     };
 
+    // This candidate is executed and then handed a Railway bearer token on
+    // stdin, and it takes precedence over whatever the user installed in PATH.
+    // Only accept one inside the project, reachable through directories no
+    // other local principal can write to.
+    let root = project_search_root(start);
     for dir in start.ancestors() {
         let candidate = dir.join("node_modules").join(".bin").join(binary);
         if candidate.exists() {
+            if writable_by_others(&candidate)
+                || dir
+                    .ancestors()
+                    .take_while(|ancestor| ancestor.starts_with(&root))
+                    .any(writable_by_others)
+            {
+                return None;
+            }
             return Some(candidate);
+        }
+        if dir == root {
+            break;
         }
     }
 
@@ -830,5 +874,60 @@ fn marker_for_change(change: &Change) -> colored::ColoredString {
         }
         Some("resource.delete") | Some("variable.delete") => "-".red().bold(),
         _ => "~".yellow().bold(),
+    }
+}
+
+#[cfg(test)]
+mod runner_discovery_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_runner(dir: &std::path::Path) -> PathBuf {
+        let bin_dir = dir.join("node_modules").join(".bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let binary = if cfg!(windows) {
+            "railway-iac-ts.cmd"
+        } else {
+            "railway-iac-ts"
+        };
+        let path = bin_dir.join(binary);
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn finds_a_runner_inside_the_repository() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let expected = make_runner(root.path());
+        let nested = root.path().join("apps").join("web");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(find_project_runner(&nested), Some(expected));
+    }
+
+    #[test]
+    fn does_not_search_above_the_repository_root() {
+        let outer = tempfile::tempdir().unwrap();
+        make_runner(outer.path());
+        let repo = outer.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+
+        assert_eq!(find_project_runner(&repo), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_runner_reachable_through_a_world_writable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let shared = root.path().join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        make_runner(&shared);
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+
+        assert_eq!(find_project_runner(&shared), None);
     }
 }

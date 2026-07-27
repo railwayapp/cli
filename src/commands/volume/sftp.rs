@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -132,12 +132,60 @@ impl LocalOverwritePolicy {
 
 struct VolumeSftpHandler {
     disconnected: Arc<AtomicBool>,
+    relay_host: &'static str,
+    relay_port: u16,
 }
 
 impl VolumeSftpHandler {
-    fn new(disconnected: Arc<AtomicBool>) -> Self {
-        Self { disconnected }
+    fn new(disconnected: Arc<AtomicBool>, relay_host: &'static str, relay_port: u16) -> Self {
+        Self {
+            disconnected,
+            relay_host,
+            relay_port,
+        }
     }
+}
+
+/// Rejects a local download destination that already exists as a symlink.
+///
+/// The remote side chooses the bytes; the local tree decides where they land.
+/// `create_dir_all` happily accepts a path that resolves through a symlink to a
+/// directory, and `File::create` follows a final symlink and truncates its
+/// target, so a link planted in the destination — an ordinary Git entry in a
+/// shared repo — redirects the write outside the directory the operator chose.
+/// Checked with `symlink_metadata` so the link itself is inspected, not what it
+/// points at.
+async fn reject_symlinked_destination(path: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => bail!(
+            "Local path {} is a symlink. Refusing to write through it — the download would land outside the directory you selected. Remove or rename it and retry.",
+            path.display()
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("Failed to inspect local path {}", path.display()))
+        }
+    }
+}
+
+/// Accepts a server-supplied directory entry name only if it is a single
+/// ordinary path component, so joining it onto a local directory cannot escape
+/// that directory. Rejects `.` / `..`, anything containing a separator (`/` on
+/// every platform, and `\` because Windows treats it as one), absolute and
+/// drive-qualified forms, and Windows alternate data streams.
+fn safe_local_component(name: &str) -> Option<&str> {
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return None;
+    }
+    // `C:evil` resolves against the drive's current directory on Windows.
+    if name.contains(':') {
+        return None;
+    }
+    Some(name)
 }
 
 /// SSH relay endpoint for the current environment (host, port). Tracks the
@@ -166,10 +214,38 @@ impl russh::client::Handler for VolumeSftpHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // no idea if Railway has a pre-defined list of server keys, can help prevent mitm attacks
-        Ok(true)
+        // Trust on first use, matching the `StrictHostKeyChecking=accept-new`
+        // policy the native `railway ssh` path already uses: record the relay's
+        // key the first time we see it, then refuse a key that has changed. An
+        // unconditional `Ok(true)` here would mean anything that can answer on
+        // the relay's address receives the SFTP session, including the file
+        // contents and the credentials embedded in them.
+        match russh::keys::check_known_hosts(self.relay_host, self.relay_port, server_public_key) {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                russh::keys::known_hosts::learn_known_hosts(
+                    self.relay_host,
+                    self.relay_port,
+                    server_public_key,
+                )
+                .with_context(|| {
+                    format!("Failed to record the host key for {}", self.relay_host)
+                })?;
+                Ok(true)
+            }
+            Err(russh::keys::Error::KeyChanged { line }) => bail!(
+                "The host key for {} does not match the one recorded in ~/.ssh/known_hosts \
+                 (line {line}). This can mean the relay's key was rotated, or that something \
+                 is impersonating it. Verify the change before removing that line.",
+                self.relay_host,
+            ),
+            Err(err) => Err(anyhow::Error::new(err).context(format!(
+                "Failed to verify the host key for {}",
+                self.relay_host
+            ))),
+        }
     }
 
     async fn disconnected(
@@ -209,7 +285,7 @@ impl VolumeSftp {
             let mut session = russh::client::connect(
                 Arc::new(russh::client::Config::default()),
                 (relay_host, relay_port),
-                VolumeSftpHandler::new(Arc::clone(&self.disconnected)),
+                VolumeSftpHandler::new(Arc::clone(&self.disconnected), relay_host, relay_port),
             )
             .await
             .with_context(|| format!("Failed to connect to Railway SFTP at {relay_host}"))?;
@@ -466,6 +542,8 @@ impl VolumeSftp {
             .await
             .with_context(|| format!("Failed to open remote file {remote_path}"))?;
 
+        reject_symlinked_destination(local_path).await?;
+
         let local_path_exists = tokio::fs::try_exists(local_path).await.with_context(|| {
             format!(
                 "Failed to check if local file {} exists",
@@ -600,9 +678,23 @@ impl VolumeSftp {
 
         while let Some((remote_dir, local_dir)) = pending.pop() {
             for entry in self.list_files_once(&remote_dir).await? {
-                let local_entry_path = local_dir.join(&entry.name);
+                // `entry.name` is chosen by whatever is answering as the SFTP
+                // server. `Path::join` resolves `..` lexically and lets an
+                // absolute or drive-qualified name replace the destination
+                // outright, so the name has to be a single ordinary component
+                // before it is joined onto a local path.
+                let local_entry_path = match safe_local_component(&entry.name) {
+                    Some(name) => local_dir.join(name),
+                    None => bail!(
+                        "Remote directory listing contained an unsafe filename {:?} under {}. \
+                         Refusing to write outside the download directory.",
+                        entry.name,
+                        remote_dir
+                    ),
+                };
 
                 if entry.kind == "directory" {
+                    reject_symlinked_destination(&local_entry_path).await?;
                     tokio::fs::create_dir_all(&local_entry_path)
                         .await
                         .with_context(|| {
@@ -1014,5 +1106,76 @@ mod tests {
             VolumeSftp::upload_destination(Path::new("dump.sql"), "/backups", true).unwrap(),
             "/backups/dump.sql"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_a_symlinked_download_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = root.path().join("download").join("export");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert!(reject_symlinked_destination(&link).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_a_symlinked_file_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let victim = root.path().join("victim.txt");
+        std::fs::write(&victim, "baseline").unwrap();
+        let link = root.path().join("payload.txt");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        assert!(reject_symlinked_destination(&link).await.is_err());
+        // The link is refused, not followed — the target is untouched.
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "baseline");
+    }
+
+    #[tokio::test]
+    async fn allows_missing_and_ordinary_destinations() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("not-there.txt");
+        assert!(reject_symlinked_destination(&missing).await.is_ok());
+
+        let real = root.path().join("real.txt");
+        std::fs::write(&real, "x").unwrap();
+        assert!(reject_symlinked_destination(&real).await.is_ok());
+
+        let dir = root.path().join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(reject_symlinked_destination(&dir).await.is_ok());
+    }
+
+    #[test]
+    fn safe_local_component_accepts_ordinary_names() {
+        assert_eq!(safe_local_component("dump.sql"), Some("dump.sql"));
+        assert_eq!(safe_local_component(".env"), Some(".env"));
+        assert_eq!(safe_local_component("..hidden"), Some("..hidden"));
+        assert_eq!(safe_local_component("a b.txt"), Some("a b.txt"));
+    }
+
+    #[test]
+    fn safe_local_component_rejects_traversal_and_separators() {
+        for name in [
+            "..",
+            ".",
+            "",
+            "../../.ssh/authorized_keys",
+            "../evil",
+            "sub/dir",
+            "..\\evil",
+            "sub\\dir",
+            "/etc/passwd",
+            "C:\\Windows\\System32\\evil.dll",
+            "C:evil",
+            "file.txt:stream",
+            "nul\0byte",
+        ] {
+            assert_eq!(safe_local_component(name), None, "should reject {name:?}");
+        }
     }
 }

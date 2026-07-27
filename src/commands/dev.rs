@@ -198,10 +198,25 @@ async fn clean_command(args: CleanArgs) -> Result<()> {
         return Ok(());
     }
 
-    let confirmed = crate::util::prompt::prompt_confirm_with_default(
-        "Stop services and remove volume data?",
-        false,
-    )?;
+    // Recursively removing the compose file's parent is only sound for the
+    // directory the CLI created for itself. With `--output` the parent is the
+    // caller's own directory — `./docker-compose.yml` makes it the repository
+    // root — so a custom path gets the file removed and nothing else.
+    let owns_parent_dir = args.output.is_none();
+
+    let prompt = if owns_parent_dir {
+        match compose_path.parent() {
+            Some(parent) => format!(
+                "Stop services, remove volume data, and delete {}?",
+                parent.display()
+            ),
+            None => "Stop services and remove volume data?".to_string(),
+        }
+    } else {
+        "Stop services and remove volume data?".to_string()
+    };
+
+    let confirmed = crate::util::prompt::prompt_confirm_with_default(&prompt, false)?;
     if !confirmed {
         return Ok(());
     }
@@ -225,8 +240,11 @@ async fn clean_command(args: CleanArgs) -> Result<()> {
         }
     }
 
-    if let Some(parent) = compose_path.parent() {
-        std::fs::remove_dir_all(parent)?;
+    match compose_path.parent() {
+        Some(parent) if owns_parent_dir => std::fs::remove_dir_all(parent)
+            .with_context(|| format!("Failed to remove {}", parent.display()))?,
+        _ => std::fs::remove_file(&compose_path)
+            .with_context(|| format!("Failed to remove {}", compose_path.display()))?,
     }
 
     println!("{}", "Services cleaned".green());
@@ -1053,18 +1071,27 @@ async fn up_command(args: UpArgs) -> Result<()> {
         volumes: compose_volumes,
     };
 
+    let cli_owns_output_dir = args.output.is_none();
     let output_path = args
         .output
         .unwrap_or_else(|| get_develop_dir(&project_id).join("docker-compose.yml"));
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
+        // Only lock down the directory the CLI owns. With --output the parent
+        // belongs to the caller and is not ours to re-permission.
+        if cli_owns_output_dir {
+            crate::config::secure_config_dir(parent)?;
+        }
     }
 
     let yaml = serde_yaml::to_string(&compose)?;
 
+    // This file carries every resolved service variable, so it must not inherit
+    // a world-readable mode from the ambient umask.
     let tmp_path = output_path.with_extension("yml.tmp");
     std::fs::write(&tmp_path, &yaml)?;
+    crate::config::secure_config_file(&tmp_path)?;
     std::fs::rename(&tmp_path, &output_path)?;
 
     if args.dry_run {
@@ -1302,7 +1329,14 @@ fn build_image_service_compose(
             .for_service(service_id)
             .expect("image services added to ctx before calling this fn");
 
-        let environment = override_railway_vars(raw_vars, Some(&service_domains), ctx);
+        // Compose interpolates `$VAR` and `${VAR}` in values, resolving them
+        // from the environment of whoever runs `docker compose` — the developer,
+        // not Railway. A variable value is remote input, so an unescaped `$`
+        // lets whoever set it pull a host-only secret into the container. Escape
+        // once, here, so every value reaches Compose as a literal. This mirrors
+        // what `start_command` below already does.
+        let environment =
+            escape_compose_values(override_railway_vars(raw_vars, Some(&service_domains), ctx));
 
         let ports: Vec<String> = port_infos
             .iter()
@@ -1560,4 +1594,79 @@ fn setup_https(project_name: &str, project_id: &str) -> Result<Option<HttpsConfi
     };
 
     Ok(Some(config))
+}
+
+/// Escape every value so Docker Compose treats it as a literal.
+///
+/// Compose resolves `$VAR` / `${VAR}` in values against the environment of the
+/// process running `docker compose`, and doubling the dollar sign is the
+/// documented way to opt out. Applied once to the whole map, so a value that
+/// genuinely contains a dollar sign still arrives intact in the container.
+fn escape_compose_values(vars: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    vars.into_iter()
+        .map(|(key, value)| (key, value.replace('$', "$$")))
+        .collect()
+}
+
+#[cfg(test)]
+mod compose_interpolation_tests {
+    use super::escape_compose_values;
+    use std::collections::BTreeMap;
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn escapes_every_interpolation_form() {
+        let escaped = escape_compose_values(map(&[
+            ("BRACED", "${AWS_SECRET_ACCESS_KEY}"),
+            ("BARE", "$GITHUB_TOKEN"),
+            ("DEFAULTED", "${NPM_TOKEN:-fallback}"),
+            ("REQUIRED", "${DATABASE_URL:?missing}"),
+            ("NESTED", "${A${B}}"),
+        ]));
+
+        for value in escaped.values() {
+            assert!(
+                !value.contains("$$$") || value.starts_with("$$$$"),
+                "unbalanced escaping: {value}"
+            );
+            // No single dollar survives: every one is doubled.
+            let singles = value
+                .replace("$$", "")
+                .chars()
+                .filter(|c| *c == '$')
+                .count();
+            assert_eq!(singles, 0, "unescaped dollar in {value}");
+        }
+        assert_eq!(escaped["BRACED"], "$${AWS_SECRET_ACCESS_KEY}");
+        assert_eq!(escaped["BARE"], "$$GITHUB_TOKEN");
+    }
+
+    #[test]
+    fn leaves_ordinary_values_unchanged() {
+        let escaped = escape_compose_values(map(&[
+            ("PORT", "3000"),
+            (
+                "DATABASE_URL",
+                "postgres://user:pw@db.railway.internal:5432/app",
+            ),
+        ]));
+        assert_eq!(escaped["PORT"], "3000");
+        assert_eq!(
+            escaped["DATABASE_URL"],
+            "postgres://user:pw@db.railway.internal:5432/app"
+        );
+    }
+
+    #[test]
+    fn a_literal_dollar_in_a_password_survives_to_the_container() {
+        // Escaped on the way in, un-escaped by Compose on the way out.
+        let escaped = escape_compose_values(map(&[("PASSWORD", "pa$$w0rd")]));
+        assert_eq!(escaped["PASSWORD"], "pa$$$$w0rd");
+    }
 }
