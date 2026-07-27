@@ -14,20 +14,67 @@ pub struct Args {
     #[clap(long)]
     agent: Vec<String>,
 
-    /// Configure the remote HTTP MCP server at mcp.railway.com instead of the local stdio server.
+    /// Configure the remote MCP server at mcp.railway.com, bridged through `railway mcp proxy`
+    /// so it authenticates with your existing CLI login (no browser OAuth flow).
     #[clap(long)]
     remote: bool,
+
+    /// With --remote: write the plain HTTP server URL instead of the CLI proxy, so the
+    /// editor runs its own OAuth (browser consent) flow.
+    #[clap(long, requires = "remote")]
+    oauth: bool,
+}
+
+/// Which flavor of the Railway MCP server an install writes into a harness config.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum McpTransport {
+    /// `railway mcp` — local stdio server backed by GraphQL.
+    Local,
+    /// `railway mcp proxy` — local stdio bridge to mcp.railway.com that
+    /// authenticates with the CLI's stored login.
+    RemoteProxy,
+    /// Plain mcp.railway.com URL — the editor authenticates via its own OAuth flow.
+    RemoteOauth,
+}
+
+impl McpTransport {
+    pub(crate) fn from_flags(remote: bool, oauth: bool) -> Self {
+        match (remote, oauth) {
+            (false, _) => Self::Local,
+            (true, false) => Self::RemoteProxy,
+            (true, true) => Self::RemoteOauth,
+        }
+    }
+}
+
+/// The argv written into harness configs for the stdio transports.
+fn stdio_args(transport: McpTransport) -> Vec<&'static str> {
+    match transport {
+        McpTransport::Local => vec!["mcp"],
+        McpTransport::RemoteProxy => vec!["mcp", "proxy"],
+        // RemoteOauth entries are URL-based; callers never ask for its argv.
+        McpTransport::RemoteOauth => unreachable!("RemoteOauth has no stdio argv"),
+    }
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    install_mcp(&args.agent, args.remote, false).await
+    install_mcp(
+        &args.agent,
+        McpTransport::from_flags(args.remote, args.oauth),
+        false,
+    )
+    .await
 }
 
 // `quiet` suppresses the section header, the "Installing … to:" line, per-tool
 // success lines, and the footer/restart notice — used by the embedded
 // agent-setup flow, which prints its own collapsed one-line summary. Failures
 // are always surfaced so a silent error can't contradict that summary.
-pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool, quiet: bool) -> Result<()> {
+pub(crate) async fn install_mcp(
+    agent_filter: &[String],
+    transport: McpTransport,
+    quiet: bool,
+) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let tools = resolve_tools(&home, agent_filter)?;
 
@@ -57,16 +104,18 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool, quiet: bo
     }
 
     let names: Vec<_> = configurable.iter().map(|t| t.name).collect();
-    let transport = if remote {
-        format!("remote ({})", REMOTE_MCP_URL).cyan()
-    } else {
-        "local stdio".cyan()
+    let transport_desc = match transport {
+        McpTransport::Local => "local stdio".to_string(),
+        McpTransport::RemoteProxy => {
+            format!("remote ({REMOTE_MCP_URL} via CLI proxy, uses `railway login`)")
+        }
+        McpTransport::RemoteOauth => format!("remote ({REMOTE_MCP_URL}, editor OAuth)"),
     };
     if !quiet {
         println!(
             "{} {} {} {}\n",
             "Installing".bold(),
-            transport,
+            transport_desc.cyan(),
             "to:".bold(),
             names.join(", ")
         );
@@ -74,7 +123,7 @@ pub(crate) async fn install_mcp(agent_filter: &[String], remote: bool, quiet: bo
 
     for tool in &configurable {
         let path = config_path(tool.slug, &home);
-        match install_for(tool.slug, &path, remote) {
+        match install_for(tool.slug, &path, transport) {
             Ok(()) => {
                 if !quiet {
                     println!(
@@ -127,7 +176,13 @@ fn config_path(slug: &str, home: &Path) -> PathBuf {
     }
 }
 
-/// True when a railway MCP entry is configured for either transport — the
+const ALL_TRANSPORTS: [McpTransport; 3] = [
+    McpTransport::Local,
+    McpTransport::RemoteProxy,
+    McpTransport::RemoteOauth,
+];
+
+/// True when a railway MCP entry is configured for any transport — the
 /// help health check doesn't care which one `setup agent` installed. Reads
 /// each config file once instead of once per transport.
 pub(crate) fn mcp_configured_any_transport(home: &Path, slug: &str) -> bool {
@@ -137,68 +192,95 @@ pub(crate) fn mcp_configured_any_transport(home: &Path, slug: &str) -> bool {
             .ok()
             .and_then(|root| root.pointer("/mcpServers/railway").cloned())
             .is_some_and(|entry| {
-                json_mcp_entry_matches(&entry, false) || json_mcp_entry_matches(&entry, true)
+                ALL_TRANSPORTS
+                    .iter()
+                    .any(|t| json_mcp_entry_matches(&entry, *t))
             }),
         "opencode" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcp/railway").cloned())
             .is_some_and(|entry| {
-                opencode_mcp_entry_matches(&entry, false)
-                    || opencode_mcp_entry_matches(&entry, true)
+                ALL_TRANSPORTS
+                    .iter()
+                    .any(|t| opencode_mcp_entry_matches(&entry, *t))
             }),
-        // Codex keeps its TOML matching in one place at the cost of a second
-        // read for this one tool.
-        "codex" => codex_mcp_configured(&path, false) || codex_mcp_configured(&path, true),
+        // Codex keeps its TOML matching in one place at the cost of extra
+        // reads for this one tool.
+        "codex" => ALL_TRANSPORTS
+            .iter()
+            .any(|t| codex_mcp_configured(&path, *t)),
         _ => false,
     }
 }
 
-pub(crate) fn mcp_configured_for_slug(home: &Path, slug: &str, remote: bool) -> bool {
+pub(crate) fn mcp_configured_for_slug(home: &Path, slug: &str, transport: McpTransport) -> bool {
     let path = config_path(slug, home);
 
     match slug {
         "claude-code" | "cursor" | "copilot" | "factory-droid" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcpServers/railway").cloned())
-            .is_some_and(|entry| json_mcp_entry_matches(&entry, remote)),
+            .is_some_and(|entry| json_mcp_entry_matches(&entry, transport)),
         "opencode" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcp/railway").cloned())
-            .is_some_and(|entry| opencode_mcp_entry_matches(&entry, remote)),
-        "codex" => codex_mcp_configured(&path, remote),
+            .is_some_and(|entry| opencode_mcp_entry_matches(&entry, transport)),
+        "codex" => codex_mcp_configured(&path, transport),
         _ => false,
     }
 }
 
-fn json_mcp_entry_matches(entry: &JsonValue, remote: bool) -> bool {
-    if remote {
-        entry.get("url").and_then(JsonValue::as_str) == Some(REMOTE_MCP_URL)
-    } else {
-        entry.get("command").and_then(JsonValue::as_str) == Some("railway")
-            && entry
-                .get("args")
-                .and_then(JsonValue::as_array)
-                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("mcp")))
+/// Distinguish `railway mcp` (local) from `railway mcp proxy`: a bare
+/// "contains mcp" check would classify a proxy entry as a local install.
+fn stdio_argv_matches<'a>(
+    args: impl Iterator<Item = &'a str> + Clone,
+    transport: McpTransport,
+) -> bool {
+    let has_mcp = args.clone().any(|a| a == "mcp");
+    let has_proxy = args.clone().any(|a| a == "proxy");
+    has_mcp && (has_proxy == matches!(transport, McpTransport::RemoteProxy))
+}
+
+fn json_mcp_entry_matches(entry: &JsonValue, transport: McpTransport) -> bool {
+    match transport {
+        McpTransport::RemoteOauth => {
+            entry.get("url").and_then(JsonValue::as_str) == Some(REMOTE_MCP_URL)
+        }
+        stdio => {
+            entry.get("command").and_then(JsonValue::as_str) == Some("railway")
+                && entry
+                    .get("args")
+                    .and_then(JsonValue::as_array)
+                    .is_some_and(|args| {
+                        stdio_argv_matches(args.iter().filter_map(JsonValue::as_str), stdio)
+                    })
+        }
     }
 }
 
-fn opencode_mcp_entry_matches(entry: &JsonValue, remote: bool) -> bool {
-    if remote {
-        entry.get("type").and_then(JsonValue::as_str) == Some("remote")
-            && entry.get("url").and_then(JsonValue::as_str) == Some(REMOTE_MCP_URL)
-    } else {
-        entry.get("type").and_then(JsonValue::as_str) == Some("local")
-            && entry
-                .get("command")
-                .and_then(JsonValue::as_array)
-                .is_some_and(|command| {
-                    command.first().and_then(JsonValue::as_str) == Some("railway")
-                        && command.iter().any(|arg| arg.as_str() == Some("mcp"))
-                })
+fn opencode_mcp_entry_matches(entry: &JsonValue, transport: McpTransport) -> bool {
+    match transport {
+        McpTransport::RemoteOauth => {
+            entry.get("type").and_then(JsonValue::as_str) == Some("remote")
+                && entry.get("url").and_then(JsonValue::as_str) == Some(REMOTE_MCP_URL)
+        }
+        stdio => {
+            entry.get("type").and_then(JsonValue::as_str) == Some("local")
+                && entry
+                    .get("command")
+                    .and_then(JsonValue::as_array)
+                    .is_some_and(|command| {
+                        command.first().and_then(JsonValue::as_str) == Some("railway")
+                            && stdio_argv_matches(
+                                command.iter().skip(1).filter_map(JsonValue::as_str),
+                                stdio,
+                            )
+                    })
+        }
     }
 }
 
-fn codex_mcp_configured(path: &Path, remote: bool) -> bool {
+fn codex_mcp_configured(path: &Path, transport: McpTransport) -> bool {
     let Ok(existing) = std::fs::read_to_string(path) else {
         return false;
     };
@@ -208,67 +290,70 @@ fn codex_mcp_configured(path: &Path, remote: bool) -> bool {
 
     doc.get("mcp_servers")
         .and_then(|servers| servers.get("railway"))
-        .is_some_and(|entry| {
-            if remote {
+        .is_some_and(|entry| match transport {
+            McpTransport::RemoteOauth => {
                 entry.get("url").and_then(toml::Value::as_str) == Some(REMOTE_MCP_URL)
-            } else {
+            }
+            stdio => {
                 entry.get("command").and_then(toml::Value::as_str) == Some("railway")
                     && entry
                         .get("args")
                         .and_then(toml::Value::as_array)
-                        .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("mcp")))
+                        .is_some_and(|args| {
+                            stdio_argv_matches(args.iter().filter_map(toml::Value::as_str), stdio)
+                        })
             }
         })
 }
 
-fn install_for(slug: &str, path: &Path, remote: bool) -> Result<()> {
+fn install_for(slug: &str, path: &Path, transport: McpTransport) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory {}", parent.display()))?;
     }
     match slug {
         "claude-code" => {
-            let entry = if remote {
-                json!({ "type": "http", "url": REMOTE_MCP_URL })
-            } else {
-                json!({ "command": "railway", "args": ["mcp"] })
+            let entry = match transport {
+                McpTransport::RemoteOauth => json!({ "type": "http", "url": REMOTE_MCP_URL }),
+                stdio => json!({ "command": "railway", "args": stdio_args(stdio) }),
             };
             write_json_mcp_servers(path, entry)
         }
         "cursor" => {
             // Cursor auto-detects HTTP/SSE from the presence of `url`.
-            let entry = if remote {
-                json!({ "url": REMOTE_MCP_URL })
-            } else {
-                json!({ "command": "railway", "args": ["mcp"] })
+            let entry = match transport {
+                McpTransport::RemoteOauth => json!({ "url": REMOTE_MCP_URL }),
+                stdio => json!({ "command": "railway", "args": stdio_args(stdio) }),
             };
             write_json_mcp_servers(path, entry)
         }
-        "opencode" => write_opencode_mcp(path, remote),
-        "codex" => write_codex_toml(path, remote),
+        "opencode" => write_opencode_mcp(path, transport),
+        "codex" => write_codex_toml(path, transport),
         "copilot" => {
-            let entry = if remote {
-                json!({ "type": "http", "url": REMOTE_MCP_URL, "tools": ["*"] })
-            } else {
-                json!({
+            let entry = match transport {
+                McpTransport::RemoteOauth => {
+                    json!({ "type": "http", "url": REMOTE_MCP_URL, "tools": ["*"] })
+                }
+                stdio => json!({
                     "type": "local",
                     "command": "railway",
-                    "args": ["mcp"],
+                    "args": stdio_args(stdio),
                     "tools": ["*"]
-                })
+                }),
             };
             write_json_mcp_servers(path, entry)
         }
         "factory-droid" => {
-            let entry = if remote {
-                json!({ "type": "http", "url": REMOTE_MCP_URL, "disabled": false })
-            } else {
-                json!({
+            let entry = match transport {
+                McpTransport::RemoteOauth => {
+                    json!({ "type": "http", "url": REMOTE_MCP_URL, "disabled": false })
+                }
+                stdio => json!({
                     "type": "stdio",
                     "command": "railway",
-                    "args": ["mcp"],
+                    "args": stdio_args(stdio),
                     "disabled": false
-                })
+                }),
             };
             write_json_mcp_servers(path, entry)
         }
@@ -297,20 +382,23 @@ fn write_json_mcp_servers(path: &Path, entry: JsonValue) -> Result<()> {
 /// OpenCode uses an `mcp` key with a slightly different per-server schema
 /// (`type: "local"` with `command` as an argv array, or `type: "remote"` with
 /// `url`). See docs.opencode.ai for the canonical shape.
-fn write_opencode_mcp(path: &Path, remote: bool) -> Result<()> {
+fn write_opencode_mcp(path: &Path, transport: McpTransport) -> Result<()> {
     let mut root = read_json_or_empty(path)?;
-    let entry = if remote {
-        json!({
+    let entry = match transport {
+        McpTransport::RemoteOauth => json!({
             "type": "remote",
             "url": REMOTE_MCP_URL,
             "enabled": true,
-        })
-    } else {
-        json!({
-            "type": "local",
-            "command": ["railway", "mcp"],
-            "enabled": true,
-        })
+        }),
+        stdio => {
+            let mut command = vec!["railway"];
+            command.extend(stdio_args(stdio));
+            json!({
+                "type": "local",
+                "command": command,
+                "enabled": true,
+            })
+        }
     };
 
     let obj = root
@@ -336,7 +424,7 @@ fn write_opencode_mcp(path: &Path, remote: bool) -> Result<()> {
     write_json_pretty(path, &root)
 }
 
-fn write_codex_toml(path: &Path, remote: bool) -> Result<()> {
+fn write_codex_toml(path: &Path, transport: McpTransport) -> Result<()> {
     let existing = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -363,20 +451,28 @@ fn write_codex_toml(path: &Path, remote: bool) -> Result<()> {
         .context("`mcp_servers` is not a TOML table")?;
 
     let mut railway = toml::value::Table::new();
-    if remote {
-        railway.insert(
-            "url".to_string(),
-            toml::Value::String(REMOTE_MCP_URL.to_string()),
-        );
-    } else {
-        railway.insert(
-            "command".to_string(),
-            toml::Value::String("railway".to_string()),
-        );
-        railway.insert(
-            "args".to_string(),
-            toml::Value::Array(vec![toml::Value::String("mcp".to_string())]),
-        );
+    match transport {
+        McpTransport::RemoteOauth => {
+            railway.insert(
+                "url".to_string(),
+                toml::Value::String(REMOTE_MCP_URL.to_string()),
+            );
+        }
+        stdio => {
+            railway.insert(
+                "command".to_string(),
+                toml::Value::String("railway".to_string()),
+            );
+            railway.insert(
+                "args".to_string(),
+                toml::Value::Array(
+                    stdio_args(stdio)
+                        .into_iter()
+                        .map(|a| toml::Value::String(a.to_string()))
+                        .collect(),
+                ),
+            );
+        }
     }
     servers.insert("railway".to_string(), toml::Value::Table(railway));
 
@@ -491,8 +587,55 @@ mod tests {
         )
         .unwrap();
 
-        assert!(mcp_configured_for_slug(home.path(), "cursor", false));
-        assert!(!mcp_configured_for_slug(home.path(), "cursor", true));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::Local
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::RemoteProxy
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::RemoteOauth
+        ));
+    }
+
+    #[test]
+    fn proxy_entry_is_not_mistaken_for_local() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        install_for("cursor", &path, McpTransport::RemoteProxy).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let root: JsonValue = serde_json::from_str(&written).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+        assert_eq!(
+            railway.get("args").unwrap(),
+            &serde_json::json!(["mcp", "proxy"])
+        );
+
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::RemoteProxy
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::Local
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::RemoteOauth
+        ));
+        assert!(mcp_configured_any_transport(home.path(), "cursor"));
     }
 
     #[test]
@@ -518,8 +661,53 @@ mod tests {
         )
         .unwrap();
 
-        assert!(mcp_configured_for_slug(home.path(), "opencode", true));
-        assert!(!mcp_configured_for_slug(home.path(), "opencode", false));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "opencode",
+            McpTransport::RemoteOauth
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "opencode",
+            McpTransport::Local
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "opencode",
+            McpTransport::RemoteProxy
+        ));
+    }
+
+    #[test]
+    fn writes_and_detects_opencode_proxy_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        install_for("opencode", &path, McpTransport::RemoteProxy).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let root: JsonValue = serde_json::from_str(&written).unwrap();
+        let railway = root.pointer("/mcp/railway").unwrap();
+        assert_eq!(
+            railway.get("command").unwrap(),
+            &serde_json::json!(["railway", "mcp", "proxy"])
+        );
+
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "opencode",
+            McpTransport::RemoteProxy
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "opencode",
+            McpTransport::Local
+        ));
     }
 
     #[test]
@@ -537,8 +725,52 @@ mod tests {
         )
         .unwrap();
 
-        assert!(mcp_configured_for_slug(home.path(), "codex", false));
-        assert!(!mcp_configured_for_slug(home.path(), "codex", true));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "codex",
+            McpTransport::Local
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "codex",
+            McpTransport::RemoteProxy
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "codex",
+            McpTransport::RemoteOauth
+        ));
+    }
+
+    #[test]
+    fn writes_and_detects_codex_proxy_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".codex").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        write_codex_toml(&path, McpTransport::RemoteProxy).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let doc = written.parse::<toml::Value>().unwrap();
+        let args = doc
+            .get("mcp_servers")
+            .and_then(|servers| servers.get("railway"))
+            .and_then(|railway| railway.get("args"))
+            .and_then(toml::Value::as_array)
+            .unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[1].as_str(), Some("proxy"));
+
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "codex",
+            McpTransport::RemoteProxy
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "codex",
+            McpTransport::Local
+        ));
     }
 
     #[test]
@@ -555,8 +787,16 @@ mod tests {
         )
         .unwrap();
 
-        assert!(mcp_configured_for_slug(home.path(), "codex", true));
-        assert!(!mcp_configured_for_slug(home.path(), "codex", false));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "codex",
+            McpTransport::RemoteOauth
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "codex",
+            McpTransport::Local
+        ));
     }
 
     #[test]
@@ -565,7 +805,7 @@ mod tests {
         let path = home.path().join(".codex").join("config.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        write_codex_toml(&path, true).unwrap();
+        write_codex_toml(&path, McpTransport::RemoteOauth).unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         let doc = written.parse::<toml::Value>().unwrap();
@@ -588,7 +828,7 @@ mod tests {
         let path = home.path().join(".copilot").join("mcp-config.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        install_for("copilot", &path, false).unwrap();
+        install_for("copilot", &path, McpTransport::Local).unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         let root: JsonValue = serde_json::from_str(&written).unwrap();
@@ -602,7 +842,11 @@ mod tests {
             railway.get("command").and_then(JsonValue::as_str),
             Some("railway")
         );
-        assert!(mcp_configured_for_slug(home.path(), "copilot", false));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "copilot",
+            McpTransport::Local
+        ));
     }
 
     #[test]
@@ -611,7 +855,7 @@ mod tests {
         let path = home.path().join(".factory").join("mcp.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        install_for("factory-droid", &path, true).unwrap();
+        install_for("factory-droid", &path, McpTransport::RemoteOauth).unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         let root: JsonValue = serde_json::from_str(&written).unwrap();
@@ -625,6 +869,10 @@ mod tests {
             railway.get("url").and_then(JsonValue::as_str),
             Some("https://mcp.railway.com")
         );
-        assert!(mcp_configured_for_slug(home.path(), "factory-droid", true));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "factory-droid",
+            McpTransport::RemoteOauth
+        ));
     }
 }

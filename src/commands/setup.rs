@@ -35,9 +35,15 @@ pub struct AgentArgs {
     #[clap(short = 'y', long)]
     yes: bool,
 
-    /// Configure the remote HTTP MCP server at mcp.railway.com instead of the local stdio server.
+    /// Configure the remote MCP server (mcp.railway.com) via the CLI proxy — it authenticates
+    /// with your existing `railway login`, no browser OAuth flow.
     #[clap(long)]
     remote: bool,
+
+    /// With --remote: write the plain HTTP server URL instead of the CLI proxy, so the
+    /// editor runs its own OAuth (browser consent) flow.
+    #[clap(long, requires = "remote")]
+    oauth: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -66,7 +72,8 @@ impl fmt::Display for ToolChoice {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum McpChoice {
     Local,
-    Remote,
+    RemoteProxy,
+    RemoteOauth,
     Skip,
 }
 
@@ -78,24 +85,42 @@ impl fmt::Display for McpChoice {
                 "Local (default)  {}",
                 "— runs `railway mcp` as a stdio server".dimmed()
             ),
-            McpChoice::Remote => write!(
+            McpChoice::RemoteProxy => write!(
                 f,
                 "Remote           {}",
-                "— https://mcp.railway.com (HTTP)".dimmed()
+                "— mcp.railway.com via the CLI proxy (uses your `railway login`)".dimmed()
+            ),
+            McpChoice::RemoteOauth => write!(
+                f,
+                "Remote (OAuth)   {}",
+                "— https://mcp.railway.com directly; your editor handles OAuth".dimmed()
             ),
             McpChoice::Skip => write!(f, "Skip             {}", "— don't configure MCP".dimmed()),
         }
     }
 }
 
-fn pick_mcp_choice(remote_flag: bool, non_interactive: bool) -> Result<McpChoice> {
+fn pick_mcp_choice(
+    remote_flag: bool,
+    oauth_flag: bool,
+    non_interactive: bool,
+) -> Result<McpChoice> {
     if remote_flag {
-        return Ok(McpChoice::Remote);
+        return Ok(if oauth_flag {
+            McpChoice::RemoteOauth
+        } else {
+            McpChoice::RemoteProxy
+        });
     }
     if non_interactive {
         return Ok(McpChoice::Local);
     }
-    let options = vec![McpChoice::Local, McpChoice::Remote, McpChoice::Skip];
+    let options = vec![
+        McpChoice::Local,
+        McpChoice::RemoteProxy,
+        McpChoice::RemoteOauth,
+        McpChoice::Skip,
+    ];
     inquire::Select::new("Configure MCP server:", options)
         .with_render_config(Configs::get_render_config())
         .prompt()
@@ -240,15 +265,37 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
 
     // Step 2: MCP install (skips universal internally — no MCP convention).
     // `--remote` short-circuits the prompt; `-y`/non-TTY defaults to local.
-    let mcp_choice = pick_mcp_choice(args.remote, non_interactive)?;
+    let mcp_choice = pick_mcp_choice(args.remote, args.oauth, non_interactive)?;
     let mcp_transport = match mcp_choice {
         McpChoice::Local => {
-            install_missing_mcp(&home, &selected_slugs, false, embedded).await?;
+            install_missing_mcp(
+                &home,
+                &selected_slugs,
+                mcp_install::McpTransport::Local,
+                embedded,
+            )
+            .await?;
             Some("local")
         }
-        McpChoice::Remote => {
-            install_missing_mcp(&home, &selected_slugs, true, embedded).await?;
-            Some("remote")
+        McpChoice::RemoteProxy => {
+            install_missing_mcp(
+                &home,
+                &selected_slugs,
+                mcp_install::McpTransport::RemoteProxy,
+                embedded,
+            )
+            .await?;
+            Some("remote-proxy")
+        }
+        McpChoice::RemoteOauth => {
+            install_missing_mcp(
+                &home,
+                &selected_slugs,
+                mcp_install::McpTransport::RemoteOauth,
+                embedded,
+            )
+            .await?;
+            Some("remote-oauth")
         }
         McpChoice::Skip => {
             if !embedded {
@@ -420,13 +467,13 @@ pub(crate) fn print_agent_health_check() {
 async fn install_missing_mcp(
     home: &std::path::Path,
     selected_slugs: &[String],
-    remote: bool,
+    transport: mcp_install::McpTransport,
     quiet: bool,
 ) -> Result<()> {
     let missing_mcp: Vec<String> = selected_slugs
         .iter()
         .filter(|slug| slug.as_str() != "universal")
-        .filter(|slug| !mcp_install::mcp_configured_for_slug(home, slug, remote))
+        .filter(|slug| !mcp_install::mcp_configured_for_slug(home, slug, transport))
         .cloned()
         .collect();
 
@@ -441,7 +488,7 @@ async fn install_missing_mcp(
         return Ok(());
     }
 
-    mcp_install::install_mcp(&missing_mcp, remote, quiet).await
+    mcp_install::install_mcp(&missing_mcp, transport, quiet).await
 }
 
 /// Mirrors the logic at the top of `login::command` without invoking the
