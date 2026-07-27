@@ -13,6 +13,12 @@ const NETWORK_FLOW_TRAFFIC_WIDTH: usize = 10;
 const NETWORK_FLOW_LATENCY_WIDTH: usize = 8;
 const NETWORK_FLOW_STATUS_WIDTH: usize = 16;
 
+const DNS_QUERY_TIME_WIDTH: usize = 30;
+const DNS_QUERY_ZONE_WIDTH: usize = 8;
+const DNS_QUERY_TYPE_WIDTH: usize = 5;
+const DNS_QUERY_RCODE_WIDTH: usize = 9;
+const DNS_QUERY_NAME_WIDTH: usize = 47;
+
 // Trait for common fields on log types
 pub trait LogLike {
     fn message(&self) -> &str;
@@ -257,6 +263,82 @@ pub fn format_network_flow_log_string<T: NetworkFlowLogLike>(log: &T, json: bool
 
 pub fn print_network_flow_log<T: NetworkFlowLogLike>(log: T, json: bool) {
     println!("{}", format_network_flow_log_string(&log, json));
+}
+
+pub trait DnsQueryLogLike: Serialize {
+    fn queried_at(&self) -> &str;
+    fn qname(&self) -> &str;
+    fn qtype(&self) -> &str;
+    fn rcode(&self) -> &str;
+    fn query_zone_value(&self) -> String;
+    fn answers(&self) -> &[String];
+}
+
+pub fn format_dns_query_log_header() -> String {
+    format!(
+        "{:<time_width$} {:<zone_width$} {:<type_width$} {:<rcode_width$} {:<name_width$} {}",
+        "Time".bold(),
+        "Zone".bold(),
+        "Type".bold(),
+        "Rcode".bold(),
+        "Name".bold(),
+        "Answers".bold(),
+        time_width = DNS_QUERY_TIME_WIDTH,
+        zone_width = DNS_QUERY_ZONE_WIDTH,
+        type_width = DNS_QUERY_TYPE_WIDTH,
+        rcode_width = DNS_QUERY_RCODE_WIDTH,
+        name_width = DNS_QUERY_NAME_WIDTH,
+    )
+}
+
+pub fn format_dns_query_log_string<T: DnsQueryLogLike>(log: &T, json: bool) -> String {
+    if json {
+        let mut value = serde_json::to_value(log).unwrap();
+        if let Value::Object(map) = &mut value {
+            map.insert(
+                "timestamp".to_string(),
+                Value::String(log.queried_at().to_string()),
+            );
+        }
+        return serde_json::to_string(&value).unwrap();
+    }
+
+    let zone = log.query_zone_value();
+    let zone = if zone == "internal" {
+        zone.cyan()
+    } else {
+        zone.normal()
+    };
+    let rcode = log.rcode();
+    let rcode = match rcode {
+        "NOERROR" => rcode.green(),
+        "NXDOMAIN" => rcode.yellow(),
+        _ => rcode.red(),
+    };
+    let answers = if log.answers().is_empty() {
+        "-".to_string()
+    } else {
+        log.answers().join(", ")
+    };
+
+    format!(
+        "{:<time_width$} {:<zone_width$} {:<type_width$} {:<rcode_width$} {:<name_width$} {}",
+        log.queried_at().dimmed(),
+        zone,
+        log.qtype(),
+        rcode,
+        log.qname(),
+        answers.dimmed(),
+        time_width = DNS_QUERY_TIME_WIDTH,
+        zone_width = DNS_QUERY_ZONE_WIDTH,
+        type_width = DNS_QUERY_TYPE_WIDTH,
+        rcode_width = DNS_QUERY_RCODE_WIDTH,
+        name_width = DNS_QUERY_NAME_WIDTH,
+    )
+}
+
+pub fn print_dns_query_log<T: DnsQueryLogLike>(log: T, json: bool) {
+    println!("{}", format_dns_query_log_string(&log, json));
 }
 
 fn endpoint(addr: &str, port: i64) -> String {
@@ -505,6 +587,58 @@ impl NetworkFlowLogLike for queries::network_flow_logs::NetworkFlowLogFields {
 
     fn drop_cause(&self) -> Option<&str> {
         self.drop_cause.as_deref()
+    }
+}
+
+impl DnsQueryLogLike for queries::dns_query_logs::DnsQueryLogFields {
+    fn queried_at(&self) -> &str {
+        &self.queried_at
+    }
+
+    fn qname(&self) -> &str {
+        &self.qname
+    }
+
+    fn qtype(&self) -> &str {
+        &self.qtype
+    }
+
+    fn rcode(&self) -> &str {
+        &self.rcode
+    }
+
+    fn query_zone_value(&self) -> String {
+        serialized_enum_value(&self.query_zone)
+    }
+
+    fn answers(&self) -> &[String] {
+        &self.answers
+    }
+}
+
+impl DnsQueryLogLike for subscriptions::dns_query_logs::DnsQueryLogFields {
+    fn queried_at(&self) -> &str {
+        &self.queried_at
+    }
+
+    fn qname(&self) -> &str {
+        &self.qname
+    }
+
+    fn qtype(&self) -> &str {
+        &self.qtype
+    }
+
+    fn rcode(&self) -> &str {
+        &self.rcode
+    }
+
+    fn query_zone_value(&self) -> String {
+        serialized_enum_value(&self.query_zone)
+    }
+
+    fn answers(&self) -> &[String] {
+        &self.answers
     }
 }
 

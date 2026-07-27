@@ -1,0 +1,36 @@
+query DnsQueryLogs(
+  $environmentId: String!
+  $serviceId: String
+  $filter: String
+  $beforeLimit: Int
+  $beforeDate: String
+  $anchorDate: String
+  $afterDate: String
+  $afterLimit: Int
+) {
+  dnsQueryLogs(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    filter: $filter
+    beforeDate: $beforeDate
+    anchorDate: $anchorDate
+    afterDate: $afterDate
+    beforeLimit: $beforeLimit
+    afterLimit: $afterLimit
+  ) {
+    ...DnsQueryLogFields
+  }
+}
+
+fragment DnsQueryLogFields on DnsQueryLog {
+  queriedAt
+  qname
+  qtype
+  rcode
+  queryZone
+  answers
+  cnameChain
+  serviceId
+  deploymentId
+  deploymentInstanceId
+}
