@@ -1,25 +1,58 @@
 //! `railway postgres pgbouncer` -- PgBouncer connection pooling.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
+use csv::ReaderBuilder;
 use serde::Serialize;
+use serde_json::{Map, Value, json};
 
 use crate::controllers::{
-    config::{EnvironmentConfig, fetch_environment_config},
+    config::{EnvironmentConfig, ServiceInstance, Variable, fetch_environment_config},
+    db_stats::{parse_i64, split_sections},
+    exec::exec_in_container,
     postgres_plugins::{self, PgBouncerState},
-    project::{ServiceContext, resolve_service_context},
+    project::{
+        ServiceContext, find_service_instance, get_environment_instances, resolve_service_context,
+    },
+    regions::{
+        build_multi_region_patch, merge_config, region_data_from_deployment_meta,
+        validate_total_replicas,
+    },
     template_apply::{
         self, ApplyKind, ApplyTemplateParams, PGBOUNCER_TEMPLATE_CODE, RevertTemplateParams,
+        stage_and_commit_patch,
     },
 };
 
 use super::{
-    ResourceRef, confirm_or_bail, not_yet_implemented, print_field, resolve_root, service_name_map,
-    status_label,
+    ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label,
 };
+
+/// Live-probe timeout -- PgBouncer's admin console usually answers instantly;
+/// a service that's stopped, mid-deploy, or unreachable over SSH shouldn't
+/// hang `status`.
+const LIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Live-utilization thresholds, ported verbatim from the frontend's
+/// `PgBouncerControls.tsx` (`PoolSizingRows`), which mirrors the PgBouncer
+/// monitor's own warning thresholds (CLIENT_CONN_HIGH/POOL_NEAR_SATURATION at
+/// 0.8, PREPARED_STMTS_NEAR_CAP at 0.9, crit at 0.95).
+const CLIENT_UTIL_WARN: f64 = 0.8;
+const POOL_UTIL_WARN: f64 = 0.8;
+const PREPARED_UTIL_WARN: f64 = 0.9;
+const UTIL_CRIT: f64 = 0.95;
+
+/// Fallbacks for a knob that's entirely unset, ported from `PoolKnob.fallback`
+/// in `PgBouncerControls.tsx` (these are the component's generic fallbacks,
+/// not the template's authored defaults -- `MAX_CLIENT_CONN`/`DEFAULT_POOL_SIZE`/
+/// `MAX_PREPARED_STATEMENTS` are always stamped by the template on `add`, so in
+/// practice this only matters if a var was manually deleted).
+const MAX_CLIENT_CONN_FALLBACK: i64 = 1000;
+const DEFAULT_POOL_SIZE_FALLBACK: i64 = 20;
+const MAX_PREPARED_STATEMENTS_FALLBACK: i64 = 100;
 
 /// Manage PgBouncer connection pooling for Postgres
 #[derive(Parser)]
@@ -127,6 +160,10 @@ struct ScaleArgs {
     /// Target replica count
     #[clap(long)]
     replicas: i64,
+
+    /// Stage the change without deploying it immediately
+    #[clap(long)]
+    no_deploy: bool,
 }
 
 pub async fn command(
@@ -140,8 +177,8 @@ pub async fn command(
         Commands::Status => status(project, service, environment, json).await,
         Commands::Add(a) => add(project, service, environment, json, a).await,
         Commands::Remove(a) => remove(project, service, environment, json, a).await,
-        Commands::Configure(_) => not_yet_implemented("pgbouncer configure"),
-        Commands::Scale(_) => not_yet_implemented("pgbouncer scale"),
+        Commands::Configure(a) => configure(project, service, environment, json, a).await,
+        Commands::Scale(a) => scale(project, service, environment, json, a).await,
     }
 }
 
@@ -155,15 +192,54 @@ async fn status(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json)
+    print_status_with_live(&ctx, &config, json).await
 }
 
+/// Config-only status print (no live probe) -- used right after `add`/`remove`
+/// stage a change, where the deployment triggered by that change may not have
+/// rolled out yet, so a live probe would just report "unavailable" noise.
 fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bool) -> Result<()> {
+    let output = build_status_output(ctx, config, None);
+    render_status(&output, json)
+}
+
+/// Full status print, including the live `SHOW POOLS`/`SHOW STATS`/`SHOW
+/// SERVERS` probe when PgBouncer is attached. Used by the standalone `status`
+/// subcommand.
+async fn print_status_with_live(
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    json: bool,
+) -> Result<()> {
+    let root = resolve_root(ctx, config);
+    let state = postgres_plugins::compute_pgbouncer_state(config, &root.root_id);
+
+    let live = if let Some(edge_id) = state.edge_service_id.as_ref() {
+        Some(probe_pgbouncer_live(ctx, edge_id).await)
+    } else {
+        None
+    };
+
+    let output = build_status_output(ctx, config, live);
+    render_status(&output, json)
+}
+
+fn build_status_output(
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    live: Option<PgBouncerLiveOutput>,
+) -> PgBouncerStatusOutput {
     let root = resolve_root(ctx, config);
     let state = postgres_plugins::compute_pgbouncer_state(config, &root.root_id);
     let names = service_name_map(ctx);
+    let replicas = state
+        .edge_service_id
+        .as_ref()
+        .and_then(|id| config.services.get(id))
+        .and_then(|s| s.deploy.as_ref())
+        .and_then(|d| d.num_replicas);
 
-    let output = PgBouncerStatusOutput {
+    PgBouncerStatusOutput {
         service: ResourceRef {
             id: ctx.service_id.clone(),
             name: ctx.service_name.clone(),
@@ -181,16 +257,20 @@ fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bool) ->
             id: id.clone(),
             name: names.get(id).cloned().unwrap_or_else(|| id.clone()),
         }),
+        replicas,
         pool_mode: state.pool_mode.clone(),
         max_client_conn: state.max_client_conn,
         default_pool_size: state.default_pool_size,
         max_prepared_statements: state.max_prepared_statements,
-    };
+        live,
+    }
+}
 
+fn render_status(output: &PgBouncerStatusOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!("{}", serde_json::to_string_pretty(output)?);
     } else {
-        print_pgbouncer_status(&output);
+        print_pgbouncer_status(output);
     }
     Ok(())
 }
@@ -236,6 +316,84 @@ fn print_pgbouncer_status(output: &PgBouncerStatusOutput) {
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".to_string()),
     );
+
+    if let Some(live) = &output.live {
+        print_live_section(live, output, output.replicas.unwrap_or(1).max(1));
+    }
+}
+
+fn print_live_section(live: &PgBouncerLiveOutput, knobs: &PgBouncerStatusOutput, replicas: i64) {
+    println!();
+    println!("{}", "Live pool stats".bold());
+
+    if !live.reachable {
+        let reason = live
+            .error
+            .clone()
+            .unwrap_or_else(|| "probe unavailable".to_string());
+        print_field("Live probe:", &format!("unavailable ({reason})").dimmed());
+        return;
+    }
+
+    let max_client_conn = knobs.max_client_conn.unwrap_or(MAX_CLIENT_CONN_FALLBACK);
+    let pool_size = knobs
+        .default_pool_size
+        .unwrap_or(DEFAULT_POOL_SIZE_FALLBACK);
+    let max_prepared = knobs
+        .max_prepared_statements
+        .unwrap_or(MAX_PREPARED_STATEMENTS_FALLBACK);
+
+    let client_capacity = max_client_conn * replicas;
+    let clients_in_use = live.clients_active.unwrap_or(0) + live.clients_waiting.unwrap_or(0);
+    print_util_line(
+        "Clients:",
+        clients_in_use,
+        client_capacity,
+        CLIENT_UTIL_WARN,
+    );
+
+    let pool_capacity = pool_size * replicas;
+    let servers_open = live.servers_active.unwrap_or(0)
+        + live.servers_idle.unwrap_or(0)
+        + live.servers_used.unwrap_or(0);
+    print_util_line("Server pool:", servers_open, pool_capacity, POOL_UTIL_WARN);
+
+    if max_prepared > 0 {
+        print_util_line(
+            "Prepared stmts:",
+            live.max_prepared_statements_in_use.unwrap_or(0),
+            max_prepared,
+            PREPARED_UTIL_WARN,
+        );
+    }
+
+    if let (Some(xacts), Some(queries)) = (live.total_transactions, live.total_queries) {
+        print_field(
+            "Lifetime totals:",
+            &format!("{xacts} transactions, {queries} queries"),
+        );
+    }
+}
+
+fn print_util_line(label: &str, used: i64, capacity: i64, warn_threshold: f64) {
+    if capacity <= 0 {
+        print_field(label, &format!("{used} in use (no configured limit)"));
+        return;
+    }
+    let util = used as f64 / capacity as f64;
+    let free = (capacity - used).max(0);
+    let line = format!(
+        "{used} of {capacity} in use ({:.0}%) -- {free} free",
+        util * 100.0
+    );
+    let colored = if util >= UTIL_CRIT {
+        line.red().to_string()
+    } else if util >= warn_threshold {
+        line.yellow().to_string()
+    } else {
+        line.green().to_string()
+    };
+    print_field(label, &colored);
 }
 
 async fn add(
@@ -381,6 +539,496 @@ async fn remove(
     print_status(&ctx, &config, json)
 }
 
+async fn configure(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: ConfigureArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let state = postgres_plugins::compute_pgbouncer_state(&config, &root.root_id);
+
+    if !state.attached {
+        bail!(
+            "PgBouncer is not attached to {}. Run `railway postgres pgbouncer add` first.",
+            root.root_name
+        );
+    }
+    let edge_id = state
+        .edge_service_id
+        .clone()
+        .expect("attached implies an edge service id");
+
+    let replicas = config
+        .services
+        .get(&edge_id)
+        .and_then(|s| s.deploy.as_ref())
+        .and_then(|d| d.num_replicas)
+        .unwrap_or(1);
+
+    let effective_pool_mode = args
+        .pool_mode
+        .map(|m| m.as_var_value().to_string())
+        .or_else(|| state.pool_mode.clone())
+        .unwrap_or_else(|| "transaction".to_string());
+    let effective_max_client_conn = args
+        .max_client_conn
+        .or(state.max_client_conn)
+        .unwrap_or(MAX_CLIENT_CONN_FALLBACK);
+    let effective_pool_size = args
+        .default_pool_size
+        .or(state.default_pool_size)
+        .unwrap_or(DEFAULT_POOL_SIZE_FALLBACK);
+    let effective_max_prepared = args
+        .max_prepared_statements
+        .or(state.max_prepared_statements)
+        .unwrap_or(MAX_PREPARED_STATEMENTS_FALLBACK);
+
+    for warning in configure_advisory_warnings(AdvisoryInputs {
+        pool_mode: &effective_pool_mode,
+        max_client_conn: effective_max_client_conn,
+        default_pool_size: effective_pool_size,
+        max_prepared_statements: effective_max_prepared,
+        replicas,
+    }) {
+        eprintln!("{} {}", "warning:".yellow().bold(), warning);
+    }
+
+    let mut variables: BTreeMap<String, Option<Variable>> = BTreeMap::new();
+    if let Some(pool_mode) = args.pool_mode {
+        variables.insert(
+            postgres_plugins::POOL_MODE_VAR.to_string(),
+            Some(Variable {
+                value: Some(pool_mode.as_var_value().to_string()),
+                ..Variable::default()
+            }),
+        );
+    }
+    if let Some(v) = args.max_client_conn {
+        variables.insert(
+            postgres_plugins::MAX_CLIENT_CONN_VAR.to_string(),
+            Some(Variable {
+                value: Some(v.to_string()),
+                ..Variable::default()
+            }),
+        );
+    }
+    if let Some(v) = args.default_pool_size {
+        variables.insert(
+            postgres_plugins::DEFAULT_POOL_SIZE_VAR.to_string(),
+            Some(Variable {
+                value: Some(v.to_string()),
+                ..Variable::default()
+            }),
+        );
+    }
+    if let Some(v) = args.max_prepared_statements {
+        variables.insert(
+            postgres_plugins::MAX_PREPARED_STATEMENTS_VAR.to_string(),
+            Some(Variable {
+                value: Some(v.to_string()),
+                ..Variable::default()
+            }),
+        );
+    }
+
+    let patch = EnvironmentConfig {
+        services: BTreeMap::from([(
+            edge_id.clone(),
+            ServiceInstance {
+                variables,
+                ..ServiceInstance::default()
+            },
+        )]),
+        ..EnvironmentConfig::default()
+    };
+
+    let deployed = stage_and_commit_patch(&ctx, patch, !args.no_deploy)
+        .await
+        .context("Failed to configure PgBouncer")?;
+
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    if !json {
+        let verb = if deployed {
+            "Configured and deployed"
+        } else {
+            "Staged configuring"
+        };
+        println!(
+            "{verb} PgBouncer on {} in environment {} (project {}).",
+            root.root_name.bold(),
+            ctx.environment_name.bold(),
+            ctx.project_id
+        );
+    }
+    print_status(&ctx, &config, json)
+}
+
+/// Inputs for [`configure_advisory_warnings`], the exact set of values that
+/// end up wired into the PgBouncer edge service once a `configure` call is
+/// applied (whichever knobs the caller didn't pass through `ConfigureArgs`
+/// keep their currently-deployed value).
+struct AdvisoryInputs<'a> {
+    pool_mode: &'a str,
+    max_client_conn: i64,
+    default_pool_size: i64,
+    max_prepared_statements: i64,
+    replicas: i64,
+}
+
+/// Advisory (non-blocking) misconfiguration checks, ported verbatim from the
+/// frontend's `PoolSizingRows` in `PgBouncerControls.tsx`: a `MAX_CLIENT_CONN`
+/// below the pool's total capacity means some pooled connections can never be
+/// reached, and `MAX_PREPARED_STATEMENTS = 0` under transaction pooling breaks
+/// Prisma and most ORMs. Neither blocks the mutation -- callers still apply
+/// the change and just print these as warnings first.
+fn configure_advisory_warnings(inputs: AdvisoryInputs) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let replicas = inputs.replicas.max(1);
+    let pool_capacity = inputs.default_pool_size * replicas;
+
+    if inputs.max_client_conn < pool_capacity {
+        warnings.push(format!(
+            "MAX_CLIENT_CONN ({}) is below pool capacity ({} x {replicas} replica{} = {pool_capacity}) -- some pooled connections can't be reached.",
+            inputs.max_client_conn,
+            inputs.default_pool_size,
+            if replicas == 1 { "" } else { "s" },
+        ));
+    }
+
+    if inputs.pool_mode == "transaction" && inputs.max_prepared_statements <= 0 {
+        warnings.push(
+            "MAX_PREPARED_STATEMENTS is 0 in transaction mode -- this breaks Prisma and most ORMs."
+                .to_string(),
+        );
+    }
+
+    warnings
+}
+
+async fn scale(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: ScaleArgs,
+) -> Result<()> {
+    if args.replicas < 0 {
+        bail!("--replicas must be zero or a positive integer");
+    }
+
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let state = postgres_plugins::compute_pgbouncer_state(&config, &root.root_id);
+
+    if !state.attached {
+        bail!(
+            "PgBouncer is not attached to {}. Run `railway postgres pgbouncer add` first.",
+            root.root_name
+        );
+    }
+    let edge_id = state
+        .edge_service_id
+        .clone()
+        .expect("attached implies an edge service id");
+    let edge_name = service_name_map(&ctx)
+        .get(&edge_id)
+        .cloned()
+        .unwrap_or_else(|| edge_id.clone());
+
+    let environment_instances = get_environment_instances(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+    )
+    .await?;
+    let instance = find_service_instance(&environment_instances, &edge_id).with_context(|| {
+        format!("PgBouncer edge service \"{edge_name}\" has no instance in this environment")
+    })?;
+
+    let existing = instance
+        .latest_deployment
+        .as_ref()
+        .and_then(|d| d.meta.as_ref())
+        .map(region_data_from_deployment_meta)
+        .transpose()?
+        .flatten()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+
+    let region_id = single_scalable_region(&existing, &edge_name)?;
+
+    let mut new_config = Map::new();
+    new_config.insert(
+        region_id,
+        if args.replicas == 0 {
+            Value::Null
+        } else {
+            json!({ "numReplicas": args.replicas })
+        },
+    );
+    let region_data = merge_config(existing, new_config);
+    validate_total_replicas(&region_data)?;
+
+    let patch = build_multi_region_patch(&edge_id, &region_data)?;
+    let deployed = stage_and_commit_patch(&ctx, patch, !args.no_deploy)
+        .await
+        .context("Failed to scale PgBouncer")?;
+
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    if !json {
+        let verb = if deployed {
+            "Scaled and deployed"
+        } else {
+            "Staged scaling"
+        };
+        println!(
+            "{verb} {} to {} replica(s) in environment {} (project {}).",
+            edge_name.bold(),
+            args.replicas,
+            ctx.environment_name.bold(),
+            ctx.project_id
+        );
+    }
+    print_status(&ctx, &config, json)
+}
+
+/// Resolves the single region `railway postgres pgbouncer scale --replicas N`
+/// should target. PgBouncer/edge nodes are single-service, plain
+/// container-replica scaling -- not the multi-service HA create/delete case --
+/// so a bare `--replicas N` only makes unambiguous sense when the edge is
+/// currently deployed to exactly one region. Zero regions (not deployed yet)
+/// or more than one (already region-scaled by hand) both need the caller to
+/// use `railway scale`/`railway service scale` directly instead.
+fn single_scalable_region(existing: &Value, edge_name: &str) -> Result<String> {
+    let mut regions: Vec<String> = existing
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    regions.sort();
+
+    match regions.as_slice() {
+        [region] => Ok(region.clone()),
+        [] => bail!(
+            "\"{edge_name}\" has no active deployment yet in this environment -- deploy it first, then retry `railway postgres pgbouncer scale`."
+        ),
+        _ => bail!(
+            "\"{edge_name}\" is deployed across multiple regions ({}) -- use `railway scale --service {edge_name} <REGION>=<REPLICAS>` to control replicas per region.",
+            regions.join(", ")
+        ),
+    }
+}
+
+// --- Live probe (SHOW POOLS / SHOW STATS / SHOW SERVERS) --------------------
+
+/// PGBouncer's admin console answers on the same port the pooler listens on
+/// for regular client traffic (5432 in Railway's `postgres-with-pgbouncer`
+/// template -- confirmed against `packages/backboard/src/temporal/workflows/
+/// pgbouncer-monitor/activities.ts` and the frontend's
+/// `usePgBouncerAdminStats.ts`, both of which connect on port 5432, not the
+/// upstream PgBouncer project's own default of 6432), via the special virtual
+/// `pgbouncer` database.
+fn build_pgbouncer_probe_command() -> String {
+    let psql = "PGHOST=localhost PGPORT=5432 PGSSLMODE=disable psql --csv -q -P pager=off -P footer=off pgbouncer";
+    format!(
+        r#"echo '===POOLS===';
+{psql} -c "SHOW POOLS;";
+echo '===STATS===';
+{psql} -c "SHOW STATS;";
+echo '===SERVERS===';
+{psql} -c "SHOW SERVERS;""#
+    )
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PgBouncerProbeRaw {
+    clients_active: i64,
+    clients_waiting: i64,
+    servers_active: i64,
+    servers_idle: i64,
+    servers_used: i64,
+    max_prepared_statements_in_use: i64,
+    total_xact_count: i64,
+    total_query_count: i64,
+}
+
+/// Parse `psql --csv` output (header row + data rows) into name -> value maps,
+/// so field lookups below survive PgBouncer adding/reordering columns across
+/// versions (e.g. `prepared_statements` on `SHOW SERVERS` only exists on
+/// PgBouncer >= 1.21).
+fn parse_named_csv_rows(csv: &str) -> Vec<std::collections::HashMap<String, String>> {
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(csv.as_bytes());
+    let headers: Vec<String> = reader
+        .headers()
+        .map(|h| h.iter().map(String::from).collect())
+        .unwrap_or_default();
+    reader
+        .records()
+        .filter_map(|r| r.ok())
+        .map(|record| {
+            headers
+                .iter()
+                .cloned()
+                .zip(record.iter().map(String::from))
+                .collect()
+        })
+        .collect()
+}
+
+/// Parses the combined `SHOW POOLS`/`SHOW STATS`/`SHOW SERVERS` output.
+/// Mirrors `usePgBouncerAdminStats.ts`/the pgbouncer monitor's own
+/// aggregation: rows for the administrative `pgbouncer` virtual database are
+/// excluded from the sums, and prepared-statement usage is a max (not a sum)
+/// across server connections.
+fn parse_pgbouncer_probe_output(output: &str) -> PgBouncerProbeRaw {
+    let sections = split_sections(output);
+    let mut raw = PgBouncerProbeRaw::default();
+
+    let is_admin_db = |row: &std::collections::HashMap<String, String>| {
+        row.get("database").map(String::as_str) == Some("pgbouncer")
+    };
+
+    if let Some(csv) = sections.get("POOLS") {
+        for row in parse_named_csv_rows(csv)
+            .into_iter()
+            .filter(|r| !is_admin_db(r))
+        {
+            raw.clients_active += row.get("cl_active").map(|v| parse_i64(v)).unwrap_or(0);
+            raw.clients_waiting += row.get("cl_waiting").map(|v| parse_i64(v)).unwrap_or(0);
+            raw.servers_active += row.get("sv_active").map(|v| parse_i64(v)).unwrap_or(0);
+            raw.servers_idle += row.get("sv_idle").map(|v| parse_i64(v)).unwrap_or(0);
+            raw.servers_used += row.get("sv_used").map(|v| parse_i64(v)).unwrap_or(0);
+        }
+    }
+
+    if let Some(csv) = sections.get("STATS") {
+        for row in parse_named_csv_rows(csv)
+            .into_iter()
+            .filter(|r| !is_admin_db(r))
+        {
+            raw.total_xact_count += row
+                .get("total_xact_count")
+                .map(|v| parse_i64(v))
+                .unwrap_or(0);
+            raw.total_query_count += row
+                .get("total_query_count")
+                .map(|v| parse_i64(v))
+                .unwrap_or(0);
+        }
+    }
+
+    if let Some(csv) = sections.get("SERVERS") {
+        for row in parse_named_csv_rows(csv)
+            .into_iter()
+            .filter(|r| !is_admin_db(r))
+        {
+            let prepared = row
+                .get("prepared_statements")
+                .map(|v| parse_i64(v))
+                .unwrap_or(0);
+            raw.max_prepared_statements_in_use = raw.max_prepared_statements_in_use.max(prepared);
+        }
+    }
+
+    raw
+}
+
+async fn probe_pgbouncer_live(ctx: &ServiceContext, edge_service_id: &str) -> PgBouncerLiveOutput {
+    match probe_pgbouncer_live_inner(ctx, edge_service_id).await {
+        Ok(raw) => PgBouncerLiveOutput::from_raw(raw),
+        Err(err) => PgBouncerLiveOutput::unavailable(format!("{err:#}")),
+    }
+}
+
+async fn probe_pgbouncer_live_inner(
+    ctx: &ServiceContext,
+    edge_service_id: &str,
+) -> Result<PgBouncerProbeRaw> {
+    let environment_instances = get_environment_instances(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+    )
+    .await?;
+    let instance = find_service_instance(&environment_instances, edge_service_id)
+        .context("PgBouncer edge service has no instance in this environment")?;
+    let instance_id = instance.id.clone();
+
+    let command = build_pgbouncer_probe_command();
+    let output = tokio::time::timeout(
+        LIVE_PROBE_TIMEOUT,
+        exec_in_container(&instance_id, &command),
+    )
+    .await
+    .context("Timed out probing PgBouncer's admin console")??;
+
+    Ok(parse_pgbouncer_probe_output(&output))
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct PgBouncerLiveOutput {
+    reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clients_active: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clients_waiting: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    servers_active: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    servers_idle: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    servers_used: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_prepared_statements_in_use: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_transactions: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_queries: Option<i64>,
+}
+
+impl PgBouncerLiveOutput {
+    fn unavailable(error: String) -> Self {
+        Self {
+            reachable: false,
+            error: Some(error),
+            ..Self::default()
+        }
+    }
+
+    fn from_raw(raw: PgBouncerProbeRaw) -> Self {
+        Self {
+            reachable: true,
+            error: None,
+            clients_active: Some(raw.clients_active),
+            clients_waiting: Some(raw.clients_waiting),
+            servers_active: Some(raw.servers_active),
+            servers_idle: Some(raw.servers_idle),
+            servers_used: Some(raw.servers_used),
+            max_prepared_statements_in_use: Some(raw.max_prepared_statements_in_use),
+            total_transactions: Some(raw.total_xact_count),
+            total_queries: Some(raw.total_query_count),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PgBouncerStatusOutput {
@@ -391,6 +1039,8 @@ struct PgBouncerStatusOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     edge: Option<ResourceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    replicas: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pool_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_client_conn: Option<i64>,
@@ -398,6 +1048,8 @@ struct PgBouncerStatusOutput {
     default_pool_size: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_prepared_statements: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live: Option<PgBouncerLiveOutput>,
 }
 
 #[cfg(test)]
@@ -450,6 +1102,29 @@ mod tests {
             panic!("expected configure");
         };
         assert_eq!(configure.max_client_conn, Some(200));
+        assert!(!configure.no_deploy);
+    }
+
+    #[test]
+    fn configure_accepts_multiple_settings_and_no_deploy() {
+        let args = Args::parse_from([
+            "pgbouncer",
+            "configure",
+            "--pool-mode",
+            "session",
+            "--default-pool-size",
+            "30",
+            "--max-prepared-statements",
+            "0",
+            "--no-deploy",
+        ]);
+        let Commands::Configure(configure) = args.command else {
+            panic!("expected configure");
+        };
+        assert_eq!(configure.pool_mode, Some(PoolMode::Session));
+        assert_eq!(configure.default_pool_size, Some(30));
+        assert_eq!(configure.max_prepared_statements, Some(0));
+        assert!(configure.no_deploy);
     }
 
     #[test]
@@ -458,7 +1133,138 @@ mod tests {
         let args = Args::parse_from(["pgbouncer", "scale", "--replicas", "2"]);
         assert!(matches!(
             args.command,
-            Commands::Scale(ScaleArgs { replicas: 2 })
+            Commands::Scale(ScaleArgs {
+                replicas: 2,
+                no_deploy: false
+            })
         ));
+    }
+
+    #[test]
+    fn scale_accepts_no_deploy() {
+        let args = Args::parse_from(["pgbouncer", "scale", "--replicas", "0", "--no-deploy"]);
+        assert!(matches!(
+            args.command,
+            Commands::Scale(ScaleArgs {
+                replicas: 0,
+                no_deploy: true
+            })
+        ));
+    }
+
+    #[test]
+    fn configure_advisory_warns_below_pool_capacity() {
+        let warnings = configure_advisory_warnings(AdvisoryInputs {
+            pool_mode: "transaction",
+            max_client_conn: 100,
+            default_pool_size: 70,
+            max_prepared_statements: 300,
+            replicas: 2,
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("MAX_CLIENT_CONN"));
+        assert!(warnings[0].contains("140"));
+    }
+
+    #[test]
+    fn configure_advisory_warns_zero_prepared_statements_in_transaction_mode() {
+        let warnings = configure_advisory_warnings(AdvisoryInputs {
+            pool_mode: "transaction",
+            max_client_conn: 1000,
+            default_pool_size: 20,
+            max_prepared_statements: 0,
+            replicas: 1,
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("MAX_PREPARED_STATEMENTS"));
+    }
+
+    #[test]
+    fn configure_advisory_zero_prepared_statements_ok_outside_transaction_mode() {
+        let warnings = configure_advisory_warnings(AdvisoryInputs {
+            pool_mode: "session",
+            max_client_conn: 1000,
+            default_pool_size: 20,
+            max_prepared_statements: 0,
+            replicas: 1,
+        });
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn configure_advisory_no_warnings_for_healthy_config() {
+        let warnings = configure_advisory_warnings(AdvisoryInputs {
+            pool_mode: "transaction",
+            max_client_conn: 1000,
+            default_pool_size: 70,
+            max_prepared_statements: 300,
+            replicas: 2,
+        });
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn configure_advisory_can_report_both_warnings_at_once() {
+        let warnings = configure_advisory_warnings(AdvisoryInputs {
+            pool_mode: "transaction",
+            max_client_conn: 10,
+            default_pool_size: 70,
+            max_prepared_statements: 0,
+            replicas: 1,
+        });
+        assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn single_scalable_region_picks_the_only_region() {
+        let existing = json!({ "us-west2": { "numReplicas": 2 } });
+        assert_eq!(
+            single_scalable_region(&existing, "pgbouncer").unwrap(),
+            "us-west2"
+        );
+    }
+
+    #[test]
+    fn single_scalable_region_errors_when_undeployed() {
+        let existing = json!({});
+        assert!(single_scalable_region(&existing, "pgbouncer").is_err());
+    }
+
+    #[test]
+    fn single_scalable_region_errors_when_multi_region() {
+        let existing = json!({
+            "us-west2": { "numReplicas": 1 },
+            "europe-west4-drams3a": { "numReplicas": 1 }
+        });
+        let err = single_scalable_region(&existing, "pgbouncer").unwrap_err();
+        assert!(err.to_string().contains("multiple regions"));
+    }
+
+    #[test]
+    fn parse_pgbouncer_probe_output_sums_pools_and_maxes_prepared_statements() {
+        let output = "===POOLS===\ndatabase,cl_active,cl_waiting,sv_active,sv_idle,sv_used\npgbouncer,1,0,0,0,0\nrailway,4,1,2,3,1\n===STATS===\ndatabase,total_xact_count,total_query_count\npgbouncer,0,0\nrailway,100,500\n===SERVERS===\ndatabase,prepared_statements\nrailway,5\nrailway,12\n";
+        let raw = parse_pgbouncer_probe_output(output);
+        assert_eq!(raw.clients_active, 4);
+        assert_eq!(raw.clients_waiting, 1);
+        assert_eq!(raw.servers_active, 2);
+        assert_eq!(raw.servers_idle, 3);
+        assert_eq!(raw.servers_used, 1);
+        assert_eq!(raw.total_xact_count, 100);
+        assert_eq!(raw.total_query_count, 500);
+        assert_eq!(raw.max_prepared_statements_in_use, 12);
+    }
+
+    #[test]
+    fn parse_pgbouncer_probe_output_handles_missing_sections() {
+        let raw = parse_pgbouncer_probe_output("");
+        assert_eq!(raw, PgBouncerProbeRaw::default());
+    }
+
+    #[test]
+    fn live_output_unavailable_has_no_raw_fields() {
+        let live = PgBouncerLiveOutput::unavailable("connection refused".to_string());
+        assert!(!live.reachable);
+        assert_eq!(live.error.as_deref(), Some("connection refused"));
+        assert!(live.clients_active.is_none());
     }
 }

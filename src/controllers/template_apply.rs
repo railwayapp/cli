@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     client::post_graphql,
-    controllers::project::ServiceContext,
+    controllers::{config::EnvironmentConfig, project::ServiceContext},
     gql::{mutations, queries},
 };
 
@@ -210,9 +210,37 @@ pub async fn revert_template(
     })
 }
 
+/// Stages an arbitrary `EnvironmentConfig` patch (merged into whatever's
+/// already staged, if anything) and commits it, honoring `auto_deploy` the
+/// same way [`apply_composable_template`]/[`revert_template`] do. Used by
+/// `railway postgres pgbouncer {configure,scale}` -- both PgBouncer knob
+/// edits (`variables`) and replica-count edits (`deploy.multiRegionConfig`)
+/// go through this same two-call stage-then-commit mechanism, so one code
+/// path handles both consistently and respects `--no-deploy`.
+pub async fn stage_and_commit_patch(
+    ctx: &ServiceContext,
+    patch: EnvironmentConfig,
+    auto_deploy: bool,
+) -> Result<bool> {
+    post_graphql::<mutations::EnvironmentStageChanges, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::environment_stage_changes::Variables {
+            environment_id: ctx.environment_id.clone(),
+            input: patch,
+            merge: Some(true),
+        },
+    )
+    .await
+    .context("Failed to stage changes")?;
+
+    commit_staged_patch(ctx, auto_deploy).await
+}
+
 /// Commits the environment's currently-staged patch (created by the
-/// `templateDeployV2`/`templateRevert` workflow above), optionally skipping
-/// the deploy trigger. Returns whether deploys ran.
+/// `templateDeployV2`/`templateRevert` workflow above, or by
+/// [`stage_and_commit_patch`]'s explicit stage call), optionally skipping the
+/// deploy trigger. Returns whether deploys ran.
 async fn commit_staged_patch(ctx: &ServiceContext, auto_deploy: bool) -> Result<bool> {
     post_graphql::<mutations::EnvironmentPatchCommitStaged, _>(
         &ctx.client,
