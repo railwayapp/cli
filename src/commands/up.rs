@@ -348,7 +348,10 @@ pub async fn command(args: Args) -> Result<()> {
             if json_mode {
                 print_log(log, true, LogFormat::LevelOnly);
             } else {
-                println!("{}", log.message);
+                println!(
+                    "{}",
+                    crate::util::logs::strip_terminal_controls(&log.message)
+                );
             }
             if should_exit {
                 std::process::exit(0);
@@ -844,7 +847,10 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
             if json_mode {
                 print_log(log, true, LogFormat::LevelOnly);
             } else {
-                println!("{}", log.message);
+                println!(
+                    "{}",
+                    crate::util::logs::strip_terminal_controls(&log.message)
+                );
             }
         })
         .await;
@@ -858,7 +864,10 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
         let deploy_id_for_logs = up_response.deployment_id.clone();
         Some(tokio::task::spawn(async move {
             let _ = stream_deploy_logs(deploy_id_for_logs, None, |log| {
-                println!("{}", log.message);
+                println!(
+                    "{}",
+                    crate::util::logs::strip_terminal_controls(&log.message)
+                );
             })
             .await;
         }))

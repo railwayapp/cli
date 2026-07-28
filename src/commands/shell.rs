@@ -62,6 +62,10 @@ pub async fn command(args: Args) -> Result<()> {
     .await?;
     all_variables.append(&mut variables);
 
+    // Service variables are project-writable, and this shell runs as the local
+    // user. Drop the names the shell would execute during startup.
+    let dropped = crate::util::host_env::strip_unsafe_host_vars(&mut all_variables);
+
     let shell = std::env::var("SHELL").unwrap_or(match std::env::consts::OS {
         "windows" => match windows_shell_detection().await {
             Some(shell) => shell.to_string(),
@@ -78,6 +82,9 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     if !args.silent {
+        if let Some(notice) = crate::util::host_env::dropped_notice(&dropped) {
+            eprintln!("{}", notice.yellow());
+        }
         println!("Entering subshell with Railway variables available. Type 'exit' to exit.\n");
     }
 

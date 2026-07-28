@@ -421,6 +421,14 @@ pub fn spawn_native_ssh_forward(
     identity_file: Option<&Path>,
     forwards: &[PortForward],
 ) -> Result<ForwardGuard> {
+    // Refuse to start if something already owns a requested local port. The
+    // readiness probe below can only prove that *someone* is listening, not
+    // that it is our ssh child, so a pre-existing listener would otherwise be
+    // accepted as the tunnel and receive whatever the caller sends through it.
+    for forward in forwards {
+        ensure_local_port_free(forward.local_port)?;
+    }
+
     let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
     apply_forward_options(&mut ssh_cmd, forwards);
     ssh_cmd.arg(&target);
@@ -454,6 +462,24 @@ pub fn spawn_native_ssh_forward(
     Ok(guard)
 }
 
+/// Fails unless nothing is currently listening on `127.0.0.1:<port>`. Binding
+/// is the only portable way to ask; the socket is closed immediately so ssh can
+/// take the port, which leaves a small window that the post-probe liveness
+/// re-check in `wait_for_forward_ready` closes.
+fn ensure_local_port_free(port: u16) -> Result<()> {
+    match std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => bail!(
+            "Local port {port} is already in use. Pick a free port with --port, or stop the process using it.\n\
+             Railway will not send traffic to a port it did not open."
+        ),
+        Err(err) => Err(err).with_context(|| format!("Failed to check local port {port}")),
+    }
+}
+
 /// Poll the forwarded local ports until they accept a TCP connection. Bails if
 /// ssh exits first (e.g. `ExitOnForwardFailure` tripping on a busy local port)
 /// or the tunnel doesn't come up within the deadline.
@@ -468,6 +494,16 @@ fn wait_for_forward_ready(guard: &mut ForwardGuard, forwards: &[PortForward]) ->
             TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
         });
         if all_up {
+            // A successful connect only proves someone is listening. ssh reports
+            // a failed bind asynchronously, so re-check that our child is still
+            // alive before treating the listener as ours — otherwise a port that
+            // was taken between the pre-flight check and the bind would be
+            // reported as a ready tunnel.
+            if let Some(status) = guard.child.try_wait()? {
+                bail!(
+                    "SSH tunnel exited while coming up ({status}). The local port is owned by another process."
+                );
+            }
             return Ok(());
         }
         if Instant::now() >= deadline {
