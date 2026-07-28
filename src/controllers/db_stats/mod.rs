@@ -135,7 +135,11 @@ pub async fn fetch_db_stats(
 
 /// Split raw command output into sections by delimiter markers.
 /// Returns a map of section_name -> section_content.
-fn split_sections(output: &str) -> std::collections::HashMap<&str, &str> {
+///
+/// `pub(crate)`: also reused by `commands::postgres::pgbouncer`'s live pool
+/// probe (`SHOW POOLS`/`SHOW STATS`/`SHOW SERVERS`), which follows the same
+/// `echo '===NAME==='` delimiter convention as this module's own commands.
+pub(crate) fn split_sections(output: &str) -> std::collections::HashMap<&str, &str> {
     let mut sections = std::collections::HashMap::new();
     let mut current_name: Option<&str> = None;
     let mut current_start = 0;
@@ -176,7 +180,9 @@ fn split_sections(output: &str) -> std::collections::HashMap<&str, &str> {
 }
 
 /// Parse a simple integer from a string, returning 0 on failure.
-fn parse_i64(s: &str) -> i64 {
+///
+/// `pub(crate)`: reused by `commands::postgres::pgbouncer`'s live pool probe.
+pub(crate) fn parse_i64(s: &str) -> i64 {
     s.trim().parse().unwrap_or(0)
 }
 
