@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod cluster_scale;
 pub mod config;
 pub mod database;
 pub mod db_stats;
@@ -11,6 +12,7 @@ pub mod local_override;
 pub mod metrics;
 pub mod metrics_tui;
 pub mod outbound_networking;
+pub mod patroni;
 pub mod postgres_plugins;
 pub mod private_network;
 pub mod project;
