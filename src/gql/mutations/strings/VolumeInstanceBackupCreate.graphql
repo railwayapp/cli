@@ -1,0 +1,5 @@
+mutation VolumeInstanceBackupCreate($volumeInstanceId: String!, $name: String) {
+  volumeInstanceBackupCreate(volumeInstanceId: $volumeInstanceId, name: $name) {
+    workflowId
+  }
+}

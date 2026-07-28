@@ -1,0 +1,6 @@
+mutation VolumeInstanceBackupScheduleUpdate(
+  $volumeInstanceId: String!
+  $kinds: [VolumeInstanceBackupScheduleKind!]
+) {
+  volumeInstanceBackupScheduleUpdate(volumeInstanceId: $volumeInstanceId, kinds: $kinds)
+}

@@ -1,0 +1,6 @@
+mutation VolumeInstanceBackupLock($volumeInstanceId: String!, $volumeInstanceBackupId: String!) {
+  volumeInstanceBackupLock(
+    volumeInstanceId: $volumeInstanceId
+    volumeInstanceBackupId: $volumeInstanceBackupId
+  )
+}

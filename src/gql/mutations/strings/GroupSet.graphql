@@ -1,0 +1,3 @@
+mutation GroupSet($input: GroupSetInput!) {
+  groupSet(input: $input)
+}

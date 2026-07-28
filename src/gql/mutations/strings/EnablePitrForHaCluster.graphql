@@ -1,0 +1,6 @@
+mutation EnablePitrForHaCluster($input: EnablePitrForHaClusterInput!) {
+  enablePitrForHaCluster(input: $input) {
+    projectId
+    workflowId
+  }
+}

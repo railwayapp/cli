@@ -539,6 +539,172 @@ pub struct SandboxDestroy;
 #[allow(dead_code)]
 pub struct SandboxHeartbeat;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateDeployV2.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateDeployV2;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateRevert.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateRevert;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnablePitrForHaCluster.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnablePitrForHaCluster;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DisablePitrForHaCluster.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct DisablePitrForHaCluster;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CancelPitrHaWorkflow.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CancelPitrHaWorkflow;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ClearPitrHaWorkflowProgress.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ClearPitrHaWorkflowProgress;
+
+/// Front-loaded for phase B (PITR point-in-time restore); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstancePitrRestore.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+#[allow(dead_code)]
+pub struct VolumeInstancePitrRestore;
+
+/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+#[allow(dead_code)]
+pub struct VolumeInstanceBackupCreate;
+
+/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+#[allow(dead_code)]
+pub struct VolumeInstanceBackupDelete;
+
+/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupBatchDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+#[allow(dead_code)]
+pub struct VolumeInstanceBackupBatchDelete;
+
+/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupLock.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+#[allow(dead_code)]
+pub struct VolumeInstanceBackupLock;
+
+/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupRestore.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+#[allow(dead_code)]
+pub struct VolumeInstanceBackupRestore;
+
+/// Used by `template_apply`'s HA-conversion pre-flight safety backup.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupCreateForHaConversion.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VolumeInstanceBackupCreateForHaConversion;
+
+/// Front-loaded for phase B (PITR backup schedule); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupScheduleUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+#[allow(dead_code)]
+pub struct VolumeInstanceBackupScheduleUpdate;
+
+/// Front-loaded for phase B (PITR backup schedule trigger); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupScheduleTrigger.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+#[allow(dead_code)]
+pub struct VolumeInstanceBackupScheduleTrigger;
+
+/// Front-loaded for phase B (HA cluster scale, adding new nodes to the canvas group); not yet called.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/GroupSet.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+#[allow(dead_code)]
+pub struct GroupSet;
+
+/// Commits a staged environment patch, used by `template_apply`'s auto-deploy wrapper.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnvironmentPatchCommitStaged.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnvironmentPatchCommitStaged;
+
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

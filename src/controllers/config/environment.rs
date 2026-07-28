@@ -43,6 +43,10 @@ pub struct ServiceInstance {
     pub is_deleted: Option<bool>,
     pub is_created: Option<bool>,
     pub parent_service_id: Option<String>,
+    /// Cluster membership role stamped by template conversion/scaling:
+    /// "root" | "replica" | "internal" | "edge". `None` for services that
+    /// aren't part of a cluster (or predate this field).
+    pub cluster_role: Option<String>,
 }
 
 #[skip_serializing_none]

@@ -1,0 +1,10 @@
+query VolumeInstanceBackupScheduleList($volumeInstanceId: String!) {
+  volumeInstanceBackupScheduleList(volumeInstanceId: $volumeInstanceId) {
+    id
+    kind
+    cron
+    name
+    retentionSeconds
+    createdAt
+  }
+}

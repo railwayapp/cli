@@ -1,0 +1,6 @@
+mutation TemplateRevert($input: TemplateRevertInput!) {
+  templateRevert(input: $input) {
+    projectId
+    workflowId
+  }
+}

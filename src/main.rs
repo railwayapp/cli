@@ -62,6 +62,7 @@ commands!(
     metrics,
     open,
     outbound_networking as "outbound-network",
+    postgres,
     project,
     private_network as "private-network",
     run(local),
