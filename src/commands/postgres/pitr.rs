@@ -1,32 +1,40 @@
 //! `railway postgres pitr` -- point-in-time recovery / continuous backups.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
 use serde::Serialize;
+use tokio::time::{sleep, timeout};
 
 use crate::{
     client::post_graphql,
+    commands::ssh::get_service_instance_id,
     controllers::{
         config::{EnvironmentConfig, fetch_environment_config},
+        database::DatabaseType,
+        db_stats::{diagnose_db_stats_failure, preflight_db_stats_ssh},
+        exec::exec_in_container,
         postgres_plugins::{self, PitrState},
-        project::resolve_service_context,
+        project::{ServiceContext, resolve_service_context},
         template_apply::{
             self, ApplyKind, ApplyTemplateParams, PITR_TEMPLATE_CODE, RevertTemplateParams,
         },
     },
     gql::{mutations, queries},
+    util::time::parse_time,
 };
 
 use super::{
-    ResourceRef, confirm_or_bail, not_yet_implemented, print_field, resolve_root, service_name_map,
-    status_label, yes_no,
+    ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label, yes_no,
 };
 
 /// Manage point-in-time recovery (continuous backups) for Postgres
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z) or `YYYY-MM-DD HH:MM:SS` (UTC).\n  `enable`/`disable` auto-detect whether the target is a standalone Postgres or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow)."
+    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (UTC), or a relative offset (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone Postgres or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable.\n  `backup trigger` has no dashboard equivalent -- it's a CLI-only remediation for a missed scheduled backup."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -172,7 +180,9 @@ struct BackupRestoreArgs {
 
 #[derive(Parser)]
 struct BackupTriggerArgs {
-    /// Backup schedule ID to trigger (see `backup schedule list`)
+    /// Backup schedule ID to trigger (see `pitr schedule list`); auto-resolved
+    /// when omitted and exactly one schedule is configured. CLI-only --
+    /// remediation for a missed scheduled backup, no dashboard equivalent.
     #[clap(long = "schedule-id")]
     schedule_id: Option<String>,
 }
@@ -224,21 +234,29 @@ pub async fn command(
         Commands::Status => status(project, service, environment, json).await,
         Commands::Enable(a) => enable(project, service, environment, json, a).await,
         Commands::Disable(a) => disable(project, service, environment, json, a).await,
-        Commands::Progress(_) => not_yet_implemented("pitr progress"),
+        Commands::Progress(a) => progress(project, service, environment, json, a).await,
         Commands::Cancel => cancel(project, service, environment, json).await,
         Commands::Clear => clear(project, service, environment, json).await,
-        Commands::Restore(_) => not_yet_implemented("pitr restore"),
+        Commands::Restore(a) => restore(project, service, environment, json, a).await,
         Commands::Backup(a) => match a.command {
-            BackupCommands::List => not_yet_implemented("pitr backup list"),
-            BackupCommands::Create(_) => not_yet_implemented("pitr backup create"),
-            BackupCommands::Delete(_) => not_yet_implemented("pitr backup delete"),
-            BackupCommands::Lock(_) => not_yet_implemented("pitr backup lock"),
-            BackupCommands::Restore(_) => not_yet_implemented("pitr backup restore"),
-            BackupCommands::Trigger(_) => not_yet_implemented("pitr backup trigger"),
+            BackupCommands::List => backup_list(project, service, environment, json).await,
+            BackupCommands::Create(a) => {
+                backup_create(project, service, environment, json, a).await
+            }
+            BackupCommands::Delete(a) => {
+                backup_delete(project, service, environment, json, a).await
+            }
+            BackupCommands::Lock(a) => backup_lock(project, service, environment, json, a).await,
+            BackupCommands::Restore(a) => {
+                backup_restore(project, service, environment, json, a).await
+            }
+            BackupCommands::Trigger(a) => {
+                backup_trigger(project, service, environment, json, a).await
+            }
         },
         Commands::Schedule(a) => match a.command {
-            ScheduleCommands::Set(_) => not_yet_implemented("pitr schedule set"),
-            ScheduleCommands::List => not_yet_implemented("pitr schedule list"),
+            ScheduleCommands::Set(a) => schedule_set(project, service, environment, json, a).await,
+            ScheduleCommands::List => schedule_list(project, service, environment, json).await,
         },
     }
 }
@@ -253,14 +271,10 @@ async fn status(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json)
+    print_status(&ctx, &config, json).await
 }
 
-fn print_status(
-    ctx: &crate::controllers::project::ServiceContext,
-    config: &EnvironmentConfig,
-    json: bool,
-) -> Result<()> {
+async fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bool) -> Result<()> {
     let root = resolve_root(ctx, config);
     let names = service_name_map(ctx);
     let ha_state = postgres_plugins::compute_ha_state(config, &root.root_id, &names);
@@ -297,6 +311,16 @@ fn print_status(
         Vec::new()
     };
 
+    // Live coverage/archiver probe is best-effort and only meaningful once the
+    // overlay is actually applied -- skip it entirely for a service that never
+    // had PITR enabled rather than spending a ~5s SSH round trip to learn
+    // nothing.
+    let live = if root_pitr.enabled {
+        Some(probe_pitr_live(ctx, &root.root_id).await)
+    } else {
+        None
+    };
+
     let output = PitrStatusOutput {
         service: ResourceRef {
             id: ctx.service_id.clone(),
@@ -315,6 +339,7 @@ fn print_status(
         bucket_wired: root_pitr.bucket_wired,
         blockers: guardrail_blockers(&root_pitr),
         members,
+        live,
     };
 
     if json {
@@ -352,6 +377,68 @@ fn print_pitr_status(output: &PitrStatusOutput) {
                 member.cluster_role.as_deref().unwrap_or("-"),
                 status_label(member.enabled)
             );
+        }
+    }
+
+    if let Some(live) = &output.live {
+        println!();
+        println!("{}", "Live coverage (best effort):".bold());
+        if !live.available {
+            print_field(
+                "Probe:",
+                &live
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "unavailable".to_string())
+                    .dimmed(),
+            );
+            return;
+        }
+        match &live.backup_coverage_error {
+            Some(err) => print_field("Backup coverage:", &format!("unavailable ({err})").dimmed()),
+            None => {
+                print_field(
+                    "Backup sets:",
+                    &live
+                        .backup_set_count
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                );
+                print_field(
+                    "Latest backup:",
+                    &live.latest_backup_at.as_deref().unwrap_or("-"),
+                );
+                print_field(
+                    "WAL coverage:",
+                    &format!(
+                        "{} .. {}",
+                        live.wal_min.as_deref().unwrap_or("-"),
+                        live.wal_max.as_deref().unwrap_or("-")
+                    ),
+                );
+            }
+        }
+        match &live.archiver_error {
+            Some(err) => print_field("Archiver:", &format!("unavailable ({err})").dimmed()),
+            None => {
+                let healthy = live.archiver_healthy.unwrap_or(false);
+                print_field(
+                    "Archiver:",
+                    &if live.archiver_healthy.is_some() {
+                        status_label(healthy)
+                    } else {
+                        "unknown".dimmed().bold()
+                    },
+                );
+                print_field(
+                    "Last archived at:",
+                    &live.archiver_last_archived_at.as_deref().unwrap_or("-"),
+                );
+                print_field(
+                    "Restorable up to:",
+                    &live.max_restore_time.as_deref().unwrap_or("-"),
+                );
+            }
         }
     }
 }
@@ -403,7 +490,7 @@ async fn enable(
 
     if pitr_state.enabled {
         println!("PITR is already enabled for {}.", root.root_name.bold());
-        return print_status(&ctx, &config, json);
+        return print_status(&ctx, &config, json).await;
     }
 
     let blockers = guardrail_blockers(&pitr_state);
@@ -483,7 +570,7 @@ async fn enable(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json)
+    print_status(&ctx, &config, json).await
 }
 
 async fn disable(
@@ -607,7 +694,7 @@ async fn disable(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json)
+    print_status(&ctx, &config, json).await
 }
 
 async fn cancel(
@@ -691,6 +778,977 @@ async fn clear(
     Ok(())
 }
 
+/// Max time `progress --watch` polls before giving up (the workflow itself
+/// may still finish later -- this only bounds the CLI's own wait).
+const PROGRESS_WATCH_TIMEOUT_SECS: u64 = 600;
+const PROGRESS_POLL_INTERVAL_SECS: u64 = 2;
+
+async fn progress(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: ProgressArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let names = service_name_map(&ctx);
+    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    if !ha_state.is_cluster {
+        bail!(
+            "{} is not an HA cluster; there is no PITR workflow progress to show.",
+            root.root_name
+        );
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(PROGRESS_WATCH_TIMEOUT_SECS);
+    let mut last_printed: Option<String> = None;
+
+    loop {
+        let response = post_graphql::<queries::GetPitrHaWorkflowProgress, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            queries::get_pitr_ha_workflow_progress::Variables {
+                environment_id: ctx.environment_id.clone(),
+                root_service_id: root.root_id.clone(),
+            },
+        )
+        .await
+        .context("Failed to fetch the PITR workflow progress")?;
+
+        let Some(progress) = response.pitr_ha_workflow_progress else {
+            if json {
+                println!("{}", serde_json::json!({"active": false}));
+            } else {
+                println!(
+                    "No PITR enable/disable workflow found for {}.",
+                    root.root_name.bold()
+                );
+            }
+            return Ok(());
+        };
+
+        let output = build_progress_output(&root, &progress);
+        let rendered = serde_json::to_string(&output)?;
+        if last_printed.as_deref() != Some(rendered.as_str()) {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                print_progress(&output);
+            }
+            last_printed = Some(rendered);
+        }
+
+        let terminal = matches!(
+            progress.phase,
+            queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase::DONE
+                | queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase::FAILED
+        );
+        if terminal || !args.watch {
+            return Ok(());
+        }
+
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Timed out after {PROGRESS_WATCH_TIMEOUT_SECS}s waiting for the workflow to reach a terminal phase. It may still be running -- check again with `railway postgres pitr progress`."
+            );
+        }
+
+        sleep(Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+    }
+}
+
+fn build_progress_output(
+    root: &super::RootContext,
+    progress: &queries::get_pitr_ha_workflow_progress::GetPitrHaWorkflowProgressPitrHaWorkflowProgress,
+) -> PitrProgressOutput {
+    use queries::get_pitr_ha_workflow_progress::{
+        PitrHaWorkflowDirection, PitrHaWorkflowMemberStatus, PitrHaWorkflowPhase,
+    };
+
+    let phase_str = |phase: &PitrHaWorkflowPhase| -> String {
+        match phase {
+            PitrHaWorkflowPhase::PLANNING => "planning".to_string(),
+            PitrHaWorkflowPhase::CREATING_BUCKET => "creating_bucket".to_string(),
+            PitrHaWorkflowPhase::WRITING_VARIABLES => "writing_variables".to_string(),
+            PitrHaWorkflowPhase::PATCHING_DCS => "patching_dcs".to_string(),
+            PitrHaWorkflowPhase::ROLLING_REPLICAS => "rolling_replicas".to_string(),
+            PitrHaWorkflowPhase::SWITCHING_OVER => "switching_over".to_string(),
+            PitrHaWorkflowPhase::ROLLING_EX_LEADER => "rolling_ex_leader".to_string(),
+            PitrHaWorkflowPhase::REMOVING_VARIABLES => "removing_variables".to_string(),
+            PitrHaWorkflowPhase::VERIFYING => "verifying".to_string(),
+            PitrHaWorkflowPhase::DONE => "done".to_string(),
+            PitrHaWorkflowPhase::FAILED => "failed".to_string(),
+            PitrHaWorkflowPhase::Other(other) => other.to_ascii_lowercase(),
+        }
+    };
+    let direction_str = |direction: &PitrHaWorkflowDirection| -> String {
+        match direction {
+            PitrHaWorkflowDirection::ENABLE => "enable".to_string(),
+            PitrHaWorkflowDirection::DISABLE => "disable".to_string(),
+            PitrHaWorkflowDirection::Other(other) => other.to_ascii_lowercase(),
+        }
+    };
+    let member_status_str = |status: &PitrHaWorkflowMemberStatus| -> String {
+        match status {
+            PitrHaWorkflowMemberStatus::HEALTHY => "healthy".to_string(),
+            PitrHaWorkflowMemberStatus::PENDING => "pending".to_string(),
+            PitrHaWorkflowMemberStatus::RESTARTING => "restarting".to_string(),
+            PitrHaWorkflowMemberStatus::SKIPPED => "skipped".to_string(),
+            PitrHaWorkflowMemberStatus::Other(other) => other.to_ascii_lowercase(),
+        }
+    };
+
+    PitrProgressOutput {
+        root: ResourceRef {
+            id: root.root_id.clone(),
+            name: root.root_name.clone(),
+        },
+        workflow_id: progress.workflow_id.clone(),
+        direction: direction_str(&progress.direction),
+        phase: phase_str(&progress.phase),
+        started_at: progress.started_at.clone(),
+        updated_at: progress.updated_at.clone(),
+        completed_at: progress.completed_at.clone(),
+        error_message: progress.error_message.clone(),
+        failed_at_phase: progress.failed_at_phase.as_ref().map(phase_str),
+        current_member_service_id: progress.current_member_service_id.clone(),
+        new_leader_service_id: progress.new_leader_service_id.clone(),
+        cluster_mutated: progress.cluster_mutated,
+        members: progress
+            .members
+            .iter()
+            .map(|m| PitrProgressMemberOutput {
+                service_id: m.service_id.clone(),
+                service_name: m.service_name.clone(),
+                is_leader: m.is_leader,
+                status: member_status_str(&m.status),
+            })
+            .collect(),
+    }
+}
+
+fn print_progress(output: &PitrProgressOutput) {
+    println!("{}", "PITR HA workflow progress".bold());
+    println!();
+    print_field("Root:", &output.root.name);
+    print_field("Direction:", &output.direction);
+    print_field("Phase:", &output.phase.bold());
+    print_field("Started:", &output.started_at);
+    print_field("Updated:", &output.updated_at);
+    if let Some(completed_at) = &output.completed_at {
+        print_field("Completed:", completed_at);
+    }
+    if let Some(error) = &output.error_message {
+        print_field("Error:", &error.red());
+    }
+    if let Some(failed_at) = &output.failed_at_phase {
+        print_field("Failed at phase:", &failed_at.red());
+    }
+
+    if !output.members.is_empty() {
+        println!();
+        println!("{}", "Members:".bold());
+        for member in &output.members {
+            println!(
+                "  {:<28} {:<6} {}",
+                member.service_name,
+                if member.is_leader { "leader" } else { "-" },
+                member.status
+            );
+        }
+    }
+}
+
+async fn restore(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: RestoreArgs,
+) -> Result<()> {
+    let target_timestamp =
+        parse_time(&args.at).with_context(|| format!("Invalid --at value \"{}\"", args.at))?;
+
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    let new_service_note = args
+        .new_service_name
+        .clone()
+        .unwrap_or_else(|| format!("{}-restored-<timestamp>", root.root_name));
+
+    if !confirm_or_bail(
+        &format!(
+            "Restore {} to {}? This creates a brand-new service ({new_service_note}) from the point-in-time snapshot -- {} keeps running untouched.",
+            root.root_name.yellow(),
+            target_timestamp.to_rfc3339(),
+            root.root_name
+        ),
+        args.yes,
+    )? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let response = post_graphql::<mutations::VolumeInstancePitrRestore, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_pitr_restore::Variables {
+            volume_instance_id,
+            target_timestamp,
+            new_service_name: args.new_service_name.clone(),
+            source_repo_path: args.source_repo_path.clone(),
+        },
+    )
+    .await
+    .context("Failed to start the point-in-time restore")?;
+
+    let workflow_id = response.volume_instance_pitr_restore.workflow_id;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "root": { "id": root.root_id, "name": root.root_name },
+                "targetTimestamp": target_timestamp.to_rfc3339(),
+                "workflowId": workflow_id,
+            })
+        );
+    } else {
+        println!(
+            "Started a point-in-time restore of {} to {}.",
+            root.root_name.bold(),
+            target_timestamp.to_rfc3339()
+        );
+        if let Some(id) = &workflow_id {
+            print_field("Workflow:", id);
+        }
+        println!(
+            "This runs in the background; the new service will appear in the dashboard once provisioning completes."
+        );
+    }
+    Ok(())
+}
+
+/// Shared by every `backup`/`schedule` subcommand: resolves the target root
+/// service's volume instance id (from `volumeMounts` in the environment
+/// config, same field `enable`/`convert` already read this from).
+fn resolve_volume_instance_id(
+    config: &EnvironmentConfig,
+    root: &super::RootContext,
+) -> Result<String> {
+    config
+        .services
+        .get(&root.root_id)
+        .and_then(|service| service.volume_mounts.keys().next().cloned())
+        .with_context(|| {
+            format!(
+                "{} has no volume attached -- PITR backups require a volume.",
+                root.root_name
+            )
+        })
+}
+
+async fn backup_list(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    let response = post_graphql::<queries::VolumeInstanceBackupList, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        queries::volume_instance_backup_list::Variables { volume_instance_id },
+    )
+    .await
+    .context("Failed to list backups")?;
+    let backups = response.volume_instance_backup_list;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&backups)?);
+        return Ok(());
+    }
+
+    if backups.is_empty() {
+        println!("No backups found for {}.", root.root_name.bold());
+        return Ok(());
+    }
+
+    println!(
+        "{:<26} {:<20} {:<26} {:>10} {:<12} {}",
+        "ID", "NAME", "CREATED", "SIZE (MB)", "SCHEDULE", "EXPIRES"
+    );
+    for backup in &backups {
+        println!(
+            "{:<26} {:<20} {:<26} {:>10} {:<12} {}",
+            backup.id,
+            backup.name.as_deref().unwrap_or("-"),
+            backup.created_at.to_rfc3339(),
+            backup
+                .used_mb
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            backup.schedule_id.as_deref().unwrap_or("manual"),
+            backup
+                .expires_at
+                .map(|v| v.to_rfc3339())
+                .unwrap_or_else(|| "never".to_string()),
+        );
+    }
+    Ok(())
+}
+
+async fn backup_create(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupCreateArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupCreate, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_create::Variables {
+            volume_instance_id,
+            name: args.name.clone(),
+        },
+    )
+    .await
+    .context("Failed to create a backup")?;
+    let workflow_id = response.volume_instance_backup_create.workflow_id;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "workflowId": workflow_id})
+        );
+    } else {
+        println!("Started an on-demand backup for {}.", root.root_name.bold());
+        if let Some(id) = &workflow_id {
+            print_field("Workflow:", id);
+        }
+        println!("Check `railway postgres pitr backup list` once it completes.");
+    }
+    Ok(())
+}
+
+async fn backup_delete(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupDeleteArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    if !confirm_or_bail(
+        &format!(
+            "Delete {} backup(s) forever ({})? This cannot be undone.",
+            args.ids.len(),
+            args.ids.join(", ").red()
+        ),
+        args.yes,
+    )? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupBatchDelete, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_batch_delete::Variables {
+            volume_instance_id,
+            volume_instance_backup_ids: args.ids.clone(),
+        },
+    )
+    .await
+    .context("Failed to delete backups")?;
+    let workflow_id = response.volume_instance_backup_batch_delete.workflow_id;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"deletedIds": args.ids, "workflowId": workflow_id})
+        );
+    } else {
+        println!("Deleted {} backup(s).", args.ids.len());
+        if let Some(id) = &workflow_id {
+            print_field("Workflow:", id);
+        }
+    }
+    Ok(())
+}
+
+async fn backup_lock(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupIdArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupLock, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_lock::Variables {
+            volume_instance_id,
+            volume_instance_backup_id: args.id.clone(),
+        },
+    )
+    .await
+    .context("Failed to lock the backup")?;
+    let locked = response.volume_instance_backup_lock;
+
+    if json {
+        println!("{}", serde_json::json!({"id": args.id, "locked": locked}));
+    } else if locked {
+        println!(
+            "Backup {} will now be kept indefinitely (expiration removed).",
+            args.id.bold()
+        );
+    } else {
+        println!("Could not lock backup {}.", args.id.bold());
+    }
+    Ok(())
+}
+
+async fn backup_restore(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupRestoreArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    if !confirm_or_bail(
+        &format!(
+            "Restore {} from backup {}? This overwrites the current data with the backup's contents.",
+            root.root_name.red(),
+            args.id
+        ),
+        args.yes,
+    )? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupRestore, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_restore::Variables {
+            volume_instance_id,
+            volume_instance_backup_id: args.id.clone(),
+            replica_service_ids: None,
+            wipe_service_ids: None,
+        },
+    )
+    .await
+    .context("Failed to restore from the backup")?;
+    let workflow_id = response.volume_instance_backup_restore.workflow_id;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id})
+        );
+    } else {
+        println!(
+            "Started restoring {} from backup {}.",
+            root.root_name.bold(),
+            args.id
+        );
+        if let Some(id) = &workflow_id {
+            print_field("Workflow:", id);
+        }
+    }
+    Ok(())
+}
+
+const BACKUP_WORKFLOW_POLL_INTERVAL_SECS: u64 = 2;
+const BACKUP_WORKFLOW_TIMEOUT_SECS: u64 = 600;
+
+/// True once a backup workflow's status string leaves the (Temporal-style)
+/// running/pending states. Treated as terminal-by-default (rather than an
+/// allowlist of known-terminal strings) so an unexpected future status value
+/// still stops the poll instead of spinning for the full timeout.
+fn is_terminal_backup_status(status: &str) -> bool {
+    !matches!(
+        status.to_ascii_uppercase().as_str(),
+        "RUNNING" | "PENDING" | "SCHEDULED" | "STARTED"
+    )
+}
+
+async fn poll_backup_workflow_status(ctx: &ServiceContext, workflow_id: &str) -> Result<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(BACKUP_WORKFLOW_TIMEOUT_SECS);
+    loop {
+        let response = post_graphql::<queries::VolumeInstanceBackupWorkflowStatus, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            queries::volume_instance_backup_workflow_status::Variables {
+                workflow_id: workflow_id.to_string(),
+            },
+        )
+        .await
+        .context("Failed to check the backup workflow status")?;
+        let status = response.volume_instance_backup_workflow_status;
+
+        if is_terminal_backup_status(&status) {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Timed out after {BACKUP_WORKFLOW_TIMEOUT_SECS}s waiting for the backup to finish (it may still be running -- check `railway postgres pitr backup list`)."
+            );
+        }
+        sleep(Duration::from_secs(BACKUP_WORKFLOW_POLL_INTERVAL_SECS)).await;
+    }
+}
+
+async fn backup_trigger(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupTriggerArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    let schedule_id = match args.schedule_id.clone() {
+        Some(id) => id,
+        None => {
+            let response = post_graphql::<queries::VolumeInstanceBackupScheduleList, _>(
+                &ctx.client,
+                ctx.configs.get_backboard(),
+                queries::volume_instance_backup_schedule_list::Variables {
+                    volume_instance_id: volume_instance_id.clone(),
+                },
+            )
+            .await
+            .context("Failed to look up the backup schedule")?;
+            let schedules = response.volume_instance_backup_schedule_list;
+            match schedules.len() {
+                0 => bail!(
+                    "{} has no configured backup schedule to trigger. Run `railway postgres pitr schedule set` first, or pass --schedule-id.",
+                    root.root_name
+                ),
+                1 => schedules[0].id.clone(),
+                _ => bail!(
+                    "{} has multiple backup schedules ({}). Pass --schedule-id to pick one.",
+                    root.root_name,
+                    schedules
+                        .iter()
+                        .map(|s| format!("{:?}:{}", s.kind, s.id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+    };
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupScheduleTrigger, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_schedule_trigger::Variables {
+            schedule_id: schedule_id.clone(),
+        },
+    )
+    .await
+    .context("Failed to trigger the backup schedule")?;
+
+    let Some(workflow_id) = response.volume_instance_backup_schedule_trigger.workflow_id else {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"scheduleId": schedule_id, "workflowId": null, "triggered": true})
+            );
+        } else {
+            println!(
+                "Triggered the backup schedule for {} -- the run wasn't immediately observable (an in-flight run may have absorbed it). Check `railway postgres pitr backup list` shortly.",
+                root.root_name.bold()
+            );
+        }
+        return Ok(());
+    };
+
+    if !json {
+        println!(
+            "Triggered an immediate backup run for {} (workflow {workflow_id}). Waiting for it to finish...",
+            root.root_name.bold(),
+        );
+    }
+
+    let status = poll_backup_workflow_status(&ctx, &workflow_id).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"scheduleId": schedule_id, "workflowId": workflow_id, "status": status})
+        );
+    } else {
+        println!("Backup workflow finished with status: {}.", status.bold());
+    }
+    Ok(())
+}
+
+async fn schedule_set(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: ScheduleSetArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    use mutations::volume_instance_backup_schedule_update::VolumeInstanceBackupScheduleKind as ScheduleKind;
+    let mut kinds = Vec::new();
+    if args.daily {
+        kinds.push(ScheduleKind::DAILY);
+    }
+    if args.weekly {
+        kinds.push(ScheduleKind::WEEKLY);
+    }
+    if args.monthly {
+        kinds.push(ScheduleKind::MONTHLY);
+    }
+
+    post_graphql::<mutations::VolumeInstanceBackupScheduleUpdate, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_schedule_update::Variables {
+            volume_instance_id,
+            kinds: Some(kinds),
+        },
+    )
+    .await
+    .context("Failed to update the backup schedule")?;
+
+    let mut labels = Vec::new();
+    if args.daily {
+        labels.push("daily");
+    }
+    if args.weekly {
+        labels.push("weekly");
+    }
+    if args.monthly {
+        labels.push("monthly");
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"daily": args.daily, "weekly": args.weekly, "monthly": args.monthly})
+        );
+    } else {
+        println!(
+            "Updated the backup schedule for {}: {}.",
+            root.root_name.bold(),
+            labels.join(", ")
+        );
+    }
+    Ok(())
+}
+
+async fn schedule_list(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+
+    let response = post_graphql::<queries::VolumeInstanceBackupScheduleList, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        queries::volume_instance_backup_schedule_list::Variables { volume_instance_id },
+    )
+    .await
+    .context("Failed to list backup schedules")?;
+    let schedules = response.volume_instance_backup_schedule_list;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&schedules)?);
+        return Ok(());
+    }
+
+    if schedules.is_empty() {
+        println!(
+            "No backup schedule configured for {}.",
+            root.root_name.bold()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:<24} {:<26} {}",
+        "KIND", "NAME", "CREATED", "RETENTION"
+    );
+    for s in &schedules {
+        println!(
+            "{:<10} {:<24} {:<26} {}",
+            format!("{:?}", s.kind),
+            s.name,
+            s.created_at.to_rfc3339(),
+            s.retention_seconds
+                .map(|r| format!("{r}s"))
+                .unwrap_or_else(|| "-".to_string()),
+        );
+    }
+    Ok(())
+}
+
+/// Total time budget for `status`'s live coverage/archiver probe. Kept short
+/// -- this is a best-effort addition to `status`, never worth making the
+/// whole command feel slow (or hang) when the service isn't reachable.
+const LIVE_PROBE_TIMEOUT_SECS: u64 = 5;
+
+async fn probe_pitr_live(ctx: &ServiceContext, root_service_id: &str) -> PitrLiveProbe {
+    let attempt = async {
+        let instance_id = get_service_instance_id(
+            &ctx.client,
+            &ctx.configs,
+            &ctx.environment_id,
+            root_service_id,
+        )
+        .await
+        .context("No live deployment found for this service")?;
+
+        let (pgbackrest_result, archiver_result) = tokio::join!(
+            exec_in_container(&instance_id, "pgbackrest info --output=json"),
+            exec_in_container(&instance_id, ARCHIVER_PROBE_QUERY),
+        );
+
+        let mut probe = PitrLiveProbe {
+            available: true,
+            ..PitrLiveProbe::default()
+        };
+
+        match pgbackrest_result {
+            Ok(output) => apply_pgbackrest_info(&mut probe, &output),
+            Err(err) => {
+                probe.backup_coverage_error =
+                    Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
+            }
+        }
+        match archiver_result {
+            Ok(output) => apply_archiver_output(&mut probe, &output),
+            Err(err) => {
+                probe.archiver_error =
+                    Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
+            }
+        }
+
+        Ok::<_, anyhow::Error>(probe)
+    };
+
+    // A missing local SSH key is by far the most common reason this probe
+    // can't run at all -- check for it up front (no network call) so the
+    // failure reason is specific instead of a generic SSH timeout/refusal.
+    if let Err(reason) = preflight_db_stats_ssh().await {
+        return PitrLiveProbe {
+            available: false,
+            unavailable_reason: Some(reason),
+            ..PitrLiveProbe::default()
+        };
+    }
+
+    match timeout(Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS), attempt).await {
+        Ok(Ok(probe)) => probe,
+        Ok(Err(err)) => PitrLiveProbe {
+            available: false,
+            unavailable_reason: Some(format!("{err:#}")),
+            ..PitrLiveProbe::default()
+        },
+        Err(_) => PitrLiveProbe {
+            available: false,
+            unavailable_reason: Some(format!("probe timed out after {LIVE_PROBE_TIMEOUT_SECS}s")),
+            ..PitrLiveProbe::default()
+        },
+    }
+}
+
+/// Loosely parses `pgbackrest info --output=json`'s shape (an array of
+/// stanzas, each with a `backup` list and an `archive` list) -- deliberately
+/// tolerant of missing fields since this runs against whatever pgBackRest
+/// version/config the image ships, not a pinned schema.
+fn apply_pgbackrest_info(probe: &mut PitrLiveProbe, output: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
+        probe.backup_coverage_error = Some("could not parse pgbackrest output".to_string());
+        return;
+    };
+    let Some(stanza) = value.as_array().and_then(|arr| arr.first()) else {
+        probe.backup_coverage_error = Some("pgbackrest reported no stanzas".to_string());
+        return;
+    };
+
+    if let Some(backups) = stanza.get("backup").and_then(|b| b.as_array()) {
+        probe.backup_set_count = Some(backups.len());
+        probe.latest_backup_at = backups
+            .last()
+            .and_then(|b| b.get("timestamp"))
+            .and_then(|t| t.get("stop"))
+            .and_then(|v| v.as_i64())
+            .and_then(|epoch| chrono::DateTime::<Utc>::from_timestamp(epoch, 0))
+            .map(|dt| dt.to_rfc3339());
+    }
+    if let Some(archive) = stanza
+        .get("archive")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.first())
+    {
+        probe.wal_min = archive
+            .get("min")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        probe.wal_max = archive
+            .get("max")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+    }
+}
+
+const ARCHIVER_PROBE_QUERY: &str = concat!(
+    "PGHOST=localhost PGPORT=5432 PGSSLMODE=disable psql -t -A -F',' -q -c \"",
+    "SELECT archived_count, coalesce(last_archived_time::text, ''), failed_count, ",
+    "coalesce(last_failed_time::text, ''), coalesce(((pg_last_committed_xact()).timestamp)::text, '') ",
+    "FROM pg_stat_archiver\"",
+);
+
+/// Parses the single CSV-ish line `ARCHIVER_PROBE_QUERY` prints and applies
+/// the sticky-field gate from prior PITR incident work: `pg_stat_archiver`'s
+/// `last_failed_*` columns never clear on their own (only a Postgres restart
+/// resets them), so a failure from days ago would otherwise permanently read
+/// as "unhealthy" -- only treat it as current if it's newer than the last
+/// successful archive.
+fn apply_archiver_output(probe: &mut PitrLiveProbe, output: &str) {
+    let line = output.lines().next().unwrap_or("").trim();
+    let fields: Vec<&str> = line.split(',').collect();
+    if fields.len() < 5 {
+        probe.archiver_error = Some("unexpected archiver probe output".to_string());
+        return;
+    }
+
+    let last_archived_time = non_empty(fields[1]);
+    let last_failed_time = non_empty(fields[3]);
+    let last_committed_at = non_empty(fields[4]);
+
+    probe.archiver_last_archived_at = last_archived_time.clone();
+    probe.max_restore_time = last_committed_at;
+
+    probe.archiver_healthy = match (
+        last_archived_time.as_deref().and_then(parse_pg_timestamp),
+        last_failed_time.as_deref().and_then(parse_pg_timestamp),
+    ) {
+        (_, None) => Some(true), // no failure recorded at all
+        (Some(archived), Some(failed)) => Some(failed <= archived),
+        (None, Some(_)) => Some(false), // failed, and never successfully archived
+    };
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parses Postgres's `timestamptz::text` output (e.g.
+/// `2026-07-28 10:00:00.123456+00`), which isn't quite RFC3339 (space instead
+/// of `T`, no colon in the offset).
+fn parse_pg_timestamp(s: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
+        .ok()
+        .or_else(|| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrProgressMemberOutput {
+    service_id: String,
+    service_name: String,
+    is_leader: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrProgressOutput {
+    root: ResourceRef,
+    workflow_id: String,
+    direction: String,
+    phase: String,
+    started_at: String,
+    updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_at_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_member_service_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_leader_service_id: Option<String>,
+    cluster_mutated: bool,
+    members: Vec<PitrProgressMemberOutput>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PitrMemberStatus {
@@ -713,6 +1771,48 @@ struct PitrStatusOutput {
     blockers: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     members: Vec<PitrMemberStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live: Option<PitrLiveProbe>,
+}
+
+/// Best-effort live coverage/archiver probe (`pgbackrest info` + `pg_stat_archiver`
+/// over SSH into the root service's running container). `available == false`
+/// means the probe itself couldn't run at all (no live deployment, no SSH key,
+/// unreachable, timed out); `backup_coverage_error`/`archiver_error` mean the
+/// probe connected but one half of the two independent sub-probes failed
+/// (e.g. `pgbackrest` not installed on a non-official image, or the Postgres
+/// user lacks `pg_monitor`) while the other still reports.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrLiveProbe {
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_coverage_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_set_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_backup_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_min: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_max: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archiver_error: Option<String>,
+    /// `None` when the archiver query ran but the sticky-failure gate
+    /// couldn't be evaluated (one or both timestamps failed to parse) --
+    /// printed as "unknown" rather than a false "healthy"/"unhealthy".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archiver_healthy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archiver_last_archived_at: Option<String>,
+    /// Approximate PITR restore ceiling (`(pg_last_committed_xact()).timestamp`).
+    /// Deliberately simpler than the backend's authoritative
+    /// `GREATEST(pg_last_committed_xact, pg_xact_commit_timestamp)` -- this is
+    /// a best-effort CLI probe, not a replacement for the admin fleet monitor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_restore_time: Option<String>,
 }
 
 #[cfg(test)]
@@ -811,6 +1911,167 @@ mod tests {
         assert!(set.daily);
         assert!(set.weekly);
         assert!(!set.monthly);
+    }
+
+    #[test]
+    fn parses_schedule_list() {
+        assert!(matches!(
+            Args::parse_from(["pitr", "schedule", "list"]).command,
+            Commands::Schedule(ScheduleArgs {
+                command: ScheduleCommands::List
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_progress_watch_flag() {
+        let args = Args::parse_from(["pitr", "progress", "--watch"]);
+        let Commands::Progress(progress) = args.command else {
+            panic!("expected progress");
+        };
+        assert!(progress.watch);
+
+        let args = Args::parse_from(["pitr", "progress"]);
+        let Commands::Progress(progress) = args.command else {
+            panic!("expected progress");
+        };
+        assert!(!progress.watch);
+    }
+
+    #[test]
+    fn parses_backup_lock_restore_and_trigger() {
+        let args = Args::parse_from(["pitr", "backup", "lock", "backup-1"]);
+        let Commands::Backup(BackupArgs {
+            command: BackupCommands::Lock(lock),
+        }) = args.command
+        else {
+            panic!("expected backup lock");
+        };
+        assert_eq!(lock.id, "backup-1");
+
+        let args = Args::parse_from(["pitr", "backup", "restore", "backup-1", "--yes"]);
+        let Commands::Backup(BackupArgs {
+            command: BackupCommands::Restore(restore),
+        }) = args.command
+        else {
+            panic!("expected backup restore");
+        };
+        assert_eq!(restore.id, "backup-1");
+        assert!(restore.yes);
+
+        let args = Args::parse_from(["pitr", "backup", "trigger", "--schedule-id", "sched-1"]);
+        let Commands::Backup(BackupArgs {
+            command: BackupCommands::Trigger(trigger),
+        }) = args.command
+        else {
+            panic!("expected backup trigger");
+        };
+        assert_eq!(trigger.schedule_id.as_deref(), Some("sched-1"));
+
+        assert!(matches!(
+            Args::parse_from(["pitr", "backup", "trigger"]).command,
+            Commands::Backup(BackupArgs {
+                command: BackupCommands::Trigger(BackupTriggerArgs { schedule_id: None })
+            })
+        ));
+    }
+
+    #[test]
+    fn is_terminal_backup_status_treats_running_states_as_non_terminal() {
+        assert!(!is_terminal_backup_status("running"));
+        assert!(!is_terminal_backup_status("RUNNING"));
+        assert!(!is_terminal_backup_status("pending"));
+        assert!(is_terminal_backup_status("COMPLETED"));
+        assert!(is_terminal_backup_status("FAILED"));
+        assert!(is_terminal_backup_status("CANCELED"));
+    }
+
+    #[test]
+    fn parse_pg_timestamp_handles_postgres_text_format() {
+        let parsed = parse_pg_timestamp("2026-07-28 10:00:00.123456+00").unwrap();
+        assert_eq!(parsed.to_rfc3339(), "2026-07-28T10:00:00.123456+00:00");
+        assert!(parse_pg_timestamp("not-a-timestamp").is_none());
+    }
+
+    #[test]
+    fn non_empty_treats_blank_and_whitespace_as_none() {
+        assert_eq!(non_empty("  "), None);
+        assert_eq!(non_empty(""), None);
+        assert_eq!(non_empty(" value "), Some("value".to_string()));
+    }
+
+    #[test]
+    fn apply_archiver_output_gates_sticky_failure_on_recency() {
+        // A failure strictly before the last successful archive is stale
+        // (pg_stat_archiver never clears last_failed_* on its own) -- healthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,2026-07-28 10:00:00+00,1,2026-07-27 09:00:00+00,2026-07-28 10:00:05+00",
+        );
+        assert_eq!(probe.archiver_healthy, Some(true));
+        assert_eq!(
+            probe.archiver_last_archived_at.as_deref(),
+            Some("2026-07-28 10:00:00+00")
+        );
+
+        // A failure after the last successful archive is current -- unhealthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,2026-07-28 10:00:00+00,2,2026-07-28 11:00:00+00,",
+        );
+        assert_eq!(probe.archiver_healthy, Some(false));
+
+        // No failure recorded at all -- healthy regardless of archive state.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,");
+        assert_eq!(probe.archiver_healthy, Some(true));
+    }
+
+    #[test]
+    fn apply_pgbackrest_info_extracts_backup_count_and_wal_range() {
+        let output = serde_json::json!([
+            {
+                "backup": [
+                    { "timestamp": { "start": 1700000000, "stop": 1700000100 } },
+                    { "timestamp": { "start": 1700003600, "stop": 1700003700 } }
+                ],
+                "archive": [
+                    { "min": "000000010000000000000001", "max": "000000010000000000000005" }
+                ]
+            }
+        ])
+        .to_string();
+
+        let mut probe = PitrLiveProbe::default();
+        apply_pgbackrest_info(&mut probe, &output);
+        assert_eq!(probe.backup_set_count, Some(2));
+        assert_eq!(probe.wal_min.as_deref(), Some("000000010000000000000001"));
+        assert_eq!(probe.wal_max.as_deref(), Some("000000010000000000000005"));
+        assert!(probe.latest_backup_at.is_some());
+    }
+
+    #[test]
+    fn apply_pgbackrest_info_degrades_on_unparseable_output() {
+        let mut probe = PitrLiveProbe::default();
+        apply_pgbackrest_info(&mut probe, "not json");
+        assert!(probe.backup_coverage_error.is_some());
+        assert_eq!(probe.backup_set_count, None);
+    }
+
+    #[test]
+    fn resolve_volume_instance_id_errors_without_a_volume() {
+        let mut config = EnvironmentConfig::default();
+        config.services.insert(
+            "root".to_string(),
+            crate::controllers::config::ServiceInstance::default(),
+        );
+        let root = super::super::RootContext {
+            root_id: "root".to_string(),
+            root_name: "postgres".to_string(),
+        };
+        assert!(resolve_volume_instance_id(&config, &root).is_err());
     }
 
     #[test]

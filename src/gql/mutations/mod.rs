@@ -591,7 +591,7 @@ pub struct CancelPitrHaWorkflow;
 )]
 pub struct ClearPitrHaWorkflowProgress;
 
-/// Front-loaded for phase B (PITR point-in-time restore); not yet called.
+/// Used by `railway postgres pitr restore`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -599,10 +599,9 @@ pub struct ClearPitrHaWorkflowProgress;
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
-#[allow(dead_code)]
 pub struct VolumeInstancePitrRestore;
 
-/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+/// Used by `railway postgres pitr backup create`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -610,10 +609,11 @@ pub struct VolumeInstancePitrRestore;
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupCreate;
 
-/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+/// Single-id delete counterpart to `VolumeInstanceBackupBatchDelete` below --
+/// unused for now since `backup delete <id>...` always goes through the
+/// batch mutation (it also covers the single-id case).
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -623,27 +623,25 @@ pub struct VolumeInstanceBackupCreate;
 #[allow(dead_code)]
 pub struct VolumeInstanceBackupDelete;
 
-/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+/// Used by `railway postgres pitr backup delete`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/VolumeInstanceBackupBatchDelete.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupBatchDelete;
 
-/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+/// Used by `railway postgres pitr backup lock`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/VolumeInstanceBackupLock.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupLock;
 
-/// Front-loaded for phase B (PITR backup CRUD); not yet called.
+/// Used by `railway postgres pitr backup restore`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -651,7 +649,6 @@ pub struct VolumeInstanceBackupLock;
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupRestore;
 
 /// Used by `template_apply`'s HA-conversion pre-flight safety backup.
@@ -663,7 +660,7 @@ pub struct VolumeInstanceBackupRestore;
 )]
 pub struct VolumeInstanceBackupCreateForHaConversion;
 
-/// Front-loaded for phase B (PITR backup schedule); not yet called.
+/// Used by `railway postgres pitr schedule set`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -671,17 +668,15 @@ pub struct VolumeInstanceBackupCreateForHaConversion;
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupScheduleUpdate;
 
-/// Front-loaded for phase B (PITR backup schedule trigger); not yet called.
+/// Used by `railway postgres pitr backup trigger`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/VolumeInstanceBackupScheduleTrigger.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupScheduleTrigger;
 
 /// Front-loaded for phase B (HA cluster scale, adding new nodes to the canvas group); not yet called.

@@ -396,14 +396,13 @@ pub struct GitHubSshKeys;
 )]
 pub struct ServiceInstance;
 
-/// Front-loaded for phase B (`railway postgres pitr progress`); not yet called.
+/// Used by `railway postgres pitr progress`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/GetPitrHaWorkflowProgress.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct GetPitrHaWorkflowProgress;
 
 /// Used by `railway postgres pitr disable`'s HA precheck.
@@ -415,34 +414,32 @@ pub struct GetPitrHaWorkflowProgress;
 )]
 pub struct GetPitrHaClusterReplicationHealth;
 
-/// Front-loaded for phase B (`railway postgres pitr backup list`); not yet called.
+/// Used by `railway postgres pitr backup list`.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/VolumeInstanceBackupList.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupList;
 
-/// Front-loaded for phase B (`railway postgres pitr schedule list`); not yet called.
+/// Used by `railway postgres pitr schedule list` and `backup trigger`
+/// (to resolve a schedule id when `--schedule-id` is omitted).
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/VolumeInstanceBackupScheduleList.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupScheduleList;
 
-/// Front-loaded for phase B (`railway postgres pitr backup trigger` poll); not yet called.
+/// Used by `railway postgres pitr backup trigger`'s poll loop.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/VolumeInstanceBackupWorkflowStatus.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupWorkflowStatus;
 
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
