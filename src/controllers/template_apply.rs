@@ -238,10 +238,11 @@ pub async fn stage_and_commit_patch(
 }
 
 /// Commits the environment's currently-staged patch (created by the
-/// `templateDeployV2`/`templateRevert` workflow above, or by
-/// [`stage_and_commit_patch`]'s explicit stage call), optionally skipping the
-/// deploy trigger. Returns whether deploys ran.
-async fn commit_staged_patch(ctx: &ServiceContext, auto_deploy: bool) -> Result<bool> {
+/// `templateDeployV2`/`templateRevert` workflow above, by
+/// [`stage_and_commit_patch`]'s explicit stage call, or by `cluster_scale`'s
+/// own `environmentStageChanges` call), optionally skipping the deploy
+/// trigger. Returns whether deploys ran.
+pub(crate) async fn commit_staged_patch(ctx: &ServiceContext, auto_deploy: bool) -> Result<bool> {
     post_graphql::<mutations::EnvironmentPatchCommitStaged, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -307,14 +308,19 @@ fn strip_trailing_dash_number(name: &str) -> String {
 }
 
 /// `${{<name>.RAILWAY_PRIVATE_DOMAIN}}` variable reference syntax.
-fn private_domain_ref(name: &str) -> String {
+pub(crate) fn private_domain_ref(name: &str) -> String {
     let mut out = String::from("${{");
     out.push_str(name);
     out.push_str(".RAILWAY_PRIVATE_DOMAIN}}");
     out
 }
 
-fn format_data_node_entry(format: &str, service_name: &str, root_name: &str) -> String {
+/// Substitutes `{host}`/`{rootName}` placeholders in a template-declared
+/// data-node entry format. Shared verbatim with `cluster_scale` (live
+/// replica/coordinator scaling) -- the substitution rules are identical
+/// whether the wiring came from a freshly-fetched template's JSON or an
+/// already-converted cluster's live `ClusterWiring`.
+pub(crate) fn format_data_node_entry(format: &str, service_name: &str, root_name: &str) -> String {
     format
         .replace("{host}", &private_domain_ref(service_name))
         .replace("{rootName}", root_name)
