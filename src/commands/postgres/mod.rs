@@ -102,14 +102,6 @@ pub(super) fn confirm_or_bail(message: &str, yes: bool) -> Result<bool> {
     }
 }
 
-/// `not yet implemented` bail helper for the phase-B-deferred verb bodies
-/// below, kept in one place so the message stays consistent.
-pub(super) fn not_yet_implemented(verb: &str) -> Result<()> {
-    bail!(
-        "`railway postgres {verb}` is not yet implemented in this version of the CLI. Use the Railway dashboard for now."
-    );
-}
-
 /// Service id -> name lookup, used to label HA cluster members (which are
 /// only identified by id in `environment.config`).
 pub(super) fn service_name_map(ctx: &ServiceContext) -> BTreeMap<String, String> {

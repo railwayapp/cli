@@ -247,8 +247,8 @@ fn print_ha_status(output: &HaStatusOutput) {
         println!();
         println!("{}", "Members:".bold());
         println!(
-            "  {:<28} {:<12} {:<10} {:<10} {}",
-            "NAME", "CONFIG ROLE", "LIVE ROLE", "STATE", "LAG"
+            "  {:<28} {:<12} {:<10} {:<10} LAG",
+            "NAME", "CONFIG ROLE", "LIVE ROLE", "STATE"
         );
         for member in &output.members {
             let live_role = match &member.reachable {

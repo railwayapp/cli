@@ -1090,8 +1090,8 @@ async fn backup_list(
     }
 
     println!(
-        "{:<26} {:<20} {:<26} {:>10} {:<12} {}",
-        "ID", "NAME", "CREATED", "SIZE (MB)", "SCHEDULE", "EXPIRES"
+        "{:<26} {:<20} {:<26} {:>10} {:<12} EXPIRES",
+        "ID", "NAME", "CREATED", "SIZE (MB)", "SCHEDULE"
     );
     for backup in &backups {
         println!(
@@ -1532,10 +1532,7 @@ async fn schedule_list(
         return Ok(());
     }
 
-    println!(
-        "{:<10} {:<24} {:<26} {}",
-        "KIND", "NAME", "CREATED", "RETENTION"
-    );
+    println!("{:<10} {:<24} {:<26} RETENTION", "KIND", "NAME", "CREATED");
     for s in &schedules {
         println!(
             "{:<10} {:<24} {:<26} {}",
