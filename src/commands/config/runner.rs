@@ -496,15 +496,27 @@ fn project_search_root(start: &std::path::Path) -> PathBuf {
         .to_path_buf()
 }
 
-/// Whether `path` is writable by anyone other than its owner. A runner sitting
-/// in a group- or world-writable directory can be replaced by another local
-/// principal between now and exec, so it is not a trustworthy candidate.
+/// Whether `path` is a directory writable by anyone other than its owner.
+///
+/// A runner reachable through a group- or world-writable directory can be
+/// replaced by another local principal between discovery and exec, so it is
+/// not a trustworthy candidate.
+///
+/// Symlink and file mode bits are intentionally ignored: package managers
+/// install `node_modules/.bin` entries as `0777` symlinks (and often ship the
+/// target script as `0777` too). Those bits are not meaningful for substitution
+/// risk — replacing a path component requires write access to a directory.
 #[cfg(unix)]
 fn writable_by_others(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::symlink_metadata(path)
-        .map(|metadata| metadata.permissions().mode() & 0o022 != 0)
-        .unwrap_or(true)
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return true,
+    };
+    if !metadata.is_dir() {
+        return false;
+    }
+    metadata.permissions().mode() & 0o022 != 0
 }
 
 #[cfg(not(unix))]
@@ -527,11 +539,10 @@ fn find_project_runner(start: &std::path::Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let candidate = dir.join("node_modules").join(".bin").join(binary);
         if candidate.exists() {
-            if writable_by_others(&candidate)
-                || dir
-                    .ancestors()
-                    .take_while(|ancestor| ancestor.starts_with(&root))
-                    .any(writable_by_others)
+            if dir
+                .ancestors()
+                .take_while(|ancestor| ancestor.starts_with(&root))
+                .any(writable_by_others)
             {
                 return None;
             }
@@ -929,5 +940,35 @@ mod runner_discovery_tests {
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
 
         assert_eq!(find_project_runner(&shared), None);
+    }
+
+    /// npm/bun/pnpm install package bins as symlinks whose own mode is `0777`
+    /// (and often the target script is `0777` too). Discovery must still accept
+    /// them when the containing directories are not writable by others.
+    #[cfg(unix)]
+    #[test]
+    fn finds_a_package_manager_bin_symlink_with_permissive_modes() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+
+        let target_dir = root
+            .path()
+            .join("node_modules")
+            .join("railway")
+            .join("dist")
+            .join("iac");
+        fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("bin.js");
+        fs::write(&target, "#!/usr/bin/env node\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let bin_dir = root.path().join("node_modules").join(".bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let link = bin_dir.join("railway-iac-ts");
+        symlink(&target, &link).unwrap();
+
+        assert_eq!(find_project_runner(root.path()), Some(link));
     }
 }
