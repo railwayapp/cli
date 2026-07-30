@@ -1,6 +1,13 @@
 use reqwest::header::InvalidHeaderValue;
 use thiserror::Error;
 
+/// Sentinel error: commands return this to exit with a specific code without
+/// printing an error, while still running end-of-process work in main (update
+/// checks, telemetry) that a direct `process::exit` would skip.
+#[derive(Error, Debug)]
+#[error("exit code {0}")]
+pub struct ExitCode(pub i32);
+
 #[derive(Error, Debug)]
 pub enum RailwayError {
     #[error("Unauthorized. Please login with `railway login`")]

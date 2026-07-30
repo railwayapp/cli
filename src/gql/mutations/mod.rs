@@ -9,6 +9,26 @@ use crate::controllers;
 pub type DateTime = DateTimeType<Utc>;
 type EnvironmentConfig = controllers::config::EnvironmentConfig;
 
+/// Variant of `EnvironmentStageChanges` whose `EnvironmentConfig` input is raw
+/// JSON. Re-staging a server-fetched patch (discard) must not round-trip
+/// through `controllers::config::EnvironmentConfig`: that struct only models
+/// the fields the CLI edits, so unrecognized fields staged by other clients
+/// would be silently dropped.
+pub mod raw_config {
+    use graphql_client::GraphQLQuery;
+
+    type EnvironmentConfig = serde_json::Value;
+
+    #[derive(GraphQLQuery)]
+    #[graphql(
+        schema_path = "src/gql/schema.json",
+        query_path = "src/gql/mutations/strings/EnvironmentStageChangesRaw.graphql",
+        response_derives = "Debug, Serialize, Clone",
+        skip_serializing_none
+    )]
+    pub struct EnvironmentStageChangesRaw;
+}
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -414,6 +434,15 @@ pub struct FunctionUpdate;
     skip_serializing_none
 )]
 pub struct EnvironmentPatchCommit;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnvironmentPatchCommitStaged.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnvironmentPatchCommitStaged;
 
 #[derive(GraphQLQuery)]
 #[graphql(

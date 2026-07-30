@@ -13,6 +13,7 @@ pub mod api;
 pub mod autoupdate;
 pub mod bucket;
 pub mod cdn;
+pub mod changes;
 pub mod completion;
 pub mod config;
 pub mod connect;

@@ -401,6 +401,7 @@ async fn fetch_staged_ipv6_value(
         configs.get_backboard(),
         queries::environment_staged_changes::Variables {
             environment_id: environment_id.to_string(),
+            decrypt_variables: Some(true),
         },
     )
     .await?;
