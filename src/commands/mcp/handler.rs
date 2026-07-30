@@ -1579,7 +1579,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Stage a public TCP proxy for a Railway service application port. Only one TCP proxy is allowed per service instance. The proxy is provisioned when staged changes are deployed (staged_changes_deploy or `railway changes deploy`)."
+        description = "Create a public TCP proxy for a Railway service application port. Only one TCP proxy is allowed per service instance."
     )]
     async fn create_tcp_proxy(
         &self,
@@ -1700,7 +1700,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Create a new object storage bucket and stage it for a Railway environment. Default region is sjc. Returns the bucket ID and name; the bucket is provisioned when staged changes are deployed (staged_changes_deploy or `railway changes deploy`)."
+        description = "Create a new object storage bucket in a Railway environment. Default region is sjc. Returns the bucket ID and name."
     )]
     async fn create_bucket(
         &self,
@@ -1710,7 +1710,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Stage the removal of an object storage bucket from a Railway environment. The deletion is irreversible once staged changes are deployed (staged_changes_deploy or `railway changes deploy`). Returns a preview first.",
+        description = "Remove an object storage bucket from a Railway environment. This is irreversible. Returns a preview first.",
         annotations(destructive_hint = true)
     )]
     async fn remove_bucket(

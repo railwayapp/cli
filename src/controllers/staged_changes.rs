@@ -1637,6 +1637,7 @@ fn collect_private_networking_change(
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pretty_change(
     name_info: DisplayName,
     current_value: Option<&Value>,
@@ -2262,18 +2263,6 @@ fn resolve_name(view: &StagedChangesView, kind: ResourceKind, id: &str) -> Strin
         .find(|group| group.resource_kind == kind && group.resource_id.as_deref() == Some(id))
         .map(|group| group.resource_name.clone())
         .unwrap_or_else(|| id.to_string())
-}
-
-/// The one-line notice every command that stages changes prints, so the whole
-/// CLI points at the same next steps.
-pub fn staged_changes_notice(count: usize) -> String {
-    format!(
-        "Staged {} {} — review: {} · deploy: {}",
-        count,
-        if count == 1 { "change" } else { "changes" },
-        "railway changes status".cyan().bold(),
-        "railway changes deploy".cyan().bold(),
-    )
 }
 
 #[cfg(test)]

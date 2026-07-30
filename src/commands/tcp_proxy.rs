@@ -6,8 +6,7 @@ use serde::Serialize;
 use crate::{
     controllers::{
         project::resolve_service_context,
-        staged_changes::staged_changes_notice,
-        tcp_proxy::{self, TcpProxy, parse_port},
+        tcp_proxy::{self, PatchMode, TcpProxy, parse_port},
     },
     util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
@@ -17,7 +16,7 @@ use super::*;
 /// Manage public TCP proxies for a service
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway tcp-proxy list --service postgres --json\n  railway tcp-proxy create --port 5432 --service postgres\n  railway tcp-proxy status tcp-proxy-id\n  railway tcp-proxy delete tcp-proxy-id --yes\n\nAutomation notes:\n  Only one TCP proxy is allowed per service instance.\n  TCP proxy creation stages a service networking change; the proxy is provisioned when you run `railway changes deploy`.\n  Deleting an active TCP proxy takes effect immediately."
+    after_help = "Examples:\n\n  railway tcp-proxy list --service postgres --json\n  railway tcp-proxy create --port 5432 --service postgres\n  railway tcp-proxy status tcp-proxy-id\n  railway tcp-proxy delete tcp-proxy-id --yes\n\nAutomation notes:\n  Only one TCP proxy is allowed per service instance.\n  TCP proxy creation updates service networking config. If the proxy does not become active, redeploy the service and check its status."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -203,45 +202,79 @@ async fn create(
         return Ok(());
     }
 
-    let spinner = create_spinner_if(
-        !json && std::io::stdout().is_terminal(),
-        "Staging TCP proxy...".into(),
-    );
-    tcp_proxy::stage_tcp_proxy_patch(
+    let spinner = create_spinner_if(!json, "Configuring TCP proxy...".into());
+    let patch_mode = tcp_proxy::apply_tcp_proxy_patch(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project,
+        &ctx.environment_id,
+        &ctx.service_id,
+        &ctx.service_name,
+        port,
+    )
+    .await?;
+    if patch_mode == PatchMode::Commit {
+        tcp_proxy::verify_tcp_proxy_configured(
+            &ctx.client,
+            &ctx.configs,
+            &ctx.environment_id,
+            &ctx.service_id,
+            port,
+        )
+        .await?;
+    }
+    let active_proxy = tcp_proxy::fetch_tcp_proxies(
         &ctx.client,
         &ctx.configs,
         &ctx.environment_id,
         &ctx.service_id,
-        port,
     )
-    .await?;
+    .await?
+    .into_iter()
+    .find(|proxy| proxy.application_port == i64::from(port));
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&CreateOutput {
                 application_port: port,
-                staged: true,
-                committed: false,
-                proxy: None,
+                staged: patch_mode == PatchMode::Stage,
+                committed: patch_mode == PatchMode::Commit,
+                proxy: active_proxy,
             })?
         );
         return Ok(());
     }
 
-    let msg = format!(
-        "Staged TCP proxy for service {} on application port {} in {}",
-        ctx.service_name.blue(),
-        port.to_string().cyan(),
-        ctx.environment_name.magenta().bold(),
-    );
+    let msg = match patch_mode {
+        PatchMode::Commit => format!(
+            "Configured TCP proxy for service {} on application port {}.",
+            ctx.service_name.blue(),
+            port.to_string().cyan()
+        ),
+        PatchMode::Stage => format!(
+            "Staged TCP proxy for service {} on application port {} in {} {}",
+            ctx.service_name.blue(),
+            port.to_string().cyan(),
+            ctx.environment_name.magenta().bold(),
+            "(use 'railway environment edit' to commit)".dimmed()
+        ),
+    };
 
     if let Some(spinner) = spinner {
         spinner.finish_with_message(msg);
     } else {
         println!("{msg}");
     }
-    println!("{}", staged_changes_notice(1));
+
+    if let Some(proxy) = active_proxy {
+        print_proxy_details(&proxy, "Active TCP proxy");
+    } else {
+        println!(
+            "The TCP proxy is configured but is not readable yet. Run {} shortly; if it does not become active, redeploy the service.",
+            format!("railway tcp-proxy list --service {}", ctx.service_name).bold()
+        );
+    }
 
     Ok(())
 }
@@ -255,38 +288,14 @@ async fn delete(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let proxy = match tcp_proxy::resolve_tcp_proxy(
+    let proxy = tcp_proxy::resolve_tcp_proxy(
         &ctx.client,
         &ctx.configs,
         &ctx.environment_id,
         &ctx.service_id,
         &proxy,
     )
-    .await
-    {
-        Ok(proxy) => proxy,
-        Err(resolve_error) => {
-            // Not an active proxy — it may exist only as a staged (not yet
-            // deployed) creation, which is removed by staging null over the
-            // port entry rather than via tcpProxyDelete.
-            let staged_ports = tcp_proxy::staged_tcp_proxy_ports(
-                &ctx.client,
-                &ctx.configs,
-                &ctx.environment_id,
-                &ctx.service_id,
-            )
-            .await
-            .unwrap_or_default();
-            let staged_port = proxy
-                .parse::<u16>()
-                .ok()
-                .filter(|port| staged_ports.contains(port));
-            let Some(port) = staged_port else {
-                return Err(resolve_error);
-            };
-            return delete_staged(&ctx, port, yes, json).await;
-        }
-    };
+    .await?;
 
     let confirmed = if yes {
         true
@@ -319,10 +328,7 @@ async fn delete(
         return Ok(());
     }
 
-    let spinner = create_spinner_if(
-        !json && std::io::stdout().is_terminal(),
-        "Deleting TCP proxy...".into(),
-    );
+    let spinner = create_spinner_if(!json, "Deleting TCP proxy...".into());
     tcp_proxy::delete_tcp_proxy(
         &ctx.client,
         &ctx.configs,
@@ -348,75 +354,6 @@ async fn delete(
         spinner.finish_with_message(format!("Deleted TCP proxy {}", proxy.endpoint.blue()));
     } else {
         println!("Deleted TCP proxy {}.", proxy.endpoint.blue());
-    }
-
-    Ok(())
-}
-
-/// Remove a TCP proxy that only exists as a staged creation: stage null over
-/// the port entry (matching the dashboard) so nothing is provisioned on deploy.
-async fn delete_staged(
-    ctx: &crate::controllers::project::ServiceContext,
-    port: u16,
-    yes: bool,
-    json: bool,
-) -> Result<()> {
-    let confirmed = if yes {
-        true
-    } else if std::io::stdout().is_terminal() {
-        prompt_confirm_with_default(
-            &format!(
-                "Remove staged TCP proxy for application port {}? It has not been deployed yet.",
-                port.to_string().cyan()
-            ),
-            false,
-        )?
-    } else {
-        bail!(
-            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
-        );
-    };
-
-    if !confirmed {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "deleted": false,
-                    "applicationPort": port,
-                }))?
-            );
-        } else {
-            println!("Deletion cancelled.");
-        }
-        return Ok(());
-    }
-
-    tcp_proxy::stage_tcp_proxy_removal(
-        &ctx.client,
-        &ctx.configs,
-        &ctx.environment_id,
-        &ctx.service_id,
-        port,
-    )
-    .await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "deleted": true,
-                "applicationPort": port,
-                "staged": true,
-                "committed": false,
-            }))?
-        );
-    } else {
-        println!(
-            "Removed staged TCP proxy for service {} on application port {}.",
-            ctx.service_name.blue(),
-            port.to_string().cyan()
-        );
     }
 
     Ok(())

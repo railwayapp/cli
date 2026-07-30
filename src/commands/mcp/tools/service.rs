@@ -23,6 +23,7 @@ use super::super::params::{
     AddReferenceVariableParams, DeployTemplateParams, GetServiceConfigParams, ScaleServiceParams,
     SearchTemplatesParams,
 };
+use super::storage::PatchMode;
 
 impl RailwayMcp {
     pub(crate) async fn do_scale_service(
@@ -128,13 +129,20 @@ impl RailwayMcp {
             .find(|service| service.node.id == service_ctx.service_id)
             .map(|service| service.node.name.as_str())
             .unwrap_or(&service_ctx.service_id);
-        self.commit_env_patch(ctx, patch, Some(format!("Scale service {service_name}")))
+        let mode = self
+            .apply_env_patch(ctx, patch, Some(format!("Scale service {service_name}")))
             .await?;
+        let status = match mode {
+            PatchMode::Commit => "committed",
+            PatchMode::Stage => {
+                "staged (environment has pending changes; use `railway environment edit` to commit)"
+            }
+        };
         let region_locations = region_locations_from_regions(&regions.regions);
         let region_summary = format_region_replicas(&region_data, &region_locations);
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Service scaled: {service_name} (id: {})\nEnvironment: {}\nRegions: {region_summary}\nChange: committed",
+            "Service scaled: {service_name} (id: {})\nEnvironment: {}\nRegions: {region_summary}\nChange: {status}",
             service_ctx.service_id, config_resp.name
         ))]))
     }
