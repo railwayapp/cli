@@ -3,6 +3,5 @@ pub mod observability;
 pub mod private_network;
 pub mod project;
 pub mod service;
-pub mod staged_changes;
 pub mod storage;
 pub mod tcp_proxy;

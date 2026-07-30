@@ -1526,39 +1526,6 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "Show staged environment changes with dashboard-style labels, raw paths, current values, and new values. Variable values are masked unless show_values is true; sealed variable values are always null.",
-        annotations(read_only_hint = true)
-    )]
-    async fn staged_changes_status(
-        &self,
-        Parameters(params): Parameters<StagedChangesParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.do_staged_changes_status(params).await
-    }
-
-    #[tool(
-        description = "Deploy all staged environment changes. The commit is accepted first, then apply progress is polled; a pending result means the commit succeeded and changes are still applying (not an error). Deletions that require two-factor verification are refused over token auth.",
-        annotations(destructive_hint = true)
-    )]
-    async fn staged_changes_deploy(
-        &self,
-        Parameters(params): Parameters<DeployStagedChangesParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.do_staged_changes_deploy(params).await
-    }
-
-    #[tool(
-        description = "Discard staged environment changes. Pass all: true to discard everything, or paths for selected dot paths (a prefix like services.<id> discards that whole subtree). Only affects staged, uncommitted changes.",
-        annotations(destructive_hint = true)
-    )]
-    async fn staged_changes_discard(
-        &self,
-        Parameters(params): Parameters<DiscardStagedChangesParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.do_staged_changes_discard(params).await
-    }
-
-    #[tool(
         description = "Get the current configuration of a service instance including source, build config, start command, and variable count."
     )]
     async fn get_service_config(

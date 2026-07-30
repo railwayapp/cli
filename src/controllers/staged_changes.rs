@@ -931,26 +931,6 @@ fn mask_value(value: &str) -> String {
     format!("{prefix}…")
 }
 
-/// Copy of the view with variable values masked, for surfaces whose JSON
-/// output should default to hiding secrets (the MCP status tool).
-pub fn mask_view_values(view: &StagedChangesView) -> StagedChangesView {
-    let mut masked = view.clone();
-    for group in &mut masked.pretty.groups {
-        for change in &mut group.changes {
-            if change.is_sealed || !is_variable_like(change) {
-                continue;
-            }
-            if !change.current_value.is_empty() {
-                change.current_value = mask_value(&change.current_value);
-            }
-            if !change.new_value.is_empty() {
-                change.new_value = mask_value(&change.new_value);
-            }
-        }
-    }
-    masked
-}
-
 fn collect_raw_fallback_changes(
     patch: &Value,
     environment_config: &Value,
