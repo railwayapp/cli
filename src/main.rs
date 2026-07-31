@@ -7,6 +7,7 @@ use clap::error::ErrorKind;
 mod commands;
 use commands::*;
 use config::Configs;
+use errors::RailwayError;
 use is_terminal::IsTerminal;
 use util::{
     check_update::{UPDATE_CHECK_INTERVAL_HOURS, UpdateCheck},
@@ -429,7 +430,18 @@ async fn main() -> Result<()> {
     if command_needs_refresh(&cli) {
         if let Ok(mut configs) = Configs::new() {
             if let Err(e) = client::ensure_valid_token(&mut configs).await {
-                eprintln!("{}: {e}", "Warning: failed to refresh OAuth token".yellow());
+                // A revoked/expired login is the actual cause of the
+                // "Unauthorized" the command is about to fail with, so say so
+                // here rather than letting the generic message stand in for it.
+                // The credential has already been cleared by this point.
+                if matches!(
+                    e.downcast_ref::<RailwayError>(),
+                    Some(RailwayError::OAuthInvalidGrant(_))
+                ) {
+                    eprintln!("{}", format!("{e}").red());
+                } else {
+                    eprintln!("{}: {e}", "Warning: failed to refresh OAuth token".yellow());
+                }
             }
         }
     }

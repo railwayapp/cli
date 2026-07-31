@@ -112,6 +112,13 @@ pub enum RailwayError {
     #[error("Token refresh failed: {0}. Please run `railway login` again.")]
     OAuthRefreshFailed(String),
 
+    /// The server rejected the stored refresh token with `invalid_grant` —
+    /// it was revoked, expired, or never existed. Unlike every other refresh
+    /// failure this is *permanent*: retrying with the same credential can
+    /// never succeed, so the caller clears it instead of looping forever.
+    #[error("Your saved login is no longer valid ({0}). Please run `railway login` again.")]
+    OAuthInvalidGrant(String),
+
     #[error("OAuth error: {0}")]
     OAuthError(String),
 
@@ -158,6 +165,7 @@ impl RailwayError {
             RailwayError::OAuthDeviceCodeExpired => "OAUTH_DEVICE_CODE_EXPIRED",
             RailwayError::OAuthAccessDenied => "OAUTH_ACCESS_DENIED",
             RailwayError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",
+            RailwayError::OAuthInvalidGrant(_) => "OAUTH_INVALID_GRANT",
             RailwayError::OAuthError(_) => "OAUTH_ERROR",
             RailwayError::NotAuthenticated => "NOT_AUTHENTICATED",
         }
@@ -168,7 +176,7 @@ impl RailwayError {
     /// embed guidance in their message.
     pub fn hint(&self) -> Option<&'static str> {
         match self {
-            RailwayError::NotAuthenticated => {
+            RailwayError::NotAuthenticated | RailwayError::OAuthInvalidGrant(_) => {
                 Some("Run `railway login` to authenticate, then re-run.")
             }
             RailwayError::NoLinkedProject | RailwayError::ProjectNotFound => {

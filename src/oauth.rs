@@ -269,5 +269,54 @@ pub async fn refresh_access_token(host: &str, refresh_token: &str) -> Result<Tok
         error_description: Some(format!("HTTP {status}")),
     });
     let desc = error_resp.error_description.unwrap_or_default();
-    Err(RailwayError::OAuthRefreshFailed(format!("{}: {desc}", error_resp.error)).into())
+    Err(classify_refresh_error(&error_resp.error, desc).into())
+}
+
+/// Split token-endpoint failures into permanent and retryable.
+///
+/// RFC 6749 §5.2: `invalid_grant` means the refresh token is revoked,
+/// expired, or unknown to the server — no retry can ever succeed, so the
+/// caller deletes the stored credential. Everything else (5xx, rate limits,
+/// `unknown` from an unparseable body) may succeed later and must keep its
+/// tokens: backboard serves real 500s on `/token` from Redis and Postgres
+/// pool exhaustion, and treating those as permanent would sign every active
+/// user out during an outage.
+fn classify_refresh_error(error: &str, desc: String) -> RailwayError {
+    if error == "invalid_grant" {
+        return RailwayError::OAuthInvalidGrant(desc);
+    }
+    RailwayError::OAuthRefreshFailed(format!("{error}: {desc}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_grant_is_permanent() {
+        let err = classify_refresh_error("invalid_grant", "refresh token not found".into());
+        assert!(matches!(err, RailwayError::OAuthInvalidGrant(_)));
+    }
+
+    /// The property that keeps a backboard outage from becoming a mass
+    /// logout: only `invalid_grant` may clear credentials.
+    #[test]
+    fn transient_failures_are_not_permanent() {
+        for error in [
+            "unknown",      // unparseable body, e.g. a 500 HTML page
+            "server_error", // Redis/Prisma pool exhaustion on /token
+            "temporarily_unavailable",
+            "slow_down",
+            "invalid_request",
+            "invalid_client",
+        ] {
+            assert!(
+                !matches!(
+                    classify_refresh_error(error, "boom".into()),
+                    RailwayError::OAuthInvalidGrant(_)
+                ),
+                "{error} must not be treated as a permanently dead credential"
+            );
+        }
+    }
 }
