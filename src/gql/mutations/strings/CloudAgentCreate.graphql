@@ -1,0 +1,10 @@
+mutation CloudAgentCreate($input: CloudAgentCreateInput!) {
+  cloudAgentCreate(input: $input) {
+    id
+    name
+    status
+    projectId
+    environmentId
+    createdAt
+  }
+}

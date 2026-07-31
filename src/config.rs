@@ -100,6 +100,12 @@ pub struct RailwayConfig {
     /// Sandbox template recipes the CLI has built (id is server-side hash;
     /// instructions kept locally because sandboxCreate needs the full recipe).
     pub sandbox_templates: Option<Vec<StoredSandboxTemplate>>,
+    /// The cloud agent `railway code` last used, per environment. Unlike a
+    /// sandbox this is a durable box the user comes back to, so the pointer is
+    /// keyed by environment rather than being a single global "active" slot:
+    /// switching projects must not make `railway code` reach for a box in a
+    /// different environment.
+    pub code_agents: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug)]
@@ -563,6 +569,32 @@ impl Configs {
         }
         if self.root_config.active_sandbox.as_deref() == Some(id) {
             self.root_config.active_sandbox = None;
+        }
+    }
+
+    /// The cloud agent `railway code` last used in this environment, if any.
+    pub fn get_code_agent(&self, environment_id: &str) -> Option<String> {
+        self.root_config
+            .code_agents
+            .as_ref()?
+            .get(environment_id)
+            .cloned()
+    }
+
+    /// Remember the cloud agent `railway code` is using in this environment.
+    /// Caller persists with `write()`.
+    pub fn set_code_agent(&mut self, environment_id: &str, id: &str) {
+        self.root_config
+            .code_agents
+            .get_or_insert_with(BTreeMap::new)
+            .insert(environment_id.to_string(), id.to_string());
+    }
+
+    /// Forget the cloud agent pointer for an environment (the agent was deleted
+    /// or has gone unreachable). Caller persists with `write()`.
+    pub fn remove_code_agent(&mut self, environment_id: &str) {
+        if let Some(agents) = self.root_config.code_agents.as_mut() {
+            agents.remove(environment_id);
         }
     }
 

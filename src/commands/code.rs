@@ -3,9 +3,7 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
-use crate::commands::sandbox::{
-    CreateReport, create_and_store, resolve_project_and_env, spawn_heartbeat, variables_to_input,
-};
+use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
 use crate::commands::ssh::{
     ensure_ssh_key_quiet, run_native_ssh_captured, run_native_ssh_with_opts,
 };
@@ -15,24 +13,39 @@ use crate::util::progress::{create_shimmer_spinner, fail_spinner};
 use crate::util::shell::shell_join;
 
 // ---------------------------------------------------------------------------
-// `railway code --codex` / `railway code --claude` — launch a coding agent in
-// a Railway sandbox on the user's own plan.
+// `railway code --codex` / `railway code --claude` / `railway code --grok` —
+// launch a coding agent on a Railway cloud agent VM, on the user's own plan.
+//
+// The VM does most of the work. `cloud-agent-base` bakes every harness
+// (claude, codex, grok, cursor, droid, opencode, pi, railway-agent), and the
+// `express-agent serve --agents` entrypoint reconciles their config on every
+// boot: MCP servers (including Railway's own platform tools), hooks, the
+// onboarding/trust flags, and the autonomy posture. So this command installs
+// nothing, updates nothing, and seeds no harness config — doing any of that
+// would fight the reconciler for ownership of the same files. What is left is
+// the one thing only the user's laptop has: their credential.
 //
 // Auth shape: Codex copies the user's existing local sign-in
 // (`~/.codex/auth.json`) — the flow OpenAI documents for remote machines.
-// Claude uses a deliberate long-lived token (`claude setup-token` output, or
-// an ANTHROPIC_API_KEY), matching mono's agent-vm Connect tab flow — never
-// the local sign-in's `.credentials.json`, whose refresh token two machines
-// can't safely share. Either credential is announced to the user, read
-// client-side, and rides ssh stdin into a 0600 file in the sandbox: it never
-// appears in an argv, a Railway variable, an image, or server-side config.
+// Grok does the same with `~/.grok/auth.json`. Claude uses a deliberate
+// long-lived token (`claude setup-token` output, or an ANTHROPIC_API_KEY) —
+// never the local sign-in's `.credentials.json`, whose refresh token two
+// machines can't safely share. Every credential is announced to the user, read
+// client-side, and rides ssh stdin into a 0600 file on the VM: deliberately
+// NOT a create-time variable, so it never appears in an argv, a Railway
+// variable, the VM spec, an image, or server-side config. That also means a
+// reused agent gets its credential refreshed the same way a fresh one does.
 // Nothing is stored locally by this command.
+//
+// Lifecycle: agents are durable and have no idle timeout, so unlike a sandbox
+// nothing eventually reaps one. Disconnecting therefore SLEEPS the agent —
+// disk and work survive, compute stops billing — and the next run wakes it.
 // ---------------------------------------------------------------------------
 
-/// Launch a coding agent in a Railway sandbox
+/// Launch a coding agent on a Railway cloud agent VM
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway code --codex              # sandbox + your local Codex sign-in\n  railway code --claude             # sandbox + your Claude setup-token\n  railway code --codex --new        # force a fresh sandbox\n  railway code --claude --gh        # also inject your GitHub auth (gh auth token)\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --claude --gh        # also inject your GitHub auth (gh auth token)\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nAgents persist between runs: disconnecting sleeps yours, and the next\n`railway code` wakes it with your work still on disk. `--keep-awake` leaves it\nrunning; `railway code --rm` destroys it.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct Args {
     /// Launch OpenAI Codex using your local ChatGPT sign-in (~/.codex/auth.json)
@@ -40,24 +53,36 @@ pub struct Args {
     codex: bool,
 
     /// Launch Claude Code — runs `claude setup-token` for you to mint a
-    /// sandbox token (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY env
+    /// token for the VM (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY env
     /// variables skip that when set)
     #[clap(long)]
     claude: bool,
 
-    /// Always create a fresh sandbox instead of reusing the active one
+    /// Launch Grok CLI using your local sign-in (~/.grok/auth.json)
+    #[clap(long)]
+    grok: bool,
+
+    /// Always create a fresh agent instead of reusing this environment's
     #[clap(long)]
     new: bool,
 
-    /// Minutes the sandbox may sit idle (disconnected) before it is
-    /// auto-destroyed
-    #[clap(long, value_name = "MINUTES", default_value = "30")]
-    idle_timeout: i64,
+    /// Leave the agent running on disconnect instead of putting it to sleep.
+    /// A running agent keeps billing for compute
+    #[clap(long)]
+    keep_awake: bool,
 
-    /// Set a variable on the sandbox (repeatable, comma-separable). Values
+    /// Destroy this environment's agent and exit. Its disk goes with it
+    #[clap(long)]
+    rm: bool,
+
+    /// Name for a newly created agent (defaults to a generated one)
+    #[clap(long)]
+    name: Option<String>,
+
+    /// Set a variable on the agent (repeatable, comma-separable). Values
     /// may reference other variables — `DB_URL=postgres.DATABASE_URL` or the
     /// full `${{postgres.DATABASE_URL}}` form — resolved server-side at
-    /// create time. Applies to newly created sandboxes (combine with --new)
+    /// create time. Applies to newly created agents (combine with --new)
     #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
     variables: Vec<String>,
 
@@ -67,7 +92,7 @@ pub struct Args {
     env_files: Vec<std::path::PathBuf>,
 
     /// Also inject your GitHub auth (read via `gh auth token`) so git and gh
-    /// can reach your repos over HTTPS inside the sandbox
+    /// can reach your repos over HTTPS inside the agent
     #[clap(long)]
     gh: bool,
 
@@ -84,13 +109,14 @@ pub struct Args {
     agent_args: Vec<String>,
 }
 
-/// The coding agent to launch, and everything that differs between them:
-/// where the local sign-in lives, how the sandbox-side seed looks, and what
-/// to install when the image doesn't ship the binary.
+/// The coding agent to launch, and the two things that differ between them:
+/// where the local sign-in lives, and how its credential is written on the VM.
+/// Installing and configuring the harness is the image's job, not ours.
 #[derive(Clone, Copy, PartialEq)]
 enum Agent {
     Codex,
     Claude,
+    Grok,
 }
 
 impl Agent {
@@ -99,6 +125,7 @@ impl Agent {
         match self {
             Agent::Codex => "codex",
             Agent::Claude => "claude",
+            Agent::Grok => "grok",
         }
     }
 
@@ -106,6 +133,7 @@ impl Agent {
         match self {
             Agent::Codex => "--codex",
             Agent::Claude => "--claude",
+            Agent::Grok => "--grok",
         }
     }
 
@@ -114,33 +142,7 @@ impl Agent {
         match self {
             Agent::Codex => "Codex",
             Agent::Claude => "Claude Code",
-        }
-    }
-
-    fn npm_package(self) -> &'static str {
-        match self {
-            Agent::Codex => "@openai/codex",
-            Agent::Claude => "@anthropic-ai/claude-code",
-        }
-    }
-
-    /// Silent refresh run during provisioning (behind the spinner) when the
-    /// binary already exists — synchronous on purpose: every fresh sandbox
-    /// starts from the image's baked version, so a background update always
-    /// loses the race against the launch and codex greets the user with an
-    /// "update available" banner. The cheap path is taken when possible:
-    /// codex compares installed vs registry (~2s when current) and only pays
-    /// for the install on an actual version gap; claude's own updater
-    /// no-ops quickly when current. `timeout` bounds a wedged registry so
-    /// provisioning can't hang on it.
-    fn update_snippet(self) -> &'static str {
-        match self {
-            Agent::Codex => {
-                r#"current="$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
-latest="$(timeout 15 npm view @openai/codex version 2>/dev/null)"
-if [ -n "$latest" ] && [ "$current" != "$latest" ]; then timeout 180 npm install -g @openai/codex@latest >/dev/null 2>&1; fi"#
-            }
-            Agent::Claude => "timeout 180 claude update >/dev/null 2>&1 || true",
+            Agent::Grok => "Grok",
         }
     }
 
@@ -148,67 +150,62 @@ if [ -n "$latest" ] && [ "$current" != "$latest" ]; then timeout 180 npm install
         match self {
             Agent::Codex => CODEX_SEED,
             Agent::Claude => CLAUDE_SEED,
+            Agent::Grok => GROK_SEED,
         }
     }
 }
 
-/// Codex-specific sandbox seed. The credential arrives on stdin into a 0600
-/// file (never an argv). config.toml pre-trusts the dirs codex lands in
-/// ($HOME via `cd ~`, and / where the relay drops non-cd sessions) or the
-/// TUI stops at a folder-trust prompt even when authenticated — only seeded
-/// when no config exists, so a user-customized config is never clobbered.
-/// bubblewrap: codex warns at startup when distro bwrap is absent (it falls
-/// back to its bundled copy, so this is cosmetic); best-effort apt install
-/// (~8s) until the sandbox image ships it — the `command -v` guard makes
-/// this a free no-op once it does.
+/// Codex-specific VM seed: the credential arrives on stdin into a 0600 file
+/// (never an argv), and that is all. Folder trust, the autonomy posture
+/// (`approval_policy`/`sandbox_mode`) and the MCP servers are reconciled into
+/// `~/.codex/config.toml` on every boot by express-agent, and codex's hooks
+/// come from the image's policy file at `/etc/codex/requirements.toml`.
+/// bubblewrap ships in the image too, so the old apt-install warning fix is
+/// gone.
 const CODEX_SEED: &str = r#"mkdir -p ~/.codex
-cat > ~/.codex/auth.json
-if [ ! -f ~/.codex/config.toml ]; then
-cat > ~/.codex/config.toml <<'EOF'
-[projects."/root"]
-trust_level = "trusted"
+cat > ~/.codex/auth.json"#;
 
-[projects."/"]
-trust_level = "trusted"
-EOF
-fi
-command -v bwrap >/dev/null 2>&1 || { apt-get update >/dev/null 2>&1 && apt-get install -y bubblewrap >/dev/null 2>&1; } || true"#;
-
-/// Claude-specific sandbox seed. The credential is one `KEY=VALUE` line —
+/// Claude-specific VM seed. The credential is one `KEY=VALUE` line —
 /// `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or a passed-through
 /// `ANTHROPIC_API_KEY` — arriving on stdin into a 0600 env file that login
 /// shells and the launch prefix source (claude reads the env var; the key
 /// name rides the payload so both var names work without baking either into
-/// the script). ~/.claude.json is the gotcha: until it says onboarding is
-/// done, claude ignores the env token and shows the first-run login picker
-/// — and the sandbox image SHIPS a ~/.claude.json (the image build runs
-/// claude once, stamping installMethod/firstStartTime) WITHOUT the flag, so
-/// a write-only-when-absent seed never fires. Existing files therefore get
-/// the flags MERGED in (jq ships in the image; node is the fallback), never
-/// replaced — the rest of the state file is preserved. The same flags
-/// pre-accept the folder-trust dialog for the dirs claude lands in.
+/// the script).
+///
+/// `~/.claude.json`'s `hasCompletedOnboarding` — the flag that stops claude
+/// ignoring the env token and showing the first-run login picker — is
+/// express-agent's to seed, along with per-project trust for `$HOME` and
+/// `/app`. It runs at boot, before this command can connect.
 const CLAUDE_SEED: &str = r#"cat > ~/.claude-code-env
-chmod 600 ~/.claude-code-env
-if [ ! -f ~/.claude.json ]; then
-cat > ~/.claude.json <<'EOF'
-{"hasCompletedOnboarding":true,"projects":{"/root":{"hasTrustDialogAccepted":true},"/":{"hasTrustDialogAccepted":true}}}
-EOF
-elif command -v jq >/dev/null 2>&1; then
-jq '.hasCompletedOnboarding = true | .projects."/root".hasTrustDialogAccepted = true | .projects."/".hasTrustDialogAccepted = true' ~/.claude.json > ~/.claude.json.new 2>/dev/null && mv ~/.claude.json.new ~/.claude.json || rm -f ~/.claude.json.new
-elif command -v node >/dev/null 2>&1; then
-node -e 'const fs=require("fs");const p=process.env.HOME+"/.claude.json";const j=JSON.parse(fs.readFileSync(p,"utf8"));j.hasCompletedOnboarding=true;j.projects=Object.assign({},j.projects);for(const d of["/root","/"])j.projects[d]=Object.assign({},j.projects[d],{hasTrustDialogAccepted:true});fs.writeFileSync(p,JSON.stringify(j,null,2))' 2>/dev/null || true
-fi"#;
+chmod 600 ~/.claude-code-env"#;
 
 /// Second `--claude` provision, run only when the user has a local
-/// `~/.claude/settings.json`: mirror it into the sandbox so their setup
-/// (permissions mode, model, plugins, statusline) carries over. Overwrites on
-/// every provision — the laptop copy is the source of truth. The onboarding
-/// disable does NOT ride this file; it's the ~/.claude.json flag in
-/// `CLAUDE_SEED`, which is seeded whether or not local settings exist.
+/// `~/.claude/settings.json`: merge it into the VM's so their setup
+/// (permissions mode, model, plugins, statusline) carries over.
+///
+/// A merge, emphatically not the overwrite this used to be: on an agent VM
+/// `~/.claude/settings.json` is co-owned — express-agent writes the railway and
+/// playwright MCP servers and its hook entries there, and railway-agent reads
+/// the same file. Truncating it would strip the harness's Railway tools until
+/// the next boot reconcile. So the laptop's keys win where they overlap, and
+/// `hooks`/`mcpServers` are left to their owner. The user's settings arrive on
+/// stdin as a file rather than an argv because they can be large and are the
+/// user's own data.
 const CLAUDE_SETTINGS_PROVISION: &str = r#"umask 077
 mkdir -p ~/.claude
-cat > ~/.claude/settings.json
-echo SETTINGS-OK"#;
+cat > /tmp/.railway-code-settings.json
+if [ ! -s ~/.claude/settings.json ]; then
+  mv /tmp/.railway-code-settings.json ~/.claude/settings.json
+  echo SETTINGS-OK
+elif command -v jq >/dev/null 2>&1; then
+  jq -s '.[0] * (.[1] | del(.hooks, .mcpServers))' ~/.claude/settings.json /tmp/.railway-code-settings.json > ~/.claude/settings.json.new 2>/dev/null \
+    && mv ~/.claude/settings.json.new ~/.claude/settings.json && echo SETTINGS-OK \
+    || { rm -f ~/.claude/settings.json.new; echo SETTINGS-MERGE-FAILED; }
+  rm -f /tmp/.railway-code-settings.json
+else
+  echo SETTINGS-NO-JQ
+  rm -f /tmp/.railway-code-settings.json
+fi"#;
 
 /// The user's local Claude settings, when they have any (`None` when the
 /// file is missing or empty — the sandbox then just gets the onboarding
@@ -218,12 +215,21 @@ fn local_claude_settings() -> Option<Vec<u8>> {
     std::fs::read(&path).ok().filter(|b| !b.is_empty())
 }
 
+/// Grok-specific VM seed: the credential is the user's local
+/// `~/.grok/auth.json`, arriving on stdin into a 0600 file like codex. grok's
+/// always-approve posture (`permission_mode = "bypassPermissions"`) and its MCP
+/// servers are reconciled into `~/.grok/config.toml` at boot by express-agent,
+/// and the image puts `~/.grok/bin` on PATH via `/etc/environment`, so neither
+/// the old `[ui] yolo` merge nor a `/usr/local/bin` symlink is needed.
+const GROK_SEED: &str = r#"mkdir -p ~/.grok
+cat > ~/.grok/auth.json"#;
+
 /// Agent-independent seeds, all idempotent:
 /// - COLORTERM: the relay forwards TERM but not COLORTERM; without it TUIs
 ///   render a greyed/degraded palette.
-/// - ~/.profile autostart: plain connects (`railway sandbox ssh`) run bash as
-///   a login shell (verified: ~/.profile IS sourced; command sessions are
-///   not), so any interactive reconnect drops into the agent recorded in
+/// - ~/.profile autostart: plain connects (`railway ssh agent:<env>:<id>`) run
+///   bash as a login shell (verified: ~/.profile IS sourced; command sessions
+///   are not), so any interactive reconnect drops into the agent recorded in
 ///   ~/.railway-code-agent (written per-provision, so re-running with the
 ///   other agent retargets reconnects too). Not `exec`, so quitting the agent
 ///   lands in a shell instead of closing the connection. The `[ -t 1 ]` guard
@@ -237,45 +243,37 @@ cat >> ~/.profile <<'PROFEOF'
 # railway-code agent autostart (connecting drops into the agent; exit it for a shell)
 if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ -s "$HOME/.railway-code-agent" ]; then
   agent="$(cat "$HOME/.railway-code-agent")"
+  [ -d "$HOME/.grok/bin" ] && export PATH="$HOME/.grok/bin:$PATH"
   if command -v "$agent" >/dev/null 2>&1; then
     export RAILWAY_CODE_AUTOSTARTED=1
     [ -f "$HOME/.gh-token" ] && export GH_TOKEN="$(cat "$HOME/.gh-token")"
     [ -f "$HOME/.claude-code-env" ] && set -a && . "$HOME/.claude-code-env" && set +a
-    cd "$HOME" && "$agent"
+    "$agent"
     printf '\033[<u\033[<u\033[=0;1u\033[?2004l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?25h'
   fi
 fi
 PROFEOF
 fi"#;
 
-/// The whole sandbox-side provision as ONE script over ONE connection — the
+/// The whole VM-side provision as ONE script over ONE connection — the
 /// credential arrives on stdin (never an argv) into a 0600 file, then the
-/// seeds and the agent install run. One connection instead of three matters:
-/// success/failure markers ride stdout so a relay-level failure is
-/// distinguishable from "npm missing" / "install failed".
+/// reconnect seeds run. One connection matters because the status marker rides
+/// stdout: without it a relay-level failure is indistinguishable from a VM
+/// that answered but couldn't run the script.
 ///
-/// When the binary already exists, `update_snippet` runs to completion
-/// before the ready marker, so the agent that launches moments later is the
-/// current version — see `update_snippet` for why background updating can't
-/// achieve that. Only a missing binary takes the full install path.
+/// There is no install path and no update path. `cloud-agent-base` bakes every
+/// harness and keeps them current, so a missing binary is an image problem the
+/// user cannot fix by waiting — hence AGENT-MISSING rather than an install
+/// attempt that would race the image's own copy.
 fn provision_script(agent: Agent) -> String {
     let seed = agent.credential_seed();
     let name = agent.name();
-    let pkg = agent.npm_package();
-    let update = agent.update_snippet();
     format!(
         r#"umask 077
 {seed}
 {COMMON_SEED}
 echo {name} > ~/.railway-code-agent
-if command -v {name} >/dev/null 2>&1; then
-{update}
-echo AGENT-READY
-exit 0
-fi
-command -v npm >/dev/null 2>&1 || {{ echo AGENT-NO-NPM; exit 0; }}
-npm install -g {pkg} >/dev/null 2>&1
-if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-INSTALL-FAILED; fi"#
+if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi"#
     )
 }
 
@@ -427,6 +425,27 @@ fn codex_credentials() -> Result<(Vec<u8>, String)> {
     if bytes.is_empty() {
         bail!(
             "{} is empty — run `codex login` locally first.",
+            auth_path.display()
+        );
+    }
+    Ok((bytes, auth_path.display().to_string()))
+}
+
+/// Read the local Grok sign-in (`~/.grok/auth.json`) — the same
+/// copy-the-local-login shape as codex.
+fn grok_credentials() -> Result<(Vec<u8>, String)> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
+    let auth_path = home.join(".grok").join("auth.json");
+    if !auth_path.exists() {
+        bail!(
+            "No Grok sign-in found at {}.\nRun `grok` locally and sign in first, then re-run this command.",
+            auth_path.display()
+        );
+    }
+    let bytes = std::fs::read(&auth_path)?;
+    if bytes.is_empty() {
+        bail!(
+            "{} is empty — run `grok` locally and sign in first.",
             auth_path.display()
         );
     }
@@ -758,26 +777,362 @@ fn ssh_plumbing(
     }
     let (code, err_text) = last;
     if err_text.is_empty() {
-        bail!("SSH to the sandbox failed after {ATTEMPTS} attempts (exit {code}).")
+        bail!("SSH to the agent failed after {ATTEMPTS} attempts (exit {code}).")
     }
-    bail!("SSH to the sandbox failed after {ATTEMPTS} attempts (exit {code}):\n{err_text}")
+    bail!("SSH to the agent failed after {ATTEMPTS} attempts (exit {code}):\n{err_text}")
+}
+
+/// The literal `ssh` command for a relay target, for the disconnect hint. The
+/// relay is the same one this command connected through, so whatever worked here
+/// works when pasted — including the dev relay's non-default port.
+fn raw_ssh_hint(target: &str) -> String {
+    let (host, port) = Configs::get_ssh_relay();
+    match port {
+        Some(p) if p != 22 => format!("ssh -p {p} {target}@{host}"),
+        _ => format!("ssh {target}@{host}"),
+    }
+}
+
+/// One cloud agent, reduced to what this command steers on.
+#[derive(Clone)]
+struct CodeAgent {
+    id: String,
+    name: String,
+    status: queries::cloud_agent::CloudAgentStatus,
+}
+
+/// How long to wait for a created or woken agent to reach RUNNING before
+/// giving up. A cold create boots a microVM and publishes routes; a wake
+/// restores a checkpoint and is much quicker.
+const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Read one agent by id, scoped to the environment. `None` means it is gone
+/// (deleted, or it belongs to another environment) — the caller's cue to forget
+/// its stored pointer rather than to fail.
+async fn fetch_agent(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<Option<CodeAgent>> {
+    let res = post_graphql::<queries::CloudAgent, _>(
+        client,
+        backboard,
+        queries::cloud_agent::Variables {
+            id: id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await?;
+    Ok(res.cloud_agent.map(|a| CodeAgent {
+        id: a.id,
+        name: a.name,
+        status: a.status,
+    }))
+}
+
+/// Poll until the agent is RUNNING. A terminal state (CRASHED/FAILED/DELETING)
+/// is reported immediately instead of burning the whole timeout on a box that
+/// will never come up.
+async fn wait_until_running(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<CodeAgent> {
+    use queries::cloud_agent::CloudAgentStatus as S;
+    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let agent = fetch_agent(client, backboard, environment_id, id)
+            .await?
+            .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
+        match agent.status {
+            S::RUNNING => return Ok(agent),
+            S::STARTING | S::SLEEPING => {}
+            S::CRASHED => bail!(
+                "Agent {} crashed while starting. `railway code --new` for a fresh one.",
+                agent.name
+            ),
+            S::FAILED => bail!(
+                "Agent {} failed to start. `railway code --new` for a fresh one.",
+                agent.name
+            ),
+            S::DELETING => bail!("Agent {} is being deleted.", agent.name),
+            S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Agent {} did not reach RUNNING within {}s (last state: {:?}).",
+                agent.name,
+                READY_TIMEOUT.as_secs(),
+                agent.status
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// Bring an agent that already exists up to RUNNING: reuse it when it is
+/// already up, wake it when it is asleep or still booting. `None` means the
+/// agent is dead and the caller should create a fresh one.
+async fn ready_existing_agent(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    agent: CodeAgent,
+) -> Result<Option<CodeAgent>> {
+    use colored::Colorize;
+    use queries::cloud_agent::CloudAgentStatus as S;
+
+    match agent.status {
+        S::RUNNING => {
+            println!("Using agent {} (--new for a fresh one)", agent.name.cyan());
+            Ok(Some(agent))
+        }
+        // STARTING means a previous run is still booting it, so a re-run seconds
+        // after a ctrl-c waits rather than minting a duplicate. SLEEPING is the
+        // resting state this command leaves behind.
+        S::SLEEPING | S::STARTING => {
+            let mut spinner = create_shimmer_spinner(&format!("Waking agent {}", agent.name));
+            if agent.status == S::SLEEPING
+                && let Err(e) = post_graphql::<mutations::CloudAgentWake, _>(
+                    client,
+                    backboard,
+                    mutations::cloud_agent_wake::Variables {
+                        id: agent.id.clone(),
+                    },
+                )
+                .await
+            {
+                fail_spinner(&mut spinner, "Wake failed".to_string());
+                return Err(e.into());
+            }
+            match wait_until_running(client, backboard, environment_id, &agent.id).await {
+                Ok(running) => {
+                    spinner.finish_and_clear();
+                    println!(
+                        "Woke agent {} — your work is on its disk",
+                        running.name.cyan()
+                    );
+                    Ok(Some(running))
+                }
+                Err(e) => {
+                    fail_spinner(&mut spinner, "Wake failed".to_string());
+                    Err(e)
+                }
+            }
+        }
+        S::CRASHED | S::FAILED | S::DELETING | S::Other(_) => {
+            eprintln!(
+                "{}",
+                format!(
+                    "Agent {} is {:?}; creating a fresh one.",
+                    agent.name, agent.status
+                )
+                .yellow()
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// The caller's own live agent in this environment, when there is exactly one.
+///
+/// `mine` is load-bearing rather than tidiness: agents authorize per
+/// environment, so an unfiltered list includes teammates' — and adopting one
+/// would put this user's credentials on a box someone else is working in.
+async fn sole_owned_agent_id(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+) -> Result<Option<String>> {
+    use queries::cloud_agents::CloudAgentStatus as S;
+
+    let live: Vec<_> = post_graphql::<queries::CloudAgents, _>(
+        client,
+        backboard,
+        queries::cloud_agents::Variables {
+            environment_id: environment_id.to_owned(),
+            mine: Some(true),
+        },
+    )
+    .await?
+    .cloud_agents
+    .into_iter()
+    .filter(|a| matches!(a.status, S::RUNNING | S::SLEEPING | S::STARTING))
+    .collect();
+
+    match live.as_slice() {
+        [] => Ok(None),
+        [only] => Ok(Some(only.id.clone())),
+        many => bail!(
+            "You have {} cloud agents in this environment and no local record of which one `railway code` should use:\n{}\nPick one in the dashboard, or `railway code --new` to add another.",
+            many.len(),
+            many.iter()
+                .map(|a| format!("  {} ({})", a.name, a.id))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    }
+}
+
+/// Resolve the agent this run should use: the environment's remembered one, the
+/// caller's sole existing one, or a fresh one. Returns the running agent and
+/// whether it was just created, which is only used for messaging.
+///
+/// Adoption exists because agents never self-reap: a second machine or a wiped
+/// CLI config that created a duplicate would quietly bill for two boxes
+/// forever, which is worth one extra lookup to avoid.
+async fn resolve_agent(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    args: &Args,
+    environment_id: &str,
+) -> Result<(CodeAgent, bool)> {
+    use colored::Colorize;
+
+    let backboard = configs.get_backboard();
+
+    let candidate = if args.new {
+        None
+    } else {
+        match configs.get_code_agent(environment_id) {
+            Some(id) => Some(id),
+            None => sole_owned_agent_id(client, &backboard, environment_id).await?,
+        }
+    };
+    // Re-read by id either way, so both paths carry the same shape and the
+    // stale-pointer case (agent deleted elsewhere) collapses into `None`.
+    let existing = match candidate {
+        Some(id) => fetch_agent(client, &backboard, environment_id, &id).await?,
+        None => None,
+    };
+    if let Some(agent) = existing {
+        if let Some(ready) = ready_existing_agent(client, &backboard, environment_id, agent).await?
+        {
+            warn_ignored_variables(args);
+            configs.set_code_agent(environment_id, &ready.id);
+            configs.write()?;
+            return Ok((ready, false));
+        }
+        configs.remove_code_agent(environment_id);
+    }
+
+    let variables = variables_to_input(&args.env_files, &args.variables)?
+        .map(serde_json::to_value)
+        .transpose()?;
+    let mut spinner = create_shimmer_spinner("Creating a cloud agent");
+    let created = match post_graphql::<mutations::CloudAgentCreate, _>(
+        client,
+        &backboard,
+        mutations::cloud_agent_create::Variables {
+            input: mutations::cloud_agent_create::CloudAgentCreateInput {
+                environment_id: environment_id.to_owned(),
+                name: args.name.clone(),
+                variables,
+            },
+        },
+    )
+    .await
+    {
+        Ok(res) => res.cloud_agent_create,
+        Err(e) => {
+            fail_spinner(&mut spinner, "Create failed".to_string());
+            return Err(e.into());
+        }
+    };
+
+    // Remembered before the box is up: a create that succeeds and then times out
+    // waiting has still spent a VM, and the pointer is the only handle the next
+    // run has to it.
+    configs.set_code_agent(environment_id, &created.id);
+    configs.write()?;
+
+    match wait_until_running(client, &backboard, environment_id, &created.id).await {
+        Ok(running) => {
+            spinner.finish_and_clear();
+            println!("✓ Created agent {}", running.name.cyan());
+            Ok((running, true))
+        }
+        Err(e) => {
+            fail_spinner(&mut spinner, "Agent did not start".to_string());
+            Err(e)
+        }
+    }
+}
+
+/// `--variable`/`--env-file` only reach the VM spec at create time, so say so
+/// rather than silently dropping them on a reuse.
+fn warn_ignored_variables(args: &Args) {
+    use colored::Colorize;
+    if !args.variables.is_empty() || !args.env_files.is_empty() {
+        eprintln!(
+            "{}",
+            "Note: --variable/--env-file only apply when an agent is created — reusing this environment's. Add --new to create with these variables."
+                .yellow()
+        );
+    }
+}
+
+/// `railway code --rm`: destroy this environment's agent, disk and all.
+async fn destroy_agent(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    environment_id: &str,
+) -> Result<()> {
+    let backboard = configs.get_backboard();
+    let Some(id) = configs.get_code_agent(environment_id) else {
+        println!("No agent recorded for this environment.");
+        return Ok(());
+    };
+    let name = fetch_agent(client, &backboard, environment_id, &id)
+        .await?
+        .map(|a| a.name);
+    // Forget the pointer either way: a delete that reports failure on an
+    // already-gone agent must not leave the CLI reaching for it forever.
+    configs.remove_code_agent(environment_id);
+    configs.write()?;
+    match name {
+        Some(name) => {
+            post_graphql::<mutations::CloudAgentDelete, _>(
+                client,
+                &backboard,
+                mutations::cloud_agent_delete::Variables { id },
+            )
+            .await?;
+            println!("✓ Deleted agent {name}");
+        }
+        None => println!("Agent {id} is already gone."),
+    }
+    Ok(())
 }
 
 pub async fn command(args: Args) -> Result<()> {
     use colored::Colorize;
 
-    let agent = match (args.codex, args.claude) {
-        (true, false) => Agent::Codex,
-        (false, true) => Agent::Claude,
-        (true, true) => bail!("Pick one agent: --codex or --claude."),
-        (false, false) => bail!(
-            "Specify which agent to launch, e.g.:\n  railway code --codex\n  railway code --claude"
+    // `--rm` is a lifecycle action, not a launch: it needs no agent choice and
+    // no credential, so it resolves the environment and returns.
+    if args.rm {
+        let mut configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        let (_project_id, environment_id) =
+            resolve_project_and_env(&mut configs, &client, args.project, args.environment).await?;
+        return destroy_agent(&mut configs, &client, &environment_id).await;
+    }
+
+    let agent = match (args.codex, args.claude, args.grok) {
+        (true, false, false) => Agent::Codex,
+        (false, true, false) => Agent::Claude,
+        (false, false, true) => Agent::Grok,
+        (false, false, false) => bail!(
+            "Specify which agent to launch, e.g.:\n  railway code --codex\n  railway code --claude\n  railway code --grok"
         ),
+        _ => bail!("Pick one agent: --codex, --claude, or --grok."),
     };
 
     eprintln!(
         "{}",
-        "Warning: Railway sandboxes are experimental and APIs may change or break during testing."
+        "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
             .yellow()
     );
 
@@ -785,28 +1140,28 @@ pub async fn command(args: Args) -> Result<()> {
     let (auth_bytes, auth_source) = match agent {
         Agent::Codex => codex_credentials()?,
         Agent::Claude => claude_credentials()?,
+        Agent::Grok => grok_credentials()?,
     };
     if args.gh {
         eprintln!(
-            "Using your {} credential ({auth_source}) and GitHub token (`gh auth token`) in the sandbox",
+            "Using your {} credential ({auth_source}) and GitHub token (`gh auth token`) on the agent",
             agent.display()
         );
     } else {
         eprintln!(
-            "Using your {} credential ({auth_source}) in the sandbox",
+            "Using your {} credential ({auth_source}) on the agent",
             agent.display()
         );
     }
-    // Read the GitHub token before spending a sandbox, so a missing gh login
-    // fails fast and cheap.
+    // Read the GitHub token before spending a VM, so a missing gh login fails
+    // fast and cheap.
     let gh_token = if args.gh {
         Some(host_gh_token()?)
     } else {
         None
     };
-    // Mirror the user's local Claude settings into the sandbox so their setup
-    // carries over; without one, the CLAUDE_SEED onboarding disable still
-    // applies.
+    // Mirror the user's local Claude settings onto the agent so their setup
+    // carries over; express-agent's own entries in that file survive the merge.
     let claude_settings = if agent == Agent::Claude {
         let settings = local_claude_settings();
         if settings.is_some() {
@@ -817,98 +1172,33 @@ pub async fn command(args: Args) -> Result<()> {
         None
     };
 
-    // --- Resolve where the sandbox lives.
+    // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let (project_id, environment_id) =
-        resolve_project_and_env(&mut configs, &client, args.project, args.environment).await?;
+    let (project_id, environment_id) = resolve_project_and_env(
+        &mut configs,
+        &client,
+        args.project.clone(),
+        args.environment.clone(),
+    )
+    .await?;
 
-    // Reuse the active sandbox when it's still alive here — repeated runs
-    // shouldn't mint a fleet of boxes. CREATING counts as alive: a re-run
-    // seconds after a launch (flaky connection, ctrl-c) must reuse the box
-    // that's still booting, not spawn a duplicate. `--new` forces a fresh one.
-    let reusable = if args.new {
-        None
-    } else {
-        match configs.get_active_sandbox() {
-            Some(stored) if stored.environment_id == environment_id => {
-                let res = post_graphql::<queries::Sandboxes, _>(
-                    &client,
-                    configs.get_backboard(),
-                    queries::sandboxes::Variables {
-                        environment_id: environment_id.clone(),
-                        first: Some(100),
-                        after: None,
-                    },
-                )
-                .await?;
-                res.sandboxes
-                    .edges
-                    .into_iter()
-                    .map(|e| e.node)
-                    .find(|n| {
-                        n.id == stored.id
-                            && matches!(
-                                n.status,
-                                queries::sandboxes::SandboxStatus::RUNNING
-                                    | queries::sandboxes::SandboxStatus::CREATING
-                            )
-                    })
-                    .map(|n| n.id)
-            }
-            _ => None,
-        }
-    };
-
-    let sandbox_id = if let Some(id) = reusable {
-        println!("Reusing active sandbox {id} (use --new for a fresh one)");
-        if !args.variables.is_empty() || !args.env_files.is_empty() {
-            eprintln!(
-                "{}",
-                "Note: --variable/--env-file only apply when a sandbox is created — reusing the active one. Add --new to create with these variables."
-                    .yellow()
-            );
-        }
-        id
-    } else {
-        let input = mutations::sandbox_create::SandboxCreateInput {
-            environment_id: environment_id.clone(),
-            // Default is a shorter idle window for a credential-bearing box
-            // than the CLI default; it's interactive, so this only reaps
-            // forgotten ones. `--idle-timeout` overrides.
-            idle_timeout_minutes: Some(args.idle_timeout),
-            template: None,
-            source_sandbox_id: None,
-            network_isolation: None,
-            variables: variables_to_input(&args.env_files, &args.variables)?,
-        };
-        create_and_store(
-            &mut configs,
-            &client,
-            project_id.clone(),
-            environment_id.clone(),
-            input,
-            CreateReport::Quiet,
-            false,
-        )
-        .await?
-    };
+    let (cloud_agent, created) =
+        resolve_agent(&mut configs, &client, &args, &environment_id).await?;
+    configs.set_code_agent(&environment_id, &cloud_agent.id);
+    configs.write()?;
 
     let identity = ensure_ssh_key_quiet(&client, &configs).await?;
-    let target = format!("sbx:{environment_id}:{sandbox_id}");
-    let heartbeat = spawn_heartbeat(
-        client.clone(),
-        configs.get_backboard(),
-        environment_id.clone(),
-        sandbox_id.clone(),
-    );
+    // The relay's cloud-agent grammar; by id rather than name because names are
+    // not unique within an environment.
+    let target = format!("agent:{environment_id}:{}", cloud_agent.id);
 
     // Multiplex every ssh in this run over one verified connection: the
     // provisioning call establishes the master, the interactive launch rides
     // it — one host-key decision per run, not one per connection.
     let relay = relay_ssh()?;
 
-    // --- Provision: credential (stdin) + seeds + agent install, one script.
+    // --- Provision: credential (stdin) + reconnect seeds, one script.
     {
         let target = target.clone();
         let identity = identity.clone();
@@ -926,13 +1216,11 @@ pub async fn command(args: Args) -> Result<()> {
             let out = String::from_utf8_lossy(&out);
             if out.contains("AGENT-READY") {
                 // ok
-            } else if out.contains("AGENT-NO-NPM") {
+            } else if out.contains("AGENT-MISSING") {
                 bail!(
-                    "The sandbox image has no npm, so {} can't be installed automatically.",
+                    "`{}` isn't on this agent's image. Cloud agents bake every harness, so this is an image problem rather than something to retry — report it with the agent id.",
                     agent.name()
                 )
-            } else if out.contains("AGENT-INSTALL-FAILED") {
-                bail!("`npm install -g {}` failed in the sandbox.", agent.npm_package())
             } else {
                 bail!("Provisioning produced no status marker — the connection likely dropped mid-script.")
             }
@@ -945,8 +1233,14 @@ pub async fn command(args: Args) -> Result<()> {
                     Some(&settings),
                     &relay,
                 )?;
-                if !String::from_utf8_lossy(&out).contains("SETTINGS-OK") {
-                    bail!("Claude settings provisioning did not complete in the sandbox.")
+                let out = String::from_utf8_lossy(&out);
+                // A failed merge is not worth aborting a launch over: the agent
+                // is fully usable on its own settings, only the laptop's
+                // preferences are missing. Say so and carry on.
+                if !out.contains("SETTINGS-OK") {
+                    eprintln!(
+                        "Couldn't merge your local Claude settings onto the agent; continuing with the agent's own."
+                    );
                 }
             }
             if let Some(tok) = gh_token {
@@ -958,7 +1252,7 @@ pub async fn command(args: Args) -> Result<()> {
                     &relay,
                 )?;
                 if !String::from_utf8_lossy(&out).contains("GH-OK") {
-                    bail!("GitHub auth provisioning did not complete in the sandbox.")
+                    bail!("GitHub auth provisioning did not complete on the agent.")
                 }
             }
             Ok(())
@@ -970,7 +1264,6 @@ pub async fn command(args: Args) -> Result<()> {
             Ok(()) => spinner.finish_and_clear(),
             Err(e) => {
                 fail_spinner(&mut spinner, "Provisioning failed".to_string());
-                heartbeat.abort();
                 return Err(e);
             }
         }
@@ -980,15 +1273,20 @@ pub async fn command(args: Args) -> Result<()> {
     // multiplexed over the provisioning master. Command sessions don't source
     // ~/.profile, so the GH_TOKEN export is inlined here (no-op when --gh
     // wasn't used — the guard keeps an empty var from shadowing gh's config).
-    let env_prefix = "[ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; [ -f ~/.claude-code-env ] && set -a && . ~/.claude-code-env && set +a; cd ~ && ";
+    //
+    // Deliberately no `cd`: the machine's spec sets workDir for the workload and
+    // every in-VM session (`/app`, the workspace dir express-agent reconciles
+    // instructions and per-project trust into), so forcing $HOME here would
+    // override a platform default and drop the agent somewhere its harness
+    // config does not cover.
+    let env_prefix = "[ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; [ -f ~/.claude-code-env ] && set -a && . ~/.claude-code-env && set +a; [ -d ~/.grok/bin ] && export PATH=\"$HOME/.grok/bin:$PATH\"; ";
     let remote_cmd = if args.agent_args.is_empty() {
-        // Interactive: no `exec` — quitting the agent lands in a sandbox
-        // shell (matching the ~/.profile autostart behavior) instead of
-        // tearing the whole session down. The exported guard keeps the login
-        // shell's profile autostart from relaunching the agent on top of the
-        // user. The reset scrubs terminal state a TUI leaves behind on an
-        // unclean exit (kitty keyboard mode et al) before the shell takes
-        // over.
+        // Interactive: no `exec` — quitting the agent lands in a shell on the
+        // agent (matching the ~/.profile autostart behavior) instead of tearing
+        // the whole session down. The exported guard keeps the login shell's
+        // profile autostart from relaunching the agent on top of the user. The
+        // reset scrubs terminal state a TUI leaves behind on an unclean exit
+        // (kitty keyboard mode et al) before the shell takes over.
         format!(
             "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {}; {}; exec bash -l",
             agent.name(),
@@ -1006,14 +1304,21 @@ pub async fn command(args: Args) -> Result<()> {
 
     println!("Launching {}…", agent.name());
     let cmd = vec![remote_cmd];
+    let ssh_target = target.clone();
+    let ssh_relay = relay.clone();
+    let ssh_identity = identity.clone();
     let exit_code = tokio::task::spawn_blocking(move || {
-        run_native_ssh_with_opts(&target, Some(&cmd), identity.as_deref(), None, &relay.opts)
+        run_native_ssh_with_opts(
+            &ssh_target,
+            Some(&cmd),
+            ssh_identity.as_deref(),
+            None,
+            &ssh_relay.opts,
+        )
     })
     .await
     .map_err(anyhow::Error::from)
     .and_then(|r| r)?;
-
-    heartbeat.abort();
 
     // Belt-and-suspenders for the remote reset: when the connection drops
     // mid-TUI the remote printf never reaches us, so scrub locally too before
@@ -1025,24 +1330,65 @@ pub async fn command(args: Args) -> Result<()> {
         let _ = out.flush();
     }
 
-    // Where-did-my-sandbox-go breadcrumbs: the box outlives the session but
-    // only for the idle window, and `sandbox list` is environment-scoped —
-    // spell out the commands that find it from anywhere.
-    println!(
-        "\nDisconnected — sandbox {sandbox_id} stays up for ~{}m of idle time.",
-        args.idle_timeout
-    );
+    // --- Sleep on disconnect. An agent has no idle timeout, so nothing else
+    // will ever put this box down; leaving it running bills compute until the
+    // user remembers it. Sleeping keeps the disk, so the work survives and the
+    // next run wakes into it. Best-effort: a failure here is worth a warning
+    // (the user is now paying for a live VM) but not a non-zero exit on an
+    // otherwise successful session.
+    if args.keep_awake {
+        println!(
+            "\nDisconnected — agent {} is still running (--keep-awake).",
+            cloud_agent.name.cyan()
+        );
+    } else {
+        let mut spinner = create_shimmer_spinner("Sleeping the agent");
+        match post_graphql::<mutations::CloudAgentSleep, _>(
+            &client,
+            configs.get_backboard(),
+            mutations::cloud_agent_sleep::Variables {
+                id: cloud_agent.id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(_) => {
+                spinner.finish_and_clear();
+                println!(
+                    "\nDisconnected — agent {} is asleep; your work is on its disk.",
+                    cloud_agent.name.cyan()
+                );
+            }
+            Err(e) => {
+                fail_spinner(&mut spinner, "Sleep failed".to_string());
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Agent {} is still running and billing compute. Sleep it from the dashboard, or `railway code {} --rm` to destroy it. ({e})",
+                        cloud_agent.name,
+                        agent.flag()
+                    )
+                    .yellow()
+                );
+            }
+        }
+    }
+
+    if created {
+        println!("Agents persist between runs — this one is yours until you --rm it.");
+    }
     println!("Get back in:");
     println!(
-        "  railway sandbox ssh      # drops straight back into {}",
+        "  railway code {}   # wakes it and drops back into {}",
+        agent.flag(),
         agent.name()
     );
-    println!(
-        "  railway code {}     # same, from any dir linked to this project",
-        agent.flag()
-    );
-    println!("Find it later (sandbox list is per-environment):");
-    println!("  railway sandbox list -p {project_id} -e {environment_id}");
+    // `railway ssh` addresses services and deployments, not agents, so the
+    // plain-shell route is ssh itself against the relay. Only useful while the
+    // agent is awake — hence second, after the command that wakes it.
+    println!("  {}   # plain shell (once awake)", raw_ssh_hint(&target));
+    println!("Destroy it:");
+    println!("  railway code --rm -p {project_id} -e {environment_id}");
 
     if exit_code != 0 {
         std::process::exit(exit_code);
@@ -1055,46 +1401,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provision_script_embeds_agent_specifics() {
+    fn provision_script_delivers_credentials_only() {
         let codex = provision_script(Agent::Codex);
         assert!(codex.contains("cat > ~/.codex/auth.json"));
-        assert!(codex.contains("npm install -g @openai/codex"));
         assert!(codex.contains("echo codex > ~/.railway-code-agent"));
 
         let claude = provision_script(Agent::Claude);
         assert!(claude.contains("cat > ~/.claude-code-env"));
-        assert!(claude.contains("hasCompletedOnboarding"));
-        // The image ships a ~/.claude.json without the onboarding flag, so
-        // an existing file must be merged, not skipped.
-        assert!(claude.contains("jq '.hasCompletedOnboarding = true"));
-        assert!(claude.contains("npm install -g @anthropic-ai/claude-code"));
         assert!(claude.contains("echo claude > ~/.railway-code-agent"));
 
-        // Synchronous refresh when the binary exists, so a fresh sandbox
-        // launches the current version instead of the image's baked one:
-        // codex checks the registry and installs only on a version gap;
-        // claude's own updater no-ops when current. Both are bounded.
-        assert!(codex.contains("npm view @openai/codex version"));
-        assert!(codex.contains("npm install -g @openai/codex@latest"));
-        assert!(claude.contains("timeout 180 claude update"));
+        let grok = provision_script(Agent::Grok);
+        assert!(grok.contains("cat > ~/.grok/auth.json"));
+        assert!(grok.contains("echo grok > ~/.railway-code-agent"));
 
-        // Shared plumbing: reconnect autostart, env sourcing, and the status
-        // markers the provisioning caller matches on.
-        for script in [&codex, &claude] {
+        for script in [&codex, &claude, &grok] {
+            // Shared plumbing: reconnect autostart, env sourcing, and the
+            // markers the provisioning caller matches on.
             assert!(script.contains("railway-code agent autostart"));
             assert!(script.contains(". \"$HOME/.claude-code-env\""));
             assert!(script.contains("AGENT-READY"));
-            assert!(script.contains("AGENT-NO-NPM"));
-            assert!(script.contains("AGENT-INSTALL-FAILED"));
+            assert!(script.contains("AGENT-MISSING"));
+
+            // The machine's spec sets the cwd for every in-VM session (/app,
+            // the workspace dir express-agent reconciles trust into). Forcing
+            // $HOME here would override that platform default, so the autostart
+            // must launch the agent without a cd of its own.
+            assert!(!script.contains("cd \"$HOME\""));
+            assert!(!script.contains("cd ~"));
+
+            // Cloud agent VMs bake every harness and reconcile its config at
+            // boot, so this script must install nothing and configure nothing:
+            // touching those files fights express-agent for ownership, and
+            // installing races the image's own copy. These assertions are the
+            // guard on that boundary, not incidental.
+            assert!(!script.contains("npm install"));
+            assert!(!script.contains("install.sh"));
+            assert!(!script.contains("apt-get"));
+            assert!(!script.contains("hasCompletedOnboarding"));
+            assert!(!script.contains("trust_level"));
+            assert!(!script.contains("yolo"));
+            assert!(!script.contains("config.toml"));
         }
     }
 
     #[test]
-    fn claude_settings_provision_writes_settings_json() {
-        assert!(CLAUDE_SETTINGS_PROVISION.contains("cat > ~/.claude/settings.json"));
+    fn claude_settings_provision_merges_rather_than_truncates() {
+        // A truncating write here would strip express-agent's railway and
+        // playwright MCP servers plus its hook entries from the file it
+        // co-owns, leaving the harness without Railway tools until the next
+        // boot reconcile.
+        assert!(!CLAUDE_SETTINGS_PROVISION.contains("cat > ~/.claude/settings.json"));
+        assert!(CLAUDE_SETTINGS_PROVISION.contains("del(.hooks, .mcpServers)"));
         assert!(CLAUDE_SETTINGS_PROVISION.contains("SETTINGS-OK"));
-        // The onboarding disable must not depend on the settings mirror.
-        assert!(CLAUDE_SEED.contains("hasCompletedOnboarding"));
+        // Onboarding/trust is express-agent's to seed at boot; the CLI must not
+        // have quietly reacquired it via the settings path.
+        assert!(!CLAUDE_SEED.contains("hasCompletedOnboarding"));
     }
 
     #[test]

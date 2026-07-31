@@ -1,0 +1,6 @@
+mutation CloudAgentWake($id: ID!) {
+  cloudAgentWake(id: $id) {
+    id
+    status
+  }
+}

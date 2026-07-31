@@ -1,0 +1,10 @@
+query CloudAgents($environmentId: ID!, $mine: Boolean) {
+  cloudAgents(environmentId: $environmentId, mine: $mine) {
+    id
+    name
+    status
+    projectId
+    environmentId
+    createdAt
+  }
+}

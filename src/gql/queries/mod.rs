@@ -338,6 +338,24 @@ pub struct SshPublicKeys;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgent.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq",
+    skip_serializing_none
+)]
+pub struct CloudAgent;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgents.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq",
+    skip_serializing_none
+)]
+pub struct CloudAgents;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/Sandbox.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none

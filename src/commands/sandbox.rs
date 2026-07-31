@@ -798,9 +798,6 @@ pub(crate) enum CreateReport {
     /// The full `sandbox create` block: id, status, region, connect hints.
     Full,
     Json,
-    /// One line — `railway code` wraps the sandbox in its own UX, so the
-    /// status/region/connect-hints block is noise there.
-    Quiet,
 }
 
 /// Run `sandboxCreate` with the given input, persist the result as the active
@@ -851,7 +848,6 @@ pub(crate) async fn create_and_store(
 
     match report {
         CreateReport::Json => println!("{}", serde_json::to_string_pretty(&sandbox)?),
-        CreateReport::Quiet => println!("✓ {did} sandbox {}", sandbox.id),
         CreateReport::Full => {
             println!("✓ {did} sandbox {} (now active)", sandbox.id);
             println!("  status: {:?}", sandbox.status);
@@ -913,6 +909,9 @@ async fn create(
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        // Server-side default (SANDBOX_DEFAULT_REGION); the CLI exposes no
+        // region flag yet.
+        region: None,
     };
     create_and_store(
         configs,
@@ -1384,6 +1383,9 @@ async fn fork(
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        // Server-side default (SANDBOX_DEFAULT_REGION); the CLI exposes no
+        // region flag yet.
+        region: None,
     };
     create_and_store(
         configs,

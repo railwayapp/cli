@@ -1,0 +1,3 @@
+mutation CloudAgentDelete($id: ID!) {
+  cloudAgentDelete(id: $id)
+}
