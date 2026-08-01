@@ -14,7 +14,7 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
         let statuses = private_network::fetch_private_network_statuses(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,
@@ -36,7 +36,7 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
         let status = private_network::update_private_network_endpoint_name(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,

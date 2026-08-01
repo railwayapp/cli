@@ -14,6 +14,8 @@ use util::{
     compare_semver::compare_semver,
 };
 
+#[cfg(test)]
+mod auth_sim;
 mod client;
 mod config;
 mod consts;
