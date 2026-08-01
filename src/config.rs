@@ -297,6 +297,25 @@ impl Configs {
         self.write()
     }
 
+    /// Drop the stored OAuth credentials after the server has told us they
+    /// are permanently dead (`invalid_grant`).
+    ///
+    /// Without this the CLI re-presents the same revoked refresh token on
+    /// every single invocation, forever: the refresh fails, the stale access
+    /// token is used anyway, and the user sees a generic "Unauthorized" with
+    /// no way out but deleting `~/.railway` by hand. Clearing turns that
+    /// permanent wedge into one clean `railway login`.
+    ///
+    /// Deliberately narrower than `reset()`: only the credential fields are
+    /// touched, so the linked project/environment/service survive and the
+    /// user lands back where they were after logging in.
+    pub fn clear_oauth_tokens(&mut self) -> Result<()> {
+        self.root_config.user.access_token = None;
+        self.root_config.user.refresh_token = None;
+        self.root_config.user.token_expires_at = None;
+        self.write()
+    }
+
     pub fn save_user_id(&mut self, id: &str) -> Result<()> {
         anyhow::ensure!(!id.is_empty(), "user id cannot be empty");
         self.root_config.user.id = Some(id.to_string());

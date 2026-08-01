@@ -219,7 +219,28 @@ async fn refresh_tokens(configs: &mut Configs) -> Result<()> {
     })?;
 
     let host = configs.get_host();
-    let token_resp = oauth::refresh_access_token(host, refresh_token).await?;
+    let token_resp = match oauth::refresh_access_token(host, refresh_token).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            // A permanently-dead credential is discarded so the next run
+            // starts clean instead of replaying the same doomed refresh.
+            // Transient failures (5xx, rate limits, network) keep their
+            // tokens — clearing on those would turn a brief server blip
+            // into a fleet-wide forced logout.
+            if matches!(
+                e.downcast_ref::<RailwayError>(),
+                Some(RailwayError::OAuthInvalidGrant(_))
+            ) {
+                if let Err(clear_err) = configs.clear_oauth_tokens() {
+                    eprintln!(
+                        "{}: {clear_err}",
+                        "Warning: could not clear the expired login from disk".yellow()
+                    );
+                }
+            }
+            return Err(e);
+        }
+    };
 
     configs.save_oauth_tokens(
         &token_resp.access_token,
