@@ -42,7 +42,7 @@ impl RailwayMcp {
 
         if unmerged > 0 {
             post_graphql::<mutations::EnvironmentStageChanges, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 mutations::environment_stage_changes::Variables {
                     environment_id: ctx.environment_id.clone(),
@@ -55,7 +55,7 @@ impl RailwayMcp {
             Ok(PatchMode::Stage)
         } else {
             post_graphql::<mutations::EnvironmentPatchCommit, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 mutations::environment_patch_commit::Variables {
                     environment_id: ctx.environment_id.clone(),
@@ -94,7 +94,7 @@ impl RailwayMcp {
         };
 
         let create_resp = post_graphql::<mutations::BucketCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             create_vars,
         )
@@ -214,7 +214,7 @@ impl RailwayMcp {
         };
 
         let resp = post_graphql::<mutations::VolumeCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -239,7 +239,7 @@ impl RailwayMcp {
                 name,
             };
             post_graphql::<mutations::VolumeNameUpdate, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 vars,
             )
@@ -275,7 +275,7 @@ impl RailwayMcp {
                 mount_path,
             };
             post_graphql::<mutations::VolumeMountPathUpdate, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 vars,
             )
@@ -308,7 +308,7 @@ impl RailwayMcp {
         };
 
         post_graphql::<mutations::VolumeDelete, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )

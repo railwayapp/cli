@@ -42,13 +42,13 @@ impl RailwayMcp {
             .await?;
         let ctx = &service_ctx.context;
         let regions =
-            fetch_regions_for_project(&self.client, &self.configs, Some(&service_ctx.project_id))
+            fetch_regions_for_project(&self.client(), &self.configs, Some(&service_ctx.project_id))
                 .await
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
                 })?;
         let config_resp = fetch_environment_config(
-            &self.client,
+            &self.client(),
             &self.configs,
             &service_ctx.environment_id,
             false,
@@ -58,7 +58,7 @@ impl RailwayMcp {
             McpError::internal_error(format!("Failed to fetch environment config: {e}"), None)
         })?;
         let environment_instances = get_environment_instances(
-            &self.client,
+            &self.client(),
             &self.configs,
             &service_ctx.project_id,
             &service_ctx.environment_id,
@@ -156,7 +156,7 @@ impl RailwayMcp {
             .await?;
 
         let config_resp =
-            fetch_environment_config(&self.client, &self.configs, &ctx.environment_id, false)
+            fetch_environment_config(&self.client(), &self.configs, &ctx.environment_id, false)
                 .await
                 .map_err(|e| {
                     McpError::internal_error(
@@ -253,7 +253,7 @@ impl RailwayMcp {
         };
 
         post_graphql::<mutations::VariableCollectionUpsert, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -304,7 +304,7 @@ impl RailwayMcp {
         };
 
         let deploy_resp = post_graphql::<mutations::TemplateDeploy, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             deploy_vars,
         )

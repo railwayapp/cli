@@ -184,7 +184,7 @@ pub(crate) fn auth_failure_error() -> RailwayError {
 /// the lock performs the single refresh, and the others pick up its result.
 pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
     // Env var tokens are not managed by us
-    if Configs::get_railway_token().is_some() || Configs::get_railway_api_token().is_some() {
+    if Configs::is_using_token_auth() {
         return Ok(());
     }
 
@@ -193,139 +193,114 @@ pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
         return Ok(());
     }
 
-    // Serialize the refresh across concurrent CLI processes. If we can't take
-    // the lock (e.g. a stale/wedged lock, unsupported filesystem), fall back to
-    // refreshing without it rather than wedging the CLI — see `refresh_tokens`.
-    let lock_guard = ConfigLockGuard::acquire();
-
-    // Re-read credentials now that we hold the lock: another process may have
-    // already refreshed while we were waiting, in which case we skip the
-    // refresh entirely and use the freshly-rotated token it wrote.
-    if lock_guard.is_some() {
-        configs.reload()?;
-        if !configs.has_oauth_token() || !configs.is_token_expired() {
-            return Ok(());
+    match refresh_locked(configs, false).await {
+        RefreshOutcome::Refreshed | RefreshOutcome::AlreadyFresh => Ok(()),
+        RefreshOutcome::SessionExpired(e) | RefreshOutcome::Transient(e) => Err(e.into()),
+        RefreshOutcome::NoRefreshToken => {
+            Err(RailwayError::OAuthRefreshFailed("No refresh token available".to_string()).into())
         }
     }
-
-    refresh_tokens(configs).await
 }
 
-/// Perform the actual OAuth refresh + persist. The caller is expected to hold
-/// the config lock (when available) and to have re-checked expiry.
-async fn refresh_tokens(configs: &mut Configs) -> Result<()> {
-    let refresh_token = configs.get_refresh_token().ok_or_else(|| {
-        RailwayError::OAuthRefreshFailed("No refresh token available".to_string())
-    })?;
+/// What a refresh attempt did to the stored credentials.
+#[derive(Debug)]
+pub(crate) enum RefreshOutcome {
+    /// New tokens persisted.
+    Refreshed,
+    /// Another process refreshed while we waited for the lock; its result is now
+    /// loaded and valid, so there was nothing left to do.
+    AlreadyFresh,
+    /// The grant is dead and the credentials have been cleared from disk. The
+    /// user must run `railway login`; retrying will never succeed.
+    SessionExpired(RailwayError),
+    /// Refresh failed but the credentials are intact and still worth using. The
+    /// command should proceed and may well succeed.
+    Transient(RailwayError),
+    /// Nothing to refresh with.
+    NoRefreshToken,
+}
 
-    let host = configs.get_host();
-    let token_resp = match oauth::refresh_access_token(host, refresh_token).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            // A permanently-dead credential is discarded so the next run
-            // starts clean instead of replaying the same doomed refresh.
-            // Transient failures (5xx, rate limits, network) keep their
-            // tokens — clearing on those would turn a brief server blip
-            // into a fleet-wide forced logout.
-            if matches!(
-                e.downcast_ref::<RailwayError>(),
-                Some(RailwayError::OAuthInvalidGrant(_))
-            ) {
-                if let Err(clear_err) = configs.clear_oauth_tokens() {
-                    eprintln!(
-                        "{}: {clear_err}",
-                        "Warning: could not clear the expired login from disk".yellow()
-                    );
-                }
-            }
-            return Err(e);
-        }
+/// Backoff between transient refresh attempts.
+const REFRESH_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Take the config lock, re-read credentials, and refresh.
+///
+/// The lock matters because the refresh is a read-modify-write of the on-disk
+/// credentials and backboard reuse-detects the refresh token: two processes
+/// refreshing concurrently means the second presents an already-consumed token
+/// and the server revokes the whole grant — a hard logout. Whichever process
+/// wins the lock performs the single refresh; the others re-read and pick up its
+/// result. If the lock cannot be taken we refresh anyway rather than wedge.
+///
+/// `force` skips the "someone else already did it" short-circuit, for callers
+/// reacting to an actual authorization failure rather than to local expiry.
+async fn refresh_locked(configs: &mut Configs, force: bool) -> RefreshOutcome {
+    let _lock = configs.acquire_lock().await;
+
+    if configs.reload().is_err() {
+        return RefreshOutcome::NoRefreshToken;
+    }
+    if !force && (!configs.has_oauth_token() || !configs.is_token_expired()) {
+        return RefreshOutcome::AlreadyFresh;
+    }
+
+    let base_url = oauth::get_oauth_base_url(configs.get_host());
+    refresh_with_policy(configs, &base_url, REFRESH_BACKOFF).await
+}
+
+/// Refresh unconditionally, ignoring the local expiry timestamp.
+///
+/// `ensure_valid_token` trusts `tokenExpiresAt`, so it does nothing when the
+/// stored token merely *looks* valid. A token can die server-side well before
+/// that — the grant is revoked, or evicted by the per-grant refresh-token cap —
+/// and in that state a long-lived process would otherwise never recover. Call
+/// this after an actual authorization failure.
+pub(crate) async fn force_refresh(configs: &mut Configs) -> RefreshOutcome {
+    if Configs::is_using_token_auth() {
+        // Env-var tokens are not ours to refresh.
+        return RefreshOutcome::NoRefreshToken;
+    }
+    refresh_locked(configs, true).await
+}
+
+/// Refresh against an explicit base URL and apply the credential policy:
+/// clear on a dead grant, preserve on anything transient.
+pub(crate) async fn refresh_with_policy(
+    configs: &mut Configs,
+    base_url: &str,
+    backoff: Duration,
+) -> RefreshOutcome {
+    let Some(refresh_token) = configs.get_refresh_token().map(str::to_owned) else {
+        return RefreshOutcome::NoRefreshToken;
     };
 
-    configs.save_oauth_tokens(
-        &token_resp.access_token,
-        token_resp.refresh_token.as_deref(),
-        token_resp.expires_in,
-    )?;
-
-    Ok(())
-}
-
-/// How long to wait for the config lock before giving up and refreshing
-/// without it. Kept short so a stale lock can never wedge the CLI for long.
-const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-/// Poll interval while waiting for the config lock.
-const CONFIG_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// RAII guard around an exclusive advisory lock on the config lockfile.
-/// Releasing the lock (and dropping the file handle) happens on drop, covering
-/// all error paths.
-struct ConfigLockGuard {
-    file: std::fs::File,
-}
-
-impl ConfigLockGuard {
-    /// Try to acquire the exclusive config lock, retrying up to
-    /// [`CONFIG_LOCK_TIMEOUT`]. Returns `None` (with a warning) on any failure
-    /// so the caller can fall back to an unlocked refresh rather than wedge.
-    fn acquire() -> Option<Self> {
-        use fs2::FileExt;
-
-        let lock_path = match Configs::config_lock_path() {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!(
-                    "{}: {e}",
-                    "Warning: could not determine config lock path".yellow()
-                );
-                return None;
+    match oauth::refresh_access_token_at(base_url, &refresh_token, backoff).await {
+        Ok(token_resp) => {
+            if let Err(e) = configs.save_oauth_tokens(
+                &token_resp.access_token,
+                token_resp.refresh_token.as_deref(),
+                token_resp.expires_in,
+            ) {
+                return RefreshOutcome::Transient(RailwayError::OAuthRefreshFailed(format!(
+                    "failed to persist tokens: {e}"
+                )));
             }
-        };
-
-        if let Some(parent) = lock_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "{}: {e}",
-                    "Warning: could not create config directory for lock".yellow()
-                );
-                return None;
-            }
+            RefreshOutcome::Refreshed
         }
-
-        let file = match std::fs::File::create(&lock_path) {
-            Ok(file) => file,
-            Err(e) => {
+        // A permanently-dead credential is discarded so the next run starts
+        // clean instead of replaying the same doomed refresh. Transient failures
+        // keep their tokens — clearing on those would turn a brief server blip
+        // into a fleet-wide forced logout.
+        Err(oauth::RefreshFailure::Terminal(err)) => {
+            if let Err(clear_err) = configs.clear_oauth_tokens() {
                 eprintln!(
-                    "{}: {e}",
-                    "Warning: could not open config lock file".yellow()
+                    "{}: {clear_err}",
+                    "Warning: could not clear the expired login from disk".yellow()
                 );
-                return None;
             }
-        };
-
-        let deadline = std::time::Instant::now() + CONFIG_LOCK_TIMEOUT;
-        loop {
-            if file.try_lock_exclusive().is_ok() {
-                return Some(Self { file });
-            }
-            if std::time::Instant::now() >= deadline {
-                eprintln!(
-                    "{}",
-                    "Warning: timed out waiting for config lock; refreshing without it".yellow()
-                );
-                return None;
-            }
-            std::thread::sleep(CONFIG_LOCK_POLL_INTERVAL);
+            RefreshOutcome::SessionExpired(err)
         }
-    }
-}
-
-impl Drop for ConfigLockGuard {
-    fn drop(&mut self) {
-        use fs2::FileExt;
-        // Best-effort unlock; the lock is also released when the file handle is
-        // dropped immediately after.
-        let _ = FileExt::unlock(&self.file);
+        Err(oauth::RefreshFailure::Transient(err)) => RefreshOutcome::Transient(err),
     }
 }
 

@@ -59,7 +59,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::ProjectCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -109,7 +109,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::EnvironmentCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -148,7 +148,7 @@ impl RailwayMcp {
         let branch = if let Some(repo) = params.source_repo.as_deref() {
             validate_repo_name(repo).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
             Some(
-                resolve_repo_branch(&self.client, &self.configs, repo, params.branch)
+                resolve_repo_branch(&self.client(), &self.configs, repo, params.branch)
                     .await
                     .map_err(|e| {
                         McpError::invalid_params(
@@ -180,7 +180,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::ServiceCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -216,7 +216,7 @@ impl RailwayMcp {
 
         let (repo, branch, image) = if let Some(repo) = params.source_repo {
             validate_repo_name(&repo).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-            let branch = resolve_repo_branch(&self.client, &self.configs, &repo, params.branch)
+            let branch = resolve_repo_branch(&self.client(), &self.configs, &repo, params.branch)
                 .await
                 .map_err(|e| {
                     McpError::invalid_params(format!("Failed to resolve repo branch: {e}"), None)
@@ -227,7 +227,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::ServiceConnect, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             mutations::service_connect::Variables {
                 id: ctx.service_id.clone(),
@@ -264,7 +264,7 @@ impl RailwayMcp {
             .await?;
 
         let result = post_graphql::<mutations::ServiceDisconnect, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             mutations::service_disconnect::Variables {
                 id: ctx.service_id.clone(),
@@ -295,7 +295,7 @@ impl RailwayMcp {
         };
 
         post_graphql::<mutations::ServiceDelete, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -332,7 +332,7 @@ impl RailwayMcp {
         let region = match params.region {
             Some(region_input) => {
                 let regions =
-                    fetch_regions_for_project(&self.client, &self.configs, Some(&ctx.project_id))
+                    fetch_regions_for_project(&self.client(), &self.configs, Some(&ctx.project_id))
                         .await
                         .map_err(|e| {
                             McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
@@ -371,7 +371,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::ServiceInstanceUpdate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -413,7 +413,7 @@ impl RailwayMcp {
         output.push_str("--------|--------|-------------------|---------------\n");
 
         let environment_instances =
-            get_environment_instances(&self.client, &self.configs, &ctx.project_id, &env.node.id)
+            get_environment_instances(&self.client(), &self.configs, &ctx.project_id, &env.node.id)
                 .await
                 .map_err(|e| {
                     McpError::internal_error(

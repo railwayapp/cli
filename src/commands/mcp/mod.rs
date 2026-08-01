@@ -33,7 +33,16 @@ pub async fn command(args: Args) -> Result<()> {
 
 async fn serve_stdio() -> Result<()> {
     let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
+    // Start even when there are no usable credentials. Refusing to boot makes
+    // the harness report an opaque "MCP server failed" that no later
+    // `railway login` can clear, because the process is already gone. Serving
+    // with an unauthenticated client instead means tool calls return an
+    // actionable auth error, and `refresh_credentials` swaps in an authorized
+    // client as soon as the user signs in — no editor restart.
+    let client = match GQLClient::new_authorized(&configs) {
+        Ok(client) => client,
+        Err(_) => GQLClient::new_public()?,
+    };
     let handler = RailwayMcp::new(client, configs);
 
     let service = handler

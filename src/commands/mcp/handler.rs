@@ -32,9 +32,26 @@ use crate::{
 
 #[derive(Clone)]
 pub struct RailwayMcp {
-    pub(crate) client: reqwest::Client,
+    /// Swappable HTTP client. `GQLClient::new_authorized` bakes the bearer
+    /// token into the client's default headers, so the client is only valid for
+    /// as long as that token is. This server outlives its access token (1h) by
+    /// hours, so the client has to be replaceable — otherwise every tool call
+    /// after expiry fails and `railway login` cannot heal the running process.
+    /// Paired with the bearer token it carries, so the two can never disagree.
+    /// Rebuilding a `reqwest::Client` throws away its connection pool and costs
+    /// a fresh TLS handshake (~130ms per call, measured), so it is replaced only
+    /// when the token actually changes rather than on every tool call.
+    client: Arc<std::sync::RwLock<AuthedClient>>,
     pub(crate) configs: Arc<Configs>,
     tool_router: ToolRouter<Self>,
+}
+
+/// An HTTP client together with the bearer token baked into its default
+/// headers. Kept as one value so a reader can never see a new client with a
+/// stale token.
+struct AuthedClient {
+    http: reqwest::Client,
+    token: Option<String>,
 }
 
 pub(crate) struct ResolvedContext {
@@ -53,10 +70,84 @@ pub(crate) struct ResolvedServiceContext {
 
 impl RailwayMcp {
     pub fn new(client: reqwest::Client, configs: Configs) -> Self {
+        let token = configs.get_railway_auth_token();
         Self {
-            client,
+            client: Arc::new(std::sync::RwLock::new(AuthedClient {
+                http: client,
+                token,
+            })),
             configs: Arc::new(configs),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// The HTTP client to use for this request. Cloning a `reqwest::Client` is
+    /// cheap (it is an `Arc` internally) and shares the connection pool.
+    ///
+    /// A poisoned lock means a previous swap panicked mid-write; the inner
+    /// client is still a valid value, so keep serving with it.
+    pub(crate) fn client(&self) -> reqwest::Client {
+        self.client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .http
+            .clone()
+    }
+
+    /// Re-resolve credentials from disk, refresh them if needed, and swap in a
+    /// client carrying the current bearer token. Returns whether the token
+    /// changed, i.e. whether a request that just failed on auth is worth
+    /// retrying.
+    ///
+    /// Called at the start of every tool call. This is what makes the server
+    /// survive its own access-token lifetime, and what lets a `railway login` in
+    /// another terminal take effect without restarting the editor.
+    ///
+    /// `force` ignores the local expiry timestamp, for use after an actual
+    /// authorization failure: a token can die server-side (grant revoked, or
+    /// evicted by the per-grant refresh-token cap) while still looking valid
+    /// here.
+    ///
+    /// Failures are deliberately silent: stdout is the JSON-RPC channel, the
+    /// existing client may still work, and the tool call's own error is a better
+    /// signal than one from a speculative refresh.
+    pub(crate) async fn sync_client(&self, force: bool) -> bool {
+        let Ok(mut configs) = Configs::new() else {
+            return false;
+        };
+        if force {
+            let _ = crate::client::force_refresh(&mut configs).await;
+        } else {
+            let _ = crate::client::ensure_valid_token(&mut configs).await;
+        }
+
+        let token = configs.get_railway_auth_token();
+        // Steady state: the token is unchanged, so keep the existing client and
+        // its warm connection pool. This is the common path on every tool call.
+        if self
+            .client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token
+            == token
+        {
+            return false;
+        }
+        // A cleared token cannot authorize anything, so there is nothing to
+        // install and no point retrying.
+        if token.is_none() {
+            return false;
+        }
+        match crate::client::GQLClient::new_authorized(&configs) {
+            Ok(http) => {
+                *self
+                    .client
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    AuthedClient { http, token };
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -78,7 +169,7 @@ impl RailwayMcp {
                 )
             })?;
 
-        let project = get_project(&self.client, &self.configs, project_id.clone())
+        let project = get_project(&self.client(), &self.configs, project_id.clone())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -125,7 +216,7 @@ impl RailwayMcp {
             first: Some(1),
         };
         let response = post_graphql::<queries::Deployments, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -191,7 +282,7 @@ impl RailwayMcp {
         ctx: &ResolvedServiceContext,
     ) -> Result<queries::domains::DomainsDomains, McpError> {
         post_graphql::<queries::Domains, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             queries::domains::Variables {
                 environment_id: ctx.environment_id.clone(),
@@ -580,11 +671,31 @@ fn validate_domain_port(port: i64) -> Result<i64, McpError> {
     }
 }
 
+/// Whether a tool result failed because the request was not authorized.
+///
+/// Matches on the rendered message because the underlying `RailwayError` is
+/// already flattened into an `McpError` string by the time it reaches the
+/// dispatcher. The markers live in `errors.rs` beside the variants they
+/// describe, with a test pinning the coupling.
+///
+/// A false positive here is bounded: `sync_client` only reports success when the
+/// bearer token actually changed, so an unrelated error mentioning
+/// "Unauthorized" cannot by itself cause the tool to be re-run.
+fn is_auth_failure(result: &Result<CallToolResult, McpError>) -> bool {
+    let Err(err) = result else {
+        return false;
+    };
+    let rendered = err.to_string();
+    crate::errors::AUTH_FAILURE_MARKERS
+        .iter()
+        .any(|marker| rendered.contains(marker))
+}
+
 #[tool_router]
 impl RailwayMcp {
     #[tool(description = "Check Railway authentication status and return the current user")]
     async fn whoami(&self) -> Result<CallToolResult, McpError> {
-        let user = get_user(&self.client, &self.configs).await.map_err(|e| {
+        let user = get_user(&self.client(), &self.configs).await.map_err(|e| {
             McpError::internal_error(
                 format!("Not authenticated. Run 'railway login' first. Error: {e}"),
                 None,
@@ -678,7 +789,7 @@ impl RailwayMcp {
             }
         };
 
-        let project = get_project(&self.client, &self.configs, project_id)
+        let project = get_project(&self.client(), &self.configs, project_id)
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -718,7 +829,7 @@ impl RailwayMcp {
         };
 
         let response = post_graphql::<queries::Deployments, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -759,7 +870,7 @@ impl RailwayMcp {
             .await?;
 
         let variables = get_service_variables(
-            &self.client,
+            &self.client(),
             &self.configs,
             ctx.project_id,
             ctx.environment_id,
@@ -854,7 +965,7 @@ impl RailwayMcp {
 
         let backboard = self.configs.get_backboard();
         let fetch_params = FetchLogsParams {
-            client: &self.client,
+            client: &self.client(),
             backboard: &backboard,
             deployment_id: deployment_id.clone(),
             limit: Some(lines),
@@ -937,7 +1048,7 @@ impl RailwayMcp {
         };
 
         post_graphql::<mutations::VariableCollectionUpsert, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -975,7 +1086,7 @@ impl RailwayMcp {
                 },
             };
             let result = post_graphql::<mutations::CustomDomainCreate, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 create_vars,
             )
@@ -1011,7 +1122,7 @@ impl RailwayMcp {
                 target_port,
             };
             let result = post_graphql::<mutations::ServiceDomainCreate, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 create_vars,
             )
@@ -1085,7 +1196,7 @@ impl RailwayMcp {
         }
 
         post_graphql::<mutations::CustomDomainIssueCertificate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             mutations::custom_domain_issue_certificate::Variables {
                 id: domain.id.clone(),
@@ -1126,7 +1237,7 @@ impl RailwayMcp {
         match domain.kind {
             McpDomainKind::Custom => {
                 post_graphql::<mutations::CustomDomainDelete, _>(
-                    &self.client,
+                    &self.client(),
                     self.configs.get_backboard(),
                     mutations::custom_domain_delete::Variables {
                         id: domain.id.clone(),
@@ -1139,7 +1250,7 @@ impl RailwayMcp {
             }
             McpDomainKind::Service => {
                 post_graphql::<mutations::ServiceDomainDelete, _>(
-                    &self.client,
+                    &self.client(),
                     self.configs.get_backboard(),
                     mutations::service_domain_delete::Variables {
                         id: domain.id.clone(),
@@ -1200,7 +1311,7 @@ impl RailwayMcp {
                 }
 
                 post_graphql::<mutations::CustomDomainUpdate, _>(
-                    &self.client,
+                    &self.client(),
                     self.configs.get_backboard(),
                     mutations::custom_domain_update::Variables {
                         environment_id: domain.environment_id.clone(),
@@ -1215,7 +1326,7 @@ impl RailwayMcp {
             }
             McpDomainKind::Service => {
                 post_graphql::<mutations::ServiceDomainUpdate, _>(
-                    &self.client,
+                    &self.client(),
                     self.configs.get_backboard(),
                     mutations::service_domain_update::Variables {
                         input: mutations::service_domain_update::ServiceDomainUpdateInput {
@@ -1266,7 +1377,7 @@ impl RailwayMcp {
                 )
             })?;
 
-        let project = get_project(&self.client, &self.configs, project_id.clone())
+        let project = get_project(&self.client(), &self.configs, project_id.clone())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -1290,7 +1401,7 @@ impl RailwayMcp {
                 )
             })?;
             let instances = get_environment_instances(
-                &self.client,
+                &self.client(),
                 &self.configs,
                 &project_id,
                 &environment.id,
@@ -1386,7 +1497,7 @@ impl RailwayMcp {
             )
         })?;
 
-        let project = get_project(&self.client, &self.configs, project_id.clone())
+        let project = get_project(&self.client(), &self.configs, project_id.clone())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -1801,7 +1912,7 @@ impl RailwayMcp {
 
         let hostname = self.configs.get_host();
         let response = upload_deploy_tarball(
-            &self.client,
+            &self.client(),
             hostname,
             &ctx.project_id,
             &ctx.environment_id,
@@ -1875,8 +1986,29 @@ impl ServerHandler for RailwayMcp {
             .map(|info| telemetry::McpClientInfo {
                 name: info.client_info.name.clone(),
             });
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let result = self.tool_router.call(tcc).await;
+        // Single choke point for every tool call: make sure the credentials we
+        // are about to use are current. Without this the bearer token captured
+        // at process start is used forever.
+        self.sync_client(false).await;
+
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(
+            self,
+            request.clone(),
+            context.clone(),
+        );
+        let mut result = self.tool_router.call(tcc).await;
+
+        // Reactive re-auth. The pre-dispatch sync trusts the local expiry
+        // timestamp, so it does nothing for a token that merely looks valid but
+        // has already died server-side (grant revoked, or evicted by the
+        // per-grant refresh-token cap). Without this the session would stay
+        // broken for its entire life. Retry only when re-auth actually produced
+        // a different token — otherwise a retry cannot help, and re-running a
+        // tool that was rejected on authorization is pointless.
+        if is_auth_failure(&result) && self.sync_client(true).await {
+            let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            result = self.tool_router.call(tcc).await;
+        }
         let duration_ms = start.elapsed().as_millis() as u64;
 
         telemetry::send_mcp_tool_with_client(
