@@ -46,6 +46,38 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --all-targets --all-features
 
+  installer:
+    name: Installer (POSIX sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      # install.sh is published at railway.com/install.sh and reached through
+      # `curl … | sh`, so it has to run under whatever /bin/sh the host ships —
+      # dash on Debian/Ubuntu, busybox ash on Alpine — not just bash. Linting as
+      # dash catches bashisms before they reach users (see #319, #990).
+      - name: Shellcheck as dash
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w koalaman/shellcheck:stable \
+            -s dash -S error install.sh agents.sh
+
+      - name: Install under dash (Debian/Ubuntu /bin/sh)
+        run: |
+          docker run --rm -v "$PWD/install.sh:/install.sh:ro" ubuntu:24.04 sh -c '
+            set -e
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
+            SHELL=/bin/bash dash -s -- -y < /install.sh
+            ~/.railway/bin/railway --version'
+
+      - name: Install under busybox ash (Alpine /bin/sh, no bash present)
+        run: |
+          docker run --rm -v "$PWD/install.sh:/install.sh:ro" alpine:3.20 sh -c '
+            set -e
+            apk add --no-cache curl >/dev/null
+            SHELL=/bin/ash sh -s -- -y < /install.sh
+            ~/.railway/bin/railway --version'
+
   test-plan:
     name: Tests
     strategy:
