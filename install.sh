@@ -447,19 +447,26 @@ RAILWAY_PATH_MARKER_END="# <<< railway initialize <<<"
 SHELL_STARTUP_FILE=""
 SHELL_STARTUP_ACTION=""
 
-DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-)
+# Resolve the version to install, asking GitHub for the latest release only
+# when the caller hasn't pinned one. Called after argument parsing so that a
+# pinned install, --help and --uninstall all work without reaching the GitHub
+# API — an API rate limit shouldn't be able to fail an install of a version the
+# caller already named.
+resolve_version() {
+  if [ -n "${RAILWAY_VERSION-}" ]; then
+    return 0
+  fi
 
-if [ -z "$DEFAULT_VERSION" ]; then
-  error "Failed to fetch latest version from GitHub"
-  exit 1
-fi
+  RAILWAY_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-)
 
+  if [ -z "$RAILWAY_VERSION" ]; then
+    error "Failed to fetch latest version from GitHub"
+    info "Set RAILWAY_VERSION=<x.y.z> to install a specific version without querying the API."
+    exit 1
+  fi
+}
 
 # defaults
-if [ -z "${RAILWAY_VERSION-}" ]; then
-  RAILWAY_VERSION="$DEFAULT_VERSION"
-fi
-
 if [ -z "${RAILWAY_PLATFORM-}" ]; then
   PLATFORM="$(detect_platform)"
 fi
@@ -1090,6 +1097,8 @@ if [ "$HELP" = 1 ]; then
     echo "${help_text}"
     exit 0
 fi
+
+resolve_version
 
 RAILWAY_UPGRADE_AGENT=0
 
