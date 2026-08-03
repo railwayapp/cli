@@ -447,19 +447,32 @@ RAILWAY_PATH_MARKER_END="# <<< railway initialize <<<"
 SHELL_STARTUP_FILE=""
 SHELL_STARTUP_ACTION=""
 
-DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-)
+# Resolve the version to install. Deliberately lazy: called only after --help and
+# --remove have had their chance to exit, and skipped outright when the caller
+# pinned RAILWAY_VERSION. Resolving eagerly at startup made every invocation
+# depend on an unauthenticated api.github.com call — rate limited to 60/hour per
+# source IP, which shared CI runners exhaust — so an install with a pinned
+# version would fail, and even `--help` and `-r` could not run. (#1030)
+resolve_railway_version() {
+  if [ -n "${RAILWAY_VERSION-}" ]; then
+    return 0
+  fi
 
-if [ -z "$DEFAULT_VERSION" ]; then
-  error "Failed to fetch latest version from GitHub"
-  exit 1
-fi
+  RAILWAY_VERSION=$(curl -s --max-time 15 https://api.github.com/repos/railwayapp/cli/releases/latest \
+    | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-) || true
+
+  if [ -z "$RAILWAY_VERSION" ]; then
+    error "Could not determine the latest Railway CLI version from GitHub."
+    info "This is usually a transient network failure, or GitHub's unauthenticated"
+    info "API rate limit (60 requests/hour per IP) on a shared runner."
+    info "Pin a version to skip this lookup entirely:"
+    info "  ${BOLD}RAILWAY_VERSION=<x.y.z>${NO_COLOR}"
+    exit 1
+  fi
+}
 
 
 # defaults
-if [ -z "${RAILWAY_VERSION-}" ]; then
-  RAILWAY_VERSION="$DEFAULT_VERSION"
-fi
-
 if [ -z "${RAILWAY_PLATFORM-}" ]; then
   PLATFORM="$(detect_platform)"
 fi
@@ -1090,6 +1103,10 @@ if [ "$HELP" = 1 ]; then
     echo "${help_text}"
     exit 0
 fi
+
+# Everything past this point needs a concrete version; --help and --remove are
+# already done, so this is the first place the lookup can be required.
+resolve_railway_version
 
 RAILWAY_UPGRADE_AGENT=0
 
