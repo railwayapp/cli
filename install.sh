@@ -153,6 +153,14 @@ replace_all() {
   local out=""
   local head
 
+  # An empty needle matches at every position, so the loop below would never
+  # advance. No caller does this today; guard anyway rather than let a future one
+  # hang the installer with no output.
+  if [ -z "$needle" ]; then
+    printf '%s' "$str"
+    return 0
+  fi
+
   # Assign the prefix on its own line: `"${str%%"$needle"*}"` nested inside an
   # outer double-quoted string is left unspecified by POSIX, and this script
   # runs under whatever /bin/sh the host provides.
