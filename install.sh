@@ -87,8 +87,10 @@ has() {
 
 RANDOM_FOR_SH=$(od -vAn -N4 -tu4 < /dev/urandom | sed 's/\t*$//g')
 
-# Removes leading whitespace
-RANDOM_FOR_SH=$(echo ${RANDOM_FOR_SH:-$RANDOM})
+# Removes leading whitespace. The fallback is $$ rather than $RANDOM: this
+# script runs under dash and busybox ash (via `curl … | sh`), where $RANDOM is
+# unset and `set -u` would abort with "RANDOM: parameter not set".
+RANDOM_FOR_SH=$(echo ${RANDOM_FOR_SH:-$$})
 
 # Gets path to a temporary file, even if
 get_tmpfile() {
@@ -141,16 +143,41 @@ tildify() {
   fi
 }
 
+# POSIX stand-in for bash's ${var//needle/repl}. This script is reached via
+# `curl … | sh` on systems where /bin/sh is dash (Debian/Ubuntu) or busybox ash
+# (Alpine), neither of which supports pattern-substitution expansion.
+replace_all() {
+  local str="$1"
+  local needle="$2"
+  local repl="$3"
+  local out=""
+  local head
+
+  # Assign the prefix on its own line: `"${str%%"$needle"*}"` nested inside an
+  # outer double-quoted string is left unspecified by POSIX, and this script
+  # runs under whatever /bin/sh the host provides.
+  while :; do
+    case "$str" in
+      *"$needle"*)
+        head=${str%%"$needle"*}
+        out=$out$head$repl
+        str=${str#*"$needle"}
+        ;;
+      *) break ;;
+    esac
+  done
+
+  printf '%s%s' "$out" "$str"
+}
+
 shell_quote() {
-  local value="$1"
-  value=${value//\'/\'\\\'\'}
-  printf "'%s'" "$value"
+  printf "'%s'" "$(replace_all "$1" "'" "'\\''")"
 }
 
 fish_quote() {
-  local value="$1"
-  value=${value//\\/\\\\}
-  value=${value//\'/\\\'}
+  local value
+  value="$(replace_all "$1" '\' '\\')"
+  value="$(replace_all "$value" "'" "\\'")"
   printf "'%s'" "$value"
 }
 
@@ -216,8 +243,12 @@ unpack() {
 
   case "$archive" in
     *.tar.gz)
-      flags=$(test -n)
-      ${sudo} tar "${flags}" -xzf "${archive}" -C "${bin_dir}"
+      # VERBOSE is normalized to "v" or "" during option parsing. Fold it into
+      # the flag bundle rather than passing a separate "${flags}" word: when
+      # empty that expands to an empty argument, which GNU tar ignores but
+      # busybox tar (Alpine) reads as a member name -> "tar: : not found in
+      # archive".
+      ${sudo} tar "-${VERBOSE}xzf" "${archive}" -C "${bin_dir}"
       return 0
       ;;
     *.zip)
@@ -945,7 +976,27 @@ run_agent_setup() {
   # Tell `setup agent` it's running inside the installer so it renders its
   # skills/MCP steps as part of one unified flow (no duplicate header, footer,
   # login prompt, or restart notices — the installer prints those once below).
-  RAILWAY_SETUP_EMBEDDED=1 "$railway_bin" setup agent $yes $remote
+  # Never let this abort the installer bare under `set -e`. The CLI itself is
+  # installed and working by this point, so a failure here must say which half
+  # broke, surface the real status, and still point somewhere useful — the old
+  # behaviour was to die mid-script with no Railway-branded message at all.
+  AGENT_SETUP_RC=0
+  RAILWAY_SETUP_EMBEDDED=1 "$railway_bin" setup agent $yes $remote || AGENT_SETUP_RC=$?
+  if [ "$AGENT_SETUP_RC" -ne 0 ]; then
+    printf "\n"
+    if [ "$AGENT_SETUP_RC" -eq 2 ]; then
+      error "This Railway CLI (${CURRENT_VERSION:-unknown}) does not support 'setup agent'."
+      error "Upgrade it first, then re-run: curl -fsSL railway.com/agents.sh | sh"
+    elif [ "$AGENT_SETUP_RC" -gt 128 ]; then
+      error "Agent setup terminated by signal $((AGENT_SETUP_RC - 128)): $railway_bin setup agent"
+      error "Please report this at https://github.com/railwayapp/cli/issues/new"
+    else
+      error "Agent setup failed (exit $AGENT_SETUP_RC): $railway_bin setup agent"
+    fi
+    info "The Railway CLI itself is installed and usable: $(tildify "$railway_bin")"
+    info "Re-run 'railway setup agent' once the above is resolved."
+    exit "$AGENT_SETUP_RC"
+  fi
 
   # Record login state (and the "Logged in as …" line) for the next-steps
   # block; don't warn here. whoami exits non-zero and prints nothing when
