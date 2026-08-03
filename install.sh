@@ -1100,6 +1100,37 @@ if [ "$AGENTS" = 1 ] && has railway; then
     exit 0
   fi
 
+  # Same reasoning as Homebrew, for npm (and the pnpm/yarn/bun/volta/nvm layouts
+  # that all end up pointing into node_modules): `command -v railway` is a
+  # symlink to <prefix>/lib/node_modules/@railway/cli/bin/railway.js, so
+  # EXISTING_BIN_DIR would be npm's own bin dir. Extracting there replaces npm's
+  # symlink with a raw binary that npm still records as its own, so a later
+  # `npm uninstall -g @railway/cli` deletes the binary we just installed —
+  # leaving no railway at all — and `npm install -g` silently reverts it.
+  NPM_INSTALL=0
+  case "$RAILWAY_BIN" in
+    */node_modules/*) NPM_INSTALL=1 ;;
+  esac
+  if [ "$NPM_INSTALL" = 0 ] && [ -L "$RAILWAY_BIN" ]; then
+    case "$(readlink "$RAILWAY_BIN" 2>/dev/null || true)" in
+      */node_modules/*|*.js) NPM_INSTALL=1 ;;
+    esac
+  fi
+
+  if [ "$NPM_INSTALL" = 1 ]; then
+    if [ "$REMOTE" = 1 ]; then
+      error "Railway CLI was installed with npm (version $CURRENT_VERSION)."
+      error "The --remote flag requires Railway CLI $RAILWAY_VERSION or newer."
+      error "Run 'npm install -g @railway/cli@latest' first, then re-run cli.new --agents --remote."
+      exit 1
+    fi
+    warn "Railway CLI was installed with npm."
+    warn "Run 'npm install -g @railway/cli@latest' to update from $CURRENT_VERSION to $RAILWAY_VERSION, then re-run cli.new --agents."
+    info "Continuing with $CURRENT_VERSION."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
   EXISTING_BIN_DIR="$(dirname "$RAILWAY_BIN")"
   info "Newer version available: $RAILWAY_VERSION (you have $CURRENT_VERSION)"
 
