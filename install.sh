@@ -1159,6 +1159,42 @@ if [ "$AGENTS" = 1 ] && has railway; then
     exit 0
   fi
 
+  # Same reasoning as the Homebrew branch above, for the JS package managers.
+  # Every release we publish is a native executable, so a `railway` on PATH that
+  # is a script or a link into node_modules belongs to something else: npm, yarn
+  # and bun symlink a .js entrypoint, pnpm writes a /bin/sh shim. Extracting into
+  # that bin dir replaces the tool's entry with a raw binary it still records as
+  # its own, so a later `npm uninstall -g @railway/cli` deletes the binary we
+  # just installed — leaving no railway at all — and reinstalling reverts it.
+  MANAGED_BIN=0
+  case "$RAILWAY_BIN" in
+    */node_modules/*) MANAGED_BIN=1 ;;
+  esac
+  if [ "$MANAGED_BIN" = 0 ] && [ -L "$RAILWAY_BIN" ]; then
+    case "$(readlink "$RAILWAY_BIN" 2>/dev/null || true)" in
+      */node_modules/*|*.js) MANAGED_BIN=1 ;;
+    esac
+  fi
+  # Catches pnpm's shell shim, and any hand-rolled wrapper — which we equally
+  # should not overwrite.
+  if [ "$MANAGED_BIN" = 0 ] && [ "$(head -c 2 "$RAILWAY_BIN" 2>/dev/null || true)" = '#!' ]; then
+    MANAGED_BIN=1
+  fi
+
+  if [ "$MANAGED_BIN" = 1 ]; then
+    if [ "$REMOTE" = 1 ]; then
+      error "Railway CLI on PATH is managed by another tool: $RAILWAY_BIN ($CURRENT_VERSION)."
+      error "The --remote flag requires Railway CLI $RAILWAY_VERSION or newer."
+      error "Update it with that tool first (e.g. 'npm install -g @railway/cli@latest'), then re-run cli.new --agents --remote."
+      exit 1
+    fi
+    warn "Railway CLI on PATH is managed by another tool: $RAILWAY_BIN"
+    warn "Update it with that tool (e.g. 'npm install -g @railway/cli@latest') to go from $CURRENT_VERSION to $RAILWAY_VERSION, then re-run cli.new --agents."
+    info "Continuing with $CURRENT_VERSION."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
   EXISTING_BIN_DIR="$(dirname "$RAILWAY_BIN")"
   info "Newer version available: $RAILWAY_VERSION (you have $CURRENT_VERSION)"
 
