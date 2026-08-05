@@ -162,7 +162,7 @@ async fn ensure_default_target_has_linked_service(target: &TargetArgs) -> Result
     if !std::io::stdout().is_terminal() {
         return Ok(());
     }
-    if Configs::has_env_var_project_config() || Configs::get_railway_token().is_some() {
+    if Configs::uses_env_project_targeting() {
         return Ok(());
     }
 
