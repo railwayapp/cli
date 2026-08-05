@@ -198,11 +198,14 @@ pub async fn upload_deploy_tarball(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
 
     /// Sorted archive member names, so tests assert on what was actually
-    /// captured rather than merely on success.
+    /// captured rather than merely on success. Only the symlink cases inspect
+    /// contents, and those are Unix-only.
+    #[cfg(unix)]
     fn entries_of(root: &Path) -> Vec<String> {
+        use std::io::Read;
+
         let tarball = tarball_of(root).expect("tarball");
         let mut decoder = flate2::read::GzDecoder::new(tarball.as_slice());
         let mut decompressed = Vec::new();
