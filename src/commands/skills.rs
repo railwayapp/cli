@@ -18,9 +18,9 @@ const SKILLS_SHA_URL: &str = "https://api.github.com/repos/railwayapp/railway-sk
 /// How often the background task re-checks upstream for a newer skills commit.
 const SKILLS_CHECK_INTERVAL_HOURS: i64 = 1;
 
-/// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and all tools that support .agents/skills)
+/// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, Pi, and all tools that support .agents/skills)
 ///
-/// Always installs to ~/.agents/skills. Additionally installs to any detected tool directories (e.g. ~/.claude/skills, ~/.cursor/skills). Use --agent to target specific tools instead of auto-detection.
+/// Always installs to ~/.agents/skills. Additionally installs to any detected tool directories (e.g. ~/.claude/skills, ~/.cursor/skills, ~/.pi/agent/skills). Use --agent to target specific tools instead of auto-detection.
 #[derive(Parser)]
 pub struct Args {
     #[clap(subcommand)]
@@ -37,9 +37,9 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and all tools that support .agents/skills)
+    /// Install Railway agent skills for AI coding tools (Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, Pi, and all tools that support .agents/skills)
     ///
-    /// Always installs to ~/.agents/skills. Additionally installs to any detected tool directories (e.g. ~/.claude/skills, ~/.cursor/skills). Use --agent to target specific tools instead of auto-detection.
+    /// Always installs to ~/.agents/skills. Additionally installs to any detected tool directories (e.g. ~/.claude/skills, ~/.cursor/skills, ~/.pi/agent/skills). Use --agent to target specific tools instead of auto-detection.
     #[clap(visible_alias = "update", visible_alias = "add")]
     Install,
     /// Remove Railway skills from all tools
@@ -439,6 +439,12 @@ pub(super) fn coding_tools(home: &Path) -> Vec<CodingTool> {
             slug: "cursor",
             name: "Cursor",
             global_parent: home.join(".cursor"),
+            skills_dir_name: "skills",
+        },
+        CodingTool {
+            slug: "pi",
+            name: "Pi",
+            global_parent: home.join(".pi").join("agent"),
             skills_dir_name: "skills",
         },
     ]
@@ -1288,5 +1294,20 @@ mod tests {
 
         assert!(skills_configured_for_slug(home.path(), "copilot"));
         assert!(skills_configured_for_slug(home.path(), "factory-droid"));
+    }
+
+    #[test]
+    fn detects_pi_skills() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            home.path()
+                .join(".pi")
+                .join("agent")
+                .join("skills")
+                .join("use-railway"),
+        )
+        .unwrap();
+
+        assert!(skills_configured_for_slug(home.path(), "pi"));
     }
 }
