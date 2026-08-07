@@ -651,17 +651,6 @@ pub struct VolumeInstanceBackupRestore;
 )]
 pub struct VolumeInstanceBackupScheduleUpdate;
 
-/// Front-loaded for phase B (HA cluster scale, adding new nodes to the canvas group); not yet called.
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/GroupSet.graphql",
-    response_derives = "Debug, Serialize, Clone",
-    skip_serializing_none
-)]
-#[allow(dead_code)]
-pub struct GroupSet;
-
 /// Commits a staged environment patch, used by `template_apply`'s auto-deploy wrapper.
 #[derive(GraphQLQuery)]
 #[graphql(

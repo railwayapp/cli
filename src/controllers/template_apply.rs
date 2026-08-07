@@ -195,9 +195,7 @@ pub async fn apply_composable_template(
             input: mutations::template_deploy_v2::TemplateDeployV2Input {
                 environment_id: Some(ctx.environment_id.clone()),
                 existing_root_service_id: Some(params.service_id.clone()),
-                group_id: None,
                 project_id: Some(ctx.project_id.clone()),
-                project_name: None,
                 serialized_config: config,
                 stage_only: Some(true),
                 template_id: detail.template.id.clone(),

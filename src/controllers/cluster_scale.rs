@@ -256,7 +256,6 @@ async fn scale_replicas(
 
         let to_add = target_count - current_count;
         let mut added = Vec::with_capacity(to_add as usize);
-        let mut new_ids = Vec::with_capacity(to_add as usize);
         for next_number in start_number..start_number + to_add {
             let node_name = format!("{base_name}-{next_number}");
             let node = create_clone_service(ctx, &node_name, &source_image).await?;
@@ -285,11 +284,6 @@ async fn scale_replicas(
 
             existing.push((node.id.clone(), node.name.clone()));
             added.push(node.name.clone());
-            new_ids.push(node.id.clone());
-        }
-
-        if let Some(group_id) = &root.group_id {
-            add_to_group(ctx, group_id, &new_ids).await?;
         }
 
         ScaleDimensionSummary {
@@ -414,7 +408,6 @@ async fn scale_internal(
 
         let to_add = target_count - current_count;
         let mut added = Vec::with_capacity(to_add as usize);
-        let mut new_ids = Vec::with_capacity(to_add as usize);
         for next_number in start_number..start_number + to_add {
             let node_name = format!("{base_name}-{next_number}");
             let node = create_clone_service(ctx, &node_name, &source_image).await?;
@@ -443,11 +436,6 @@ async fn scale_internal(
 
             existing.push((node.id.clone(), node.name.clone()));
             added.push(node.name.clone());
-            new_ids.push(node.id.clone());
-        }
-
-        if let Some(group_id) = &root.group_id {
-            add_to_group(ctx, group_id, &new_ids).await?;
         }
 
         ScaleDimensionSummary {
@@ -952,37 +940,6 @@ async fn delete_member(
     )
     .await
     .with_context(|| format!("Failed to delete service {service_id}"))?;
-
-    Ok(())
-}
-
-/// Adds newly-created nodes to the cluster root's canvas group, best-effort
-/// -- canvas grouping is a cosmetic visual feature, so a failure here
-/// shouldn't fail the scale.
-async fn add_to_group(ctx: &ServiceContext, group_id: &str, node_ids: &[String]) -> Result<()> {
-    if node_ids.is_empty() {
-        return Ok(());
-    }
-
-    let nodes = node_ids
-        .iter()
-        .map(|id| mutations::group_set::GroupSet {
-            node_id: id.clone(),
-            group_id: Some(group_id.to_string()),
-        })
-        .collect();
-
-    if let Err(err) = post_graphql::<mutations::GroupSet, _>(
-        &ctx.client,
-        ctx.configs.get_backboard(),
-        mutations::group_set::Variables {
-            input: mutations::group_set::GroupSetInput { nodes },
-        },
-    )
-    .await
-    {
-        eprintln!("Warning: could not add new node(s) to the canvas group: {err:#}");
-    }
 
     Ok(())
 }
