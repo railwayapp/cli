@@ -531,7 +531,7 @@ async fn revert(
     // as scale-down). Matched against the pre-revert snapshot by id: the
     // revert patch clears parentServiceId on stragglers, so they can't be
     // re-derived from the fresh config.
-    let leftovers: Vec<(String, String)> = pre_revert_members
+    let mut leftovers: Vec<(String, String)> = pre_revert_members
         .into_iter()
         .filter(|(member_id, _)| {
             config
@@ -540,6 +540,27 @@ async fn revert(
                 .is_some_and(|service| !service.is_deleted.unwrap_or(false))
         })
         .collect();
+    // The public patch path DROPS parentServiceId (confirmed live: staging
+    // it round-trips clusterRole but not the parent link), so a node added
+    // by live scaling is invisible to the membership snapshot too. A
+    // role-stamped service with NO parent is not a legitimate end state of
+    // any flow -- treat those as cluster debris and sweep them as well.
+    let names = service_name_map(&ctx);
+    for (id, service) in &config.services {
+        let orphaned_member = matches!(
+            service.cluster_role.as_deref(),
+            Some("replica") | Some("internal") | Some("edge")
+        ) && service.parent_service_id.is_none()
+            && !service.is_deleted.unwrap_or(false)
+            && id.as_str() != root.root_id
+            && !leftovers.iter().any(|(seen, _)| seen == id);
+        if orphaned_member {
+            leftovers.push((
+                id.clone(),
+                names.get(id).cloned().unwrap_or_else(|| id.clone()),
+            ));
+        }
+    }
     for (member_id, member_name) in &leftovers {
         if !json {
             println!(

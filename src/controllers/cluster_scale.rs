@@ -156,6 +156,14 @@ pub async fn scale_cluster(
         edge_summary = scale_edge(&config, root_id, target, &mut patch)?;
     }
 
+    let created_ids: Vec<String> = patch
+        .iter()
+        .filter(|(id, service)| {
+            service.parent_service_id.is_some() && !config.services.contains_key(*id)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+
     let deployed = if patch.is_empty() {
         false
     } else {
@@ -165,6 +173,32 @@ pub async fn scale_cluster(
         };
         stage_and_commit(ctx, env_patch, params.auto_deploy).await?
     };
+
+    // The public patch path silently drops parentServiceId (confirmed
+    // live), which orphans brand-new members from the cluster topology --
+    // status won't list them and revert has to sweep them heuristically.
+    // Verify and warn loudly rather than letting it surprise later.
+    if !created_ids.is_empty() {
+        let after = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+            .await
+            .map(|response| response.config)
+            .unwrap_or_default();
+        let dropped: Vec<&String> = created_ids
+            .iter()
+            .filter(|id| {
+                after
+                    .services
+                    .get(*id)
+                    .is_none_or(|service| service.parent_service_id.is_none())
+            })
+            .collect();
+        if !dropped.is_empty() {
+            eprintln!(
+                "Warning: the platform dropped the parent link on {} new cluster member(s); they will still serve traffic (wiring is stamped), but `ha status` won't list them as members until the link is restored. `ha revert` still removes them.",
+                dropped.len()
+            );
+        }
+    }
 
     Ok(ScaleClusterResult {
         deployed,
