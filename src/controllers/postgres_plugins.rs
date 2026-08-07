@@ -476,4 +476,122 @@ mod tests {
         assert_eq!(resolve_root_service_id(&config, "root"), "root");
         assert_eq!(resolve_root_service_id(&config, "unknown"), "unknown");
     }
+
+    #[test]
+    fn resolve_root_service_id_edge_without_parent_falls_back_to_itself() {
+        let mut orphan_edge = ServiceInstance {
+            cluster_role: Some("edge".to_string()),
+            ..ServiceInstance::default()
+        };
+        orphan_edge.parent_service_id = None;
+        let config = config_with(vec![("edge", orphan_edge)]);
+        assert_eq!(resolve_root_service_id(&config, "edge"), "edge");
+    }
+
+    #[test]
+    fn ha_state_survives_a_parent_cycle() {
+        // Corrupt config where two services point at each other as parents --
+        // the walk must terminate (cycle guard) instead of hanging.
+        let config = config_with(vec![
+            ("a", child_service("b", "replica")),
+            ("b", child_service("a", "replica")),
+        ]);
+        let state = compute_ha_state(&config, "a", &BTreeMap::new());
+        assert!(!state.is_cluster);
+        assert_eq!(state.root_service_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn pgbouncer_state_skips_deleted_edge_child() {
+        let mut pgbouncer = child_service("root", "edge");
+        pgbouncer.source = Some(ServiceSource {
+            image: Some("ghcr.io/railwayapp-templates/pgbouncer:latest".to_string()),
+            ..ServiceSource::default()
+        });
+        pgbouncer.is_deleted = Some(true);
+
+        let config = config_with(vec![
+            ("root", root_service(false)),
+            ("pgbouncer", pgbouncer),
+        ]);
+        assert!(!compute_pgbouncer_state(&config, "root").attached);
+    }
+
+    #[test]
+    fn pgbouncer_state_ignores_non_pgbouncer_children() {
+        let mut haproxy = child_service("root", "edge");
+        haproxy.source = Some(ServiceSource {
+            image: Some("ghcr.io/railwayapp-templates/haproxy:latest".to_string()),
+            ..ServiceSource::default()
+        });
+        let config = config_with(vec![("root", root_service(true)), ("haproxy", haproxy)]);
+        assert!(!compute_pgbouncer_state(&config, "root").attached);
+    }
+
+    #[test]
+    fn pgbouncer_state_tolerates_unparseable_knob_values() {
+        let mut pgbouncer = child_service("root", "edge");
+        pgbouncer.source = Some(ServiceSource {
+            image: Some("ghcr.io/railwayapp-templates/pgbouncer:latest".to_string()),
+            ..ServiceSource::default()
+        });
+        pgbouncer.variables.insert(
+            MAX_CLIENT_CONN_VAR.to_string(),
+            Some(Variable {
+                value: Some("not-a-number".to_string()),
+                ..Variable::default()
+            }),
+        );
+        let config = config_with(vec![
+            ("root", root_service(false)),
+            ("pgbouncer", pgbouncer),
+        ]);
+        let state = compute_pgbouncer_state(&config, "root");
+        assert!(state.attached);
+        assert_eq!(state.max_client_conn, None);
+    }
+
+    #[test]
+    fn pitr_state_whitespace_start_command_does_not_count() {
+        let mut service = service_with_image("ghcr.io/railwayapp-templates/postgres-ssl:16");
+        service.deploy = Some(DeployConfig {
+            start_command: Some("   ".to_string()),
+            ..DeployConfig::default()
+        });
+        assert!(!compute_pitr_state(&service).has_start_command);
+    }
+
+    #[test]
+    fn minor_pin_detection_edge_tags() {
+        // A suffixed minor tag (e.g. `-alpine`) is not a plain minor pin.
+        assert!(!is_minor_pinned_postgres_image(Some(
+            "ghcr.io/railwayapp-templates/postgres-ssl:16.10-alpine"
+        )));
+        // No tag at all.
+        assert!(!is_minor_pinned_postgres_image(Some(
+            "ghcr.io/railwayapp-templates/postgres-ssl"
+        )));
+        assert!(!is_minor_pinned_postgres_image(None));
+    }
+
+    #[test]
+    fn ha_state_members_sorted_by_name() {
+        let config = config_with(vec![
+            ("root", root_service(true)),
+            ("z", child_service("root", "replica")),
+            ("a", child_service("root", "replica")),
+        ]);
+        let names: BTreeMap<String, String> =
+            [("root", "db"), ("z", "zz-replica"), ("a", "aa-replica")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        let state = compute_ha_state(&config, "root", &names);
+        let ordered: Vec<&str> = state
+            .members
+            .iter()
+            .map(|m| m.service_name.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["aa-replica", "db", "zz-replica"]);
+    }
 }

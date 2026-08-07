@@ -31,7 +31,7 @@ pub mod pitr;
 /// Manage Postgres plugin features: point-in-time recovery, high availability, and connection pooling
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres ha status --service postgres\n  railway postgres ha convert --service postgres --replicas 2\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway postgres`.\n  Actions that stage a template change (enable/disable/convert/revert/add/remove) auto-deploy by default; pass --no-deploy to only stage the change for `railway up` later."
+    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres ha status --service postgres\n  railway postgres ha convert --service postgres --replicas 2\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway postgres`.\n  Actions that change config (enable/disable/convert/revert/add/remove/configure/scale) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy)."
 )]
 pub struct Args {
     #[clap(subcommand)]

@@ -179,6 +179,8 @@ async fn stage_and_commit(
     patch: EnvironmentConfig,
     auto_deploy: bool,
 ) -> Result<bool> {
+    template_apply::warn_if_preexisting_staged_changes(ctx).await;
+
     post_graphql::<mutations::EnvironmentStageChanges, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -250,12 +252,12 @@ async fn scale_replicas(
 
         let base_name = derive_node_base_name(&source_name, "Replica");
         let existing_names: Vec<String> = existing.iter().map(|(_, name)| name.clone()).collect();
-        let mut next_number = next_node_number(&existing_names, &base_name);
+        let start_number = next_node_number(&existing_names, &base_name);
 
         let to_add = target_count - current_count;
         let mut added = Vec::with_capacity(to_add as usize);
         let mut new_ids = Vec::with_capacity(to_add as usize);
-        for _ in 0..to_add {
+        for next_number in start_number..start_number + to_add {
             let node_name = format!("{base_name}-{next_number}");
             let node = create_clone_service(ctx, &node_name, &source_image).await?;
             let volume = create_clone_volume(ctx, &node.id, &mount_path, &node.name).await?;
@@ -284,7 +286,6 @@ async fn scale_replicas(
             existing.push((node.id.clone(), node.name.clone()));
             added.push(node.name.clone());
             new_ids.push(node.id.clone());
-            next_number += 1;
         }
 
         if let Some(group_id) = &root.group_id {
@@ -409,12 +410,12 @@ async fn scale_internal(
 
         let base_name = derive_node_base_name(&source_name, "internal");
         let existing_names: Vec<String> = existing.iter().map(|(_, name)| name.clone()).collect();
-        let mut next_number = next_node_number(&existing_names, &base_name);
+        let start_number = next_node_number(&existing_names, &base_name);
 
         let to_add = target_count - current_count;
         let mut added = Vec::with_capacity(to_add as usize);
         let mut new_ids = Vec::with_capacity(to_add as usize);
-        for _ in 0..to_add {
+        for next_number in start_number..start_number + to_add {
             let node_name = format!("{base_name}-{next_number}");
             let node = create_clone_service(ctx, &node_name, &source_image).await?;
             let volume = create_clone_volume(ctx, &node.id, &mount_path, &node.name).await?;
@@ -443,7 +444,6 @@ async fn scale_internal(
             existing.push((node.id.clone(), node.name.clone()));
             added.push(node.name.clone());
             new_ids.push(node.id.clone());
-            next_number += 1;
         }
 
         if let Some(group_id) = &root.group_id {
@@ -1326,5 +1326,89 @@ mod tests {
             }
             .is_noop()
         );
+    }
+
+    #[test]
+    fn scale_edge_errors_without_multi_region_config() {
+        let edge = service("edge", "root");
+        let config = config_with(vec![("edge-id", edge)]);
+        let mut patch = BTreeMap::new();
+        let err = scale_edge(&config, "root", 2, &mut patch).unwrap_err();
+        assert!(err.to_string().contains("no multi-region config"));
+    }
+
+    #[test]
+    fn scale_edge_errors_without_an_edge_service() {
+        let config = config_with(vec![("replica-1", service("replica", "root"))]);
+        let mut patch = BTreeMap::new();
+        let err = scale_edge(&config, "root", 2, &mut patch).unwrap_err();
+        assert!(err.to_string().contains("edge service"));
+    }
+
+    #[test]
+    fn next_node_number_falls_back_to_count_when_names_are_unnumbered() {
+        // One existing member whose name doesn't match `<base>-<n>` still
+        // advances numbering past the member count (mirrors
+        // haClusterUtils.ts's nextNodeNumber).
+        let names = vec!["etcd".to_string()];
+        assert_eq!(next_node_number(&names, "etcd"), 2);
+    }
+
+    #[test]
+    fn find_primary_internal_none_when_no_numbered_nodes() {
+        let nodes = vec![("id-a".to_string(), "etcd".to_string())];
+        assert!(find_primary_internal(&nodes, "etcd").is_none());
+    }
+
+    #[test]
+    fn duplicate_name_error_detection() {
+        assert!(is_duplicate_name_error(&RailwayError::GraphQLError(
+            "Service name must be unique within a project".to_string()
+        )));
+        assert!(is_duplicate_name_error(&RailwayError::GraphQLError(
+            "A service with that name already exists".to_string()
+        )));
+        assert!(!is_duplicate_name_error(&RailwayError::GraphQLError(
+            "Internal server error".to_string()
+        )));
+    }
+
+    #[test]
+    fn generate_suffix_is_four_lowercase_alphanumerics() {
+        let suffix = generate_suffix();
+        assert_eq!(suffix.len(), 4);
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
+    }
+
+    #[test]
+    fn members_of_role_falls_back_to_id_when_name_unknown() {
+        let config = config_with(vec![("replica-1", service("replica", "root"))]);
+        let members = members_of_role(&config, "root", "replica", &BTreeMap::new());
+        assert_eq!(
+            members,
+            vec![("replica-1".to_string(), "replica-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn restamp_replica_wiring_skips_undeclared_fields() {
+        // Wiring with nothing declared: restamp must not invent any patch
+        // entries (a cluster whose template opted out of a given mechanism
+        // keeps its own hand-managed variables untouched).
+        let wiring = ClusterWiring::default();
+        let mut patch = BTreeMap::new();
+        restamp_replica_wiring(
+            &mut patch,
+            &wiring,
+            "root",
+            "db",
+            Some("edge"),
+            &[("r1".to_string(), "replica-1".to_string())],
+        );
+        assert!(patch.is_empty());
     }
 }

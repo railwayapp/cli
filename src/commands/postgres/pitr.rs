@@ -34,7 +34,7 @@ use super::{
 /// Manage point-in-time recovery (continuous backups) for Postgres
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (UTC), or a relative offset (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone Postgres or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable.\n  `backup trigger` has no dashboard equivalent -- it's a CLI-only remediation for a missed scheduled backup."
+    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone Postgres or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable.\n  `backup trigger` has no dashboard equivalent -- it's a CLI-only remediation for a missed scheduled backup."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -73,8 +73,8 @@ enum Commands {
 
 #[derive(Parser)]
 struct EnableArgs {
-    /// Stage the change without deploying it immediately (standalone only; HA
-    /// enable always applies live, it has no staging step)
+    /// Commit the config change without triggering deploys -- it applies on
+    /// the next deploy (standalone only; HA enable always applies live)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -85,8 +85,8 @@ struct DisableArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Stage the change without deploying it immediately (standalone only; HA
-    /// disable always applies live, it has no staging step)
+    /// Commit the config change without triggering deploys -- it applies on
+    /// the next deploy (standalone only; HA disable always applies live)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -100,7 +100,8 @@ struct ProgressArgs {
 
 #[derive(Parser)]
 struct RestoreArgs {
-    /// Point in time to restore to: RFC3339 (2026-07-20T12:00:00Z) or "YYYY-MM-DD HH:MM:SS" (UTC)
+    /// Point in time to restore to: RFC3339 (2026-07-20T12:00:00Z), "YYYY-MM-DD HH:MM:SS"
+    /// (local timezone), or a relative offset back from now (30m, 2h, 1d)
     #[clap(long = "at")]
     at: String,
 
@@ -205,7 +206,7 @@ enum ScheduleCommands {
 #[derive(Parser)]
 #[clap(group(
     clap::ArgGroup::new("kinds")
-        .args(["daily", "weekly", "monthly"])
+        .args(["daily", "weekly", "monthly", "none"])
         .required(true)
         .multiple(true)
 ))]
@@ -221,6 +222,10 @@ struct ScheduleSetArgs {
     /// Keep a monthly backup
     #[clap(long)]
     monthly: bool,
+
+    /// Remove every automatic backup schedule (existing backups are kept)
+    #[clap(long, conflicts_with_all = ["daily", "weekly", "monthly"])]
+    none: bool,
 }
 
 pub async fn command(
@@ -271,10 +276,19 @@ async fn status(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json).await
+    print_status(&ctx, &config, json, true).await
 }
 
-async fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bool) -> Result<()> {
+/// `include_live == false` skips the SSH coverage/archiver probe -- used
+/// right after `enable`/`disable`, where the deployment triggered by that
+/// change hasn't rolled out yet, so a live probe would only report stale or
+/// "unavailable" noise (mirrors `pgbouncer`'s post-mutation status print).
+async fn print_status(
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    json: bool,
+    include_live: bool,
+) -> Result<()> {
     let root = resolve_root(ctx, config);
     let names = service_name_map(ctx);
     let ha_state = postgres_plugins::compute_ha_state(config, &root.root_id, &names);
@@ -315,7 +329,7 @@ async fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bo
     // overlay is actually applied -- skip it entirely for a service that never
     // had PITR enabled rather than spending a ~5s SSH round trip to learn
     // nothing.
-    let live = if root_pitr.enabled {
+    let live = if include_live && root_pitr.enabled {
         Some(probe_pitr_live(ctx, &root.root_id).await)
     } else {
         None
@@ -490,7 +504,7 @@ async fn enable(
 
     if pitr_state.enabled {
         println!("PITR is already enabled for {}.", root.root_name.bold());
-        return print_status(&ctx, &config, json).await;
+        return print_status(&ctx, &config, json, true).await;
     }
 
     let blockers = guardrail_blockers(&pitr_state);
@@ -522,10 +536,14 @@ async fn enable(
         .await
         .context("Failed to enable PITR on the HA cluster")?;
 
-        if let Some(workflow_id) = response.enable_pitr_for_ha_cluster.workflow_id {
-            crate::controllers::workflow::wait_for_workflow(&ctx.client, &ctx.configs, workflow_id)
-                .await?;
-        }
+        follow_started_ha_workflow(
+            &ctx,
+            &root,
+            json,
+            response.enable_pitr_for_ha_cluster.workflow_id,
+            "enable",
+        )
+        .await?;
         if !json {
             println!(
                 "Enabled PITR for {} in environment {}.",
@@ -556,7 +574,7 @@ async fn enable(
             let verb = if result.deployed {
                 "Enabled and deployed"
             } else {
-                "Staged (not yet deployed)"
+                "Enabled (deploys skipped -- applies on the next deploy)"
             };
             println!(
                 "{verb} PITR for {} in environment {} (project {}).",
@@ -570,7 +588,7 @@ async fn enable(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json).await
+    print_status(&ctx, &config, json, false).await
 }
 
 async fn disable(
@@ -653,10 +671,14 @@ async fn disable(
         .await
         .context("Failed to disable PITR on the HA cluster")?;
 
-        if let Some(workflow_id) = response.disable_pitr_for_ha_cluster.workflow_id {
-            crate::controllers::workflow::wait_for_workflow(&ctx.client, &ctx.configs, workflow_id)
-                .await?;
-        }
+        follow_started_ha_workflow(
+            &ctx,
+            &root,
+            json,
+            response.disable_pitr_for_ha_cluster.workflow_id,
+            "disable",
+        )
+        .await?;
         if !json {
             println!(
                 "Disabled PITR for {} in environment {}.",
@@ -680,10 +702,10 @@ async fn disable(
             let verb = if result.deployed {
                 "Disabled and deployed"
             } else {
-                "Staged the disable (not yet deployed)"
+                "Disabled (deploys skipped -- applies on the next deploy)"
             };
             println!(
-                "{verb} for PITR on {} in environment {} (project {}).",
+                "{verb} PITR on {} in environment {} (project {}).",
                 root.root_name.bold(),
                 ctx.environment_name.bold(),
                 result.project_id
@@ -694,7 +716,7 @@ async fn disable(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json).await
+    print_status(&ctx, &config, json, false).await
 }
 
 async fn cancel(
@@ -729,7 +751,10 @@ async fn cancel(
     .context("Failed to cancel the PITR workflow")?;
 
     if json {
-        println!("{}", serde_json::json!({"cancelled": true}));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"cancelled": true}))?
+        );
     } else {
         println!("Cancelled the PITR workflow for {}.", root.root_name.bold());
     }
@@ -768,7 +793,10 @@ async fn clear(
     .context("Failed to clear the PITR workflow progress")?;
 
     if json {
-        println!("{}", serde_json::json!({"cleared": true}));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"cleared": true}))?
+        );
     } else {
         println!(
             "Cleared PITR workflow progress for {}.",
@@ -782,6 +810,15 @@ async fn clear(
 /// may still finish later -- this only bounds the CLI's own wait).
 const PROGRESS_WATCH_TIMEOUT_SECS: u64 = 600;
 const PROGRESS_POLL_INTERVAL_SECS: u64 = 2;
+/// Follow deadline for a workflow this command just started (`pitr
+/// enable`/`disable` on an HA cluster). Deliberately much longer than the
+/// generic ~2-minute `wait_for_workflow` cap: the rolling enable/disable
+/// restarts every member one at a time and its server-side activities allow
+/// up to 20 minutes each.
+const HA_WORKFLOW_FOLLOW_TIMEOUT_SECS: u64 = 1800;
+/// How long a just-started workflow gets to make its progress record
+/// visible before the follower falls back to the generic workflow wait.
+const PROGRESS_VISIBILITY_GRACE_SECS: u64 = 60;
 
 async fn progress(
     project: Option<String>,
@@ -804,7 +841,64 @@ async fn progress(
         );
     }
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(PROGRESS_WATCH_TIMEOUT_SECS);
+    let observed = follow_progress(
+        &ctx,
+        &root,
+        &ProgressFollow {
+            watch: args.watch,
+            expected_workflow_id: None,
+            deadline: Duration::from_secs(PROGRESS_WATCH_TIMEOUT_SECS),
+            fail_on_failed: false,
+            render: true,
+            json,
+        },
+    )
+    .await?;
+
+    if observed.is_none() {
+        if json {
+            println!("{}", serde_json::json!({"active": false}));
+        } else {
+            println!(
+                "No PITR enable/disable workflow found for {}.",
+                root.root_name.bold()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Options for [`follow_progress`].
+struct ProgressFollow {
+    /// Keep polling until a terminal phase; `false` renders at most one
+    /// snapshot and returns.
+    watch: bool,
+    /// Only accept the progress record for this specific workflow id.
+    /// Protects a just-started follow from latching onto a stale (already
+    /// terminal) record from a previous run that was never `clear`ed.
+    expected_workflow_id: Option<String>,
+    deadline: Duration,
+    /// Treat a FAILED terminal phase as a command failure (`enable`/
+    /// `disable`) instead of a state to display (`progress`).
+    fail_on_failed: bool,
+    /// Render snapshots as they change. Disabled for `enable`/`disable`
+    /// under `--json`, where only the final status document may reach
+    /// stdout.
+    render: bool,
+    json: bool,
+}
+
+/// Polls `pitrHaWorkflowProgress` and renders snapshots as they change.
+/// Returns `Ok(Some(<final phase>))` once a (matching) progress record was
+/// observed, or `Ok(None)` if none became visible in time.
+async fn follow_progress(
+    ctx: &ServiceContext,
+    root: &super::RootContext,
+    opts: &ProgressFollow,
+) -> Result<Option<String>> {
+    let start = std::time::Instant::now();
+    let deadline = start + opts.deadline;
+    let visibility_deadline = start + Duration::from_secs(PROGRESS_VISIBILITY_GRACE_SECS);
     let mut last_printed: Option<String> = None;
 
     loop {
@@ -819,46 +913,115 @@ async fn progress(
         .await
         .context("Failed to fetch the PITR workflow progress")?;
 
-        let Some(progress) = response.pitr_ha_workflow_progress else {
-            if json {
-                println!("{}", serde_json::json!({"active": false}));
-            } else {
-                println!(
-                    "No PITR enable/disable workflow found for {}.",
-                    root.root_name.bold()
-                );
+        let progress = response.pitr_ha_workflow_progress.filter(|p| {
+            opts.expected_workflow_id
+                .as_deref()
+                .is_none_or(|expected| p.workflow_id == expected)
+        });
+
+        let Some(progress) = progress else {
+            if opts.expected_workflow_id.is_some()
+                && std::time::Instant::now() < visibility_deadline
+            {
+                sleep(Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+                continue;
             }
-            return Ok(());
+            return Ok(None);
         };
 
-        let output = build_progress_output(&root, &progress);
-        let rendered = serde_json::to_string(&output)?;
-        if last_printed.as_deref() != Some(rendered.as_str()) {
-            if json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                print_progress(&output);
+        let output = build_progress_output(root, &progress);
+        if opts.render {
+            let rendered = serde_json::to_string(&output)?;
+            if last_printed.as_deref() != Some(rendered.as_str()) {
+                if opts.json {
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    print_progress(&output);
+                }
+                last_printed = Some(rendered);
             }
-            last_printed = Some(rendered);
         }
 
-        let terminal = matches!(
-            progress.phase,
-            queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase::DONE
-                | queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase::FAILED
-        );
-        if terminal || !args.watch {
-            return Ok(());
+        if output.phase == "failed" {
+            if opts.fail_on_failed {
+                let detail = output
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "no error detail reported".to_string());
+                bail!(
+                    "The PITR workflow failed{}: {detail}",
+                    output
+                        .failed_at_phase
+                        .as_deref()
+                        .map(|phase| format!(" during {phase}"))
+                        .unwrap_or_default()
+                );
+            }
+            return Ok(Some(output.phase));
+        }
+        if output.phase == "done" || !opts.watch {
+            return Ok(Some(output.phase));
         }
 
         if std::time::Instant::now() >= deadline {
             bail!(
-                "Timed out after {PROGRESS_WATCH_TIMEOUT_SECS}s waiting for the workflow to reach a terminal phase. It may still be running -- check again with `railway postgres pitr progress`."
+                "Timed out after {}s waiting for the workflow to reach a terminal phase. It keeps running server-side -- follow it with `railway postgres pitr progress --watch`.",
+                opts.deadline.as_secs()
             );
         }
 
         sleep(Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
     }
+}
+
+/// Follows a rolling HA PITR enable/disable workflow this command just
+/// started. Prefers the dedicated progress record (rich phase/member
+/// rendering, a deadline sized for a full rolling restart); falls back to
+/// the generic workflow-status wait if the progress record never becomes
+/// visible, rather than reporting success blind.
+async fn follow_started_ha_workflow(
+    ctx: &ServiceContext,
+    root: &super::RootContext,
+    json: bool,
+    workflow_id: Option<String>,
+    direction: &str,
+) -> Result<()> {
+    let Some(workflow_id) = workflow_id else {
+        return Ok(());
+    };
+
+    if !json {
+        println!(
+            "Rolling the cluster to {direction} PITR -- members restart one at a time; this can take several minutes. Following progress (the workflow keeps running server-side if you interrupt)..."
+        );
+    }
+
+    let observed = follow_progress(
+        ctx,
+        root,
+        &ProgressFollow {
+            watch: true,
+            expected_workflow_id: Some(workflow_id.clone()),
+            deadline: Duration::from_secs(HA_WORKFLOW_FOLLOW_TIMEOUT_SECS),
+            fail_on_failed: true,
+            render: !json,
+            json,
+        },
+    )
+    .await?;
+
+    if observed.is_none() {
+        use crate::controllers::workflow::{WorkflowError, wait_for_workflow};
+        wait_for_workflow(&ctx.client, &ctx.configs, workflow_id)
+            .await
+            .map_err(|err| match err {
+                WorkflowError::Timeout => anyhow::anyhow!(
+                    "The PITR workflow is still running (the CLI stopped waiting). Follow it with `railway postgres pitr progress --watch`."
+                ),
+                other => other.into(),
+            })?;
+    }
+    Ok(())
 }
 
 fn build_progress_output(
@@ -1016,11 +1179,11 @@ async fn restore(
     if json {
         println!(
             "{}",
-            serde_json::json!({
+            serde_json::to_string_pretty(&serde_json::json!({
                 "root": { "id": root.root_id, "name": root.root_name },
                 "targetTimestamp": target_timestamp.to_rfc3339(),
                 "workflowId": workflow_id,
-            })
+            }))?
         );
     } else {
         println!(
@@ -1142,7 +1305,9 @@ async fn backup_create(
     if json {
         println!(
             "{}",
-            serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "workflowId": workflow_id})
+            serde_json::to_string_pretty(
+                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "workflowId": workflow_id})
+            )?
         );
     } else {
         println!("Started an on-demand backup for {}.", root.root_name.bold());
@@ -1195,10 +1360,15 @@ async fn backup_delete(
     if json {
         println!(
             "{}",
-            serde_json::json!({"deletedIds": args.ids, "workflowId": workflow_id})
+            serde_json::to_string_pretty(
+                &serde_json::json!({"deletedIds": args.ids, "workflowId": workflow_id})
+            )?
         );
     } else {
-        println!("Deleted {} backup(s).", args.ids.len());
+        println!(
+            "Started deleting {} backup(s) -- deletion runs in the background.",
+            args.ids.len()
+        );
         if let Some(id) = &workflow_id {
             print_field("Workflow:", id);
         }
@@ -1233,7 +1403,10 @@ async fn backup_lock(
     let locked = response.volume_instance_backup_lock;
 
     if json {
-        println!("{}", serde_json::json!({"id": args.id, "locked": locked}));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"id": args.id, "locked": locked}))?
+        );
     } else if locked {
         println!(
             "Backup {} will now be kept indefinitely (expiration removed).",
@@ -1288,7 +1461,9 @@ async fn backup_restore(
     if json {
         println!(
             "{}",
-            serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id})
+            serde_json::to_string_pretty(
+                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id})
+            )?
         );
     } else {
         println!(
@@ -1403,7 +1578,9 @@ async fn backup_trigger(
         if json {
             println!(
                 "{}",
-                serde_json::json!({"scheduleId": schedule_id, "workflowId": null, "triggered": true})
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"scheduleId": schedule_id, "workflowId": null, "triggered": true})
+                )?
             );
         } else {
             println!(
@@ -1426,7 +1603,9 @@ async fn backup_trigger(
     if json {
         println!(
             "{}",
-            serde_json::json!({"scheduleId": schedule_id, "workflowId": workflow_id, "status": status})
+            serde_json::to_string_pretty(
+                &serde_json::json!({"scheduleId": schedule_id, "workflowId": workflow_id, "status": status})
+            )?
         );
     } else {
         println!("Backup workflow finished with status: {}.", status.bold());
@@ -1471,23 +1650,32 @@ async fn schedule_set(
     .await
     .context("Failed to update the backup schedule")?;
 
-    let mut labels = Vec::new();
-    if args.daily {
-        labels.push("daily");
-    }
-    if args.weekly {
-        labels.push("weekly");
-    }
-    if args.monthly {
-        labels.push("monthly");
-    }
-
     if json {
         println!(
             "{}",
-            serde_json::json!({"daily": args.daily, "weekly": args.weekly, "monthly": args.monthly})
+            serde_json::to_string_pretty(&serde_json::json!({
+                "daily": args.daily,
+                "weekly": args.weekly,
+                "monthly": args.monthly,
+                "cleared": args.none,
+            }))?
+        );
+    } else if args.none {
+        println!(
+            "Removed every automatic backup schedule for {} (existing backups are kept).",
+            root.root_name.bold()
         );
     } else {
+        let mut labels = Vec::new();
+        if args.daily {
+            labels.push("daily");
+        }
+        if args.weekly {
+            labels.push("weekly");
+        }
+        if args.monthly {
+            labels.push("monthly");
+        }
         println!(
             "Updated the backup schedule for {}: {}.",
             root.root_name.bold(),
@@ -1908,6 +2096,23 @@ mod tests {
         assert!(set.daily);
         assert!(set.weekly);
         assert!(!set.monthly);
+        assert!(!set.none);
+    }
+
+    #[test]
+    fn schedule_set_none_clears_and_conflicts_with_kinds() {
+        let args = Args::parse_from(["pitr", "schedule", "set", "--none"]);
+        let Commands::Schedule(ScheduleArgs {
+            command: ScheduleCommands::Set(set),
+        }) = args.command
+        else {
+            panic!("expected schedule set");
+        };
+        assert!(set.none);
+        assert!(!set.daily && !set.weekly && !set.monthly);
+
+        assert!(Args::try_parse_from(["pitr", "schedule", "set", "--none", "--daily"]).is_err());
+        assert!(Args::try_parse_from(["pitr", "schedule", "set", "--none", "--monthly"]).is_err());
     }
 
     #[test]
@@ -1981,6 +2186,8 @@ mod tests {
         assert!(is_terminal_backup_status("COMPLETED"));
         assert!(is_terminal_backup_status("FAILED"));
         assert!(is_terminal_backup_status("CANCELED"));
+        // Terminal-by-default: an unknown future status must stop the poll.
+        assert!(is_terminal_backup_status("SOME_NEW_STATUS"));
     }
 
     #[test]
@@ -1988,6 +2195,104 @@ mod tests {
         let parsed = parse_pg_timestamp("2026-07-28 10:00:00.123456+00").unwrap();
         assert_eq!(parsed.to_rfc3339(), "2026-07-28T10:00:00.123456+00:00");
         assert!(parse_pg_timestamp("not-a-timestamp").is_none());
+        // RFC3339 fallback.
+        assert!(parse_pg_timestamp("2026-07-28T10:00:00+00:00").is_some());
+    }
+
+    #[test]
+    fn apply_archiver_output_flags_malformed_line() {
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "garbage-with-no-commas");
+        assert!(probe.archiver_error.is_some());
+        assert!(probe.archiver_healthy.is_none());
+    }
+
+    fn progress_fixture(
+        phase: queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase,
+    ) -> queries::get_pitr_ha_workflow_progress::GetPitrHaWorkflowProgressPitrHaWorkflowProgress
+    {
+        use queries::get_pitr_ha_workflow_progress::*;
+        GetPitrHaWorkflowProgressPitrHaWorkflowProgress {
+            workflow_id: "wf-1".to_string(),
+            phase,
+            direction: PitrHaWorkflowDirection::ENABLE,
+            started_at: "2026-08-07T00:00:00Z".to_string(),
+            updated_at: "2026-08-07T00:01:00Z".to_string(),
+            completed_at: None,
+            error_message: None,
+            failed_at_phase: None,
+            current_member_service_id: Some("replica-1".to_string()),
+            new_leader_service_id: None,
+            cluster_mutated: true,
+            members: vec![
+                GetPitrHaWorkflowProgressPitrHaWorkflowProgressMembers {
+                    service_id: "root".to_string(),
+                    service_name: "postgres".to_string(),
+                    is_leader: true,
+                    status: PitrHaWorkflowMemberStatus::HEALTHY,
+                },
+                GetPitrHaWorkflowProgressPitrHaWorkflowProgressMembers {
+                    service_id: "replica-1".to_string(),
+                    service_name: "postgres-replica-1".to_string(),
+                    is_leader: false,
+                    status: PitrHaWorkflowMemberStatus::RESTARTING,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn build_progress_output_maps_phases_directions_and_members() {
+        use queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase;
+
+        let root = super::super::RootContext {
+            root_id: "root".to_string(),
+            root_name: "postgres".to_string(),
+        };
+        let output = build_progress_output(
+            &root,
+            &progress_fixture(PitrHaWorkflowPhase::ROLLING_REPLICAS),
+        );
+        assert_eq!(output.phase, "rolling_replicas");
+        assert_eq!(output.direction, "enable");
+        assert_eq!(output.workflow_id, "wf-1");
+        assert_eq!(output.members.len(), 2);
+        assert!(output.members[0].is_leader);
+        assert_eq!(output.members[0].status, "healthy");
+        assert_eq!(output.members[1].status, "restarting");
+    }
+
+    #[test]
+    fn build_progress_output_lowercases_unknown_enum_values() {
+        use queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase;
+
+        let root = super::super::RootContext {
+            root_id: "root".to_string(),
+            root_name: "postgres".to_string(),
+        };
+        let mut progress = progress_fixture(PitrHaWorkflowPhase::Other("NEW_PHASE".to_string()));
+        progress.failed_at_phase = Some(PitrHaWorkflowPhase::Other("ODD_PHASE".to_string()));
+        let output = build_progress_output(&root, &progress);
+        assert_eq!(output.phase, "new_phase");
+        assert_eq!(output.failed_at_phase.as_deref(), Some("odd_phase"));
+    }
+
+    #[test]
+    fn build_progress_output_terminal_phases_map_to_done_and_failed() {
+        use queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase;
+
+        let root = super::super::RootContext {
+            root_id: "root".to_string(),
+            root_name: "postgres".to_string(),
+        };
+        assert_eq!(
+            build_progress_output(&root, &progress_fixture(PitrHaWorkflowPhase::DONE)).phase,
+            "done"
+        );
+        assert_eq!(
+            build_progress_output(&root, &progress_fixture(PitrHaWorkflowPhase::FAILED)).phase,
+            "failed"
+        );
     }
 
     #[test]

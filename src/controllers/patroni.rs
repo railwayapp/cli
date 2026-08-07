@@ -92,6 +92,14 @@ pub async fn switchover(instance_id: &str, leader: &str, candidate: &str) -> Res
     .await
     .context("Timed out requesting switchover")??;
 
+    parse_switchover_response(&output)
+}
+
+/// Splits the probe's `<body>\nHTTP_STATUS:<code>` (from `curl -w`) shape
+/// and turns a non-2xx/unparseable status into an error carrying Patroni's
+/// own response body (which explains WHY a switchover was rejected, e.g. a
+/// candidate that isn't streaming).
+fn parse_switchover_response(output: &str) -> Result<String> {
     let (response_body, status) = match output.rsplit_once("HTTP_STATUS:") {
         Some((body, status)) => (body.trim().to_string(), status.trim().parse::<u16>().ok()),
         None => (output.trim().to_string(), None),
@@ -213,5 +221,35 @@ mod tests {
         assert_eq!(parsed.members.len(), 1);
         assert_eq!(parsed.members[0].role, "");
         assert!(parsed.members[0].lag.is_none());
+    }
+
+    #[test]
+    fn switchover_response_accepts_2xx_with_body() {
+        let ok =
+            parse_switchover_response("Successfully switched over to \"pg-2\"\nHTTP_STATUS:200")
+                .unwrap();
+        assert_eq!(ok, "Successfully switched over to \"pg-2\"");
+    }
+
+    #[test]
+    fn switchover_response_surfaces_patronis_rejection_body() {
+        let err = parse_switchover_response(
+            "candidate name does not match with the switchover candidate\nHTTP_STATUS:412",
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("412"));
+        assert!(message.contains("candidate name does not match"));
+    }
+
+    #[test]
+    fn switchover_response_rejects_missing_status_marker() {
+        let err = parse_switchover_response("curl: (7) connection refused").unwrap_err();
+        assert!(err.to_string().contains("unexpected response"));
+    }
+
+    #[test]
+    fn switchover_response_rejects_unparseable_status_code() {
+        assert!(parse_switchover_response("body\nHTTP_STATUS:abc").is_err());
     }
 }

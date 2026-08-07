@@ -110,7 +110,7 @@ struct AddArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Stage the change without deploying it immediately
+    /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -121,7 +121,7 @@ struct RemoveArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Stage the change without deploying it immediately
+    /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -139,18 +139,18 @@ struct ConfigureArgs {
     pool_mode: Option<PoolMode>,
 
     /// Maximum client connections PgBouncer accepts
-    #[clap(long = "max-client-conn")]
+    #[clap(long = "max-client-conn", value_parser = clap::value_parser!(i64).range(1..))]
     max_client_conn: Option<i64>,
 
     /// Default pool size per user/database pair
-    #[clap(long = "default-pool-size")]
+    #[clap(long = "default-pool-size", value_parser = clap::value_parser!(i64).range(1..))]
     default_pool_size: Option<i64>,
 
     /// Maximum prepared statements per connection (0 disables; ignored outside transaction mode)
-    #[clap(long = "max-prepared-statements")]
+    #[clap(long = "max-prepared-statements", value_parser = clap::value_parser!(i64).range(0..))]
     max_prepared_statements: Option<i64>,
 
-    /// Stage the change without deploying it immediately
+    /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -158,10 +158,10 @@ struct ConfigureArgs {
 #[derive(Parser)]
 struct ScaleArgs {
     /// Target replica count
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     replicas: i64,
 
-    /// Stage the change without deploying it immediately
+    /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -468,7 +468,7 @@ async fn add(
         let verb = if result.deployed {
             "Added and deployed"
         } else {
-            "Staged adding"
+            "Added (deploys skipped -- applies on the next deploy)"
         };
         println!(
             "{verb} PgBouncer in front of {} in environment {} (project {}).",
@@ -527,7 +527,7 @@ async fn remove(
         let verb = if result.deployed {
             "Removed and deployed"
         } else {
-            "Staged removing"
+            "Removed (deploys skipped -- applies on the next deploy)"
         };
         println!(
             "{verb} PgBouncer from {} in environment {} (project {}).",
@@ -659,7 +659,7 @@ async fn configure(
         let verb = if deployed {
             "Configured and deployed"
         } else {
-            "Staged configuring"
+            "Configured (deploys skipped -- applies on the next deploy)"
         };
         println!(
             "{verb} PgBouncer on {} in environment {} (project {}).",
@@ -720,10 +720,6 @@ async fn scale(
     json: bool,
     args: ScaleArgs,
 ) -> Result<()> {
-    if args.replicas < 0 {
-        bail!("--replicas must be zero or a positive integer");
-    }
-
     let ctx = resolve_service_context(project, service, environment).await?;
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
@@ -792,7 +788,7 @@ async fn scale(
         let verb = if deployed {
             "Scaled and deployed"
         } else {
-            "Staged scaling"
+            "Scaled (deploys skipped -- applies on the next deploy)"
         };
         println!(
             "{verb} {} to {} replica(s) in environment {} (project {}).",
@@ -1150,6 +1146,50 @@ mod tests {
                 no_deploy: true
             })
         ));
+    }
+
+    #[test]
+    fn configure_rejects_nonpositive_knobs_at_parse_time() {
+        assert!(Args::try_parse_from(["pgbouncer", "configure", "--max-client-conn=0"]).is_err());
+        assert!(Args::try_parse_from(["pgbouncer", "configure", "--max-client-conn=-5"]).is_err());
+        assert!(Args::try_parse_from(["pgbouncer", "configure", "--default-pool-size=0"]).is_err());
+        assert!(
+            Args::try_parse_from(["pgbouncer", "configure", "--max-prepared-statements=-1"])
+                .is_err()
+        );
+        // Zero prepared statements is a legal (if warned-about) configuration.
+        assert!(
+            Args::try_parse_from(["pgbouncer", "configure", "--max-prepared-statements=0"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn scale_rejects_negative_replicas_at_parse_time() {
+        assert!(Args::try_parse_from(["pgbouncer", "scale", "--replicas=-1"]).is_err());
+        assert!(Args::try_parse_from(["pgbouncer", "scale", "--replicas=0"]).is_ok());
+    }
+
+    #[test]
+    fn pool_mode_var_values_are_lowercase() {
+        assert_eq!(PoolMode::Transaction.as_var_value(), "transaction");
+        assert_eq!(PoolMode::Session.as_var_value(), "session");
+        assert_eq!(PoolMode::Statement.as_var_value(), "statement");
+    }
+
+    #[test]
+    fn parse_named_csv_rows_handles_quoted_fields() {
+        let rows = parse_named_csv_rows("b,a\n\"x,y\",1\n");
+        assert_eq!(rows[0]["b"], "x,y");
+        assert_eq!(rows[0]["a"], "1");
+    }
+
+    #[test]
+    fn parse_pgbouncer_probe_output_tolerates_missing_prepared_column() {
+        let output = "===POOLS===\ndatabase,cl_active,cl_waiting,sv_active,sv_idle,sv_used\nrailway,1,0,1,0,0\n===STATS===\ndatabase,total_xact_count,total_query_count\nrailway,10,20\n===SERVERS===\ndatabase,state\nrailway,idle\n";
+        let raw = parse_pgbouncer_probe_output(output);
+        assert_eq!(raw.max_prepared_statements_in_use, 0);
+        assert_eq!(raw.clients_active, 1);
+        assert_eq!(raw.total_query_count, 20);
     }
 
     #[test]

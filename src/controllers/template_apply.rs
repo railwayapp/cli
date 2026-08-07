@@ -87,6 +87,47 @@ pub struct ApplyTemplateResult {
     pub deployed: bool,
 }
 
+/// True when a staged environment patch actually carries changes (vs. the
+/// empty placeholder patch `environmentStagedChanges` returns when nothing
+/// is staged).
+pub(crate) fn staged_patch_is_nonempty(patch: &Value) -> bool {
+    match patch {
+        Value::Object(map) => map.values().any(|v| match v {
+            Value::Object(m) => !m.is_empty(),
+            Value::Null => false,
+            _ => true,
+        }),
+        _ => false,
+    }
+}
+
+/// Every mutating `railway postgres` action ends by committing the
+/// environment's WHOLE staged patch (same semantics as the dashboard's
+/// "Apply" button) -- so changes someone staged earlier (dashboard, another
+/// CLI session) get committed and deployed together with this one. This
+/// best-effort warning makes that visible up front; it never blocks the
+/// command (the backend query only returns STAGED/APPLYING patches, so a
+/// non-empty result is always genuinely pending work).
+pub(crate) async fn warn_if_preexisting_staged_changes(ctx: &ServiceContext) {
+    let response = post_graphql::<queries::EnvironmentStagedChanges, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        queries::environment_staged_changes::Variables {
+            environment_id: ctx.environment_id.clone(),
+        },
+    )
+    .await;
+
+    if let Ok(response) = response
+        && staged_patch_is_nonempty(&response.environment_staged_changes.patch)
+    {
+        eprintln!(
+            "Warning: environment {} already has staged changes; this command commits the environment's full staged patch, so those pre-existing changes will be applied (and deployed) together with this one.",
+            ctx.environment_name
+        );
+    }
+}
+
 /// Fetches a template by code, adjusts its `serializedConfig` for the
 /// requested replica/internal/edge counts and edge-variable overrides, then
 /// deploys it onto `params.service_id` as the existing cluster root.
@@ -94,6 +135,8 @@ pub async fn apply_composable_template(
     ctx: &ServiceContext,
     params: ApplyTemplateParams,
 ) -> Result<ApplyTemplateResult> {
+    warn_if_preexisting_staged_changes(ctx).await;
+
     if params.kind == ApplyKind::Conversion
         && let Some(volume_instance_id) = params.volume_instance_id.clone()
     {
@@ -180,6 +223,8 @@ pub async fn revert_template(
     ctx: &ServiceContext,
     params: RevertTemplateParams,
 ) -> Result<ApplyTemplateResult> {
+    warn_if_preexisting_staged_changes(ctx).await;
+
     let response = post_graphql::<mutations::TemplateRevert, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -222,6 +267,8 @@ pub async fn stage_and_commit_patch(
     patch: EnvironmentConfig,
     auto_deploy: bool,
 ) -> Result<bool> {
+    warn_if_preexisting_staged_changes(ctx).await;
+
     post_graphql::<mutations::EnvironmentStageChanges, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -460,7 +507,7 @@ pub fn adjust_replica_count(config: &mut Value, target_count: i64) {
                 services_mut.remove(&id);
             }
         } else {
-            let mut next_number = existing_numbers.into_iter().max().unwrap_or(0) + 1;
+            let start_number = existing_numbers.into_iter().max().unwrap_or(0) + 1;
             let to_add = target_count - current_count;
             let template_base = name_of(&template_service)
                 .map(strip_trailing_dash_number)
@@ -472,13 +519,12 @@ pub fn adjust_replica_count(config: &mut Value, target_count: i64) {
             } else {
                 format!("{template_base}-replica")
             };
-            for _ in 0..to_add {
+            for next_number in start_number..start_number + to_add {
                 let new_id = format!("{id_prefix}{next_number}");
                 services_mut.insert(
                     new_id,
                     clone_service(&template_service, &next_number.to_string()),
                 );
-                next_number += 1;
             }
         }
     }
@@ -599,20 +645,19 @@ pub fn adjust_internal_count(config: &mut Value, target_count: i64) {
                 services_mut.remove(&id);
             }
         } else {
-            let mut next_number = existing_numbers.into_iter().max().unwrap_or(0) + 1;
+            let start_number = existing_numbers.into_iter().max().unwrap_or(0) + 1;
             let to_add = target_count - current_count;
             let template_base = name_of(&template_service)
                 .map(strip_trailing_dash_number)
                 .map(|s| s.to_ascii_lowercase())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "internal".to_string());
-            for _ in 0..to_add {
+            for next_number in start_number..start_number + to_add {
                 let new_id = format!("{template_base}{next_number}");
                 services_mut.insert(
                     new_id,
                     clone_service(&template_service, &next_number.to_string()),
                 );
-                next_number += 1;
             }
         }
     }
@@ -880,5 +925,150 @@ mod tests {
             strip_trailing_dash_number("postgres-replica"),
             "postgres-replica"
         );
+    }
+
+    #[test]
+    fn staged_patch_is_nonempty_detects_real_changes() {
+        assert!(!staged_patch_is_nonempty(&Value::Null));
+        assert!(!staged_patch_is_nonempty(&json!({})));
+        assert!(!staged_patch_is_nonempty(&json!({ "services": {} })));
+        assert!(!staged_patch_is_nonempty(&json!({ "services": null })));
+        assert!(staged_patch_is_nonempty(
+            &json!({ "services": { "svc": { "variables": { "FOO": null } } } })
+        ));
+        // Non-object top-level values (e.g. a scalar field) count as content.
+        assert!(staged_patch_is_nonempty(&json!({ "name": "production" })));
+    }
+
+    #[test]
+    fn adjust_replica_count_scale_to_zero_removes_all_and_restamps_root_only() {
+        let mut root = service("root", "postgres-1");
+        root["variables"] = json!({ "PATRONI_ENABLED": { "defaultValue": "true" } });
+        let mut config = config_with(vec![
+            ("root", root),
+            ("replica-1", service("replica", "postgres-replica-1")),
+            ("replica-2", service("replica", "postgres-replica-2")),
+            ("edge", service("edge", "haproxy")),
+        ]);
+
+        adjust_replica_count(&mut config, 0);
+
+        let services = services_obj(&config).unwrap();
+        assert!(services.values().all(|s| role_of(s) != Some("replica")));
+
+        // The edge's data-node list shrinks to just the root.
+        let data_nodes = services["edge"]["variables"]["POSTGRES_NODES"]["defaultValue"]
+            .as_str()
+            .unwrap();
+        assert_eq!(data_nodes.split(',').count(), 1);
+        assert!(data_nodes.contains("postgres-1"));
+    }
+
+    #[test]
+    fn adjust_internal_count_scale_down_keeps_lowest_numbered() {
+        let mut root = service("root", "postgres-1");
+        root["variables"] = json!({ "PATRONI_ENABLED": { "defaultValue": "true" } });
+        let mut config = config_with(vec![
+            ("root", root),
+            ("etcd-1", service("internal", "etcd-1")),
+            ("etcd-2", service("internal", "etcd-2")),
+            ("etcd-3", service("internal", "etcd-3")),
+        ]);
+
+        adjust_internal_count(&mut config, 1);
+
+        let services = services_obj(&config).unwrap();
+        assert!(services.contains_key("etcd-1"));
+        assert!(!services.contains_key("etcd-2"));
+        assert!(!services.contains_key("etcd-3"));
+
+        // Coordinator hosts restamped down to the single survivor.
+        let hosts = services["root"]["variables"]["PATRONI_ETCD3_HOSTS"]["defaultValue"]
+            .as_str()
+            .unwrap();
+        assert_eq!(hosts.split(',').count(), 1);
+        assert!(hosts.contains("etcd-1"));
+    }
+
+    #[test]
+    fn clone_service_without_volume_mounts_only_renames() {
+        let original = json!({ "clusterRole": "internal", "name": "etcd-1" });
+        let cloned = clone_service(&original, "4");
+        assert_eq!(cloned["name"], json!("etcd-4"));
+        assert!(cloned.get("volumeMounts").is_none());
+    }
+
+    #[test]
+    fn adjust_edge_count_preserves_other_deploy_fields() {
+        let mut edge = service("edge", "haproxy");
+        edge["deploy"] = json!({ "startCommand": "haproxy -f /cfg" });
+        let mut config = config_with(vec![("edge", edge)]);
+
+        adjust_edge_count(&mut config, 2);
+
+        let services = services_obj(&config).unwrap();
+        assert_eq!(services["edge"]["deploy"]["numReplicas"], json!(2));
+        assert_eq!(
+            services["edge"]["deploy"]["startCommand"],
+            json!("haproxy -f /cfg")
+        );
+    }
+
+    #[test]
+    fn apply_edge_variables_stamps_every_edge_service_when_multiple() {
+        let mut config = config_with(vec![
+            ("edge-1", service("edge", "haproxy")),
+            ("edge-2", service("edge", "pgbouncer")),
+            ("root", service("root", "postgres-1")),
+        ]);
+        let mut overrides = BTreeMap::new();
+        overrides.insert("POOL_MODE".to_string(), "session".to_string());
+
+        apply_edge_variables(&mut config, &overrides);
+
+        let services = services_obj(&config).unwrap();
+        for edge_id in ["edge-1", "edge-2"] {
+            assert_eq!(
+                services[edge_id]["variables"]["POOL_MODE"]["defaultValue"],
+                json!("session")
+            );
+        }
+        assert!(services["root"].get("variables").is_none());
+    }
+
+    #[test]
+    fn format_data_node_entry_substitutes_host_and_root_name() {
+        assert_eq!(
+            format_data_node_entry("{host}:${{{rootName}.PGPORT}}:8008", "r1", "db-prod"),
+            "${{r1.RAILWAY_PRIVATE_DOMAIN}}:${{db-prod.PGPORT}}:8008"
+        );
+    }
+
+    #[test]
+    fn resolve_cluster_wiring_reads_declared_json_over_legacy() {
+        let root = json!({
+            "clusterRole": "root",
+            "name": "pg",
+            "variables": { "PATRONI_ENABLED": { "defaultValue": "true" } },
+            "clusterWiring": {
+                "internalNodeNameVariable": "NODE_NAME",
+                "coordinatorHostsVariable": "HOSTS",
+                "coordinatorPort": 1234,
+                "replicaNodeNameVariable": "REPLICA_NAME",
+                "dataNodesVariable": "NODES",
+                "dataNodesEntryFormat": "{host}",
+                "quorumVariable": "QUORUM"
+            }
+        });
+        let wiring = resolve_cluster_wiring(&root).unwrap();
+        assert_eq!(wiring.coordinator_port, Some(1234));
+        assert_eq!(wiring.quorum_variable.as_deref(), Some("QUORUM"));
+        assert_eq!(wiring.data_nodes_variable.as_deref(), Some("NODES"));
+    }
+
+    #[test]
+    fn resolve_cluster_wiring_none_without_wiring_or_patroni() {
+        let root = json!({ "clusterRole": "root", "name": "pg" });
+        assert!(resolve_cluster_wiring(&root).is_none());
     }
 }

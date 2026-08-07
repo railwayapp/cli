@@ -52,22 +52,22 @@ enum Commands {
 #[derive(Parser)]
 struct ConvertArgs {
     /// Number of replicas (excluding the primary); omit to keep the template default
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     replicas: Option<i64>,
 
     /// Number of coordinator/consensus nodes (e.g. etcd); must be odd; omit to keep the template default
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(i64).range(1..))]
     coordinators: Option<i64>,
 
     /// Number of edge/load-balancer replicas (e.g. HAProxy); omit to keep the template default
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     edge: Option<i64>,
 
     /// Skip the confirmation prompt
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Stage the change without deploying it immediately
+    /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -78,7 +78,7 @@ struct RevertArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Stage the change without deploying it immediately
+    /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -92,22 +92,22 @@ struct RevertArgs {
 ))]
 struct ScaleArgs {
     /// Target replica count
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     replicas: Option<i64>,
 
     /// Target coordinator/consensus node count (must stay odd)
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(i64).range(1..))]
     coordinators: Option<i64>,
 
     /// Target edge/load-balancer replica count
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     edge: Option<i64>,
 
     /// Skip the confirmation prompt
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Stage the change without deploying it immediately
+    /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -161,15 +161,24 @@ async fn status(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json).await
+    print_status(&ctx, &config, json, true).await
 }
 
-async fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bool) -> Result<()> {
+/// `include_live == false` skips the per-member Patroni probe -- used right
+/// after `convert`/`revert`/`scale`, where brand-new (or just-deleted)
+/// members haven't rolled out yet, so probing them would only add ~5s of
+/// "unreachable" noise (mirrors `pgbouncer`'s post-mutation status print).
+async fn print_status(
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    json: bool,
+    include_live: bool,
+) -> Result<()> {
     let root = resolve_root(ctx, config);
     let names = service_name_map(ctx);
     let ha_state = postgres_plugins::compute_ha_state(config, &root.root_id, &names);
 
-    let live = if ha_state.is_cluster {
+    let live = if include_live && ha_state.is_cluster {
         match patroni::probe_members(ctx, &data_node_members(&ha_state)).await {
             Ok(live) => live,
             Err(err) => {
@@ -369,7 +378,7 @@ async fn convert(
         let verb = if result.deployed {
             "Converted and deployed"
         } else {
-            "Staged the conversion of"
+            "Converted (deploys skipped -- applies on the next deploy)"
         };
         println!(
             "{verb} {} to an HA cluster in environment {} (project {}).",
@@ -378,7 +387,7 @@ async fn convert(
             result.project_id
         );
     }
-    print_status(&ctx, &config, json).await
+    print_status(&ctx, &config, json, false).await
 }
 
 async fn revert(
@@ -475,7 +484,7 @@ async fn revert(
         let verb = if result.deployed {
             "Reverted and deployed"
         } else {
-            "Staged the revert of"
+            "Reverted (deploys skipped -- applies on the next deploy)"
         };
         println!(
             "{verb} {} to standalone Postgres in environment {} (project {}).",
@@ -484,7 +493,7 @@ async fn revert(
             result.project_id
         );
     }
-    print_status(&ctx, &config, json).await
+    print_status(&ctx, &config, json, false).await
 }
 
 async fn scale(
@@ -557,14 +566,14 @@ async fn scale(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
         .await?
         .config;
-    print_status(&ctx, &config, json).await
+    print_status(&ctx, &config, json, false).await
 }
 
 fn print_scale_result(root_name: &str, result: &cluster_scale::ScaleClusterResult) {
     let verb = if result.deployed {
         "Scaled and deployed"
     } else {
-        "Staged the scale of"
+        "Scaled (deploys skipped -- applies on the next deploy)"
     };
     println!("{verb} {} -- ", root_name.bold());
 
@@ -680,7 +689,10 @@ async fn switchover(
         if !json {
             println!("{} is already the leader.", candidate.service_name.bold());
         } else {
-            println!("{}", serde_json::json!({"alreadyLeader": true}));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"alreadyLeader": true}))?
+            );
         }
         return Ok(());
     }
@@ -692,10 +704,10 @@ async fn switchover(
     if json {
         println!(
             "{}",
-            serde_json::json!({
+            serde_json::to_string_pretty(&serde_json::json!({
                 "requestedLeader": candidate_patroni_name,
                 "previousLeader": leader.name,
-            })
+            }))?
         );
     } else {
         println!(
@@ -854,6 +866,29 @@ mod tests {
             args.command,
             Commands::Scale(ScaleArgs { edge: Some(4), .. })
         ));
+    }
+
+    #[test]
+    fn convert_and_scale_reject_negative_counts_at_parse_time() {
+        assert!(Args::try_parse_from(["ha", "convert", "--replicas=-1"]).is_err());
+        assert!(Args::try_parse_from(["ha", "convert", "--edge=-2"]).is_err());
+        assert!(Args::try_parse_from(["ha", "scale", "--replicas=-1"]).is_err());
+        assert!(Args::try_parse_from(["ha", "scale", "--edge=-1"]).is_err());
+        // Zero is a legal target (remove all replicas / scale edge to zero).
+        assert!(Args::try_parse_from(["ha", "scale", "--replicas=0"]).is_ok());
+        assert!(Args::try_parse_from(["ha", "scale", "--edge=0"]).is_ok());
+    }
+
+    #[test]
+    fn coordinators_reject_zero_and_negatives_at_parse_time() {
+        assert!(Args::try_parse_from(["ha", "convert", "--coordinators=0"]).is_err());
+        assert!(Args::try_parse_from(["ha", "convert", "--coordinators=-1"]).is_err());
+        assert!(Args::try_parse_from(["ha", "scale", "--coordinators=0"]).is_err());
+        assert!(Args::try_parse_from(["ha", "scale", "--coordinators=-3"]).is_err());
+        // Parity is still enforced at runtime, not parse time.
+        assert!(Args::try_parse_from(["ha", "scale", "--coordinators=4"]).is_ok());
+        assert!(cluster_scale::validate_odd_coordinator_count(4).is_err());
+        assert!(cluster_scale::validate_odd_coordinator_count(5).is_ok());
     }
 
     #[test]
