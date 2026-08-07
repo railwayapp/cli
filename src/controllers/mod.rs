@@ -22,6 +22,7 @@ pub mod service;
 pub mod signals;
 pub mod ssh;
 pub mod tcp_proxy;
+pub mod template_apply;
 pub mod upload;
 pub mod user;
 pub mod variables;

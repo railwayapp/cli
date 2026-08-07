@@ -588,3 +588,41 @@ impl std::fmt::Display for custom_domain_create::DNSRecordType {
         }
     }
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateDeployV2.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateDeployV2;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateRevert.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateRevert;
+
+/// Commits a staged environment patch, used by `template_apply`'s auto-deploy wrapper.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnvironmentPatchCommitStaged.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnvironmentPatchCommitStaged;
+
+/// Used by `railway postgres pitr backup create`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstanceBackupCreate;
