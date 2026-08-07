@@ -102,11 +102,17 @@ pub struct RailwayConfig {
     pub sandbox_templates: Option<Vec<StoredSandboxTemplate>>,
 }
 
+// NOTE: no serde derives -- `Configs` itself is never (de)serialized, only
+// its `root_config` is. (A stray `skip_serializing_none` used to sit here;
+// it was inert without serde derives and breaks compilation once the struct
+// has an `Option` field.)
 #[derive(Debug)]
-#[serde_with::skip_serializing_none]
 pub struct Configs {
     pub root_config: RailwayConfig,
     root_config_path: PathBuf,
+    /// Test-only redirect for every GraphQL call (see
+    /// [`Configs::override_backboard_url`]). Always `None` outside tests.
+    backboard_url_override: Option<String>,
 }
 
 pub enum Environment {
@@ -132,6 +138,7 @@ impl Configs {
             let config = Self {
                 root_config,
                 root_config_path,
+                backboard_url_override: None,
             };
 
             return Ok(config);
@@ -140,6 +147,7 @@ impl Configs {
         Ok(Self {
             root_config_path,
             root_config: RailwayConfig::default(),
+            backboard_url_override: None,
         })
     }
 
@@ -314,7 +322,16 @@ impl Configs {
         Self {
             root_config: RailwayConfig::default(),
             root_config_path,
+            backboard_url_override: None,
         }
+    }
+
+    /// Point every GraphQL call made through this `Configs` at a local
+    /// scripted endpoint (see `testkit::MockBackboard`). Instance state, not
+    /// an env var, so parallel tests can each talk to their own server.
+    #[cfg(test)]
+    pub(crate) fn override_backboard_url(&mut self, url: impl Into<String>) {
+        self.backboard_url_override = Some(url.into());
     }
 
     /// Take the exclusive config lock covering this config file, without
@@ -361,6 +378,9 @@ impl Configs {
     }
 
     pub fn get_backboard(&self) -> String {
+        if let Some(url) = &self.backboard_url_override {
+            return url.clone();
+        }
         format!("https://backboard.{}/graphql/v2", self.get_host())
     }
 
@@ -903,6 +923,7 @@ mod tests {
         Configs {
             root_config_path: std::path::PathBuf::new(),
             root_config: RailwayConfig::default(),
+            backboard_url_override: None,
         }
     }
 
