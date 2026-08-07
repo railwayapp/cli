@@ -924,6 +924,11 @@ mod tests {
     /// An application that asked for mouse reporting gets a real wheel event,
     /// so its own viewport scrolls. Arrow keys were wrong here: a coding agent
     /// reads those as prompt history, so the wheel walked through old prompts.
+    /// Unix only: this needs a mode-setting escape sequence to survive the trip
+    /// through the pty, and Windows' ConPTY interprets those for itself instead
+    /// of passing them along, so the emulator never sees the mode change. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
     #[test]
     fn scrolling_an_alternate_screen_reaches_the_application() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -980,6 +985,11 @@ mod tests {
 
     /// An application with mouse reporting on gets the wheel; the emulator's
     /// own scrollback stays where it was.
+    /// Unix only: this needs a mode-setting escape sequence to survive the trip
+    /// through the pty, and Windows' ConPTY interprets those for itself instead
+    /// of passing them along, so the emulator never sees the mode change. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
     #[test]
     fn a_mouse_aware_application_receives_the_wheel() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -1033,6 +1043,11 @@ mod tests {
 
     /// The click that makes "click here to copy" work: the application is
     /// listening, so the event goes to it.
+    /// Unix only: this needs a mode-setting escape sequence to survive the trip
+    /// through the pty, and Windows' ConPTY interprets those for itself instead
+    /// of passing them along, so the emulator never sees the mode change. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
     #[test]
     fn a_mouse_aware_application_receives_a_click() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -1065,6 +1080,11 @@ mod tests {
 
     /// Press-only mode is exactly that. Sending it motion would be reporting
     /// something it never asked to hear about.
+    /// Unix only: this needs a mode-setting escape sequence to survive the trip
+    /// through the pty, and Windows' ConPTY interprets those for itself instead
+    /// of passing them along, so the emulator never sees the mode change. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
     #[test]
     fn press_only_mode_hears_only_presses() {
         let mut session = Session::for_test("ca", "test").unwrap();

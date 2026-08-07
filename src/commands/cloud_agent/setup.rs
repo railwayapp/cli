@@ -529,7 +529,9 @@ fn print_summary(home: &Path, prefs: &AgentPrefs) -> Result<()> {
 /// `~/.claude/skills` reads better than a full home path in a prompt.
 fn display_path(home: &Path, path: &Path) -> String {
     match path.strip_prefix(home) {
-        Ok(rel) => format!("~/{}", rel.display()),
+        // The platform's own separator: this is shown to someone looking at
+        // their own filesystem, and `~/.claude\skills` belongs to neither.
+        Ok(rel) => format!("~{}{}", std::path::MAIN_SEPARATOR, rel.display()),
         Err(_) => path.display().to_string(),
     }
 }
@@ -596,13 +598,21 @@ mod tests {
         assert!(prefs.agent.is_some());
     }
 
+    /// The separator is the platform's, since this string is shown to someone
+    /// looking at their own filesystem.
     #[test]
     fn display_path_shortens_under_home() {
-        let home = Path::new("/home/x");
+        let sep = std::path::MAIN_SEPARATOR;
+        let home = std::env::temp_dir().join("home-x");
         assert_eq!(
-            display_path(home, &home.join(".claude").join("skills")),
-            "~/.claude/skills"
+            display_path(&home, &home.join(".claude").join("skills")),
+            format!("~{sep}.claude{sep}skills")
         );
-        assert_eq!(display_path(home, Path::new("/opt/skills")), "/opt/skills");
+
+        let elsewhere = std::env::temp_dir().join("opt").join("skills");
+        assert_eq!(
+            display_path(&home, &elsewhere),
+            elsewhere.display().to_string()
+        );
     }
 }

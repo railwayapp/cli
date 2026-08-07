@@ -3358,6 +3358,11 @@ mod tests {
 
     /// A session whose agent is handling the mouse itself: the click goes to
     /// the agent, which is what makes its own clickable output work.
+    /// Unix only: this needs a mode-setting escape sequence to survive the trip
+    /// through the pty, and Windows' ConPTY interprets those for itself instead
+    /// of passing them along, so the emulator never sees the mode change. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
     #[test]
     fn clicks_reach_an_agent_that_is_using_the_mouse() {
         let mut a = mouse_aware_app();
@@ -3381,6 +3386,11 @@ mod tests {
 
     /// Shift is the terminal's own "this click is mine": it takes the mouse
     /// back for a selection even while the agent is using it.
+    /// Unix only: this needs a mode-setting escape sequence to survive the trip
+    /// through the pty, and Windows' ConPTY interprets those for itself instead
+    /// of passing them along, so the emulator never sees the mode change. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
     #[test]
     fn shift_takes_a_click_back_from_the_agent() {
         let mut a = mouse_aware_app();
@@ -3395,6 +3405,11 @@ mod tests {
 
     /// A link still wins: opening it is more use than anything the agent will
     /// do with the click, and it is the case this was built for.
+    /// Unix only: this needs a mode-setting escape sequence to survive the trip
+    /// through the pty, and Windows' ConPTY interprets those for itself instead
+    /// of passing them along, so the emulator never sees the mode change. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
     #[test]
     fn a_link_is_opened_rather_than_handed_to_the_agent() {
         let mut a = mouse_aware_app();
@@ -3417,6 +3432,7 @@ mod tests {
     }
 
     /// An app with a session whose agent has mouse reporting on.
+    #[cfg(unix)]
     fn mouse_aware_app() -> App {
         let mut a = loaded_app();
         let mut session = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
