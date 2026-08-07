@@ -626,3 +626,87 @@ pub struct EnvironmentPatchCommitStaged;
     skip_serializing_none
 )]
 pub struct VolumeInstanceBackupCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnablePitrForHaCluster.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnablePitrForHaCluster;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DisablePitrForHaCluster.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct DisablePitrForHaCluster;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CancelPitrHaWorkflow.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CancelPitrHaWorkflow;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ClearPitrHaWorkflowProgress.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ClearPitrHaWorkflowProgress;
+
+/// Used by `railway postgres pitr restore`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstancePitrRestore.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstancePitrRestore;
+
+/// Used by `railway postgres pitr backup delete`, once per id. The batch
+/// mutation (`volumeInstanceBackupBatchDelete`) also exists but is
+/// Internal-subgraph only -- this single-id one is on the public graph.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VolumeInstanceBackupDelete;
+
+/// Used by `railway postgres pitr backup lock`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupLock.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VolumeInstanceBackupLock;
+
+/// Used by `railway postgres pitr backup restore`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupRestore.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstanceBackupRestore;
+
+/// Used by `railway postgres pitr schedule set`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupScheduleUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstanceBackupScheduleUpdate;

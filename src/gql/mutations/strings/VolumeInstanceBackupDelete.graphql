@@ -1,0 +1,8 @@
+mutation VolumeInstanceBackupDelete($volumeInstanceId: String!, $volumeInstanceBackupId: String!) {
+  volumeInstanceBackupDelete(
+    volumeInstanceId: $volumeInstanceId
+    volumeInstanceBackupId: $volumeInstanceBackupId
+  ) {
+    workflowId
+  }
+}

@@ -468,3 +468,40 @@ impl From<environment_instances::DeploymentStatus> for SubscriptionDeploymentSta
         }
     }
 }
+
+/// Used by `railway postgres pitr progress`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/GetPitrHaWorkflowProgress.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct GetPitrHaWorkflowProgress;
+
+/// Used by `railway postgres pitr disable`'s HA precheck.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/GetPitrHaClusterReplicationHealth.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct GetPitrHaClusterReplicationHealth;
+
+/// Used by `railway postgres pitr backup list`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/VolumeInstanceBackupList.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VolumeInstanceBackupList;
+
+/// Used by `railway postgres pitr schedule list` and `backup trigger`
+/// (to resolve a schedule id when `--schedule-id` is omitted).
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/VolumeInstanceBackupScheduleList.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VolumeInstanceBackupScheduleList;
