@@ -89,7 +89,7 @@ pub async fn command(args: Args) -> Result<()> {
 // renders those as `long_about` and it would show up in `--help`.
 #[derive(Parser, Default)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --claude --gh        # also inject your GitHub auth (gh auth token)\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs: disconnecting sleeps yours, and the next\n`railway code` wakes it with your work still on disk. `--keep-awake` leaves it\nrunning; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs: disconnecting sleeps yours, and the next\n`railway code` wakes it with your work still on disk. `--keep-awake` leaves it\nrunning; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex using your local ChatGPT sign-in (~/.codex/auth.json)
@@ -140,11 +140,6 @@ pub struct LaunchArgs {
     #[clap(long = "env-file", value_name = "PATH")]
     env_files: Vec<std::path::PathBuf>,
 
-    /// Also inject your GitHub auth (read via `gh auth token`) so git and gh
-    /// can reach your repos over HTTPS inside the agent
-    #[clap(long)]
-    gh: bool,
-
     /// Environment name or ID (defaults to the linked environment)
     #[clap(long, short)]
     pub environment: Option<String>,
@@ -182,7 +177,6 @@ impl LaunchArgs {
             && !self.keep_awake
             && !self.rm
             && !self.refresh_auth
-            && !self.gh
             && self.name.is_none()
             && self.environment.is_none()
             && self.project.is_none()
@@ -255,14 +249,6 @@ impl Agent {
             "codex" => Some(Agent::Codex),
             "grok" => Some(Agent::Grok),
             _ => None,
-        }
-    }
-
-    fn flag(self) -> &'static str {
-        match self {
-            Agent::Codex => "--codex",
-            Agent::Claude => "--claude",
-            Agent::Grok => "--grok",
         }
     }
 
@@ -409,21 +395,6 @@ if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MIS
     )
 }
 
-/// `--gh` provision (rungate-proven recipe): the token arrives on stdin into
-/// a 0600 file, an idempotent ~/.profile line exports GH_TOKEN for login
-/// shells, and a git credential helper reads the file for HTTPS pulls/pushes.
-/// Deliberately no `gh auth login` and no gh install requirement: GH_TOKEN is
-/// gh's own documented env var, so gh works if present, and git works either
-/// way. The helper re-reads the file per invocation, so refreshing the token
-/// is just re-running with --gh.
-const GH_PROVISION: &str = r##"umask 077
-cat > ~/.gh-token
-chmod 600 ~/.gh-token
-grep -q "railway-code gh-token" ~/.profile 2>/dev/null || printf '\n%s\n%s\n' "# railway-code gh-token" 'export GH_TOKEN="$(cat ~/.gh-token 2>/dev/null)"' >> ~/.profile
-git config --global credential."https://github.com".helper "!f(){ echo username=x-access-token; echo \"password=\$(cat ~/.gh-token)\"; };f" 2>/dev/null || true
-git config --global credential."https://gist.github.com".helper "!f(){ echo username=x-access-token; echo \"password=\$(cat ~/.gh-token)\"; };f" 2>/dev/null || true
-echo GH-OK"##;
-
 /// The command the launch session runs on the VM. Three shapes, and the
 /// difference between them is whether you are left in a session afterwards:
 ///
@@ -455,24 +426,6 @@ fn remote_command(
         ),
         None => format!("{env_prefix}exec {name} {}", shell_join(agent_args)),
     }
-}
-
-/// Read the host's GitHub token via the gh CLI — the source of truth that
-/// works regardless of where gh stores it (macOS keychain, hosts.yml, env).
-fn host_gh_token() -> Result<String> {
-    let out = std::process::Command::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .map_err(|_| {
-            anyhow!(
-                "--gh needs the GitHub CLI on this machine (brew install gh), or drop the flag."
-            )
-        })?;
-    let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() || tok.is_empty() {
-        bail!("`gh auth token` returned nothing — run `gh auth login` first, or drop --gh.");
-    }
-    Ok(tok)
 }
 
 /// SSH options shared by every connection this command runs, plus the info
@@ -1500,8 +1453,9 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
         eprintln!(
             "{}",
             format!(
-                "Launching {} — your default from `railway ca setup`.",
-                agent.display()
+                "Launching {} — your default configuration in {}. You can change this by running `railway ca setup`.",
+                agent.display(),
+                AgentPrefs::path_in(home).display()
             )
             .dimmed()
         );
@@ -1755,24 +1709,6 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
             agent.display()
         ));
     }
-    if args.gh {
-        progress.note("Including your GitHub token (`gh auth token`)");
-    }
-    // `--refresh-auth` only has a Claude credential to re-mint; say so rather
-    // than ignoring the flag silently.
-    if args.refresh_auth && agent != Agent::Claude {
-        progress.note(&format!(
-            "Note: --refresh-auth applies to --claude; {} reads its credential from disk every run.",
-            agent.flag()
-        ));
-    }
-    // Read the GitHub token before spending a VM, so a missing gh login fails
-    // fast and cheap.
-    let gh_token = if args.gh {
-        Some(host_gh_token()?)
-    } else {
-        None
-    };
     // Pack the user's skills before spending a VM: a skills directory that has
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
@@ -1838,12 +1774,11 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
     };
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
-    progress.step(&format!("Provisioning {}", agent.name()));
+    progress.step("Finalizing Configuration...");
     let provision = {
         let target = target.clone();
         let identity = identity.clone();
         let relay = relay.clone();
-        let gh_token = gh_token.clone();
         let skills_note = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let notes = skills_note.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1876,9 +1811,8 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
             // machine. The hash rides the script above, so an unchanged set
             // costs nothing beyond the round-trip we already made.
             if let Some(packed) = packed_skills {
-                if skills_sync::parse_remote_hash(&out).as_deref() == Some(packed.hash.as_str()) {
-                    push("Your skills are already on this agent.".to_string());
-                } else {
+                // Already in sync: nothing to do, and nothing worth a line.
+                if skills_sync::parse_remote_hash(&out).as_deref() != Some(packed.hash.as_str()) {
                     let out = ssh_plumbing(
                         &target,
                         &skills_sync::provision_script(&packed.hash),
@@ -1903,18 +1837,6 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
                             "Couldn't sync your skills onto the agent ({reason}); continuing without them."
                         ));
                     }
-                }
-            }
-            if let Some(tok) = gh_token {
-                let out = ssh_plumbing(
-                    &target,
-                    GH_PROVISION,
-                    identity.as_deref(),
-                    Some(tok.as_bytes()),
-                    &relay,
-                )?;
-                if !String::from_utf8_lossy(&out).contains("GH-OK") {
-                    bail!("GitHub auth provisioning did not complete on the agent.")
                 }
             }
             Ok(())

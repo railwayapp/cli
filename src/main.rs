@@ -916,7 +916,6 @@ mod cli_tests {
                     vec!["--claude"],
                     vec!["--codex", "--new"],
                     vec!["--grok", "--keep-awake"],
-                    vec!["--claude", "--gh"],
                     vec!["--rm"],
                     vec!["--claude", "--refresh-auth"],
                     vec!["--codex", "--variable", "A=b"],
