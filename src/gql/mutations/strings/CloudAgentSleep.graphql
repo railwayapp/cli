@@ -1,0 +1,6 @@
+mutation CloudAgentSleep($id: ID!) {
+  cloudAgentSleep(id: $id) {
+    id
+    status
+  }
+}

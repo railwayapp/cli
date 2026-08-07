@@ -115,6 +115,8 @@ russh = { version = "0.60.2", default-features = false, features = [
   "rsa",
 ] }
 tempfile = "3.23.0"
+portable-pty = "0.8"
+vt100 = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2.0"

@@ -13,6 +13,8 @@ pub mod api;
 pub mod autoupdate;
 pub mod bucket;
 pub mod cdn;
+pub mod cloud_agent;
+pub mod code;
 pub mod completion;
 pub mod config;
 pub mod connect;
