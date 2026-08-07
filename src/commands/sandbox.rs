@@ -900,6 +900,7 @@ async fn create(
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        region: None,
     };
     create_and_store(
         configs,
@@ -1366,6 +1367,7 @@ async fn fork(
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        region: None,
     };
     create_and_store(
         configs,
