@@ -1466,6 +1466,8 @@ async fn backup_restore(
         mutations::volume_instance_backup_restore::Variables {
             volume_instance_id,
             volume_instance_backup_id: args.id.clone(),
+            replica_service_ids: None,
+            wipe_service_ids: None,
         },
     )
     .await
