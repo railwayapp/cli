@@ -158,7 +158,7 @@ async fn status(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     print_status(&ctx, &config, json, true).await
@@ -316,7 +316,7 @@ async fn convert(
     }
 
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -371,7 +371,7 @@ async fn convert(
     .await
     .context("Failed to convert to HA")?;
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     if !json {
@@ -398,7 +398,7 @@ async fn revert(
     args: RevertArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -477,7 +477,7 @@ async fn revert(
     .await
     .context("Failed to revert HA cluster")?;
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     if !json {
@@ -508,7 +508,7 @@ async fn scale(
     }
 
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -563,7 +563,7 @@ async fn scale(
         print_scale_result(&root.root_name, &result);
     }
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     print_status(&ctx, &config, json, false).await
@@ -614,7 +614,7 @@ async fn switchover(
     args: SwitchoverArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);

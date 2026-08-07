@@ -5,6 +5,13 @@
 //! match how customers think about these features and mirror existing
 //! nesting precedent (`railway service source connect/disconnect`, `railway
 //! service files ...`).
+//!
+//! Every environment-config fetch in this module tree uses
+//! `decryptVariables: true`: the non-decrypted config masks EVERY variable
+//! value as null in production (confirmed live 2026-08-07), and the
+//! enabled-state detection here depends on values -- `PATRONI_ENABLED ==
+//! "true"`, a non-empty `WAL_ARCHIVE_BUCKET`, PgBouncer's pool knobs. The
+//! caller's own access already gates decryption server-side.
 
 use std::collections::BTreeMap;
 

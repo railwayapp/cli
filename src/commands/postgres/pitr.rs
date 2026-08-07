@@ -258,7 +258,7 @@ async fn status(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     print_status(&ctx, &config, json, true).await
@@ -472,7 +472,7 @@ async fn enable(
     args: EnableArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -570,7 +570,7 @@ async fn enable(
         }
     }
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     print_status(&ctx, &config, json, false).await
@@ -584,7 +584,7 @@ async fn disable(
     args: DisableArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -698,7 +698,7 @@ async fn disable(
         }
     }
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     print_status(&ctx, &config, json, false).await
@@ -711,7 +711,7 @@ async fn cancel(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -753,7 +753,7 @@ async fn clear(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -813,7 +813,7 @@ async fn progress(
     args: ProgressArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1122,7 +1122,7 @@ async fn restore(
         parse_time(&args.at).with_context(|| format!("Invalid --at value \"{}\"", args.at))?;
 
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1212,7 +1212,7 @@ async fn backup_list(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1269,7 +1269,7 @@ async fn backup_create(
     args: BackupCreateArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1312,7 +1312,7 @@ async fn backup_delete(
     args: BackupDeleteArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1387,7 +1387,7 @@ async fn backup_lock(
     args: BackupIdArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1429,7 +1429,7 @@ async fn backup_restore(
     args: BackupRestoreArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1489,7 +1489,7 @@ async fn schedule_set(
     args: ScheduleSetArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -1560,7 +1560,7 @@ async fn schedule_list(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);

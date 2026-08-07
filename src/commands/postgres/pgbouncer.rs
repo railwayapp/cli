@@ -189,7 +189,7 @@ async fn status(
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     print_status_with_live(&ctx, &config, json).await
@@ -404,7 +404,7 @@ async fn add(
     args: AddArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -461,7 +461,7 @@ async fn add(
     .await
     .context("Failed to add PgBouncer")?;
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     if !json {
@@ -488,7 +488,7 @@ async fn remove(
     args: RemoveArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -520,7 +520,7 @@ async fn remove(
     .await
     .context("Failed to remove PgBouncer")?;
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     if !json {
@@ -547,7 +547,7 @@ async fn configure(
     args: ConfigureArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -652,7 +652,7 @@ async fn configure(
         .await
         .context("Failed to configure PgBouncer")?;
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     if !json {
@@ -721,7 +721,7 @@ async fn scale(
     args: ScaleArgs,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
@@ -781,7 +781,7 @@ async fn scale(
         .await
         .context("Failed to scale PgBouncer")?;
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
     if !json {
