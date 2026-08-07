@@ -497,6 +497,16 @@ async fn revert(
         return Ok(());
     }
 
+    // Snapshot the membership BEFORE reverting: the revert patch clears
+    // parentServiceId on survivors it doesn't delete, so a post-revert
+    // parent-based scan can't find them anymore.
+    let pre_revert_members: Vec<(String, String)> = ha_state
+        .members
+        .iter()
+        .filter(|m| m.service_id != root.root_id)
+        .map(|m| (m.service_id.clone(), m.service_name.clone()))
+        .collect();
+
     let result = template_apply::revert_template(
         &ctx,
         RevertTemplateParams {
@@ -514,26 +524,20 @@ async fn revert(
 
     // templateRevert tears down the members the template itself tracks; a
     // node added later by LIVE scaling only belongs to the cluster through
-    // the environment config (parentServiceId + clusterRole) -- the
-    // dashboard's revert finds those via canvas-group membership, which the
-    // public API can't stamp. Reverting IS the instruction to remove every
-    // member, so sweep the stragglers explicitly (volume first, then the
-    // service, same as scale-down).
-    let names = service_name_map(&ctx);
-    let leftovers: Vec<(String, String)> = config
-        .services
-        .iter()
-        .filter(|(id, service)| {
-            id.as_str() != root.root_id
-                && service.parent_service_id.as_deref() == Some(root.root_id.as_str())
-                && service.cluster_role.is_some()
-                && !service.is_deleted.unwrap_or(false)
-        })
-        .map(|(id, _)| {
-            (
-                id.clone(),
-                names.get(id).cloned().unwrap_or_else(|| id.clone()),
-            )
+    // the environment config -- the dashboard's revert finds those via
+    // canvas-group membership, which the public API can't stamp. Reverting
+    // IS the instruction to remove every member, so sweep any pre-revert
+    // member still alive afterwards (volume first, then the service, same
+    // as scale-down). Matched against the pre-revert snapshot by id: the
+    // revert patch clears parentServiceId on stragglers, so they can't be
+    // re-derived from the fresh config.
+    let leftovers: Vec<(String, String)> = pre_revert_members
+        .into_iter()
+        .filter(|(member_id, _)| {
+            config
+                .services
+                .get(member_id)
+                .is_some_and(|service| !service.is_deleted.unwrap_or(false))
         })
         .collect();
     for (member_id, member_name) in &leftovers {
