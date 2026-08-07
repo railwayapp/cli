@@ -114,10 +114,25 @@ impl MockBackboard {
     }
 
     /// A `Configs` (backed by a throwaway path under `dir`) whose every
-    /// GraphQL call resolves to this mock server.
+    /// GraphQL call resolves to this mock server, via the same
+    /// `RAILWAY_BACKBOARD_URL` escape hatch a spawned debug binary uses.
+    /// `Configs` snapshots the env var at construction, so the write is
+    /// serialized under a lock but the returned value is safe to use from
+    /// parallel tests.
     pub fn configs(&self, dir: &tempfile::TempDir) -> Configs {
-        let mut configs = Configs::for_test(dir.path().join("config.json"));
-        configs.override_backboard_url(self.url());
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("RAILWAY_BACKBOARD_URL").ok();
+        // SAFETY: writes are serialized under ENV_LOCK and restored before
+        // release; construction below snapshots the value.
+        unsafe { std::env::set_var("RAILWAY_BACKBOARD_URL", self.url()) };
+        let configs = Configs::for_test(dir.path().join("config.json"));
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("RAILWAY_BACKBOARD_URL", value),
+                None => std::env::remove_var("RAILWAY_BACKBOARD_URL"),
+            }
+        }
         configs
     }
 

@@ -110,8 +110,10 @@ pub struct RailwayConfig {
 pub struct Configs {
     pub root_config: RailwayConfig,
     root_config_path: PathBuf,
-    /// Test-only redirect for every GraphQL call (see
-    /// [`Configs::override_backboard_url`]). Always `None` outside tests.
+    /// Per-instance snapshot of the `RAILWAY_BACKBOARD_URL` debug-build
+    /// escape hatch, taken at construction (see
+    /// [`Configs::backboard_url_override_from_env`]). Always `None` in
+    /// release builds.
     backboard_url_override: Option<String>,
 }
 
@@ -138,7 +140,7 @@ impl Configs {
             let config = Self {
                 root_config,
                 root_config_path,
-                backboard_url_override: None,
+                backboard_url_override: Self::backboard_url_override_from_env(),
             };
 
             return Ok(config);
@@ -147,8 +149,30 @@ impl Configs {
         Ok(Self {
             root_config_path,
             root_config: RailwayConfig::default(),
-            backboard_url_override: None,
+            backboard_url_override: Self::backboard_url_override_from_env(),
         })
+    }
+
+    /// Debug-build-only escape hatch so a locally-built binary (or an
+    /// in-process test) can point every GraphQL call at a scripted backboard
+    /// (see `testkit::MockBackboard`). Snapshotted per instance at
+    /// construction, so parallel tests only need to serialize the env write
+    /// around building their `Configs`, not around using it. Deliberately
+    /// compiled out of release builds: unlike RAILWAY_ENV (which only picks
+    /// between the three fixed Railway hosts), an arbitrary URL override in
+    /// a shipped binary would let a hostile environment redirect
+    /// authenticated traffic.
+    fn backboard_url_override_from_env() -> Option<String> {
+        #[cfg(debug_assertions)]
+        {
+            std::env::var("RAILWAY_BACKBOARD_URL")
+                .ok()
+                .filter(|url| !url.is_empty())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
     }
 
     /// Absolute path to the root config file for the current environment.
@@ -322,16 +346,8 @@ impl Configs {
         Self {
             root_config: RailwayConfig::default(),
             root_config_path,
-            backboard_url_override: None,
+            backboard_url_override: Self::backboard_url_override_from_env(),
         }
-    }
-
-    /// Point every GraphQL call made through this `Configs` at a local
-    /// scripted endpoint (see `testkit::MockBackboard`). Instance state, not
-    /// an env var, so parallel tests can each talk to their own server.
-    #[cfg(test)]
-    pub(crate) fn override_backboard_url(&mut self, url: impl Into<String>) {
-        self.backboard_url_override = Some(url.into());
     }
 
     /// Take the exclusive config lock covering this config file, without
