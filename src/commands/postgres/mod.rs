@@ -77,13 +77,65 @@ pub async fn command(args: Args) -> Result<()> {
 
     crate::util::reporter::set_mode(json);
 
-    match command {
+    let result = match command {
         Commands::Pitr(sub) => pitr::command(sub, project, service, environment, json).await,
         Commands::Ha(sub) => ha::command(sub, project, service, environment, json).await,
         Commands::Pgbouncer(sub) => {
             pgbouncer::command(sub, project, service, environment, json).await
         }
+    };
+    result.map_err(add_api_mismatch_guidance)
+}
+
+/// Marker phrases the backend uses (or may use in the future) in a
+/// `UserError` when an operation this CLI build depends on has been
+/// removed or changed and the fix is a newer CLI. Matched
+/// case-insensitively against the whole error chain.
+const UPGRADE_REQUIRED_MARKERS: &[&str] = &[
+    "update your railway cli",
+    "upgrade your railway cli",
+    "update the railway cli",
+    "upgrade the railway cli",
+    "newer version of the railway cli",
+    "railway cli is out of date",
+];
+
+/// GraphQL validation messages that mean the running binary was built
+/// against a different API schema than the server is exposing -- an
+/// operation or field this command depends on no longer exists (removed,
+/// renamed, or re-internalized server-side).
+fn is_schema_mismatch_message(lower_chain: &str) -> bool {
+    lower_chain.contains("cannot query field")
+        || lower_chain.contains("is not defined by type")
+        || lower_chain.contains("unknown argument")
+        || lower_chain.contains("unknown field")
+}
+
+/// `railway postgres` drives API operations that the backend reserves the
+/// right to evolve (they were exposed on the public subgraph specifically
+/// for this CLI). When one disappears or the backend explicitly asks for a
+/// newer CLI, translate the raw GraphQL error into actionable guidance
+/// instead of a cryptic validation dump. Every other error passes through
+/// untouched.
+pub(super) fn add_api_mismatch_guidance(err: anyhow::Error) -> anyhow::Error {
+    let lower_chain = format!("{err:#}").to_ascii_lowercase();
+
+    if UPGRADE_REQUIRED_MARKERS
+        .iter()
+        .any(|marker| lower_chain.contains(marker))
+    {
+        return err.context(
+            "The Railway API requires a newer CLI for this command. Update with `railway upgrade` (or your package manager) and try again.",
+        );
     }
+
+    if is_schema_mismatch_message(&lower_chain) {
+        return err.context(
+            "This CLI build no longer matches the Railway API -- an operation this command depends on is missing or has changed. Update with `railway upgrade` and try again; if the latest CLI still fails, the operation may have been removed (check the Railway changelog).",
+        );
+    }
+
+    err
 }
 
 /// Shared confirm-before-mutating helper: `--yes` bypasses the prompt; a
@@ -174,6 +226,54 @@ mod tests {
             Args::parse_from(["postgres", "pgbouncer", "status"]).command,
             Commands::Pgbouncer(_)
         ));
+    }
+
+    #[test]
+    fn api_mismatch_guidance_translates_missing_field_validation_errors() {
+        // Real message shape from the public gateway when a mutation this
+        // build uses is not on the Public subgraph.
+        let err = anyhow::anyhow!(
+            "Cannot query field \"volumeInstanceBackupCreateForHaConversion\" on type \"Mutation\"."
+        )
+        .context("Failed to enable PITR");
+        let wrapped = add_api_mismatch_guidance(err);
+        assert!(format!("{wrapped:#}").contains("railway upgrade"));
+
+        // Input-field removal shape ("Field X is not defined by type Y").
+        let err = anyhow::anyhow!(
+            "Variable \"$input\" got invalid value; Field \"stageOnly\" is not defined by type \"TemplateDeployV2Input\"."
+        );
+        let wrapped = add_api_mismatch_guidance(err);
+        assert!(format!("{wrapped:#}").contains("no longer matches the Railway API"));
+    }
+
+    #[test]
+    fn api_mismatch_guidance_surfaces_explicit_upgrade_user_errors() {
+        // If the backend ever retires one of these routes it throws a
+        // UserError telling the caller to update -- the CLI must lead with
+        // actionable guidance, not a bare GraphQL error.
+        let err = anyhow::anyhow!(
+            "This operation has moved. Please update your Railway CLI to continue managing PITR."
+        )
+        .context("Failed to enable PITR");
+        let wrapped = add_api_mismatch_guidance(err);
+        let rendered = format!("{wrapped:#}");
+        assert!(rendered.contains("requires a newer CLI"));
+        assert!(rendered.contains("railway upgrade"));
+        // The server's own message stays visible in the chain.
+        assert!(rendered.contains("This operation has moved"));
+    }
+
+    #[test]
+    fn api_mismatch_guidance_passes_unrelated_errors_through() {
+        let err = anyhow::anyhow!("Problem processing request").context("Failed to enable PITR");
+        let before = format!("{err:#}");
+        let after = format!("{:#}", add_api_mismatch_guidance(err));
+        assert_eq!(before, after);
+
+        let err = anyhow::anyhow!("connection reset by peer");
+        let after = format!("{:#}", add_api_mismatch_guidance(err));
+        assert_eq!(after, "connection reset by peer");
     }
 
     #[test]
