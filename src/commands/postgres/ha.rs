@@ -511,6 +511,50 @@ async fn revert(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
+
+    // templateRevert tears down the members the template itself tracks; a
+    // node added later by LIVE scaling only belongs to the cluster through
+    // the environment config (parentServiceId + clusterRole) -- the
+    // dashboard's revert finds those via canvas-group membership, which the
+    // public API can't stamp. Reverting IS the instruction to remove every
+    // member, so sweep the stragglers explicitly (volume first, then the
+    // service, same as scale-down).
+    let names = service_name_map(&ctx);
+    let leftovers: Vec<(String, String)> = config
+        .services
+        .iter()
+        .filter(|(id, service)| {
+            id.as_str() != root.root_id
+                && service.parent_service_id.as_deref() == Some(root.root_id.as_str())
+                && service.cluster_role.is_some()
+                && !service.is_deleted.unwrap_or(false)
+        })
+        .map(|(id, _)| {
+            (
+                id.clone(),
+                names.get(id).cloned().unwrap_or_else(|| id.clone()),
+            )
+        })
+        .collect();
+    for (member_id, member_name) in &leftovers {
+        if !json {
+            println!(
+                "Removing live-scaled cluster member {} left behind by the template revert...",
+                member_name.bold()
+            );
+        }
+        cluster_scale::delete_member(&ctx, &config, member_id)
+            .await
+            .with_context(|| format!("Failed to remove cluster member {member_name}"))?;
+    }
+    let config = if leftovers.is_empty() {
+        config
+    } else {
+        fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+            .await?
+            .config
+    };
+
     if !json {
         let verb = if result.deployed {
             "Reverted and deployed"

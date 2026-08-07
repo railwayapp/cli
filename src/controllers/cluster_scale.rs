@@ -911,7 +911,7 @@ async fn create_clone_volume(
 /// deleted first (matches the frontend's own ordering note: deleting the
 /// service first would clear `volumeMounts`, losing the volume ids to clean
 /// up).
-async fn delete_member(
+pub(crate) async fn delete_member(
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
     service_id: &str,
