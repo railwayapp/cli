@@ -34,7 +34,7 @@ use super::{
 /// Manage point-in-time recovery (continuous backups) for Postgres
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone Postgres or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable.\n  `backup trigger` has no dashboard equivalent -- it's a CLI-only remediation for a missed scheduled backup."
+    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone Postgres or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -140,9 +140,6 @@ enum BackupCommands {
 
     /// Restore from a backup
     Restore(BackupRestoreArgs),
-
-    /// Trigger an immediate run of a missed scheduled backup
-    Trigger(BackupTriggerArgs),
 }
 
 #[derive(Parser)]
@@ -177,15 +174,6 @@ struct BackupRestoreArgs {
     /// Skip the confirmation prompt
     #[clap(long, short = 'y')]
     yes: bool,
-}
-
-#[derive(Parser)]
-struct BackupTriggerArgs {
-    /// Backup schedule ID to trigger (see `pitr schedule list`); auto-resolved
-    /// when omitted and exactly one schedule is configured. CLI-only --
-    /// remediation for a missed scheduled backup, no dashboard equivalent.
-    #[clap(long = "schedule-id")]
-    schedule_id: Option<String>,
 }
 
 #[derive(Parser)]
@@ -254,9 +242,6 @@ pub async fn command(
             BackupCommands::Lock(a) => backup_lock(project, service, environment, json, a).await,
             BackupCommands::Restore(a) => {
                 backup_restore(project, service, environment, json, a).await
-            }
-            BackupCommands::Trigger(a) => {
-                backup_trigger(project, service, environment, json, a).await
             }
         },
         Commands::Schedule(a) => match a.command {
@@ -1345,23 +1330,41 @@ async fn backup_delete(
         return Ok(());
     }
 
-    let response = post_graphql::<mutations::VolumeInstanceBackupBatchDelete, _>(
-        &ctx.client,
-        ctx.configs.get_backboard(),
-        mutations::volume_instance_backup_batch_delete::Variables {
-            volume_instance_id,
-            volume_instance_backup_ids: args.ids.clone(),
-        },
-    )
-    .await
-    .context("Failed to delete backups")?;
-    let workflow_id = response.volume_instance_backup_batch_delete.workflow_id;
+    // One delete mutation per id -- the batch mutation is Internal-subgraph
+    // only. Sequential on purpose: each returns its own deletion workflow,
+    // and a mid-list failure reports exactly which ids already started.
+    let mut workflow_ids: Vec<Option<String>> = Vec::with_capacity(args.ids.len());
+    for (index, backup_id) in args.ids.iter().enumerate() {
+        let response = post_graphql::<mutations::VolumeInstanceBackupDelete, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            mutations::volume_instance_backup_delete::Variables {
+                volume_instance_id: volume_instance_id.clone(),
+                volume_instance_backup_id: backup_id.clone(),
+            },
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to delete backup {backup_id}{}",
+                if index > 0 {
+                    format!(
+                        " (deletion already started for: {})",
+                        args.ids[..index].join(", ")
+                    )
+                } else {
+                    String::new()
+                }
+            )
+        })?;
+        workflow_ids.push(response.volume_instance_backup_delete.workflow_id);
+    }
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(
-                &serde_json::json!({"deletedIds": args.ids, "workflowId": workflow_id})
+                &serde_json::json!({"deletedIds": args.ids, "workflowIds": workflow_ids})
             )?
         );
     } else {
@@ -1369,7 +1372,7 @@ async fn backup_delete(
             "Started deleting {} backup(s) -- deletion runs in the background.",
             args.ids.len()
         );
-        if let Some(id) = &workflow_id {
+        for id in workflow_ids.iter().flatten() {
             print_field("Workflow:", id);
         }
     }
@@ -1474,141 +1477,6 @@ async fn backup_restore(
         if let Some(id) = &workflow_id {
             print_field("Workflow:", id);
         }
-    }
-    Ok(())
-}
-
-const BACKUP_WORKFLOW_POLL_INTERVAL_SECS: u64 = 2;
-const BACKUP_WORKFLOW_TIMEOUT_SECS: u64 = 600;
-
-/// True once a backup workflow's status string leaves the (Temporal-style)
-/// running/pending states. Treated as terminal-by-default (rather than an
-/// allowlist of known-terminal strings) so an unexpected future status value
-/// still stops the poll instead of spinning for the full timeout.
-fn is_terminal_backup_status(status: &str) -> bool {
-    !matches!(
-        status.to_ascii_uppercase().as_str(),
-        "RUNNING" | "PENDING" | "SCHEDULED" | "STARTED"
-    )
-}
-
-async fn poll_backup_workflow_status(ctx: &ServiceContext, workflow_id: &str) -> Result<String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(BACKUP_WORKFLOW_TIMEOUT_SECS);
-    loop {
-        let response = post_graphql::<queries::VolumeInstanceBackupWorkflowStatus, _>(
-            &ctx.client,
-            ctx.configs.get_backboard(),
-            queries::volume_instance_backup_workflow_status::Variables {
-                workflow_id: workflow_id.to_string(),
-            },
-        )
-        .await
-        .context("Failed to check the backup workflow status")?;
-        let status = response.volume_instance_backup_workflow_status;
-
-        if is_terminal_backup_status(&status) {
-            return Ok(status);
-        }
-        if std::time::Instant::now() >= deadline {
-            bail!(
-                "Timed out after {BACKUP_WORKFLOW_TIMEOUT_SECS}s waiting for the backup to finish (it may still be running -- check `railway postgres pitr backup list`)."
-            );
-        }
-        sleep(Duration::from_secs(BACKUP_WORKFLOW_POLL_INTERVAL_SECS)).await;
-    }
-}
-
-async fn backup_trigger(
-    project: Option<String>,
-    service: Option<String>,
-    environment: Option<String>,
-    json: bool,
-    args: BackupTriggerArgs,
-) -> Result<()> {
-    let ctx = resolve_service_context(project, service, environment).await?;
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
-        .await?
-        .config;
-    let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
-
-    let schedule_id = match args.schedule_id.clone() {
-        Some(id) => id,
-        None => {
-            let response = post_graphql::<queries::VolumeInstanceBackupScheduleList, _>(
-                &ctx.client,
-                ctx.configs.get_backboard(),
-                queries::volume_instance_backup_schedule_list::Variables {
-                    volume_instance_id: volume_instance_id.clone(),
-                },
-            )
-            .await
-            .context("Failed to look up the backup schedule")?;
-            let schedules = response.volume_instance_backup_schedule_list;
-            match schedules.len() {
-                0 => bail!(
-                    "{} has no configured backup schedule to trigger. Run `railway postgres pitr schedule set` first, or pass --schedule-id.",
-                    root.root_name
-                ),
-                1 => schedules[0].id.clone(),
-                _ => bail!(
-                    "{} has multiple backup schedules ({}). Pass --schedule-id to pick one.",
-                    root.root_name,
-                    schedules
-                        .iter()
-                        .map(|s| format!("{:?}:{}", s.kind, s.id))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            }
-        }
-    };
-
-    let response = post_graphql::<mutations::VolumeInstanceBackupScheduleTrigger, _>(
-        &ctx.client,
-        ctx.configs.get_backboard(),
-        mutations::volume_instance_backup_schedule_trigger::Variables {
-            schedule_id: schedule_id.clone(),
-        },
-    )
-    .await
-    .context("Failed to trigger the backup schedule")?;
-
-    let Some(workflow_id) = response.volume_instance_backup_schedule_trigger.workflow_id else {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"scheduleId": schedule_id, "workflowId": null, "triggered": true})
-                )?
-            );
-        } else {
-            println!(
-                "Triggered the backup schedule for {} -- the run wasn't immediately observable (an in-flight run may have absorbed it). Check `railway postgres pitr backup list` shortly.",
-                root.root_name.bold()
-            );
-        }
-        return Ok(());
-    };
-
-    if !json {
-        println!(
-            "Triggered an immediate backup run for {} (workflow {workflow_id}). Waiting for it to finish...",
-            root.root_name.bold(),
-        );
-    }
-
-    let status = poll_backup_workflow_status(&ctx, &workflow_id).await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({"scheduleId": schedule_id, "workflowId": workflow_id, "status": status})
-            )?
-        );
-    } else {
-        println!("Backup workflow finished with status: {}.", status.bold());
     }
     Ok(())
 }
@@ -2141,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_backup_lock_restore_and_trigger() {
+    fn parses_backup_lock_and_restore() {
         let args = Args::parse_from(["pitr", "backup", "lock", "backup-1"]);
         let Commands::Backup(BackupArgs {
             command: BackupCommands::Lock(lock),
@@ -2160,34 +2028,6 @@ mod tests {
         };
         assert_eq!(restore.id, "backup-1");
         assert!(restore.yes);
-
-        let args = Args::parse_from(["pitr", "backup", "trigger", "--schedule-id", "sched-1"]);
-        let Commands::Backup(BackupArgs {
-            command: BackupCommands::Trigger(trigger),
-        }) = args.command
-        else {
-            panic!("expected backup trigger");
-        };
-        assert_eq!(trigger.schedule_id.as_deref(), Some("sched-1"));
-
-        assert!(matches!(
-            Args::parse_from(["pitr", "backup", "trigger"]).command,
-            Commands::Backup(BackupArgs {
-                command: BackupCommands::Trigger(BackupTriggerArgs { schedule_id: None })
-            })
-        ));
-    }
-
-    #[test]
-    fn is_terminal_backup_status_treats_running_states_as_non_terminal() {
-        assert!(!is_terminal_backup_status("running"));
-        assert!(!is_terminal_backup_status("RUNNING"));
-        assert!(!is_terminal_backup_status("pending"));
-        assert!(is_terminal_backup_status("COMPLETED"));
-        assert!(is_terminal_backup_status("FAILED"));
-        assert!(is_terminal_backup_status("CANCELED"));
-        // Terminal-by-default: an unknown future status must stop the poll.
-        assert!(is_terminal_backup_status("SOME_NEW_STATUS"));
     }
 
     #[test]

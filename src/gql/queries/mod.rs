@@ -433,15 +433,6 @@ pub struct VolumeInstanceBackupList;
 )]
 pub struct VolumeInstanceBackupScheduleList;
 
-/// Used by `railway postgres pitr backup trigger`'s poll loop.
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/queries/strings/VolumeInstanceBackupWorkflowStatus.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct VolumeInstanceBackupWorkflowStatus;
-
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
 impl From<environment_instances::DeploymentStatus> for SubscriptionDeploymentStatus {
     fn from(value: environment_instances::DeploymentStatus) -> Self {

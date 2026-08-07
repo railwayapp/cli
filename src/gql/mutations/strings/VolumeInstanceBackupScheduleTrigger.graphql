@@ -1,5 +1,0 @@
-mutation VolumeInstanceBackupScheduleTrigger($scheduleId: String!) {
-  volumeInstanceBackupScheduleTrigger(scheduleId: $scheduleId) {
-    workflowId
-  }
-}

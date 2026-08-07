@@ -137,14 +137,19 @@ pub async fn apply_composable_template(
 ) -> Result<ApplyTemplateResult> {
     warn_if_preexisting_staged_changes(ctx).await;
 
+    // Best-effort pre-conversion safety backup via the public backup-create
+    // mutation (the dashboard's dedicated `volumeInstanceBackupCreateForHaConversion`
+    // is Internal-subgraph only; a plain named on-demand backup covers the
+    // same "escape hatch before topology surgery" purpose).
     if params.kind == ApplyKind::Conversion
         && let Some(volume_instance_id) = params.volume_instance_id.clone()
     {
-        if let Err(err) = post_graphql::<mutations::VolumeInstanceBackupCreateForHaConversion, _>(
+        if let Err(err) = post_graphql::<mutations::VolumeInstanceBackupCreate, _>(
             &ctx.client,
             ctx.configs.get_backboard(),
-            mutations::volume_instance_backup_create_for_ha_conversion::Variables {
+            mutations::volume_instance_backup_create::Variables {
                 volume_instance_id,
+                name: Some("pre-ha-conversion".to_string()),
             },
         )
         .await

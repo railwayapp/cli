@@ -1,5 +1,0 @@
-mutation VolumeInstanceBackupCreateForHaConversion($volumeInstanceId: String!) {
-  volumeInstanceBackupCreateForHaConversion(volumeInstanceId: $volumeInstanceId) {
-    workflowId
-  }
-}

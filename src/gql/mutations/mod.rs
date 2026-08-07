@@ -611,26 +611,16 @@ pub struct VolumeInstancePitrRestore;
 )]
 pub struct VolumeInstanceBackupCreate;
 
-/// Single-id delete counterpart to `VolumeInstanceBackupBatchDelete` below --
-/// unused for now since `backup delete <id>...` always goes through the
-/// batch mutation (it also covers the single-id case).
+/// Used by `railway postgres pitr backup delete`, once per id. The batch
+/// mutation (`volumeInstanceBackupBatchDelete`) also exists but is
+/// Internal-subgraph only -- this single-id one is on the public graph.
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/VolumeInstanceBackupDelete.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-#[allow(dead_code)]
 pub struct VolumeInstanceBackupDelete;
-
-/// Used by `railway postgres pitr backup delete`.
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/VolumeInstanceBackupBatchDelete.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct VolumeInstanceBackupBatchDelete;
 
 /// Used by `railway postgres pitr backup lock`.
 #[derive(GraphQLQuery)]
@@ -651,15 +641,6 @@ pub struct VolumeInstanceBackupLock;
 )]
 pub struct VolumeInstanceBackupRestore;
 
-/// Used by `template_apply`'s HA-conversion pre-flight safety backup.
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/VolumeInstanceBackupCreateForHaConversion.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct VolumeInstanceBackupCreateForHaConversion;
-
 /// Used by `railway postgres pitr schedule set`.
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -669,15 +650,6 @@ pub struct VolumeInstanceBackupCreateForHaConversion;
     skip_serializing_none
 )]
 pub struct VolumeInstanceBackupScheduleUpdate;
-
-/// Used by `railway postgres pitr backup trigger`.
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "src/gql/schema.json",
-    query_path = "src/gql/mutations/strings/VolumeInstanceBackupScheduleTrigger.graphql",
-    response_derives = "Debug, Serialize, Clone"
-)]
-pub struct VolumeInstanceBackupScheduleTrigger;
 
 /// Front-loaded for phase B (HA cluster scale, adding new nodes to the canvas group); not yet called.
 #[derive(GraphQLQuery)]
