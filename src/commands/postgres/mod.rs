@@ -33,12 +33,13 @@ pub(super) struct ResourceRef {
 
 pub mod ha;
 pub mod ops_log;
+pub mod pgbouncer;
 pub mod pitr;
 
 /// Manage Postgres plugin features: point-in-time recovery, high availability, and connection pooling
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres ha status --service postgres\n  railway postgres ha convert --service postgres --replicas 2\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway postgres`.\n  Actions that change config (enable/disable/convert/revert/scale) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy)."
+    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres ha status --service postgres\n  railway postgres ha convert --service postgres --replicas 2\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway postgres`.\n  Actions that change config (enable/disable/convert/revert/add/remove/configure/scale) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy)."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -68,6 +69,9 @@ enum Commands {
 
     /// Manage high-availability clustering
     Ha(ha::Args),
+
+    /// Manage PgBouncer connection pooling
+    Pgbouncer(pgbouncer::Args),
 
     /// Show the local audit trail of postgres operations
     History(HistoryArgs),
@@ -111,6 +115,16 @@ pub async fn command(args: Args) -> Result<()> {
         }
         Commands::Ha(sub) => {
             ha::command(
+                sub,
+                project.clone(),
+                service.clone(),
+                environment.clone(),
+                json,
+            )
+            .await
+        }
+        Commands::Pgbouncer(sub) => {
+            pgbouncer::command(
                 sub,
                 project.clone(),
                 service.clone(),
@@ -362,6 +376,10 @@ mod tests {
             Args::parse_from(["postgres", "ha", "status"]).command,
             Commands::Ha(_)
         ));
+        assert!(matches!(
+            Args::parse_from(["postgres", "pgbouncer", "status"]).command,
+            Commands::Pgbouncer(_)
+        ));
     }
 
     #[test]
@@ -445,7 +463,7 @@ mod tests {
         assert_eq!(args.service.as_deref(), Some("web"));
         assert!(args.json);
 
-        let args = Args::parse_from(["postgres", "pitr", "status", "--service", "web", "--json"]);
+        let args = Args::parse_from(["postgres", "ha", "status", "--service", "web", "--json"]);
         assert_eq!(args.service.as_deref(), Some("web"));
         assert!(args.json);
     }
