@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod metrics_tui;
 pub mod outbound_networking;
 pub mod patroni;
+pub mod postgres_plugins;
 pub mod private_network;
 pub mod project;
 pub mod regions;

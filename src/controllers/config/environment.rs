@@ -43,6 +43,54 @@ pub struct ServiceInstance {
     pub is_deleted: Option<bool>,
     pub is_created: Option<bool>,
     pub parent_service_id: Option<String>,
+    /// Cluster membership role stamped by template conversion/scaling:
+    /// "root" | "replica" | "internal" | "edge". `None` for services that
+    /// aren't part of a cluster (or predate this field).
+    pub cluster_role: Option<String>,
+    /// Canvas group id, used to keep live-scaled replica/internal nodes
+    /// visually grouped with their cluster root (`groupSet`).
+    pub group_id: Option<String>,
+    /// Template-declared coordination-variable wiring for HA scale helpers,
+    /// stamped on the root service at conversion time. `None` for legacy
+    /// (pre-`clusterWiring`) Patroni clusters -- callers fall back to the
+    /// historical hardcoded Patroni wiring in that case (see
+    /// `cluster_scale::resolve_cluster_wiring`).
+    pub cluster_wiring: Option<ClusterWiring>,
+}
+
+/// Template-declared wiring map for HA scale helpers, mirroring
+/// `clusterWiringSchema` in `common/javascript/models/src/environment/schema.ts`.
+/// Lets `railway postgres ha scale` re-stamp coordination variables on an
+/// already-converted cluster without hardcoding any database-specific
+/// variable names. Set on the root service's `environment.config` entry.
+///
+/// In each format string, `{host}` is substituted with the node's
+/// private-domain reference and `{rootName}` with the cluster root's actual
+/// (possibly customer-renamed) service name.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClusterWiring {
+    /// Variable on each internal service that holds that node's own identity
+    /// (e.g. `ETCD_NAME`). Stamped per node on internal scale.
+    pub internal_node_name_variable: Option<String>,
+    /// Variable on root + replica services that holds the comma-separated
+    /// coordinator hostname list (e.g. `PATRONI_ETCD3_HOSTS`).
+    pub coordinator_hosts_variable: Option<String>,
+    /// Port appended to each coordinator host (e.g. 2379 for etcd).
+    pub coordinator_port: Option<i64>,
+    /// Variable on each replica service that holds that replica's own
+    /// identity (e.g. `PATRONI_NAME`). Stamped per replica on clone.
+    pub replica_node_name_variable: Option<String>,
+    /// Variable on the edge service that holds the comma-separated data-node
+    /// endpoint list (e.g. `POSTGRES_NODES`).
+    pub data_nodes_variable: Option<String>,
+    /// Format for each data-node entry. `{host}`/`{rootName}` are
+    /// substituted as described above; the rest is literal.
+    pub data_nodes_entry_format: Option<String>,
+    /// Variable on root + replica services holding the consensus quorum.
+    /// Restamped to a majority (`floor(dataNodes / 2) + 1`) on replica scale.
+    pub quorum_variable: Option<String>,
 }
 
 #[skip_serializing_none]
