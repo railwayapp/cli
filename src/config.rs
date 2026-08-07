@@ -108,11 +108,19 @@ pub struct RailwayConfig {
     pub code_agents: Option<BTreeMap<String, String>>,
 }
 
+// NOTE: no serde derives -- `Configs` itself is never (de)serialized, only
+// its `root_config` is. (A stray `skip_serializing_none` used to sit here;
+// it was inert without serde derives and breaks compilation once the struct
+// has an `Option` field.)
 #[derive(Debug)]
-#[serde_with::skip_serializing_none]
 pub struct Configs {
     pub root_config: RailwayConfig,
     root_config_path: PathBuf,
+    /// Per-instance snapshot of the `RAILWAY_BACKBOARD_URL` debug-build
+    /// escape hatch, taken at construction (see
+    /// [`Configs::backboard_url_override_from_env`]). Always `None` in
+    /// release builds.
+    backboard_url_override: Option<String>,
 }
 
 pub enum Environment {
@@ -138,6 +146,7 @@ impl Configs {
             let config = Self {
                 root_config,
                 root_config_path,
+                backboard_url_override: Self::backboard_url_override_from_env(),
             };
 
             return Ok(config);
@@ -146,7 +155,30 @@ impl Configs {
         Ok(Self {
             root_config_path,
             root_config: RailwayConfig::default(),
+            backboard_url_override: Self::backboard_url_override_from_env(),
         })
+    }
+
+    /// Debug-build-only escape hatch so a locally-built binary (or an
+    /// in-process test) can point every GraphQL call at a scripted backboard
+    /// (see `testkit::MockBackboard`). Snapshotted per instance at
+    /// construction, so parallel tests only need to serialize the env write
+    /// around building their `Configs`, not around using it. Deliberately
+    /// compiled out of release builds: unlike RAILWAY_ENV (which only picks
+    /// between the three fixed Railway hosts), an arbitrary URL override in
+    /// a shipped binary would let a hostile environment redirect
+    /// authenticated traffic.
+    fn backboard_url_override_from_env() -> Option<String> {
+        #[cfg(debug_assertions)]
+        {
+            std::env::var("RAILWAY_BACKBOARD_URL")
+                .ok()
+                .filter(|url| !url.is_empty())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
     }
 
     /// Absolute path to the root config file for the current environment.
@@ -320,6 +352,7 @@ impl Configs {
         Self {
             root_config: RailwayConfig::default(),
             root_config_path,
+            backboard_url_override: Self::backboard_url_override_from_env(),
         }
     }
 
@@ -367,6 +400,9 @@ impl Configs {
     }
 
     pub fn get_backboard(&self) -> String {
+        if let Some(url) = &self.backboard_url_override {
+            return url.clone();
+        }
         format!("https://backboard.{}/graphql/v2", self.get_host())
     }
 
@@ -935,6 +971,7 @@ mod tests {
         Configs {
             root_config_path: std::path::PathBuf::new(),
             root_config: RailwayConfig::default(),
+            backboard_url_override: None,
         }
     }
 

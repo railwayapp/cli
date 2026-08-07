@@ -486,4 +486,111 @@ mod tests {
         assert_eq!(response.template.name, "PostgreSQL");
         assert_eq!(response.template.serialized_config, None);
     }
+
+    mod graphql_layer {
+        use super::*;
+        use crate::testkit::MockBackboard;
+        use serde_json::json;
+
+        #[tokio::test]
+        async fn success_roundtrips_data_and_sends_variables() {
+            let server = MockBackboard::spawn();
+            server.stub(
+                "WorkflowStatus",
+                json!({ "workflowStatus": { "status": "Complete", "error": null } }),
+            );
+
+            let client = reqwest::Client::new();
+            let response = post_graphql::<queries::WorkflowStatus, _>(
+                &client,
+                server.url(),
+                queries::workflow_status::Variables {
+                    workflow_id: "wf-42".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+            use queries::workflow_status::WorkflowStatus;
+            assert!(matches!(
+                response.workflow_status.status,
+                WorkflowStatus::Complete
+            ));
+            assert_eq!(
+                server.variables_for("WorkflowStatus"),
+                vec![json!({ "workflowId": "wf-42" })]
+            );
+        }
+
+        #[tokio::test]
+        async fn graphql_errors_surface_the_servers_message() {
+            let server = MockBackboard::spawn();
+            server.stub_graphql_error("WorkflowStatus", "workflow blew up");
+
+            let client = reqwest::Client::new();
+            let err = post_graphql::<queries::WorkflowStatus, _>(
+                &client,
+                server.url(),
+                queries::workflow_status::Variables {
+                    workflow_id: "wf-42".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert!(matches!(err, RailwayError::GraphQLError(ref m) if m == "workflow blew up"));
+        }
+
+        #[tokio::test]
+        async fn missing_data_without_errors_is_reported_as_such() {
+            let server = MockBackboard::spawn();
+            server.stub_raw("WorkflowStatus", 200, r#"{"data": null}"#.to_string());
+
+            let client = reqwest::Client::new();
+            let err = post_graphql::<queries::WorkflowStatus, _>(
+                &client,
+                server.url(),
+                queries::workflow_status::Variables {
+                    workflow_id: "wf-42".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, RailwayError::MissingResponseData));
+        }
+
+        #[tokio::test]
+        async fn http_429_maps_to_ratelimited() {
+            let server = MockBackboard::spawn();
+            server.stub_raw("WorkflowStatus", 429, r#"{"data": null}"#.to_string());
+
+            let client = reqwest::Client::new();
+            let err = post_graphql::<queries::WorkflowStatus, _>(
+                &client,
+                server.url(),
+                queries::workflow_status::Variables {
+                    workflow_id: "wf-42".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, RailwayError::Ratelimited));
+        }
+
+        #[tokio::test]
+        async fn connection_refused_maps_to_fetch_error() {
+            // Port 9 (discard) is never listening locally.
+            let client = reqwest::Client::new();
+            let err = post_graphql::<queries::WorkflowStatus, _>(
+                &client,
+                "http://127.0.0.1:9/graphql/v2",
+                queries::workflow_status::Variables {
+                    workflow_id: "wf-42".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, RailwayError::FetchError(_)));
+        }
+    }
 }
