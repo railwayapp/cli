@@ -293,3 +293,99 @@ pub fn prepare_config_for_duplication(mut config: EnvironmentConfig) -> Environm
 
     config
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::MockBackboard;
+    use serde_json::json;
+
+    fn environment_payload(config: serde_json::Value) -> serde_json::Value {
+        json!({
+            "environment": {
+                "id": "env-1",
+                "name": "production",
+                "config": config,
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn parses_services_and_tolerates_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub(
+            "GetEnvironmentConfig",
+            environment_payload(json!({
+                "services": {
+                    "svc-1": {
+                        "source": { "image": "ghcr.io/railwayapp-templates/postgres-ssl:16" },
+                        "variables": { "PGDATA": { "value": "/var/lib/postgresql/data" } },
+                        "parentServiceId": "svc-0",
+                        // Fields newer than this build must be ignored, not
+                        // fail the parse -- the blob evolves server-side.
+                        "someFutureField": { "nested": true },
+                    }
+                },
+                "unknownTopLevelSection": [1, 2, 3],
+            })),
+        );
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        let response = fetch_environment_config(&client, &configs, "env-1", false)
+            .await
+            .unwrap();
+
+        assert_eq!(response.name, "production");
+        let service = response.config.services.get("svc-1").unwrap();
+        assert_eq!(
+            service.source.as_ref().unwrap().image.as_deref(),
+            Some("ghcr.io/railwayapp-templates/postgres-ssl:16")
+        );
+        assert_eq!(service.parent_service_id.as_deref(), Some("svc-0"));
+
+        // The decrypt flag must reach the wire.
+        assert_eq!(
+            server.variables_for("GetEnvironmentConfig"),
+            vec![json!({ "id": "env-1", "decryptVariables": false })]
+        );
+    }
+
+    #[tokio::test]
+    async fn decrypt_flag_is_passed_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub("GetEnvironmentConfig", environment_payload(json!({})));
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        fetch_environment_config(&client, &configs, "env-1", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            server.variables_for("GetEnvironmentConfig")[0]["decryptVariables"],
+            json!(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_config_blob_fails_with_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub(
+            "GetEnvironmentConfig",
+            environment_payload(json!({ "services": "not-an-object" })),
+        );
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        let Err(err) = fetch_environment_config(&client, &configs, "env-1", false).await else {
+            panic!("malformed config must fail to parse");
+        };
+        assert!(
+            format!("{err:#}").contains("Failed to parse environment config"),
+            "unexpected error: {err:#}"
+        );
+    }
+}

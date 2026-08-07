@@ -27,6 +27,8 @@ mod oauth;
 mod resources;
 mod subscription;
 mod table;
+#[cfg(test)]
+mod testkit;
 mod util;
 mod workspace;
 
