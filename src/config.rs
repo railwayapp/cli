@@ -155,30 +155,11 @@ impl Configs {
         Ok(std::path::Path::new(&home_dir).join(root_config_partial_path))
     }
 
-    /// Path to the lockfile used to serialize credential read-modify-write
-    /// cycles (token refresh) across concurrent CLI invocations. This is a
-    /// dedicated lockfile, never `config.json` itself, so locking never
-    /// interferes with the atomic config write.
-    pub fn config_lock_path() -> Result<PathBuf> {
-        let home_dir = dirs::home_dir().context("Unable to get home directory")?;
-        Ok(home_dir.join(".railway").join(".config.lock"))
-    }
-
     /// Re-read the root config from disk, discarding any in-memory state.
     /// Used after acquiring the config lock so a refresh sees credentials
     /// freshly written by another concurrent process.
     pub fn reload(&mut self) -> Result<()> {
-        match File::open(&self.root_config_path) {
-            Ok(mut file) => {
-                let mut serialized_config = vec![];
-                file.read_to_end(&mut serialized_config)?;
-                self.root_config = serde_json::from_slice(&serialized_config)
-                    .unwrap_or_else(|_| RailwayConfig::default());
-            }
-            Err(_) => {
-                self.root_config = RailwayConfig::default();
-            }
-        }
+        self.root_config = Self::read_root_config(&self.root_config_path).unwrap_or_default();
         Ok(())
     }
 
@@ -294,13 +275,68 @@ impl Configs {
         }
         self.root_config.user.token_expires_at = Some(expires_at);
         self.root_config.user.token = None; // Clear legacy token
-        self.write()
+        self.write_credentials()
+    }
+
+    /// Drop the stored OAuth credentials after the server has told us they
+    /// are permanently dead (`invalid_grant`).
+    ///
+    /// Without this the CLI re-presents the same revoked refresh token on
+    /// every single invocation, forever: the refresh fails, the stale access
+    /// token is used anyway, and the user sees a generic "Unauthorized" with
+    /// no way out but deleting `~/.railway` by hand. Clearing turns that
+    /// permanent wedge into one clean `railway login`.
+    ///
+    /// Deliberately narrower than `reset()`: only the credential fields are
+    /// touched, so the linked project/environment/service survive and the
+    /// user lands back where they were after logging in.
+    pub fn clear_oauth_tokens(&mut self) -> Result<()> {
+        self.root_config.user.access_token = None;
+        self.root_config.user.refresh_token = None;
+        self.root_config.user.token_expires_at = None;
+        // `get_railway_auth_token` falls back to the legacy `token`, so leaving
+        // it behind would keep an old install looking authenticated after the
+        // clear.
+        self.root_config.user.token = None;
+        self.write_credentials()
     }
 
     pub fn save_user_id(&mut self, id: &str) -> Result<()> {
         anyhow::ensure!(!id.is_empty(), "user id cannot be empty");
         self.root_config.user.id = Some(id.to_string());
         self.write()
+    }
+
+    /// Build a `Configs` backed by an explicit path, for tests that need to
+    /// exercise the real read/modify/write cycle without touching `$HOME`.
+    #[cfg(test)]
+    pub(crate) fn for_test(root_config_path: PathBuf) -> Self {
+        Self {
+            root_config: RailwayConfig::default(),
+            root_config_path,
+        }
+    }
+
+    /// Take the exclusive config lock covering this config file, without
+    /// blocking the async runtime.
+    ///
+    /// Acquisition polls with a blocking sleep, so under contention it would
+    /// park a tokio worker for up to `CONFIG_LOCK_TIMEOUT` and starve unrelated
+    /// tasks — the long-running MCP server serves tool calls concurrently, so
+    /// that is a real stall, not a theoretical one.
+    pub(crate) async fn acquire_lock(&self) -> ConfigLock {
+        let path = self.root_config_path.clone();
+        tokio::task::spawn_blocking(move || ConfigLock::acquire(&path))
+            .await
+            .unwrap_or(ConfigLock { file: None })
+    }
+
+    /// Read and parse the root config, or `None` when it is absent or corrupt.
+    fn read_root_config(path: &std::path::Path) -> Option<RailwayConfig> {
+        let mut file = File::open(path).ok()?;
+        let mut buf = vec![];
+        file.read_to_end(&mut buf).ok()?;
+        serde_json::from_slice(&buf).ok()
     }
 
     pub fn get_environment_id() -> Environment {
@@ -712,7 +748,47 @@ impl Configs {
             )
     }
 
+    /// Persist the config, taking the credential fields from disk rather than
+    /// from this (possibly stale) in-memory snapshot.
+    ///
+    /// A process can hold a `Configs` for a long time — `railway mcp` keeps one
+    /// for the whole editor session — and then write it for an unrelated reason
+    /// such as linking a project. Serialising its whole snapshot would put
+    /// whatever credentials it loaded at startup back on disk, undoing a token
+    /// refresh (or a `clear_oauth_tokens` after a dead grant) performed by
+    /// another process in the meantime. Credentials belong to the auth paths, so
+    /// an ordinary write never carries them: see [`Self::write_credentials`].
     pub fn write(&self) -> Result<()> {
+        let mut to_write = serde_json::to_value(&self.root_config)?;
+        // Re-read immediately before writing so the window in which a
+        // concurrent refresh could be lost is microseconds rather than the
+        // lifetime of this `Configs`.
+        if let Some(disk) = Self::read_root_config(&self.root_config_path) {
+            // Merge on the typed struct so the field set is checked by the
+            // compiler: a new credential field on `RailwayUser` is picked up
+            // automatically instead of being silently dropped. Everything that
+            // is not a credential (`id`) stays owned by this caller, so
+            // `save_user_id` still works.
+            let merged = RailwayUser {
+                id: self.root_config.user.id.clone(),
+                ..disk.user
+            };
+            to_write["user"] = serde_json::to_value(merged)?;
+        }
+        self.write_value(&to_write)
+    }
+
+    /// Persist the config including this instance's credential fields.
+    ///
+    /// Only the auth paths may claim that ownership: login/refresh
+    /// ([`Self::save_oauth_tokens`]), a dead grant
+    /// ([`Self::clear_oauth_tokens`]), and logout.
+    pub(crate) fn write_credentials(&self) -> Result<()> {
+        let value = serde_json::to_value(&self.root_config)?;
+        self.write_value(&value)
+    }
+
+    fn write_value(&self, value: &serde_json::Value) -> Result<()> {
         let config_dir = self
             .root_config_path
             .parent()
@@ -725,11 +801,17 @@ impl Configs {
         // umask — the common 022 would leave it world-readable.
         secure_config_dir(config_dir)?;
 
-        // Use temporary file to achieve atomic write:
-        //  1. Open file ~/railway/config.tmp
-        //  2. Serialize config to temporary file
-        //  3. Rename temporary file to ~/railway/config.json (atomic operation)
-        let tmp_file_path = self.root_config_path.with_extension("tmp");
+        // Use a temporary file to achieve an atomic write. The name is unique per
+        // writer — matching `util::write_atomic`'s pid+nanos convention — because
+        // a shared `config.tmp` opened with truncate lets two concurrent writers
+        // interleave into one file and produce malformed JSON, which the loader
+        // then "repairs" by discarding every token. Threads matter as much as
+        // processes here: the MCP server serves tool calls concurrently.
+        let pid = std::process::id();
+        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let tmp_file_path = self
+            .root_config_path
+            .with_extension(format!("tmp.{pid}-{nanos}"));
         let mut options = File::options();
         options.create(true).write(true).truncate(true);
         // Set the mode at creation so the tokens are never briefly readable.
@@ -741,11 +823,12 @@ impl Configs {
         let tmp_file = options.open(&tmp_file_path)?;
         // An existing tmp file keeps its old mode, so enforce it either way.
         secure_config_file(&tmp_file_path)?;
-        serde_json::to_writer_pretty(&tmp_file, &self.root_config)?;
+        serde_json::to_writer_pretty(&tmp_file, value)?;
         tmp_file.sync_all()?;
 
-        // Rename file to final destination to achieve atomic write
-        fs::rename(tmp_file_path.as_path(), &self.root_config_path)?;
+        // Rename to the final destination. `rename_replacing` is atomic on both
+        // Unix and Windows.
+        crate::util::rename_replacing(tmp_file_path.as_path(), &self.root_config_path)?;
 
         Ok(())
     }
@@ -866,6 +949,62 @@ mod tests {
         );
 
         assert!(has_credentials);
+    }
+}
+
+/// How long to wait for the config lock before giving up and proceeding without
+/// it. Kept short so a stale lock can never wedge the CLI for long.
+const CONFIG_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Poll interval while waiting for the config lock.
+const CONFIG_LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// RAII guard around an exclusive advisory lock on the config lockfile.
+/// Releasing happens on drop, covering all error paths.
+pub(crate) struct ConfigLock {
+    file: Option<File>,
+}
+
+impl ConfigLock {
+    /// Acquire the lock guarding `config_path`. The lockfile is a sibling of the
+    /// config (never the config itself, so locking cannot interfere with the
+    /// atomic rename). Failure to lock is non-fatal: proceeding unlocked is
+    /// strictly better than wedging the CLI, and the credential merge in `write`
+    /// still narrows the race to microseconds.
+    fn acquire(config_path: &std::path::Path) -> Self {
+        let lock_path = config_path.with_extension("lock");
+        if let Some(parent) = lock_path.parent() {
+            if create_dir_all(parent).is_err() {
+                return Self { file: None };
+            }
+        }
+        let Ok(file) = File::create(&lock_path) else {
+            return Self { file: None };
+        };
+
+        use fs2::FileExt;
+        let deadline = std::time::Instant::now() + CONFIG_LOCK_TIMEOUT;
+        loop {
+            if file.try_lock_exclusive().is_ok() {
+                return Self { file: Some(file) };
+            }
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "{}",
+                    "Warning: timed out waiting for config lock; proceeding without it".yellow()
+                );
+                return Self { file: None };
+            }
+            std::thread::sleep(CONFIG_LOCK_POLL_INTERVAL);
+        }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            use fs2::FileExt;
+            let _ = FileExt::unlock(&file);
+        }
     }
 }
 

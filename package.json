@@ -1,6 +1,6 @@
 {
   "name": "@railway/cli",
-  "version": "5.30.1",
+  "version": "5.31.0",
   "description": "Develop and deploy code with zero configuration",
   "type": "module",
   "author": "Jake Runzer",
@@ -24,7 +24,6 @@
     "README.md"
   ],
   "dependencies": {
-    "@napi-rs/triples": "^1.1.0",
     "node-fetch": "^3.1.0",
     "tar": "^6.1.11"
   }

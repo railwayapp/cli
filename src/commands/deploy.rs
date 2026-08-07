@@ -1,6 +1,5 @@
 use anyhow::bail;
 use is_terminal::IsTerminal;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::{
@@ -123,9 +122,14 @@ pub async fn fetch_and_create(
 
     let template_name = details.template.name.clone();
 
-    let mut config = DeserializedTemplateConfig::deserialize(
-        &details.template.serialized_config.unwrap_or_default(),
-    )?;
+    // Work on the raw JSON value: the config is passed through to the
+    // deploy mutation verbatim (only variable values are filled in below).
+    // Round-tripping it through typed structs silently dropped every field
+    // the structs didn't declare — clusterRole, parentServiceId, exposure,
+    // numReplicas, backup schedules, variable generators/sealing, … — so
+    // templates deployed via the CLI lost their cluster metadata and
+    // replica/volume configuration.
+    let mut config = details.template.serialized_config.unwrap_or_default();
 
     ensure_project_and_environment_exist(client, configs, linked_project).await?;
     if verbose {
@@ -143,29 +147,55 @@ pub async fn fetch_and_create(
             .collect()
     };
 
-    for s in &mut config.services.values_mut() {
-        for (key, variable) in &mut s.variables {
-            let value = if let Some(value) = vars.get(&format!("{}.{key}", s.name)) {
+    let services = config
+        .get_mut("services")
+        .and_then(|s| s.as_object_mut())
+        .map(|s| s.values_mut().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for service in services {
+        let service_name = service
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let Some(variables) = service.get_mut("variables").and_then(|v| v.as_object_mut()) else {
+            continue;
+        };
+        for (key, variable) in variables.iter_mut() {
+            if variable.is_null() {
+                continue;
+            }
+            let default_value = variable
+                .get("defaultValue")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty());
+            let is_optional = variable
+                .get("isOptional")
+                .and_then(|v| v.as_bool())
+                .unwrap_or_default();
+
+            let value = if let Some(value) = vars.get(&format!("{service_name}.{key}")) {
                 value.clone()
             } else if let Some(value) = vars.get(key) {
                 value.clone()
-            } else if let Some(value) = variable.default_value.as_ref().filter(|v| !v.is_empty()) {
-                value.clone()
-            } else if !variable.is_optional.unwrap_or_default() {
+            } else if let Some(value) = default_value {
+                value.to_string()
+            } else if !is_optional {
+                let description = variable
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(|d| format!("   *{d}*\n"))
+                    .unwrap_or_default();
                 prompt_text(&format!(
-                    "Environment Variable {key} for service {} is required, please set a value:\n{}",
-                    s.name,
-                    variable
-                        .description
-                        .as_deref()
-                        .map(|d| format!("   *{d}*\n"))
-                        .unwrap_or_default(),
+                    "Environment Variable {key} for service {service_name} is required, please set a value:\n{description}",
                 ))?
             } else {
                 continue;
             };
 
-            variable.value = Some(value);
+            if let Some(variable) = variable.as_object_mut() {
+                variable.insert("value".to_string(), serde_json::Value::String(value));
+            }
         }
     }
 
@@ -175,7 +205,7 @@ pub async fn fetch_and_create(
         project_id: linked_project.project.clone(),
         environment_id: linked_project.environment_id()?.to_string(),
         template_id: details.template.id.clone(),
-        serialized_config: serde_json::to_value(&config).context("Failed to serialize config")?,
+        serialized_config: config,
     };
     if verbose {
         eprintln!("deploying template");
@@ -251,85 +281,4 @@ pub async fn fetch_and_create(
     }
 
     Ok(())
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeserializedServiceNetworking {
-    #[serde(default)]
-    service_domains: HashMap<String, serde_json::Value>,
-
-    #[serde(default)]
-    tcp_proxies: HashMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeserializedServiceVolumeMount {
-    mount_path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeserializedServiceVariable {
-    #[serde(default)]
-    default_value: Option<String>,
-
-    #[serde(default)]
-    value: Option<String>,
-
-    #[serde(default)]
-    description: Option<String>,
-
-    #[serde(default)]
-    is_optional: Option<bool>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeserializedServiceDeploy {
-    healthcheck_path: Option<String>,
-    start_command: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-enum DeserializedServiceSource {
-    Image {
-        image: String,
-    },
-    #[serde(rename_all = "camelCase")]
-    Repo {
-        root_directory: Option<String>,
-        repo: String,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeserializedTemplateService {
-    #[serde(default)]
-    deploy: Option<DeserializedServiceDeploy>,
-
-    #[serde(default)]
-    icon: Option<String>,
-    name: String,
-
-    #[serde(default)]
-    networking: Option<DeserializedServiceNetworking>,
-
-    #[serde(default)]
-    source: Option<DeserializedServiceSource>,
-
-    #[serde(default)]
-    variables: HashMap<String, DeserializedServiceVariable>,
-    #[serde(default)]
-    volume_mounts: HashMap<String, DeserializedServiceVolumeMount>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeserializedTemplateConfig {
-    #[serde(default)]
-    services: HashMap<String, DeserializedTemplateService>,
 }

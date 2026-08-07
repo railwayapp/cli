@@ -26,7 +26,7 @@ pub fn get_oauth_client_id() -> &'static str {
     })
 }
 
-fn get_oauth_base_url(host: &str) -> String {
+pub(crate) fn get_oauth_base_url(host: &str) -> String {
     format!("https://backboard.{host}/oauth")
 }
 
@@ -243,9 +243,80 @@ pub async fn poll_for_token(host: &str, device_auth: &DeviceAuthResponse) -> Res
     }
 }
 
-pub async fn refresh_access_token(host: &str, refresh_token: &str) -> Result<TokenResponse> {
-    let client = build_http_client()?;
-    let url = format!("{}/token", get_oauth_base_url(host));
+/// Why a refresh attempt failed, and whether the stored credentials are still
+/// worth keeping.
+///
+/// Wraps the [`RailwayError`] that [`classify_refresh_error`] already produces,
+/// so the permanent-vs-retryable decision lives in exactly one place and the
+/// typed error survives all the way to the caller.
+#[derive(Debug)]
+pub enum RefreshFailure {
+    /// The grant is dead server-side. Clear the credentials and re-login.
+    Terminal(RailwayError),
+    /// Transient — keep the credentials and try again later.
+    Transient(RailwayError),
+}
+
+impl RefreshFailure {
+    fn classify(error: &str, desc: String) -> Self {
+        match classify_refresh_error(error, desc) {
+            permanent @ RailwayError::OAuthInvalidGrant(_) => Self::Terminal(permanent),
+            other => Self::Transient(other),
+        }
+    }
+}
+
+/// Number of attempts for a transient failure (1 initial + 2 retries).
+pub const REFRESH_MAX_ATTEMPTS: u32 = 3;
+
+/// Refresh against an explicit OAuth base URL, retrying transient failures with
+/// exponential backoff. Takes a base URL (rather than a host) so the retry and
+/// classification policy can be exercised against a local server in tests.
+///
+/// Hand-rolled rather than using [`crate::util::retry::retry_with_backoff`]:
+/// that helper retries every `Err`, and here a `Terminal` failure must abort
+/// immediately — expressing that through it would mean returning
+/// `Result<Result<_, RefreshFailure>>` from the closure, which reads worse than
+/// the loop.
+pub async fn refresh_access_token_at(
+    base_url: &str,
+    refresh_token: &str,
+    backoff: Duration,
+) -> std::result::Result<TokenResponse, RefreshFailure> {
+    // One client for all attempts: building one re-parses the whole system root
+    // store (~80ms) and starts with a cold connection pool, so rebuilding per
+    // attempt would add ~160ms of pure setup to a retried refresh.
+    let client = build_http_client()
+        .map_err(|e| RefreshFailure::Transient(RailwayError::OAuthRefreshFailed(e.to_string())))?;
+
+    for attempt in 0..REFRESH_MAX_ATTEMPTS {
+        if attempt > 0 {
+            // Exponential backoff. A refresh storm after an outage is itself a
+            // load problem, so back off rather than hammering a recovering
+            // token endpoint.
+            tokio::time::sleep(backoff * (1 << (attempt - 1))).await;
+        }
+
+        match attempt_refresh(&client, base_url, refresh_token).await {
+            Ok(resp) => return Ok(resp),
+            // A dead grant will still be dead on the next attempt; fail fast so
+            // the caller can clear credentials and prompt a login.
+            Err(failure @ RefreshFailure::Terminal(_)) => return Err(failure),
+            // Out of attempts — surface the last cause rather than a summary.
+            Err(failure) if attempt + 1 == REFRESH_MAX_ATTEMPTS => return Err(failure),
+            Err(_) => {}
+        }
+    }
+
+    unreachable!("the final attempt returns rather than falling through")
+}
+
+pub(crate) async fn attempt_refresh(
+    client: &reqwest::Client,
+    base_url: &str,
+    refresh_token: &str,
+) -> std::result::Result<TokenResponse, RefreshFailure> {
+    let url = format!("{base_url}/token");
     let client_id = get_oauth_client_id();
 
     let resp = client
@@ -256,12 +327,29 @@ pub async fn refresh_access_token(host: &str, refresh_token: &str) -> Result<Tok
             ("client_id", client_id),
         ])
         .send()
-        .await?;
+        .await
+        // Connection refused / reset / timeout: the credentials are untouched.
+        .map_err(|e| {
+            RefreshFailure::Transient(RailwayError::OAuthRefreshFailed(format!(
+                "network error: {e}"
+            )))
+        })?;
 
     let status = resp.status();
     if status.is_success() {
-        let token_resp: TokenResponse = resp.json().await?;
-        return Ok(token_resp);
+        return resp.json::<TokenResponse>().await.map_err(|e| {
+            RefreshFailure::Transient(RailwayError::OAuthRefreshFailed(format!(
+                "malformed token response: {e}"
+            )))
+        });
+    }
+
+    // 5xx is the server's problem, never the token's — don't even look at the
+    // body for an error code.
+    if status.is_server_error() {
+        return Err(RefreshFailure::Transient(RailwayError::OAuthRefreshFailed(
+            format!("HTTP {status}"),
+        )));
     }
 
     let error_resp: TokenErrorResponse = resp.json().await.unwrap_or(TokenErrorResponse {
@@ -269,5 +357,54 @@ pub async fn refresh_access_token(host: &str, refresh_token: &str) -> Result<Tok
         error_description: Some(format!("HTTP {status}")),
     });
     let desc = error_resp.error_description.unwrap_or_default();
-    Err(RailwayError::OAuthRefreshFailed(format!("{}: {desc}", error_resp.error)).into())
+    Err(RefreshFailure::classify(&error_resp.error, desc))
+}
+
+/// Split token-endpoint failures into permanent and retryable.
+///
+/// RFC 6749 §5.2: `invalid_grant` means the refresh token is revoked,
+/// expired, or unknown to the server — no retry can ever succeed, so the
+/// caller deletes the stored credential. Everything else (5xx, rate limits,
+/// `unknown` from an unparseable body) may succeed later and must keep its
+/// tokens: backboard serves real 500s on `/token` from Redis and Postgres
+/// pool exhaustion, and treating those as permanent would sign every active
+/// user out during an outage.
+fn classify_refresh_error(error: &str, desc: String) -> RailwayError {
+    if error == "invalid_grant" {
+        return RailwayError::OAuthInvalidGrant(desc);
+    }
+    RailwayError::OAuthRefreshFailed(format!("{error}: {desc}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_grant_is_permanent() {
+        let err = classify_refresh_error("invalid_grant", "refresh token not found".into());
+        assert!(matches!(err, RailwayError::OAuthInvalidGrant(_)));
+    }
+
+    /// The property that keeps a backboard outage from becoming a mass
+    /// logout: only `invalid_grant` may clear credentials.
+    #[test]
+    fn transient_failures_are_not_permanent() {
+        for error in [
+            "unknown",      // unparseable body, e.g. a 500 HTML page
+            "server_error", // Redis/Prisma pool exhaustion on /token
+            "temporarily_unavailable",
+            "slow_down",
+            "invalid_request",
+            "invalid_client",
+        ] {
+            assert!(
+                !matches!(
+                    classify_refresh_error(error, "boom".into()),
+                    RailwayError::OAuthInvalidGrant(_)
+                ),
+                "{error} must not be treated as a permanently dead credential"
+            );
+        }
+    }
 }

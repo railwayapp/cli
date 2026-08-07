@@ -236,6 +236,11 @@ async fn fresh_token(state: &ProxyState) -> Option<String> {
         }
     }
     if let Err(e) = ensure_valid_token(&mut configs).await {
+        // On `invalid_grant` the dead credential has already been cleared, so
+        // `get_railway_auth_token()` below returns None and the caller answers
+        // with LOGIN_HINT — actionable inside an MCP harness, where this
+        // stderr line is invisible. Previously the stale token was handed back
+        // and every tool call failed as an opaque "Unauthorized" instead.
         eprintln!("railway mcp proxy: token refresh failed: {e:#}");
     }
     configs.get_railway_auth_token()
