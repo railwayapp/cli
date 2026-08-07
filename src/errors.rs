@@ -12,6 +12,19 @@ use thiserror::Error;
 /// silently disable mid-session re-auth.
 pub const AUTH_FAILURE_MARKERS: &[&str] = &["Unauthorized", "Not authenticated"];
 
+/// `Retry-After` turned into something worth reading. The server sends it on
+/// every 429; without it the only honest thing to say is "later".
+fn ratelimit_message(retry_after_secs: Option<u64>) -> String {
+    match retry_after_secs {
+        Some(secs) if secs > 90 => format!(
+            "You are being ratelimited. Try again in about {} minutes",
+            secs.div_ceil(60)
+        ),
+        Some(secs) => format!("You are being ratelimited. Try again in {secs} seconds"),
+        None => "You are being ratelimited. Please try again later".to_string(),
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum RailwayError {
     #[error("Unauthorized. Please login with `railway login`")]
@@ -111,8 +124,8 @@ pub enum RailwayError {
     #[error("Connection URL should point to the Railway TCP proxy")]
     InvalidConnectionVariable,
 
-    #[error("You are being ratelimited. Please try again later")]
-    Ratelimited,
+    #[error("{}", ratelimit_message(*retry_after_secs))]
+    Ratelimited { retry_after_secs: Option<u64> },
 
     #[error("Device code expired. Please run `railway login` again.")]
     OAuthDeviceCodeExpired,
@@ -175,7 +188,7 @@ impl RailwayError {
             RailwayError::TwoFactorEnforcementRequired(_, _) => "TWO_FACTOR_REQUIRED",
             RailwayError::ConnectionVariableNotFound(_) => "CONNECTION_VARIABLE_NOT_FOUND",
             RailwayError::InvalidConnectionVariable => "INVALID_CONNECTION_VARIABLE",
-            RailwayError::Ratelimited => "RATELIMITED",
+            RailwayError::Ratelimited { .. } => "RATELIMITED",
             RailwayError::OAuthDeviceCodeExpired => "OAUTH_DEVICE_CODE_EXPIRED",
             RailwayError::OAuthAccessDenied => "OAUTH_ACCESS_DENIED",
             RailwayError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",

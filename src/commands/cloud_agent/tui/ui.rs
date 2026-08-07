@@ -1005,7 +1005,11 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 },
                 ("d", "delete agent"),
             ],
-            _ => vec![("enter", "open"), ("n", "new agent")],
+            _ => vec![
+                ("enter", "open"),
+                ("n", "new agent"),
+                ("shift+r", "find agents"),
+            ],
         }
     };
     // Only worth advertising once there is somewhere to cycle to; on a single
