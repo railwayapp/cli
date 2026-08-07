@@ -6,7 +6,7 @@ use colored::Colorize;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
-use crate::commands::cloud_agent::prefs::AgentPrefs;
+use crate::commands::cloud_agent::prefs::{AgentPrefs, DefaultProject};
 use crate::commands::cloud_agent::skills_sync;
 use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
 use crate::commands::ssh::{
@@ -1219,7 +1219,7 @@ async fn sole_owned_agent_id(
         [] => Ok(None),
         [only] => Ok(Some(only.id.clone())),
         many => bail!(
-            "You have {} cloud agents in this environment and no local record of which one `railway code` should use:\n{}\nPick one in the dashboard, or `railway code --new` to add another.",
+            "You have {} cloud agents in this environment and no local record of which one `railway code` should use:\n{}\nPick one with `railway ca`, or `railway code --new` to add another.",
             many.len(),
             many.iter()
                 .map(|a| format!("  {} ({})", a.name, a.id))
@@ -1236,6 +1236,112 @@ async fn sole_owned_agent_id(
 /// Adoption exists because agents never self-reap: a second machine or a wiped
 /// CLI config that created a duplicate would quietly bill for two boxes
 /// forever, which is worth one extra lookup to avoid.
+/// Where a launch lands, in the order `railway ca` uses.
+///
+/// The configured default project is the answer to "where do agents go", so it
+/// beats the linked directory — a link is about deploys, and running
+/// `railway code` inside some service's checkout should not put an agent there.
+/// Flags still win over both: they are the caller saying it outright.
+///
+/// With nothing to go on, this runs `railway ca setup` rather than the
+/// workspace → project → environment picker. The picker answers one launch; the
+/// setup flow answers every launch after it, and asks the same question.
+async fn resolve_target(
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    args: &LaunchArgs,
+    prefs: &mut AgentPrefs,
+    home: &Path,
+) -> Result<(String, String)> {
+    // The link is only consulted when nothing better is available, and reading
+    // it can fail for reasons that are not this run's problem (no link at all,
+    // the RAILWAY_ENVIRONMENT_ID-without-PROJECT_ID guard).
+    let linked = if args.project.is_none() && args.environment.is_none() {
+        configs
+            .get_linked_project()
+            .await
+            .ok()
+            .and_then(|l| l.environment.clone().map(|env| (l.project, env)))
+    } else {
+        None
+    };
+
+    match choose_target(args, prefs.default_project.as_ref(), linked) {
+        // Either flag means the caller is targeting deliberately; hand both to
+        // the shared resolver so `-p` alone still finds an environment.
+        TargetSource::Flags => {
+            resolve_project_and_env(
+                configs,
+                client,
+                args.project.clone(),
+                args.environment.clone(),
+            )
+            .await
+        }
+        TargetSource::Configured(project_id, environment_id)
+        | TargetSource::Linked(project_id, environment_id) => Ok((project_id, environment_id)),
+        TargetSource::Setup => {
+            println!(
+                "{}",
+                "No default project for cloud agents yet — let's set one up.".dimmed()
+            );
+            crate::commands::cloud_agent::setup::command(Default::default()).await?;
+            *prefs = AgentPrefs::load_in(home).unwrap_or_default();
+
+            match prefs.default_project.clone() {
+                Some(default) => Ok((default.project_id, default.environment_id)),
+                // They skipped the question. Fall back to the one-off picker so
+                // the launch they asked for still happens.
+                None => resolve_project_and_env(configs, client, None, None).await,
+            }
+        }
+        TargetSource::Ask => resolve_project_and_env(configs, client, None, None).await,
+    }
+}
+
+/// Which answer wins, given what is available. Separated from the I/O so the
+/// order is checked by tests rather than by reading it.
+#[derive(Debug, PartialEq, Eq)]
+enum TargetSource {
+    /// `-p`/`-e` were given; the shared resolver takes it from here.
+    Flags,
+    Configured(String, String),
+    Linked(String, String),
+    /// Nothing to go on, and someone to ask: run `railway ca setup`.
+    Setup,
+    /// Nothing to go on and nobody to ask — the one-off picker, which errors
+    /// with instructions when it cannot prompt either.
+    Ask,
+}
+
+fn choose_target(
+    args: &LaunchArgs,
+    configured: Option<&DefaultProject>,
+    linked: Option<(String, String)>,
+) -> TargetSource {
+    if args.project.is_some() || args.environment.is_some() {
+        return TargetSource::Flags;
+    }
+    if let Some(default) = configured {
+        return TargetSource::Configured(
+            default.project_id.clone(),
+            default.environment_id.clone(),
+        );
+    }
+    // A linked directory is a worse answer than a configured default but a
+    // better one than a question, and plenty of people rely on it.
+    if let Some((project_id, environment_id)) = linked {
+        return TargetSource::Linked(project_id, environment_id);
+    }
+    // Only offer setup when there is someone to answer it. The TUI always
+    // passes an explicit target, so this cannot fire underneath a frame, and a
+    // script gets the picker's error rather than a prompt it can never answer.
+    match is_stdout_terminal() {
+        true => TargetSource::Setup,
+        false => TargetSource::Ask,
+    }
+}
+
 async fn resolve_agent(
     configs: &mut Configs,
     client: &reqwest::Client,
@@ -1682,13 +1788,8 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
     // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let (project_id, environment_id) = resolve_project_and_env(
-        &mut configs,
-        &client,
-        args.project.clone(),
-        args.environment.clone(),
-    )
-    .await?;
+    let (project_id, environment_id) =
+        resolve_target(&mut configs, &client, args, &mut prefs, &home).await?;
 
     let (cloud_agent, created) =
         resolve_agent(&mut configs, &client, args, &environment_id, progress).await?;
@@ -2114,6 +2215,87 @@ mod tests {
         assert!(
             nasty.contains(r"'\''"),
             "expected shell-escaped quoting: {nasty}"
+        );
+    }
+
+    fn default_project() -> DefaultProject {
+        DefaultProject {
+            project_id: "proj_default".into(),
+            project_name: "Cloud Agents".into(),
+            environment_id: "env_default".into(),
+            environment_name: "production".into(),
+        }
+    }
+
+    /// The order `railway ca` uses, so a launch lands in the same place from
+    /// either command.
+    #[test]
+    fn the_configured_default_beats_the_linked_directory() {
+        let linked = || Some(("proj_linked".to_string(), "env_linked".to_string()));
+
+        // Flags win outright — the caller said it.
+        let args = LaunchArgs {
+            project: Some("proj_flag".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            choose_target(&args, Some(&default_project()), linked()),
+            TargetSource::Flags
+        );
+        // Including `-e` on its own, so the shared resolver can find the project.
+        let args = LaunchArgs {
+            environment: Some("env_flag".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            choose_target(&args, Some(&default_project()), linked()),
+            TargetSource::Flags
+        );
+
+        // A configured default beats a linked directory: the default answers
+        // "where do agents go", a link answers "what do I deploy".
+        assert_eq!(
+            choose_target(&LaunchArgs::default(), Some(&default_project()), linked()),
+            TargetSource::Configured("proj_default".into(), "env_default".into())
+        );
+
+        // With no default, the link is still better than a question.
+        assert_eq!(
+            choose_target(&LaunchArgs::default(), None, linked()),
+            TargetSource::Linked("proj_linked".into(), "env_linked".into())
+        );
+    }
+
+    /// Nothing configured and nothing linked runs the setup flow, so the answer
+    /// is remembered instead of being asked again next launch. Only where there
+    /// is someone to ask.
+    #[test]
+    fn nothing_to_go_on_runs_setup_when_there_is_a_terminal() {
+        let want = match is_stdout_terminal() {
+            true => TargetSource::Setup,
+            false => TargetSource::Ask,
+        };
+        assert_eq!(choose_target(&LaunchArgs::default(), None, None), want);
+    }
+
+    /// The TUI resolves its own target and passes it explicitly, which is what
+    /// keeps the setup flow — and every other prompt — from ever being drawn
+    /// underneath a frame.
+    #[test]
+    fn a_tui_launch_always_targets_by_flag() {
+        let args = LaunchArgs::for_target(
+            "proj_1".into(),
+            "env_prod".into(),
+            "claude",
+            false,
+            None,
+            None,
+        );
+        assert!(args.project.is_some() && args.environment.is_some());
+        assert_eq!(
+            choose_target(&args, None, None),
+            TargetSource::Flags,
+            "a TUI launch must never reach a prompt"
         );
     }
 
