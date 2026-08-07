@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod cluster_scale;
 pub mod config;
 pub mod database;
 pub mod db_stats;
