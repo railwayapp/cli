@@ -361,6 +361,19 @@ impl Configs {
     }
 
     pub fn get_backboard(&self) -> String {
+        // Debug-build-only escape hatch so a locally-built binary can be
+        // pointed at a scripted backboard (see test-postgres-cli's mock
+        // flows). Deliberately NOT honored in release builds: unlike
+        // RAILWAY_ENV (which only selects between the three fixed Railway
+        // hosts), an arbitrary URL override in a shipped binary would let a
+        // hostile environment redirect authenticated traffic.
+        #[cfg(debug_assertions)]
+        if let Ok(url) = std::env::var("RAILWAY_BACKBOARD_URL")
+            && !url.is_empty()
+        {
+            return url;
+        }
+
         format!("https://backboard.{}/graphql/v2", self.get_host())
     }
 
