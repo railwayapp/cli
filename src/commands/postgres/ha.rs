@@ -141,13 +141,27 @@ pub async fn command(
 
 /// Members whose live Patroni role/state actually matters for `status` and
 /// `switchover`/`revert`'s precheck -- the data nodes (root + replicas).
-/// Coordinator/edge members don't run Patroni themselves.
-fn data_node_members(ha_state: &HaState) -> Vec<(String, String)> {
+/// Coordinator/edge members don't run Patroni themselves. Each entry is
+/// `(service_id, patroni_member_name)` -- the name the probe join uses,
+/// derived from the node's identity variable (see
+/// `postgres_plugins::patroni_member_name`).
+fn data_node_members(ha_state: &HaState, config: &EnvironmentConfig) -> Vec<(String, String)> {
+    let root_id = ha_state.root_service_id.clone().unwrap_or_default();
     ha_state
         .members
         .iter()
         .filter(|m| matches!(m.cluster_role.as_deref(), Some("root") | Some("replica")))
-        .map(|m| (m.service_id.clone(), m.service_name.clone()))
+        .map(|m| {
+            (
+                m.service_id.clone(),
+                postgres_plugins::patroni_member_name(
+                    config,
+                    &root_id,
+                    &m.service_id,
+                    &m.service_name,
+                ),
+            )
+        })
         .collect()
 }
 
@@ -179,7 +193,7 @@ async fn print_status(
     let ha_state = postgres_plugins::compute_ha_state(config, &root.root_id, &names);
 
     let live = if include_live && ha_state.is_cluster {
-        match patroni::probe_members(ctx, &data_node_members(&ha_state)).await {
+        match patroni::probe_members(ctx, &data_node_members(&ha_state, config)).await {
             Ok(live) => live,
             Err(err) => {
                 eprintln!("Warning: could not probe live cluster status: {err:#}");
@@ -353,7 +367,24 @@ async fn convert(
         return Ok(());
     }
 
-    let volume_instance_id = target_service.volume_mounts.keys().next().cloned();
+    // Live volume-instance id (NOT the config volumeMounts key, which is the
+    // volume id) for the pre-conversion safety backup. Best-effort: the
+    // backup itself is best-effort, so failing to resolve just skips it.
+    let volume_instance_id = crate::controllers::project::get_environment_instances(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+    )
+    .await
+    .ok()
+    .and_then(|instances| {
+        instances
+            .volume_instances
+            .iter()
+            .find(|edge| edge.node.service_id.as_deref() == Some(root.root_id.as_str()))
+            .map(|edge| edge.node.id.clone())
+    });
     let result = template_apply::apply_composable_template(
         &ctx,
         ApplyTemplateParams {
@@ -416,7 +447,7 @@ async fn revert(
     // leader once the cluster is torn down. Degrades to a warning (rather
     // than blocking) if no cluster member is reachable at all -- mirrors
     // `pitr disable`'s replication-health precheck, which does the same.
-    let data_nodes = data_node_members(&ha_state);
+    let data_nodes = data_node_members(&ha_state, &config);
     match patroni::probe_members(&ctx, &data_nodes).await {
         Ok(live) => {
             let root_probe = live.get(&root.root_id);
@@ -652,7 +683,7 @@ async fn switchover(
         return Ok(());
     }
 
-    let data_nodes = data_node_members(&ha_state);
+    let data_nodes = data_node_members(&ha_state, &config);
     let instance_ids = patroni::resolve_instance_ids(
         &ctx,
         &data_nodes
@@ -674,7 +705,12 @@ async fn switchover(
         .find(|m| m.role == "leader")
         .context("Patroni did not report a current leader")?;
 
-    let candidate_patroni_name = candidate.service_name.to_ascii_lowercase();
+    let candidate_patroni_name = postgres_plugins::patroni_member_name(
+        &config,
+        &root.root_id,
+        &candidate.service_id,
+        &candidate.service_name,
+    );
     if !cluster_members
         .iter()
         .any(|m| m.name.to_ascii_lowercase() == candidate_patroni_name)
@@ -935,13 +971,33 @@ mod tests {
             ],
         };
 
-        let data_nodes = data_node_members(&ha_state);
+        // With no identity variables in the config, names fall back to the
+        // lowercased service names; with one, it wins (the root's Patroni
+        // name is template-authored, e.g. `postgres-1`).
+        let config = EnvironmentConfig::default();
+        let data_nodes = data_node_members(&ha_state, &config);
         assert_eq!(
             data_nodes,
             vec![
                 ("root".to_string(), "db-prod".to_string()),
                 ("replica-1".to_string(), "postgres-replica-1".to_string()),
             ]
+        );
+
+        let mut config = EnvironmentConfig::default();
+        let mut root = crate::controllers::config::ServiceInstance::default();
+        root.variables.insert(
+            "PATRONI_NAME".to_string(),
+            Some(crate::controllers::config::Variable {
+                value: Some("postgres-1".to_string()),
+                ..Default::default()
+            }),
+        );
+        config.services.insert("root".to_string(), root);
+        let data_nodes = data_node_members(&ha_state, &config);
+        assert_eq!(
+            data_nodes[0],
+            ("root".to_string(), "postgres-1".to_string())
         );
     }
 

@@ -234,6 +234,36 @@ pub fn compute_pgbouncer_state(
     }
 }
 
+/// The Patroni member name a Railway service registers under. Prefers the
+/// node's own identity variable (the root's declared
+/// `clusterWiring.replicaNodeNameVariable`, or the legacy `PATRONI_NAME`)
+/// from the DECRYPTED config; falls back to the lowercased service name
+/// (what conversion/scale restamps stamp for new nodes). The distinction is
+/// load-bearing for the ROOT specifically: the postgres-ha template authors
+/// its Patroni name (e.g. `postgres-1`), which never matches the existing
+/// service's name.
+pub fn patroni_member_name(
+    config: &EnvironmentConfig,
+    root_id: &str,
+    service_id: &str,
+    service_name: &str,
+) -> String {
+    let identity_var = config
+        .services
+        .get(root_id)
+        .and_then(|root| root.cluster_wiring.as_ref())
+        .and_then(|wiring| wiring.replica_node_name_variable.clone())
+        .unwrap_or_else(|| "PATRONI_NAME".to_string());
+
+    config
+        .services
+        .get(service_id)
+        .and_then(|service| var_value(service, &identity_var))
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| service_name.to_ascii_lowercase())
+}
+
 /// If `service_id` is a PgBouncer/HAProxy edge child, resolves to its parent
 /// (the actual database root) -- mirrors `PgBouncerSection.tsx`'s
 /// `templateRootServiceId` so commands invoked with `--service` pointed at an
@@ -464,6 +494,44 @@ mod tests {
         let state = compute_pgbouncer_state(&config, "root");
         assert!(!state.attached);
         assert!(state.edge_service_id.is_none());
+    }
+
+    #[test]
+    fn patroni_member_name_prefers_identity_variable_over_service_name() {
+        let mut root = root_service(true);
+        root.variables.insert(
+            "PATRONI_NAME".to_string(),
+            Some(Variable {
+                value: Some("postgres-1".to_string()),
+                ..Variable::default()
+            }),
+        );
+        let mut replica = child_service("root", "replica");
+        replica.variables.insert(
+            "PATRONI_NAME".to_string(),
+            Some(Variable {
+                value: Some("postgres-replica-1".to_string()),
+                ..Variable::default()
+            }),
+        );
+        let config = config_with(vec![("root", root), ("replica-1", replica)]);
+
+        // The template authors the root's Patroni name; the service's own
+        // (renamed) display name must not leak into the join.
+        assert_eq!(
+            patroni_member_name(&config, "root", "root", "Postgres"),
+            "postgres-1"
+        );
+        assert_eq!(
+            patroni_member_name(&config, "root", "replica-1", "postgres-replica-1"),
+            "postgres-replica-1"
+        );
+        // No identity variable -> lowercased service name fallback.
+        let bare = config_with(vec![("root", root_service(true))]);
+        assert_eq!(
+            patroni_member_name(&bare, "root", "root", "Postgres"),
+            "postgres"
+        );
     }
 
     #[test]

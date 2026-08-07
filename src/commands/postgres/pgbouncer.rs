@@ -232,12 +232,25 @@ fn build_status_output(
     let root = resolve_root(ctx, config);
     let state = postgres_plugins::compute_pgbouncer_state(config, &root.root_id);
     let names = service_name_map(ctx);
+    // Replica count comes from deploy.multiRegionConfig (what the platform
+    // actually writes; `pgbouncer scale` patches it too), summed across
+    // regions, with the legacy flat numReplicas as fallback.
     let replicas = state
         .edge_service_id
         .as_ref()
         .and_then(|id| config.services.get(id))
         .and_then(|s| s.deploy.as_ref())
-        .and_then(|d| d.num_replicas);
+        .and_then(|d| {
+            d.multi_region_config
+                .as_ref()
+                .map(|mrc| {
+                    mrc.values()
+                        .filter_map(|region| region.as_ref().and_then(|r| r.num_replicas))
+                        .sum::<i64>()
+                })
+                .filter(|total| *total > 0)
+                .or(d.num_replicas)
+        });
 
     PgBouncerStatusOutput {
         service: ResourceRef {

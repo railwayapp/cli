@@ -537,13 +537,14 @@ async fn enable(
             );
         }
     } else {
-        let volume_instance_id = target_service.volume_mounts.keys().next().cloned();
         let result = template_apply::apply_composable_template(
             &ctx,
             ApplyTemplateParams {
                 template_code: PITR_TEMPLATE_CODE.to_string(),
                 service_id: root.root_id.clone(),
-                volume_instance_id,
+                // Overlay applies never take the pre-conversion safety
+                // backup, so no volume-instance resolution is needed.
+                volume_instance_id: None,
                 replica_count: None,
                 internal_count: None,
                 edge_count: None,
@@ -1126,7 +1127,7 @@ async fn restore(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     let new_service_note = args
         .new_service_name
@@ -1187,16 +1188,28 @@ async fn restore(
 }
 
 /// Shared by every `backup`/`schedule` subcommand: resolves the target root
-/// service's volume instance id (from `volumeMounts` in the environment
-/// config, same field `enable`/`convert` already read this from).
-fn resolve_volume_instance_id(
-    config: &EnvironmentConfig,
+/// service's live VOLUME-INSTANCE id via the environment's volumeInstances.
+/// Deliberately NOT the environment config's `volumeMounts` key -- that map
+/// is keyed by VOLUME id, which the backup/restore mutations reject
+/// (confirmed live: the auth scope can't resolve a volume id as an instance
+/// and the call reads back as Not Authorized).
+async fn resolve_volume_instance_id(
+    ctx: &ServiceContext,
     root: &super::RootContext,
 ) -> Result<String> {
-    config
-        .services
-        .get(&root.root_id)
-        .and_then(|service| service.volume_mounts.keys().next().cloned())
+    let instances = crate::controllers::project::get_environment_instances(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+    )
+    .await?;
+
+    instances
+        .volume_instances
+        .iter()
+        .find(|edge| edge.node.service_id.as_deref() == Some(root.root_id.as_str()))
+        .map(|edge| edge.node.id.clone())
         .with_context(|| {
             format!(
                 "{} has no volume attached -- PITR backups require a volume.",
@@ -1216,7 +1229,7 @@ async fn backup_list(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     let response = post_graphql::<queries::VolumeInstanceBackupList, _>(
         &ctx.client,
@@ -1273,7 +1286,7 @@ async fn backup_create(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     let response = post_graphql::<mutations::VolumeInstanceBackupCreate, _>(
         &ctx.client,
@@ -1316,7 +1329,7 @@ async fn backup_delete(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     if !confirm_or_bail(
         &format!(
@@ -1391,7 +1404,7 @@ async fn backup_lock(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     let response = post_graphql::<mutations::VolumeInstanceBackupLock, _>(
         &ctx.client,
@@ -1433,7 +1446,7 @@ async fn backup_restore(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     if !confirm_or_bail(
         &format!(
@@ -1493,7 +1506,7 @@ async fn schedule_set(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     use mutations::volume_instance_backup_schedule_update::VolumeInstanceBackupScheduleKind as ScheduleKind;
     let mut kinds = Vec::new();
@@ -1564,7 +1577,7 @@ async fn schedule_list(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let volume_instance_id = resolve_volume_instance_id(&config, &root)?;
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     let response = post_graphql::<queries::VolumeInstanceBackupScheduleList, _>(
         &ctx.client,
@@ -2200,20 +2213,6 @@ mod tests {
         apply_pgbackrest_info(&mut probe, "not json");
         assert!(probe.backup_coverage_error.is_some());
         assert_eq!(probe.backup_set_count, None);
-    }
-
-    #[test]
-    fn resolve_volume_instance_id_errors_without_a_volume() {
-        let mut config = EnvironmentConfig::default();
-        config.services.insert(
-            "root".to_string(),
-            crate::controllers::config::ServiceInstance::default(),
-        );
-        let root = super::super::RootContext {
-            root_id: "root".to_string(),
-            root_name: "postgres".to_string(),
-        };
-        assert!(resolve_volume_instance_id(&config, &root).is_err());
     }
 
     #[test]
