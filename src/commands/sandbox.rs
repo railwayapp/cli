@@ -511,7 +511,7 @@ pub(crate) async fn resolve_project_and_env(
 /// proceeds without one). Uses the OAuth-safe `UserProjects` listing (what
 /// `railway list` uses) — the `projects(workspaceId:)` root field is not
 /// authorized for plain user tokens.
-async fn prompt_workspace_project_env(
+pub(crate) async fn prompt_workspace_project_env(
     client: &reqwest::Client,
     configs: &mut Configs,
 ) -> Result<(String, String)> {

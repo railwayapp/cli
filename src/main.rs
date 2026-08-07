@@ -43,6 +43,7 @@ commands!(
     autoupdate,
     bucket,
     cdn,
+    cloud_agent as "ca",
     code,
     completion,
     config,
@@ -892,6 +893,68 @@ mod cli_tests {
             assert_parses(&["setup", "agent", "-y"]);
             assert_parses(&["setup", "agent", "--remote"]);
             assert_parses(&["setup", "agent", "--remote", "-y"]);
+        }
+
+        #[test]
+        fn cloud_agent_subcommands() {
+            assert_subcommand(&["ca"], "ca");
+            assert_parses(&["ca"]);
+            assert_parses(&["ca", "setup"]);
+            assert_parses(&["ca", "setup", "-y"]);
+            assert_parses(&["ca", "setup", "--show"]);
+            assert_parses(&["ca", "start", "--claude"]);
+            assert_parses(&["ca", "start", "--codex", "--new"]);
+        }
+
+        /// `railway ca` browses and `railway code` launches, but every launch
+        /// flag has to work on both — otherwise the split becomes a trap where
+        /// the flag you know only works on the command you didn't type.
+        #[test]
+        fn both_commands_take_the_same_launch_flags() {
+            for name in ["code", "ca"] {
+                for flags in [
+                    vec!["--claude"],
+                    vec!["--codex", "--new"],
+                    vec!["--grok", "--keep-awake"],
+                    vec!["--claude", "--gh"],
+                    vec!["--rm"],
+                    vec!["--claude", "--refresh-auth"],
+                    vec!["--codex", "--variable", "A=b"],
+                    vec!["--codex", "--env-file", ".env"],
+                    vec!["--claude", "-p", "proj", "-e", "env"],
+                ] {
+                    let args: Vec<&str> = std::iter::once(name).chain(flags).collect();
+                    assert_parses(&args);
+                }
+            }
+        }
+
+        /// The subcommands belong to `ca` alone — `code` is the launcher.
+        #[test]
+        fn subcommands_live_on_ca() {
+            let matches = parse(&["ca", "setup"]).unwrap();
+            let (_, sub) = matches.subcommand().unwrap();
+            assert_eq!(sub.subcommand_name(), Some("setup"));
+
+            // On `code`, `setup` is a trailing agent argument — which is why
+            // `code::command` refuses it with a pointer to `railway ca setup`
+            // rather than running it on the VM.
+            let matches = parse(&["code", "setup"]).unwrap();
+            let (_, sub) = matches.subcommand().unwrap();
+            assert_eq!(sub.subcommand_name(), None);
+            assert_eq!(
+                sub.get_many::<String>("agent_args")
+                    .map(|v| v.cloned().collect::<Vec<_>>()),
+                Some(vec!["setup".to_string()])
+            );
+        }
+
+        #[test]
+        fn trailing_agent_args_survive_on_both_names() {
+            for name in ["code", "ca"] {
+                assert_parses(&[name, "--codex", "--", "exec", "explain this codebase"]);
+            }
+            assert_parses(&["ca", "start", "--codex", "--", "--version"]);
         }
 
         #[test]

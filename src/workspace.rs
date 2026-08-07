@@ -146,6 +146,44 @@ impl Project {
             Self::Workspace(w) => w.deleted_at,
         }
     }
+
+    /// The project's environments, flattened out of the two edge shapes the
+    /// external and member variants use. `can_access` rides along because a
+    /// listing can include environments this caller may not act in.
+    pub fn environments(&self) -> Vec<ProjectEnvironment> {
+        // The two variants carry structurally identical but nominally distinct
+        // generated types, so each arm maps its own edges rather than sharing a
+        // borrow.
+        match self {
+            Self::External(w) => w
+                .environments
+                .edges
+                .iter()
+                .map(|e| ProjectEnvironment {
+                    id: e.node.id.clone(),
+                    name: e.node.name.clone(),
+                    can_access: e.node.can_access,
+                })
+                .collect(),
+            Self::Workspace(w) => w
+                .environments
+                .edges
+                .iter()
+                .map(|e| ProjectEnvironment {
+                    id: e.node.id.clone(),
+                    name: e.node.name.clone(),
+                    can_access: e.node.can_access,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectEnvironment {
+    pub id: String,
+    pub name: String,
+    pub can_access: bool,
 }
 
 impl Display for Project {

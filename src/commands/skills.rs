@@ -581,6 +581,22 @@ pub(super) fn skills_configured_for_slug(home: &Path, slug: &str) -> bool {
         .is_some_and(|path| path.is_dir())
 }
 
+/// Every skill name this CLI has installed, across every target it manages.
+///
+/// The cloud agent skills sync uses this as an exclusion list: Railway's own
+/// skills are baked into `cloud-agent-base`, so re-uploading the local copy
+/// could only ever let an older checkout win. Reads the manifest rather than
+/// matching on a hardcoded name, so a second Railway skill is covered the day
+/// it ships. A missing or corrupt manifest yields an empty set — the sync then
+/// falls back to shipping a duplicate, which is untidy but harmless.
+pub(super) fn railway_managed_skill_names(home: &Path) -> BTreeSet<String> {
+    SkillsManifest::read(home)
+        .targets
+        .values()
+        .flat_map(|skills| skills.keys().cloned())
+        .collect()
+}
+
 fn build_targets(tools: &[CodingTool]) -> Vec<InstallTarget> {
     tools
         .iter()

@@ -46,6 +46,26 @@ fn base_ssh_command(ssh_target: &str, identity_file: Option<&Path>) -> (Command,
     (cmd, format!("{ssh_target}@{host}"))
 }
 
+/// The relay destination for a target: `<target>@<relay-host>`.
+///
+/// A relay target (`agent:<env>:<id>`, `service:…`) is a *username* on the
+/// relay host, not a hostname. Handing the bare target to ssh asks the resolver
+/// to look it up as a host, which fails with "Could not resolve hostname" —
+/// exposed here so callers that build their own invocation, like the TUI's pty
+/// session, cannot rediscover that the hard way.
+pub fn relay_destination(ssh_target: &str) -> String {
+    let (host, _) = ssh_relay();
+    format!("{ssh_target}@{host}")
+}
+
+/// `-p <port>` when the relay listens somewhere other than 22, empty otherwise.
+pub fn relay_port_args() -> Vec<String> {
+    match ssh_relay() {
+        (_, Some(port)) => vec!["-p".to_string(), port.to_string()],
+        (_, None) => Vec::new(),
+    }
+}
+
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
     client: &Client,
@@ -298,6 +318,22 @@ pub fn run_native_ssh(
 /// `run_native_ssh` with extra `ssh` options (each element one argv entry,
 /// e.g. `["-o", "ControlMaster=auto"]`). Lets callers opt into connection
 /// multiplexing without changing the shared default path.
+/// Turn off mouse tracking after an interactive session.
+///
+/// An agent or editor on the far side enables it for its own use. Exiting
+/// cleanly turns it off again; being detached from — which is the normal way to
+/// leave a durable session — does not, and the modes stay set on the terminal
+/// that gets handed back. The symptom is unmistakable and cannot be cleared
+/// from the shell: every pointer movement arrives at the prompt as `35;21;32M`.
+pub fn clear_mouse_tracking() {
+    use std::io::Write;
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = std::io::stdout().flush();
+}
+
 pub fn run_native_ssh_with_opts(
     service_instance_id: &str,
     command: Option<&[String]>,

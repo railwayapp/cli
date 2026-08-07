@@ -8,7 +8,7 @@ use crate::{client::GQLClient, config::Configs};
 mod common;
 mod config;
 mod keys;
-mod native;
+pub(crate) mod native;
 // `pub(crate)` so `sandbox ssh` can emit the same stage-failure telemetry.
 pub(crate) mod tel;
 
