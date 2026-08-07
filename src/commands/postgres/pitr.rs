@@ -1525,7 +1525,7 @@ async fn schedule_set(
         ctx.configs.get_backboard(),
         mutations::volume_instance_backup_schedule_update::Variables {
             volume_instance_id,
-            kinds: Some(kinds),
+            kinds,
         },
     )
     .await

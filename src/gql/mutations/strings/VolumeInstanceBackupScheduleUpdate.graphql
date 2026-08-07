@@ -1,6 +1,6 @@
 mutation VolumeInstanceBackupScheduleUpdate(
   $volumeInstanceId: String!
-  $kinds: [VolumeInstanceBackupScheduleKind!]
+  $kinds: [VolumeInstanceBackupScheduleKind!]!
 ) {
   volumeInstanceBackupScheduleUpdate(volumeInstanceId: $volumeInstanceId, kinds: $kinds)
 }
