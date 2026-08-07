@@ -32,6 +32,7 @@ pub(super) struct ResourceRef {
 }
 
 pub mod ha;
+pub mod ops_log;
 pub mod pgbouncer;
 pub mod pitr;
 
@@ -71,6 +72,16 @@ enum Commands {
 
     /// Manage PgBouncer connection pooling
     Pgbouncer(pgbouncer::Args),
+
+    /// Show the local audit trail of postgres operations
+    History(HistoryArgs),
+}
+
+#[derive(Parser)]
+struct HistoryArgs {
+    /// Maximum entries to show (newest last)
+    #[clap(long, default_value_t = 50, value_parser = clap::value_parser!(usize))]
+    limit: usize,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -84,14 +95,150 @@ pub async fn command(args: Args) -> Result<()> {
 
     crate::util::reporter::set_mode(json);
 
+    // `history` only reads the local trail -- it neither needs resolution
+    // nor should it append to the very log it displays.
+    if let Commands::History(history_args) = &command {
+        return history(history_args, json);
+    }
+
+    let started = std::time::Instant::now();
     let result = match command {
-        Commands::Pitr(sub) => pitr::command(sub, project, service, environment, json).await,
-        Commands::Ha(sub) => ha::command(sub, project, service, environment, json).await,
-        Commands::Pgbouncer(sub) => {
-            pgbouncer::command(sub, project, service, environment, json).await
+        Commands::Pitr(sub) => {
+            pitr::command(
+                sub,
+                project.clone(),
+                service.clone(),
+                environment.clone(),
+                json,
+            )
+            .await
         }
+        Commands::Ha(sub) => {
+            ha::command(
+                sub,
+                project.clone(),
+                service.clone(),
+                environment.clone(),
+                json,
+            )
+            .await
+        }
+        Commands::Pgbouncer(sub) => {
+            pgbouncer::command(
+                sub,
+                project.clone(),
+                service.clone(),
+                environment.clone(),
+                json,
+            )
+            .await
+        }
+        Commands::History(_) => unreachable!("handled above"),
     };
-    result.map_err(add_api_mismatch_guidance)
+    let result = result.map_err(add_api_mismatch_guidance);
+
+    // Best-effort persistent audit trail (see ops_log): PITR/HA/PgBouncer
+    // compose, and reconstructing WHICH sequence of operations produced a
+    // misconfigured Postgres needs more than server-side command counters.
+    let (project, environment, service) =
+        resolved_selectors_for_log(project, service, environment).await;
+    ops_log::record(&ops_log::OpsLogEntry {
+        timestamp: chrono::Utc::now(),
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        args: std::env::args().skip(1).collect(),
+        project,
+        environment,
+        service,
+        success: result.is_ok(),
+        error: result.as_ref().err().map(|e| {
+            let message = format!("{e:#}");
+            if message.len() > 512 {
+                message[..512].to_string()
+            } else {
+                message
+            }
+        }),
+        duration_ms: started.elapsed().as_millis() as u64,
+    });
+
+    result
+}
+
+/// The selectors that actually applied: explicit flags win; otherwise the
+/// linked project's ids (config-file read, no network). Best-effort -- the
+/// log entry still lands with whatever could be resolved.
+async fn resolved_selectors_for_log(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    if project.is_some() && environment.is_some() && service.is_some() {
+        return (project, environment, service);
+    }
+    let linked = match crate::config::Configs::new() {
+        Ok(configs) => configs.get_linked_project().await.ok(),
+        Err(_) => None,
+    };
+    (
+        project.or_else(|| linked.as_ref().map(|l| l.project.clone())),
+        environment.or_else(|| linked.as_ref().and_then(|l| l.environment.clone())),
+        service.or_else(|| linked.as_ref().and_then(|l| l.service.clone())),
+    )
+}
+
+fn history(args: &HistoryArgs, json: bool) -> Result<()> {
+    let entries = ops_log::read_entries();
+    let start = entries.len().saturating_sub(args.limit);
+    let window = &entries[start..];
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(window)?);
+        return Ok(());
+    }
+
+    if window.is_empty() {
+        println!(
+            "No postgres operations recorded yet (the trail lives at {}).",
+            ops_log::log_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.railway/postgres-ops.jsonl".to_string())
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{:<21} {:<7} {:<9} {:<37} COMMAND",
+        "WHEN (UTC)", "OUTCOME", "DURATION", "PROJECT/SERVICE"
+    );
+    for entry in window {
+        let outcome = if entry.success {
+            "ok".green().to_string()
+        } else {
+            "FAIL".red().to_string()
+        };
+        let target = format!(
+            "{}/{}",
+            entry.project.as_deref().unwrap_or("-"),
+            entry.service.as_deref().unwrap_or("-")
+        );
+        let target = if target.len() > 37 {
+            format!("{}…", &target[..36])
+        } else {
+            target
+        };
+        println!(
+            "{:<21} {:<7} {:<9} {:<37} railway {}",
+            entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            outcome,
+            format!("{}ms", entry.duration_ms),
+            target,
+            entry.args.join(" ")
+        );
+        if let Some(error) = &entry.error {
+            println!("{:<40} {}", "", error.lines().next().unwrap_or("").red());
+        }
+    }
+    Ok(())
 }
 
 /// Marker phrases the backend uses (or may use in the future) in a
@@ -232,6 +379,20 @@ mod tests {
         assert!(matches!(
             Args::parse_from(["postgres", "pgbouncer", "status"]).command,
             Commands::Pgbouncer(_)
+        ));
+    }
+
+    #[test]
+    fn parses_history_with_limit() {
+        let args = Args::parse_from(["postgres", "history"]);
+        assert!(matches!(
+            args.command,
+            Commands::History(HistoryArgs { limit: 50 })
+        ));
+        let args = Args::parse_from(["postgres", "history", "--limit", "5"]);
+        assert!(matches!(
+            args.command,
+            Commands::History(HistoryArgs { limit: 5 })
         ));
     }
 
