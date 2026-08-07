@@ -617,6 +617,19 @@ impl Configs {
             .cloned()
     }
 
+    /// Every environment this machine has launched a cloud agent in.
+    ///
+    /// Local knowledge, so it misses agents made from another machine or the
+    /// dashboard, but it is free and it covers the common case of coming back
+    /// to your own work in a project that isn't the default one.
+    pub fn code_agent_environments(&self) -> Vec<String> {
+        self.root_config
+            .code_agents
+            .as_ref()
+            .map(|agents| agents.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Remember the cloud agent `railway code` is using in this environment.
     /// Caller persists with `write()`.
     pub fn set_code_agent(&mut self, environment_id: &str, id: &str) {
