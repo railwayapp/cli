@@ -643,6 +643,9 @@ mod cli_tests {
         fn variable_legacy_flags() {
             assert_parses(&["variable", "--set", "KEY=value"]);
             assert_parses(&["variable", "--set", "KEY=value", "--set", "KEY2=value2"]);
+            // Empty VALUE is legal (sets the empty string); it used to fail
+            // clap parsing and abort the whole invocation, other pairs included.
+            assert_parses(&["variable", "--set", "KEY=", "--set", "KEY2=value2"]);
             assert_parses(&["variable", "-s", "myservice"]);
             assert_parses(&["variable", "-e", "production"]);
             assert_parses(&["variable", "--kv"]);
