@@ -488,7 +488,13 @@ async fn enable(
     let pitr_state = postgres_plugins::compute_pitr_state(target_service);
 
     if pitr_state.enabled {
-        println!("PITR is already enabled for {}.", root.root_name.bold());
+        // Stdout must stay pure JSON under --json; the human note goes to
+        // stderr so `railway ... --json | jq` keeps working.
+        if json {
+            eprintln!("PITR is already enabled for {}.", root.root_name);
+        } else {
+            println!("PITR is already enabled for {}.", root.root_name.bold());
+        }
         return print_status(&ctx, &config, json, true).await;
     }
 
@@ -796,6 +802,31 @@ async fn clear(
 /// may still finish later -- this only bounds the CLI's own wait).
 const PROGRESS_WATCH_TIMEOUT_SECS: u64 = 600;
 const PROGRESS_POLL_INTERVAL_SECS: u64 = 2;
+
+/// Debug-build-only env override so the e2e harness can exercise the watch
+/// loop's timeout branch in seconds instead of minutes (same pattern as the
+/// `RAILWAY_BACKBOARD_URL` testkit escape hatch -- compiled out of releases).
+fn progress_watch_timeout_secs() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RAILWAY_POSTGRES_WATCH_TIMEOUT_SECS")
+        && let Ok(parsed) = value.parse()
+    {
+        return parsed;
+    }
+    PROGRESS_WATCH_TIMEOUT_SECS
+}
+
+/// Debug-build-only override for the poll cadence (see
+/// [`progress_watch_timeout_secs`]).
+fn progress_poll_interval_secs() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RAILWAY_POSTGRES_POLL_INTERVAL_SECS")
+        && let Ok(parsed) = value.parse()
+    {
+        return parsed;
+    }
+    PROGRESS_POLL_INTERVAL_SECS
+}
 /// Follow deadline for a workflow this command just started (`pitr
 /// enable`/`disable` on an HA cluster). Deliberately much longer than the
 /// generic ~2-minute `wait_for_workflow` cap: the rolling enable/disable
@@ -833,7 +864,7 @@ async fn progress(
         &ProgressFollow {
             watch: args.watch,
             expected_workflow_id: None,
-            deadline: Duration::from_secs(PROGRESS_WATCH_TIMEOUT_SECS),
+            deadline: Duration::from_secs(progress_watch_timeout_secs()),
             fail_on_failed: false,
             render: true,
             json,
@@ -909,7 +940,7 @@ async fn follow_progress(
             if opts.expected_workflow_id.is_some()
                 && std::time::Instant::now() < visibility_deadline
             {
-                sleep(Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+                sleep(Duration::from_secs(progress_poll_interval_secs())).await;
                 continue;
             }
             return Ok(None);
@@ -956,7 +987,7 @@ async fn follow_progress(
             );
         }
 
-        sleep(Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+        sleep(Duration::from_secs(progress_poll_interval_secs())).await;
     }
 }
 
@@ -1446,6 +1477,20 @@ async fn backup_restore(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
+
+    // An in-place backup restore replaces only the root's volume. On an HA
+    // cluster the replicas would keep their newer timelines and diverge from
+    // the restored leader, so refuse outright -- the dashboard restore knows
+    // how to reseed replicas as part of the same operation.
+    let names = service_name_map(&ctx);
+    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    if ha_state.is_cluster {
+        bail!(
+            "{} is an HA cluster: restoring a backup in place would leave its replicas diverged from the restored leader. Use the dashboard, which reseeds replicas as part of the restore.",
+            root.root_name
+        );
+    }
+
     let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     if !confirm_or_bail(
