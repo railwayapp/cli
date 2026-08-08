@@ -1,0 +1,15 @@
+mutation VolumeInstanceBackupRestore(
+  $volumeInstanceId: String!
+  $volumeInstanceBackupId: String!
+  $replicaServiceIds: [String!]
+  $wipeServiceIds: [String!]
+) {
+  volumeInstanceBackupRestore(
+    volumeInstanceId: $volumeInstanceId
+    volumeInstanceBackupId: $volumeInstanceBackupId
+    replicaServiceIds: $replicaServiceIds
+    wipeServiceIds: $wipeServiceIds
+  ) {
+    workflowId
+  }
+}
