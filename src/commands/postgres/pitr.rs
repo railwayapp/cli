@@ -488,7 +488,13 @@ async fn enable(
     let pitr_state = postgres_plugins::compute_pitr_state(target_service);
 
     if pitr_state.enabled {
-        println!("PITR is already enabled for {}.", root.root_name.bold());
+        // Stdout must stay pure JSON under --json; the human note goes to
+        // stderr so `railway ... --json | jq` keeps working.
+        if json {
+            eprintln!("PITR is already enabled for {}.", root.root_name);
+        } else {
+            println!("PITR is already enabled for {}.", root.root_name.bold());
+        }
         return print_status(&ctx, &config, json, true).await;
     }
 
@@ -796,6 +802,31 @@ async fn clear(
 /// may still finish later -- this only bounds the CLI's own wait).
 const PROGRESS_WATCH_TIMEOUT_SECS: u64 = 600;
 const PROGRESS_POLL_INTERVAL_SECS: u64 = 2;
+
+/// Debug-build-only env override so the e2e harness can exercise the watch
+/// loop's timeout branch in seconds instead of minutes (same pattern as the
+/// `RAILWAY_BACKBOARD_URL` testkit escape hatch -- compiled out of releases).
+fn progress_watch_timeout_secs() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RAILWAY_POSTGRES_WATCH_TIMEOUT_SECS")
+        && let Ok(parsed) = value.parse()
+    {
+        return parsed;
+    }
+    PROGRESS_WATCH_TIMEOUT_SECS
+}
+
+/// Debug-build-only override for the poll cadence (see
+/// [`progress_watch_timeout_secs`]).
+fn progress_poll_interval_secs() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RAILWAY_POSTGRES_POLL_INTERVAL_SECS")
+        && let Ok(parsed) = value.parse()
+    {
+        return parsed;
+    }
+    PROGRESS_POLL_INTERVAL_SECS
+}
 /// Follow deadline for a workflow this command just started (`pitr
 /// enable`/`disable` on an HA cluster). Deliberately much longer than the
 /// generic ~2-minute `wait_for_workflow` cap: the rolling enable/disable
@@ -833,7 +864,7 @@ async fn progress(
         &ProgressFollow {
             watch: args.watch,
             expected_workflow_id: None,
-            deadline: Duration::from_secs(PROGRESS_WATCH_TIMEOUT_SECS),
+            deadline: Duration::from_secs(progress_watch_timeout_secs()),
             fail_on_failed: false,
             render: true,
             json,
@@ -909,7 +940,7 @@ async fn follow_progress(
             if opts.expected_workflow_id.is_some()
                 && std::time::Instant::now() < visibility_deadline
             {
-                sleep(Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+                sleep(Duration::from_secs(progress_poll_interval_secs())).await;
                 continue;
             }
             return Ok(None);
@@ -956,7 +987,7 @@ async fn follow_progress(
             );
         }
 
-        sleep(Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+        sleep(Duration::from_secs(progress_poll_interval_secs())).await;
     }
 }
 
@@ -1446,6 +1477,20 @@ async fn backup_restore(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
+
+    // An in-place backup restore replaces only the root's volume. On an HA
+    // cluster the replicas would keep their newer timelines and diverge from
+    // the restored leader, so refuse outright -- the dashboard restore knows
+    // how to reseed replicas as part of the same operation.
+    let names = service_name_map(&ctx);
+    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    if ha_state.is_cluster {
+        bail!(
+            "{} is an HA cluster: restoring a backup in place would leave its replicas diverged from the restored leader. Use the dashboard, which reseeds replicas as part of the restore.",
+            root.root_name
+        );
+    }
+
     let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
     if !confirm_or_bail(
@@ -1459,6 +1504,10 @@ async fn backup_restore(
         println!("Cancelled.");
         return Ok(());
     }
+
+    // The restore commits the environment's staged patch at the end (see
+    // below), so anything already staged rides along.
+    template_apply::warn_if_preexisting_staged_changes(&ctx).await;
 
     let response = post_graphql::<mutations::VolumeInstanceBackupRestore, _>(
         &ctx.client,
@@ -1474,12 +1523,50 @@ async fn backup_restore(
     .context("Failed to restore from the backup")?;
     let workflow_id = response.volume_instance_backup_restore.workflow_id;
 
+    // The server-side workflow copies the backup into a fresh volume and then
+    // only STAGES the volume swap (the dashboard has the user apply staged
+    // changes as a second step). Wait for the copy, then commit + deploy so
+    // the CLI restore is end-to-end like every other postgres verb.
+    let mut deployed = false;
+    if let Some(workflow_id) = &workflow_id {
+        if !json {
+            println!(
+                "Copying backup {} into a fresh volume -- this scales with the volume's size...",
+                args.id
+            );
+        }
+        use crate::controllers::workflow::{WorkflowError, wait_for_workflow_up_to};
+        wait_for_workflow_up_to(
+            &ctx.client,
+            &ctx.configs,
+            workflow_id.clone(),
+            BACKUP_RESTORE_WAIT_ATTEMPTS,
+        )
+        .await
+        .map_err(|err| match err {
+            WorkflowError::Timeout => anyhow::anyhow!(
+                "The restore is still copying data server-side. When it finishes, the volume swap appears as staged changes on the environment -- apply them to finish the restore."
+            ),
+            other => other.into(),
+        })?;
+
+        deployed = template_apply::commit_staged_patch(&ctx, true)
+            .await
+            .context("The backup was copied, but applying the staged volume swap failed -- apply the environment's staged changes to finish the restore")?;
+    }
+
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(
-                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id})
+                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id, "deployed": deployed})
             )?
+        );
+    } else if deployed {
+        println!(
+            "Restored {} from backup {} and deployed.",
+            root.root_name.bold(),
+            args.id
         );
     } else {
         println!(
@@ -1493,6 +1580,11 @@ async fn backup_restore(
     }
     Ok(())
 }
+
+/// Attempt budget (~1s each) for the backup-copy phase of an in-place
+/// restore. Sized for real volumes, not the ~2-minute generic cap: the copy
+/// replicates the full backup into a fresh volume.
+const BACKUP_RESTORE_WAIT_ATTEMPTS: u32 = 1800;
 
 async fn schedule_set(
     project: Option<String>,
