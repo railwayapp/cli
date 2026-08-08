@@ -37160,6 +37160,30 @@
               "deprecationReason": null
             },
             {
+              "name": "myCloudAgents",
+              "description": "Cloud agents you own, across every project and environment you can reach. Answers \"where are my agents\" in one request; `cloudAgents` needs one call per environment. Machine fields (`status`, `domain`, `domains`) read the last observed state in batched queries, so selecting them across many environments is fine.",
+              "args": [],
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "CloudAgent",
+                      "ofType": null
+                    }
+                  }
+                }
+              },
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
               "name": "networkFlowLogs",
               "description": "Fetch individual network flow logs for an environment",
               "args": [
