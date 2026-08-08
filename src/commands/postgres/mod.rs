@@ -31,13 +31,14 @@ pub(super) struct ResourceRef {
     pub name: String,
 }
 
+pub mod ha;
 pub mod ops_log;
 pub mod pitr;
 
 /// Manage Postgres plugin features: point-in-time recovery, high availability, and connection pooling
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway postgres`.\n  Actions that change config (enable/disable) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy)."
+    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres ha status --service postgres\n  railway postgres ha convert --service postgres --replicas 2\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway postgres`.\n  Actions that change config (enable/disable/convert/revert/scale) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy)."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -64,6 +65,9 @@ pub struct Args {
 enum Commands {
     /// Manage point-in-time recovery (continuous backups)
     Pitr(pitr::Args),
+
+    /// Manage high-availability clustering
+    Ha(ha::Args),
 
     /// Show the local audit trail of postgres operations
     History(HistoryArgs),
@@ -97,6 +101,16 @@ pub async fn command(args: Args) -> Result<()> {
     let result = match command {
         Commands::Pitr(sub) => {
             pitr::command(
+                sub,
+                project.clone(),
+                service.clone(),
+                environment.clone(),
+                json,
+            )
+            .await
+        }
+        Commands::Ha(sub) => {
+            ha::command(
                 sub,
                 project.clone(),
                 service.clone(),
@@ -343,6 +357,10 @@ mod tests {
         assert!(matches!(
             Args::parse_from(["postgres", "pitr", "status"]).command,
             Commands::Pitr(_)
+        ));
+        assert!(matches!(
+            Args::parse_from(["postgres", "ha", "status"]).command,
+            Commands::Ha(_)
         ));
     }
 
