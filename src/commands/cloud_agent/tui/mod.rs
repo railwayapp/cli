@@ -187,6 +187,12 @@ enum Message {
         path: (usize, usize, usize),
         result: Result<Vec<Agent>, String>,
     },
+    /// The whole account's agents in one request, keyed by environment — or
+    /// why that wasn't possible, in which case startup degrades to the
+    /// per-environment path.
+    MyAgentsLoaded {
+        result: Result<Vec<(String, Agent)>, String>,
+    },
     /// A background fetch was refused for rate limiting. The rest of its batch
     /// is abandoned; see [`spawn_sweep`].
     RateLimited {
@@ -307,6 +313,71 @@ async fn fetch_agents(
         .collect())
 }
 
+/// Every agent the caller owns, keyed by environment, in one request.
+///
+/// `myCloudAgents` answers for the whole account what the startup sweep used
+/// to ask environment by environment. A backboard that predates the field
+/// reports it as unqueryable, which is the caller's cue to fall back to that
+/// sweep.
+async fn fetch_my_agents(
+    client: &reqwest::Client,
+    backboard: &str,
+) -> Result<Vec<(String, Agent)>> {
+    let res = post_graphql::<queries::MyCloudAgents, _>(
+        client,
+        backboard,
+        queries::my_cloud_agents::Variables {},
+    )
+    .await?;
+    Ok(res
+        .my_cloud_agents
+        .into_iter()
+        .map(|a| {
+            (
+                a.environment_id,
+                Agent {
+                    id: a.id,
+                    name: a.name,
+                    status: format!("{:?}", a.status).to_lowercase(),
+                    sessions: LoadSessions::NotLoaded,
+                    expanded: false,
+                },
+            )
+        })
+        .collect())
+}
+
+/// Ask for the whole account's agents in the background, once, at startup.
+fn spawn_my_agents_fetch(
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_string();
+    tokio::spawn(async move {
+        match fetch_my_agents(&client, &backboard).await {
+            Ok(agents) => {
+                let _ = tx.send(Message::MyAgentsLoaded { result: Ok(agents) });
+            }
+            // A rate limit is worth its own message — the toast with the
+            // Retry-After — rather than being folded into the fallback, which
+            // would immediately spend more requests against a refusal.
+            Err(err) => match rate_limit_from(&err) {
+                Some(retry_after_secs) => {
+                    let _ = tx.send(Message::RateLimited { retry_after_secs });
+                }
+                None => {
+                    let _ = tx.send(Message::MyAgentsLoaded {
+                        result: Err(err.to_string()),
+                    });
+                }
+            },
+        }
+    });
+}
+
 /// The reattachable shell and exec sessions on one agent's VM.
 ///
 /// These are the platform's own record of what is running in there, so they
@@ -364,14 +435,11 @@ pub async fn run(
         start_launch(app, req, &tx);
     }
 
-    // Load the environments a keypress would immediately need, in the
-    // background. Everything else waits to be expanded: one request per
-    // environment across a whole account is hundreds on a large one.
+    // Ask for every agent the caller owns, in one request. If the platform
+    // predates `myCloudAgents`, the reply says so and startup degrades to
+    // loading just the environments a keypress would immediately need.
     let stop_fetching: StopFlag = Default::default();
-    let sweep = app.initial_environments();
-    if !sweep.is_empty() {
-        spawn_sweep(sweep, &tx, &client, &backboard, stop_fetching.clone());
-    }
+    spawn_my_agents_fetch(&tx, &client, &backboard);
 
     loop {
         let mut rects = app.panes;
@@ -390,7 +458,7 @@ pub async fn run(
         let effect = tokio::select! {
             // Background work first: draining it keeps the tree and the session
             // honest even while keys arrive faster than frames.
-            Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard),
+            Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard, &stop_fetching),
             // Animate the loading screen. Only armed while it is showing, so an
             // idle TUI still blocks rather than spinning on a timer.
             // The wizard borrows the same tick for its "creating…" spinner.
@@ -654,6 +722,7 @@ fn handle_message(
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
     backboard: &str,
+    stop_fetching: &StopFlag,
 ) -> Option<Effect> {
     match message {
         Message::RateLimited { retry_after_secs } => {
@@ -672,6 +741,29 @@ fn handle_message(
             // A launch that just created an agent asked for it to be opened;
             // its row only exists now.
             app.expand_pending()
+        }
+        Message::MyAgentsLoaded { result } => {
+            match result {
+                Ok(agents) => {
+                    app.my_agents_loaded(agents);
+                    for effect in app.sessions_to_prefetch() {
+                        if let Effect::LoadSessions { agent_id, path } = effect {
+                            spawn_session_fetch(agent_id, path, tx, client, backboard);
+                        }
+                    }
+                }
+                // Whether the field doesn't exist yet or the request died,
+                // the per-environment path still works, so startup degrades
+                // to what it loaded before `myCloudAgents`: the environments
+                // a keypress would immediately need.
+                Err(_) => {
+                    let sweep = app.initial_environments();
+                    if !sweep.is_empty() {
+                        spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
+                    }
+                }
+            }
+            None
         }
         Message::SessionsLoaded { path, result } => {
             app.sessions_loaded(path, result);

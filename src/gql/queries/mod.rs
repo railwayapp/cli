@@ -356,6 +356,15 @@ pub struct CloudAgents;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/MyCloudAgents.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq",
+    skip_serializing_none
+)]
+pub struct MyCloudAgents;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/CloudAgentConsoleSessions.graphql",
     response_derives = "Debug, Serialize, Clone, PartialEq",
     skip_serializing_none
