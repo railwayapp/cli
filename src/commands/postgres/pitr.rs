@@ -598,6 +598,23 @@ async fn disable(
     let names = service_name_map(&ctx);
     let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
 
+    // Mirror enable's idempotence: a second disable must not revert a
+    // non-applied overlay (confusing server error at best, a pointless
+    // database redeploy at worst) nor kick another rolling HA workflow.
+    let root_pitr = config
+        .services
+        .get(&root.root_id)
+        .map(postgres_plugins::compute_pitr_state)
+        .unwrap_or_default();
+    if !root_pitr.enabled {
+        if json {
+            eprintln!("PITR is already disabled for {}.", root.root_name);
+        } else {
+            println!("PITR is already disabled for {}.", root.root_name.bold());
+        }
+        return print_status(&ctx, &config, json, true).await;
+    }
+
     if !confirm_or_bail(
         &format!(
             "Disable PITR for {}? This stops WAL archiving; existing backups are kept.",
@@ -1846,13 +1863,20 @@ fn apply_archiver_output(probe: &mut PitrLiveProbe, output: &str) {
     probe.archiver_last_archived_at = last_archived_time.clone();
     probe.max_restore_time = last_committed_at;
 
-    probe.archiver_healthy = match (
-        last_archived_time.as_deref().and_then(parse_pg_timestamp),
-        last_failed_time.as_deref().and_then(parse_pg_timestamp),
-    ) {
-        (_, None) => Some(true), // no failure recorded at all
-        (Some(archived), Some(failed)) => Some(failed <= archived),
-        (None, Some(_)) => Some(false), // failed, and never successfully archived
+    // "Field empty" (no failure/archive ever recorded) and "field present but
+    // unparseable" are different things: the first is a definitive state, the
+    // second means the sticky-failure gate can't be evaluated -- report
+    // `None` ("unknown") rather than guessing either way.
+    probe.archiver_healthy = match &last_failed_time {
+        None => Some(true), // no failure recorded at all
+        Some(failed_raw) => match (parse_pg_timestamp(failed_raw), &last_archived_time) {
+            (Some(_), None) => Some(false), // failed, and never successfully archived
+            (Some(failed), Some(archived_raw)) => match parse_pg_timestamp(archived_raw) {
+                Some(archived) => Some(failed <= archived),
+                None => None, // archive timestamp unparseable -- unknown
+            },
+            (None, _) => None, // failure timestamp unparseable -- unknown
+        },
     };
 }
 
@@ -2274,6 +2298,32 @@ mod tests {
         let mut probe = PitrLiveProbe::default();
         apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,");
         assert_eq!(probe.archiver_healthy, Some(true));
+
+        // A recorded failure that never archived is definitively unhealthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "0,,3,2026-07-28 11:00:00+00,");
+        assert_eq!(probe.archiver_healthy, Some(false));
+    }
+
+    #[test]
+    fn apply_archiver_output_reports_unknown_when_timestamps_do_not_parse() {
+        // Failure recorded but unparseable (e.g. non-ISO DateStyle): the
+        // sticky gate can't be evaluated -- unknown, never a false healthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,2026-07-28 10:00:00+00,1,Mon Jul 28 09:00:00 2026,",
+        );
+        assert_eq!(probe.archiver_healthy, None);
+
+        // Failure parses but the archive timestamp doesn't: also unknown
+        // (guessing unhealthy would be as wrong as guessing healthy).
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,Mon Jul 28 10:00:00 2026,1,2026-07-28 09:00:00+00,",
+        );
+        assert_eq!(probe.archiver_healthy, None);
     }
 
     #[test]
