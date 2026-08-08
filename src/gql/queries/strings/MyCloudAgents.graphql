@@ -1,0 +1,10 @@
+query MyCloudAgents {
+  myCloudAgents {
+    id
+    name
+    status
+    projectId
+    environmentId
+    createdAt
+  }
+}
