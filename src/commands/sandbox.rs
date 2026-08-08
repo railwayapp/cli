@@ -2158,7 +2158,15 @@ mod tests {
     #[test]
     fn invalid_pair_errors() {
         assert!(parse_variable_args(&args(&["NOVALUE"])).is_err());
-        assert!(parse_variable_args(&args(&["FOO=bar,NOVALUE=,BAZ=qux"])).is_err());
+        assert!(parse_variable_args(&args(&["FOO=bar,=nokey,BAZ=qux"])).is_err());
+    }
+
+    #[test]
+    fn empty_value_sets_the_empty_string() {
+        let vars = parse_variable_args(&args(&["FOO=bar,BLANK=,BAZ=qux"])).unwrap();
+        assert_eq!(vars.len(), 3);
+        assert_eq!(vars[1].key, "BLANK");
+        assert_eq!(vars[1].value, "");
     }
 
     #[test]

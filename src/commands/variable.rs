@@ -349,6 +349,12 @@ async fn set_variables_internal(
 
     if let Some(sp) = spinner {
         sp.finish_with_message(format!("Set variables {fmt_keys}"));
+        // The spinner draws to stderr and draws nothing at all when stderr
+        // is not a terminal, so a scripted/piped run used to succeed in
+        // complete silence. Give it a plain stdout confirmation instead.
+        if !std::io::stderr().is_terminal() {
+            println!("Set variables {}", keys.join(", "));
+        }
     } else {
         println!("{}", serde_json::json!({"keys": keys, "set": true}));
     }
