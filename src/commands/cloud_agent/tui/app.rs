@@ -6,9 +6,13 @@
 //! testable without a terminal or a network.
 //!
 //! The tree is workspace → project → environment → agent. Structure comes from
-//! one `UserProjects` call; agents are per environment and load only when an
-//! environment is expanded, because the only list query we have takes one
-//! environment at a time and a workspace can hold dozens.
+//! one `UserProjects` call; agents arrive from one `myCloudAgents` call, which
+//! answers for the whole account at once. Against a backboard that predates
+//! that field, agents are per environment and load only when an environment is
+//! expanded, because `cloudAgents` takes one environment at a time and a
+//! workspace can hold dozens.
+
+use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -1357,6 +1361,34 @@ impl App {
         self.select_pending();
     }
 
+    /// The whole account's agents arrived in one `myCloudAgents` request.
+    ///
+    /// Every environment becomes loaded: one absent from the response holds no
+    /// agents of the caller's, and saying so is what lets the tree show counts
+    /// everywhere without a request per environment. An environment that has
+    /// already answered — a launch just filled the target — keeps what it has,
+    /// which is at least as fresh and may carry session state.
+    pub fn my_agents_loaded(&mut self, agents: Vec<(String, Agent)>) {
+        let anchor = self.selected_row().map(|row| row.kind);
+        let mut by_env: HashMap<String, Vec<Agent>> = HashMap::new();
+        for (environment_id, agent) in agents {
+            by_env.entry(environment_id).or_default().push(agent);
+        }
+        for ws in &mut self.tree {
+            for project in &mut ws.projects {
+                for env in &mut project.envs {
+                    if matches!(env.agents, Load::Loaded(_)) {
+                        continue;
+                    }
+                    env.agents = Load::Loaded(by_env.remove(&env.id).unwrap_or_default());
+                }
+            }
+        }
+        self.settle_watched_agents();
+        self.restore_cursor(anchor);
+        self.select_pending();
+    }
+
     /// Fold up a project whose last agent has gone.
     ///
     /// After a delete the tree would otherwise sit open on an empty
@@ -2244,7 +2276,8 @@ impl App {
         out
     }
 
-    /// The environments to fetch before anyone touches a key.
+    /// The environments to fetch before anyone touches a key, on a backboard
+    /// that predates `myCloudAgents`.
     ///
     /// Only where the answer is needed immediately: the prompt's target, which
     /// New Session reads to decide whether it has an agent to work on, and the
@@ -6025,6 +6058,55 @@ mod tests {
             &effects[0],
             Effect::LoadAgents { environment_id, .. } if environment_id == "env_stg"
         ));
+    }
+
+    /// One `myCloudAgents` reply answers for the whole account: agents land in
+    /// their environments, and every other environment is loaded as empty —
+    /// absence from the response means "none of yours here", not "unknown".
+    #[test]
+    fn my_agents_loaded_settles_every_environment() {
+        let mut a = app();
+        a.my_agents_loaded(vec![
+            ("env_stg".into(), agent("ca_1", "fix-login", "running")),
+            ("env_stg".into(), agent("ca_2", "bump-deps", "sleeping")),
+            // An environment the tree doesn't know is ignored, not invented.
+            ("env_gone".into(), agent("ca_3", "orphan", "running")),
+        ]);
+
+        let stg = &a.tree[0].projects[0].envs[1].agents;
+        let Load::Loaded(agents) = stg else {
+            panic!("staging should be loaded: {stg:?}");
+        };
+        assert_eq!(
+            agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["ca_1", "ca_2"]
+        );
+        assert_eq!(
+            a.tree[0].projects[0].envs[0].agents,
+            Load::Loaded(vec![]),
+            "an environment absent from the reply has no agents of the caller's"
+        );
+    }
+
+    /// An environment that already answered keeps what it has: a launch may
+    /// have just filled the target, and its rows can carry session state the
+    /// account-wide reply doesn't.
+    #[test]
+    fn my_agents_loaded_keeps_environments_that_already_answered() {
+        let mut a = app();
+        a.tree[0].projects[0].envs[0].agents =
+            Load::Loaded(vec![agent("ca_fresh", "just-launched", "starting")]);
+
+        a.my_agents_loaded(vec![(
+            "env_prod".into(),
+            agent("ca_stale", "from-before", "running"),
+        )]);
+
+        let prod = &a.tree[0].projects[0].envs[0].agents;
+        let Load::Loaded(agents) = prod else {
+            panic!("production should stay loaded: {prod:?}");
+        };
+        assert_eq!(agents[0].id, "ca_fresh");
     }
 
     /// `shift+r` is how an agent in a project nobody has opened gets found: the
