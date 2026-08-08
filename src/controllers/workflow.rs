@@ -64,12 +64,29 @@ pub async fn wait_for_workflow_up_to(
             let backboard = backboard.clone();
             let workflow_id = workflow_id.clone();
             async move {
-                let result = post_graphql::<queries::WorkflowStatus, _>(
+                let result = match post_graphql::<queries::WorkflowStatus, _>(
                     &client,
                     backboard,
                     queries::workflow_status::Variables { workflow_id },
                 )
-                .await?;
+                .await
+                {
+                    Ok(result) => result,
+                    // An auth refusal is deterministic -- retrying can't heal
+                    // it (e.g. a workflow type that doesn't register the
+                    // queries `workflowStatus` authorizes against). Fail fast
+                    // instead of silently polling out the whole budget.
+                    Err(
+                        err @ (crate::errors::RailwayError::Unauthorized
+                        | crate::errors::RailwayError::UnauthorizedToken(_)
+                        | crate::errors::RailwayError::UnauthorizedLogin),
+                    ) => {
+                        return Ok(TerminalPoll::Failed(format!(
+                            "the workflow's status can't be polled ({err}); it keeps running server-side"
+                        )));
+                    }
+                    Err(err) => return Err(err.into()),
+                };
 
                 use queries::workflow_status::WorkflowStatus;
                 match result.workflow_status.status {
