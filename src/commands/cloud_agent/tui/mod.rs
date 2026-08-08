@@ -187,6 +187,11 @@ enum Message {
         path: (usize, usize, usize),
         result: Result<Vec<Agent>, String>,
     },
+    /// A background fetch was refused for rate limiting. The rest of its batch
+    /// is abandoned; see [`spawn_sweep`].
+    RateLimited {
+        retry_after_secs: Option<u64>,
+    },
     SessionsLoaded {
         path: (usize, usize, usize, usize),
         result: Result<Vec<ConsoleSession>, String>,
@@ -359,12 +364,13 @@ pub async fn run(
         start_launch(app, req, &tx);
     }
 
-    // Fill the per-project counts in the background. Bounded, because this is
-    // one request per environment and a large workspace has dozens — the tree
-    // is interactive throughout and the numbers appear as they land.
-    let sweep = app.unloaded_environments();
+    // Load the environments a keypress would immediately need, in the
+    // background. Everything else waits to be expanded: one request per
+    // environment across a whole account is hundreds on a large one.
+    let stop_fetching: StopFlag = Default::default();
+    let sweep = app.initial_environments();
     if !sweep.is_empty() {
-        spawn_sweep(sweep, &tx, &client, &backboard);
+        spawn_sweep(sweep, &tx, &client, &backboard, stop_fetching.clone());
     }
 
     loop {
@@ -514,6 +520,20 @@ pub async fn run(
                     });
                 }
             }
+            Some(Effect::ScanEverywhere) => {
+                // A deliberate scan clears a previous rate-limit stop: the user
+                // is asking again, and by now the window may have passed.
+                stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
+                let effects = app.scan_environments();
+                match effects.len() {
+                    0 => app.status = "Every project is already loaded".into(),
+                    n => {
+                        app.status =
+                            format!("Looking for agents in {n} more environment{}…", plural(n));
+                        spawn_sweep(effects, &tx, &client, &backboard, stop_fetching.clone());
+                    }
+                }
+            }
             Some(Effect::OpenUrl(url)) => {
                 // Best-effort: a machine with no browser is a normal way to run
                 // this, and the ssh command in the toast is still copyable.
@@ -636,6 +656,10 @@ fn handle_message(
     backboard: &str,
 ) -> Option<Effect> {
     match message {
+        Message::RateLimited { retry_after_secs } => {
+            app.rate_limited(retry_after_secs);
+            None
+        }
         Message::AgentsLoaded { path, result } => {
             app.agents_loaded(path, result);
             // Fill in each running agent's session count without waiting for
@@ -805,13 +829,40 @@ const SESSION_SETTLE: [u64; 2] = [900, 2600];
 /// How many count queries are allowed in flight at once.
 const SWEEP_CONCURRENCY: usize = 5;
 
+/// `s` when there is more than one of something.
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// A 429 seen by any background fetch. Shared so the rest of a batch stops
+/// rather than spending the caller's remaining budget on requests that will be
+/// refused too.
+type StopFlag = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+/// Was this a rate limit, and for how long?
+///
+/// `anyhow` erases the type on the way through `fetch_agents`, so the concrete
+/// error is recovered here. Matching on the message would work until someone
+/// reworded it.
+fn rate_limit_from(err: &anyhow::Error) -> Option<Option<u64>> {
+    match err.downcast_ref::<crate::errors::RailwayError>() {
+        Some(crate::errors::RailwayError::Ratelimited { retry_after_secs }) => {
+            Some(*retry_after_secs)
+        }
+        _ => None,
+    }
+}
+
 /// Fetch a batch of environments' agents, a few at a time.
 fn spawn_sweep(
     effects: Vec<Effect>,
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
     backboard: &str,
+    stop: StopFlag,
 ) {
+    use std::sync::atomic::Ordering;
+
     let tx = tx.clone();
     let client = client.clone();
     let backboard = backboard.to_string();
@@ -825,17 +876,39 @@ fn spawn_sweep(
             else {
                 continue;
             };
+            // Checked before each request rather than only at the top: the answer
+            // arrives partway through a batch.
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             let Ok(permit) = permits.clone().acquire_owned().await else {
                 return;
             };
             let tx = tx.clone();
             let client = client.clone();
             let backboard = backboard.clone();
+            let stop = stop.clone();
             tokio::spawn(async move {
-                let result = fetch_agents(&client, &backboard, &environment_id)
-                    .await
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(Message::AgentsLoaded { path, result });
+                match fetch_agents(&client, &backboard, &environment_id).await {
+                    Ok(agents) => {
+                        let _ = tx.send(Message::AgentsLoaded {
+                            path,
+                            result: Ok(agents),
+                        });
+                    }
+                    Err(err) => match rate_limit_from(&err) {
+                        Some(retry_after_secs) => {
+                            stop.store(true, Ordering::Relaxed);
+                            let _ = tx.send(Message::RateLimited { retry_after_secs });
+                        }
+                        None => {
+                            let _ = tx.send(Message::AgentsLoaded {
+                                path,
+                                result: Err(err.to_string()),
+                            });
+                        }
+                    },
+                }
                 drop(permit);
             });
         }
@@ -854,9 +927,18 @@ fn spawn_session_fetch(
     let client = client.clone();
     let backboard = backboard.to_string();
     tokio::spawn(async move {
-        let result = fetch_sessions(&client, &backboard, &agent_id)
-            .await
-            .map_err(|e| e.to_string());
+        let result = match fetch_sessions(&client, &backboard, &agent_id).await {
+            Ok(sessions) => Ok(sessions),
+            Err(err) => {
+                // Reported as a rate limit rather than as this agent's failure,
+                // so the pane says what is actually wrong.
+                if let Some(retry_after_secs) = rate_limit_from(&err) {
+                    let _ = tx.send(Message::RateLimited { retry_after_secs });
+                    return;
+                }
+                Err(err.to_string())
+            }
+        };
         let _ = tx.send(Message::SessionsLoaded { path, result });
     });
 }

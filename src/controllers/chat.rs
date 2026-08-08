@@ -138,7 +138,12 @@ pub async fn get_thread_messages(
     if !status.is_success() {
         match status.as_u16() {
             401 | 403 => return Err(auth_failure_error().into()),
-            429 => return Err(RailwayError::Ratelimited.into()),
+            429 => {
+                return Err(RailwayError::Ratelimited {
+                    retry_after_secs: None,
+                }
+                .into());
+            }
             _ => {
                 let body = response.text().await.unwrap_or_default();
                 bail!("Get thread messages failed ({}): {}", status, body);
@@ -184,7 +189,12 @@ pub async fn list_threads(
     if !status.is_success() {
         match status.as_u16() {
             401 | 403 => return Err(auth_failure_error().into()),
-            429 => return Err(RailwayError::Ratelimited.into()),
+            429 => {
+                return Err(RailwayError::Ratelimited {
+                    retry_after_secs: None,
+                }
+                .into());
+            }
             _ => {
                 let body = response.text().await.unwrap_or_default();
                 bail!("List threads request failed ({}): {}", status, body);
@@ -244,7 +254,12 @@ pub async fn stream_chat(
     if !status.is_success() {
         match status.as_u16() {
             401 | 403 => return Err(auth_failure_error().into()),
-            429 => return Err(RailwayError::Ratelimited.into()),
+            429 => {
+                return Err(RailwayError::Ratelimited {
+                    retry_after_secs: None,
+                }
+                .into());
+            }
             _ => {
                 let body = response.text().await.unwrap_or_default();
                 bail!("Chat request failed ({}): {}", status, body);
