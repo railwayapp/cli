@@ -334,6 +334,35 @@ pub fn clear_mouse_tracking() {
     let _ = std::io::stdout().flush();
 }
 
+/// Prepare the remote command words for OpenSSH.
+///
+/// ssh(1) concatenates every remote-command word with single spaces into ONE
+/// string and hands that to the remote login shell — argv boundaries do not
+/// survive the trip. Passed through raw, a multi-arg invocation like
+/// `railway ssh sh -c 'redis-cli -a "$PW" PING && echo ok'` reaches the
+/// remote shell as `sh -c redis-cli -a "$PW" PING && echo ok`, so `sh -c`
+/// takes only `redis-cli` as its script and the rest leaks into `$0`/`$1`
+/// and a second `&&` command.
+///
+/// Quoting each word when the caller passed MORE than one makes the remote
+/// shell re-split back to exactly the caller's argv (`docker exec` /
+/// `kubectl exec` semantics). A single word keeps passing through raw: it IS
+/// the remote shell line — today's documented usage — and quoting it would
+/// collapse the whole line into one command word.
+fn quote_remote_command(args: &[String]) -> Vec<String> {
+    if args.len() <= 1 {
+        return args.to_vec();
+    }
+    args.iter()
+        .map(|arg| match shlex::try_quote(arg) {
+            Ok(quoted) => quoted.into_owned(),
+            // try_quote only fails on interior NUL bytes, which cannot occur
+            // in OS-provided argv; keep the raw word rather than dying.
+            Err(_) => arg.clone(),
+        })
+        .collect()
+}
+
 pub fn run_native_ssh_with_opts(
     service_instance_id: &str,
     command: Option<&[String]>,
@@ -378,7 +407,7 @@ pub fn run_native_ssh_with_opts(
     ssh_cmd.arg(&target);
 
     if let Some(cmd_args) = command {
-        for arg in cmd_args {
+        for arg in quote_remote_command(cmd_args) {
             ssh_cmd.arg(arg);
         }
     }
@@ -625,4 +654,52 @@ pub fn run_native_ssh_captured(
         output.stdout,
         output.stderr,
     ))
+}
+
+#[cfg(test)]
+mod quote_remote_command_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The invariant that matters: after ssh joins the words with spaces and
+    /// the remote shell re-splits them, the original argv comes back.
+    fn remote_shell_split(quoted: &[String]) -> Vec<String> {
+        shlex::split(&quoted.join(" ")).expect("quoted words must re-split")
+    }
+
+    #[test]
+    fn a_single_word_is_the_remote_shell_line_and_passes_through_raw() {
+        let input = args(&["redis-cli -a \"$PW\" PING && echo ok"]);
+        assert_eq!(quote_remote_command(&input), input);
+    }
+
+    #[test]
+    fn plain_words_survive_unchanged() {
+        let input = args(&["ls", "-la", "/data"]);
+        assert_eq!(quote_remote_command(&input), input);
+    }
+
+    #[test]
+    fn argv_boundaries_survive_the_join_and_remote_resplit() {
+        let input = args(&["sh", "-c", "redis-cli -a \"$PW\" PING && echo ok"]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
+
+    #[test]
+    fn spaces_quotes_and_dollars_stay_inside_their_word() {
+        let input = args(&["echo", "a b", "it's", "$HOME", "x;y|z"]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
+
+    #[test]
+    fn empty_words_are_preserved_as_empty_words() {
+        let input = args(&["printf", "%s", ""]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
 }

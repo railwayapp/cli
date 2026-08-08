@@ -3658,6 +3658,7 @@ dependencies = [
  "serde_with",
  "serde_yaml",
  "sha2 0.10.9",
+ "shlex",
  "similar",
  "struct-field-names-as-array",
  "structstruck",
