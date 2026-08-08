@@ -1505,6 +1505,10 @@ async fn backup_restore(
         return Ok(());
     }
 
+    // The restore commits the environment's staged patch at the end (see
+    // below), so anything already staged rides along.
+    template_apply::warn_if_preexisting_staged_changes(&ctx).await;
+
     let response = post_graphql::<mutations::VolumeInstanceBackupRestore, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -1519,12 +1523,50 @@ async fn backup_restore(
     .context("Failed to restore from the backup")?;
     let workflow_id = response.volume_instance_backup_restore.workflow_id;
 
+    // The server-side workflow copies the backup into a fresh volume and then
+    // only STAGES the volume swap (the dashboard has the user apply staged
+    // changes as a second step). Wait for the copy, then commit + deploy so
+    // the CLI restore is end-to-end like every other postgres verb.
+    let mut deployed = false;
+    if let Some(workflow_id) = &workflow_id {
+        if !json {
+            println!(
+                "Copying backup {} into a fresh volume -- this scales with the volume's size...",
+                args.id
+            );
+        }
+        use crate::controllers::workflow::{WorkflowError, wait_for_workflow_up_to};
+        wait_for_workflow_up_to(
+            &ctx.client,
+            &ctx.configs,
+            workflow_id.clone(),
+            BACKUP_RESTORE_WAIT_ATTEMPTS,
+        )
+        .await
+        .map_err(|err| match err {
+            WorkflowError::Timeout => anyhow::anyhow!(
+                "The restore is still copying data server-side. When it finishes, the volume swap appears as staged changes on the environment -- apply them to finish the restore."
+            ),
+            other => other.into(),
+        })?;
+
+        deployed = template_apply::commit_staged_patch(&ctx, true)
+            .await
+            .context("The backup was copied, but applying the staged volume swap failed -- apply the environment's staged changes to finish the restore")?;
+    }
+
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(
-                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id})
+                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id, "deployed": deployed})
             )?
+        );
+    } else if deployed {
+        println!(
+            "Restored {} from backup {} and deployed.",
+            root.root_name.bold(),
+            args.id
         );
     } else {
         println!(
@@ -1538,6 +1580,11 @@ async fn backup_restore(
     }
     Ok(())
 }
+
+/// Attempt budget (~1s each) for the backup-copy phase of an in-place
+/// restore. Sized for real volumes, not the ~2-minute generic cap: the copy
+/// replicates the full backup into a fresh volume.
+const BACKUP_RESTORE_WAIT_ATTEMPTS: u32 = 1800;
 
 async fn schedule_set(
     project: Option<String>,
