@@ -41,6 +41,20 @@ pub fn durable_name(harness: &str) -> String {
     format!("{harness}-{suffix}")
 }
 
+/// Read the environment back out of a relay target (`agent:<env>:<agent>`).
+///
+/// Returns `None` for anything else rather than guessing: the caller uses this
+/// to pick a machine to flush and suspend, and a target shape we don't
+/// recognise is not one to act on.
+fn environment_from_target(target: &str) -> Option<&str> {
+    match *target.split(':').collect::<Vec<_>>().as_slice() {
+        ["agent", environment, agent] if !environment.is_empty() && !agent.is_empty() => {
+            Some(environment)
+        }
+        _ => None,
+    }
+}
+
 /// A running `ssh` under a pty, plus the emulator that makes sense of it.
 pub struct Session {
     pub agent_id: String,
@@ -70,6 +84,13 @@ pub struct Session {
 }
 
 impl Session {
+    /// The environment this session's agent lives in. The relay target is the
+    /// only place the pane carries it, and sleeping the agent needs it to flush
+    /// the disk first.
+    pub fn environment_id(&self) -> Option<&str> {
+        environment_from_target(&self.ssh_target)
+    }
+
     /// Spawn `ssh` under a pty and start reading it.
     ///
     /// `notify` fires whenever new output has been folded into the emulator, so
@@ -1146,5 +1167,24 @@ mod tests {
         let screen = parser.screen();
         assert_eq!(screen.contents().lines().next().unwrap().trim(), "hello");
         assert!(screen.contents().contains("world"));
+    }
+
+    #[test]
+    fn environment_is_read_out_of_a_relay_target() {
+        assert_eq!(
+            environment_from_target("agent:env-123:agent-456"),
+            Some("env-123")
+        );
+    }
+
+    #[test]
+    fn other_target_shapes_are_not_guessed_at() {
+        // A sandbox target has the same arity, and sleeping a machine picked
+        // out of one would suspend the wrong thing entirely.
+        assert_eq!(environment_from_target("sbx:env-123:sandbox-456"), None);
+        assert_eq!(environment_from_target("agent:env-123"), None);
+        assert_eq!(environment_from_target("agent::agent-456"), None);
+        assert_eq!(environment_from_target("agent:env-123:"), None);
+        assert_eq!(environment_from_target("some-service-instance"), None);
     }
 }

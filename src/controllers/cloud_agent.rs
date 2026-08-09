@@ -233,7 +233,24 @@ pub async fn wake(client: &reqwest::Client, backboard: &str, id: &str) -> Result
     Ok(())
 }
 
-pub async fn sleep(client: &reqwest::Client, backboard: &str, id: &str) -> Result<()> {
+/// Sleep an agent, flushing its filesystem first.
+///
+/// The flush is paired with the mutation here, rather than left to each caller,
+/// because forgetting it loses the user's most recent work silently — see
+/// [`crate::commands::code::flush_disk`]. Every path that suspends an agent goes
+/// through this function for that reason; there is deliberately no way to reach
+/// the bare mutation from outside this module.
+pub async fn sleep(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<()> {
+    crate::commands::code::flush_disk(environment_id, id).await;
+    sleep_without_flush(client, backboard, id).await
+}
+
+async fn sleep_without_flush(client: &reqwest::Client, backboard: &str, id: &str) -> Result<()> {
     post_graphql::<mutations::CloudAgentSleep, _>(
         client,
         backboard,

@@ -412,12 +412,22 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
             return Ok(());
         }
         let spinner = create_spinner(format!("Sleeping {} agents", awake.len()));
-        let mut failed = Vec::new();
-        for agent in &awake {
-            if let Err(e) = ca::sleep(client, &backboard, &agent.id).await {
-                failed.push(format!("  {} — {e}", agent.name));
+        // Concurrently: each sleep now flushes the agent's disk over ssh first,
+        // and run in sequence that would make the cost-control command take a
+        // second per agent — slow enough that people stop reaching for it.
+        let failed: Vec<String> = futures::future::join_all(awake.iter().map(|agent| {
+            let backboard = backboard.clone();
+            async move {
+                ca::sleep(client, &backboard, &agent.environment_id, &agent.id)
+                    .await
+                    .err()
+                    .map(|e| format!("  {} — {e}", agent.name))
             }
-        }
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
         spinner.finish_and_clear();
         println!("✓ Slept {} agents.", awake.len() - failed.len());
         if !failed.is_empty() {
@@ -441,7 +451,7 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
     }
 
     let spinner = create_spinner(format!("Sleeping agent {}", agent.name));
-    let result = ca::sleep(client, &backboard, &agent.id).await;
+    let result = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
     spinner.finish_and_clear();
     result?;
     // Present tense, not "is asleep": the mutation returns before the agent has
@@ -537,7 +547,7 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
         Ok(code) => code,
         Err(e) => {
             if !was_running && !args.keep_awake {
-                let _ = ca::sleep(client, &backboard, &agent.id).await;
+                let _ = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
             }
             return Err(e);
         }
@@ -551,7 +561,7 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
     } else {
         // Agents have no idle timeout, so nothing else will ever do this.
         let spinner = create_spinner("Sleeping the agent".to_string());
-        let slept = ca::sleep(client, &backboard, &agent.id).await;
+        let slept = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
         spinner.finish_and_clear();
         match slept {
             Ok(()) => println!("\nDisconnected — sleeping agent {}.", agent.name.cyan()),

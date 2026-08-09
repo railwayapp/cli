@@ -1676,12 +1676,11 @@ pub async fn sleep_agent(
     progress: &dyn Progress,
 ) -> Result<()> {
     progress.step("Sleeping the agent");
-    post_graphql::<mutations::CloudAgentSleep, _>(
+    crate::controllers::cloud_agent::sleep(
         client,
-        configs.get_backboard(),
-        mutations::cloud_agent_sleep::Variables {
-            id: prepared.agent_id.clone(),
-        },
+        &configs.get_backboard(),
+        &prepared.environment_id,
+        &prepared.agent_id,
     )
     .await?;
     progress.finish();
@@ -1912,6 +1911,52 @@ pub async fn connect_info(environment_id: &str, agent_id: &str) -> Result<Connec
         identity,
         relay_opts: relay.opts,
     })
+}
+
+/// How long the pre-sleep flush may take before we sleep the agent anyway.
+const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Flush the agent's filesystem so sleeping it cannot discard recent work.
+///
+/// `cloudAgentSleep` snapshots the disk without quiescing the guest, so pages
+/// still dirty in its page cache are absent from the image the next wake
+/// restores. Measured on a scratch agent: a file written a second before a
+/// sleep was gone after waking, while the same write followed by `sync`
+/// survived — including when the sleep was issued immediately on disconnect.
+/// So the variable is the flush, not the timing.
+///
+/// A side connection is enough because `sync(2)` flushes the whole filesystem
+/// regardless of which process dirtied it: this covers whatever the durable
+/// session was writing without reaching into it.
+///
+/// Best-effort by design. Failing to reach the agent must not stop us sleeping
+/// it — agents have no idle timeout, so the alternative to an imperfect sleep is
+/// a machine that bills until someone remembers it.
+pub async fn flush_disk(environment_id: &str, agent_id: &str) {
+    // Deliberately not `ssh_plumbing`: its ~20s retry budget exists to cross the
+    // gap while a woken agent becomes attachable. Spending it here would make
+    // every disconnect slow whenever the relay is having a bad minute, to
+    // protect writes on a box we have already failed to reach twice.
+    let flush = async {
+        let info = connect_info(environment_id, agent_id).await.ok()?;
+        let mut opts = info.relay_opts;
+        opts.push("-o".to_string());
+        opts.push(format!("ConnectTimeout={}", FLUSH_TIMEOUT.as_secs()));
+        tokio::task::spawn_blocking(move || {
+            run_native_ssh_captured(
+                &info.ssh_target,
+                "sync",
+                info.identity.as_deref(),
+                None,
+                &opts,
+            )
+        })
+        .await
+        .ok()
+    };
+    // On timeout the blocking ssh is left to finish on its own: it is a `sync`,
+    // it harms nothing, and waiting on it is the thing we just declined to do.
+    let _ = tokio::time::timeout(FLUSH_TIMEOUT, flush).await;
 }
 
 /// End a durable session on an agent.

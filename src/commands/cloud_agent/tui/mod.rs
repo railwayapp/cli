@@ -1202,14 +1202,8 @@ async fn run_agent_op(
     let backboard = backboard.to_string();
     match op {
         AgentOp::Sleep => {
-            post_graphql::<mutations::CloudAgentSleep, _>(
-                client,
-                backboard,
-                mutations::cloud_agent_sleep::Variables {
-                    id: agent_id.to_string(),
-                },
-            )
-            .await?;
+            crate::controllers::cloud_agent::sleep(client, &backboard, environment_id, agent_id)
+                .await?;
         }
         AgentOp::Wake => {
             post_graphql::<mutations::CloudAgentWake, _>(
@@ -1255,15 +1249,24 @@ async fn close_and_sleep(app: &mut App, index: usize, client: &reqwest::Client, 
         return;
     };
     let agent_id = session.agent_id.clone();
+    let environment_id = session.environment_id().map(str::to_string);
     session.detach();
     drop(session);
 
-    let _ = post_graphql::<mutations::CloudAgentSleep, _>(
-        client,
-        backboard.to_string(),
-        mutations::cloud_agent_sleep::Variables { id: agent_id },
-    )
-    .await;
+    // Without the environment there is no relay target to flush through, so the
+    // disk cannot be quiesced first. Sleeping anyway is still right: an agent
+    // left awake with nothing watching it bills until someone notices.
+    let Some(environment_id) = environment_id else {
+        let _ = post_graphql::<mutations::CloudAgentSleep, _>(
+            client,
+            backboard.to_string(),
+            mutations::cloud_agent_sleep::Variables { id: agent_id },
+        )
+        .await;
+        return;
+    };
+    let _ =
+        crate::controllers::cloud_agent::sleep(client, backboard, &environment_id, &agent_id).await;
 }
 
 /// Keep the emulator the same shape as the pane it is drawn into — done after a
