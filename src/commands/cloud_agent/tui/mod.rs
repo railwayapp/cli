@@ -187,6 +187,12 @@ enum Message {
         path: (usize, usize, usize),
         result: Result<Vec<Agent>, String>,
     },
+    /// The whole account's agents in one request, keyed by environment — or
+    /// why that wasn't possible, in which case startup degrades to the
+    /// per-environment path.
+    MyAgentsLoaded {
+        result: Result<Vec<(String, Agent)>, String>,
+    },
     /// A background fetch was refused for rate limiting. The rest of its batch
     /// is abandoned; see [`spawn_sweep`].
     RateLimited {
@@ -194,6 +200,10 @@ enum Message {
     },
     SessionsLoaded {
         path: (usize, usize, usize, usize),
+        /// Applied by id, not by the index the request was issued with: the
+        /// environment can be refetched while sessions are in flight, and a
+        /// new agent shifting the list would attach these to the wrong row.
+        agent_id: String,
         result: Result<Vec<ConsoleSession>, String>,
     },
     LaunchStep(String),
@@ -307,6 +317,71 @@ async fn fetch_agents(
         .collect())
 }
 
+/// Every agent the caller owns, keyed by environment, in one request.
+///
+/// `myCloudAgents` answers for the whole account what the startup sweep used
+/// to ask environment by environment. A backboard that predates the field
+/// reports it as unqueryable, which is the caller's cue to fall back to that
+/// sweep.
+async fn fetch_my_agents(
+    client: &reqwest::Client,
+    backboard: &str,
+) -> Result<Vec<(String, Agent)>> {
+    let res = post_graphql::<queries::MyCloudAgents, _>(
+        client,
+        backboard,
+        queries::my_cloud_agents::Variables {},
+    )
+    .await?;
+    Ok(res
+        .my_cloud_agents
+        .into_iter()
+        .map(|a| {
+            (
+                a.environment_id,
+                Agent {
+                    id: a.id,
+                    name: a.name,
+                    status: format!("{:?}", a.status).to_lowercase(),
+                    sessions: LoadSessions::NotLoaded,
+                    expanded: false,
+                },
+            )
+        })
+        .collect())
+}
+
+/// Ask for the whole account's agents in the background, once, at startup.
+fn spawn_my_agents_fetch(
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_string();
+    tokio::spawn(async move {
+        match fetch_my_agents(&client, &backboard).await {
+            Ok(agents) => {
+                let _ = tx.send(Message::MyAgentsLoaded { result: Ok(agents) });
+            }
+            // A rate limit is worth its own message — the toast with the
+            // Retry-After — rather than being folded into the fallback, which
+            // would immediately spend more requests against a refusal.
+            Err(err) => match rate_limit_from(&err) {
+                Some(retry_after_secs) => {
+                    let _ = tx.send(Message::RateLimited { retry_after_secs });
+                }
+                None => {
+                    let _ = tx.send(Message::MyAgentsLoaded {
+                        result: Err(err.to_string()),
+                    });
+                }
+            },
+        }
+    });
+}
+
 /// The reattachable shell and exec sessions on one agent's VM.
 ///
 /// These are the platform's own record of what is running in there, so they
@@ -364,13 +439,14 @@ pub async fn run(
         start_launch(app, req, &tx);
     }
 
-    // Load the environments a keypress would immediately need, in the
-    // background. Everything else waits to be expanded: one request per
-    // environment across a whole account is hundreds on a large one.
+    // Ask for every agent the caller owns, in one request. If the platform
+    // predates `myCloudAgents`, the reply says so and startup degrades to
+    // loading just the environments a keypress would immediately need. On
+    // re-entry after a session the tree has already settled, and the settle
+    // would discard a fresh answer — so don't spend the request.
     let stop_fetching: StopFlag = Default::default();
-    let sweep = app.initial_environments();
-    if !sweep.is_empty() {
-        spawn_sweep(sweep, &tx, &client, &backboard, stop_fetching.clone());
+    if app.has_unloaded_environments() {
+        spawn_my_agents_fetch(&tx, &client, &backboard);
     }
 
     loop {
@@ -390,7 +466,7 @@ pub async fn run(
         let effect = tokio::select! {
             // Background work first: draining it keeps the tree and the session
             // honest even while keys arrive faster than frames.
-            Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard),
+            Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard, &stop_fetching),
             // Animate the loading screen. Only armed while it is showing, so an
             // idle TUI still blocks rather than spinning on a timer.
             // The wizard borrows the same tick for its "creating…" spinner.
@@ -636,12 +712,31 @@ pub async fn run(
                 let client = client.clone();
                 let backboard = backboard.clone();
                 tokio::spawn(async move {
-                    let result = fetch_agents(&client, &backboard, &environment_id)
-                        .await
-                        .map_err(|e| e.to_string());
                     // A closed receiver just means the TUI already handed back;
                     // the next entry re-requests, so the drop is harmless.
-                    let _ = tx.send(Message::AgentsLoaded { path, result });
+                    match fetch_agents(&client, &backboard, &environment_id).await {
+                        Ok(agents) => {
+                            let _ = tx.send(Message::AgentsLoaded {
+                                path,
+                                result: Ok(agents),
+                            });
+                        }
+                        // The same classification the background fetches do:
+                        // a 429 puts the row back to "not loaded" with the
+                        // Retry-After toast, instead of pinning "rate limited"
+                        // to this one environment as if it were its failure.
+                        Err(err) => match rate_limit_from(&err) {
+                            Some(retry_after_secs) => {
+                                let _ = tx.send(Message::RateLimited { retry_after_secs });
+                            }
+                            None => {
+                                let _ = tx.send(Message::AgentsLoaded {
+                                    path,
+                                    result: Err(err.to_string()),
+                                });
+                            }
+                        },
+                    }
                 });
             }
         }
@@ -654,6 +749,7 @@ fn handle_message(
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
     backboard: &str,
+    stop_fetching: &StopFlag,
 ) -> Option<Effect> {
     match message {
         Message::RateLimited { retry_after_secs } => {
@@ -663,18 +759,54 @@ fn handle_message(
         Message::AgentsLoaded { path, result } => {
             app.agents_loaded(path, result);
             // Fill in each running agent's session count without waiting for
-            // someone to expand it.
-            for effect in app.sessions_to_prefetch() {
-                if let Effect::LoadSessions { agent_id, path } = effect {
-                    spawn_session_fetch(agent_id, path, tx, client, backboard);
-                }
+            // someone to expand it. Bounded: one environment usually holds a
+            // handful of agents, but nothing guarantees it.
+            let prefetch = app.sessions_to_prefetch();
+            if !prefetch.is_empty() {
+                spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
             }
             // A launch that just created an agent asked for it to be opened;
             // its row only exists now.
             app.expand_pending()
         }
-        Message::SessionsLoaded { path, result } => {
-            app.sessions_loaded(path, result);
+        Message::MyAgentsLoaded { result } => match result {
+            Ok(agents) => {
+                app.my_agents_loaded(agents);
+                let prefetch = app.sessions_to_prefetch();
+                if !prefetch.is_empty() {
+                    spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
+                }
+                // Normally redundant — a launch's own refetch answers this —
+                // but it is the safety net when that refetch failed before
+                // this settle arrived.
+                app.expand_pending()
+            }
+            // Whether the field doesn't exist yet or the request died, the
+            // per-environment path still works, so startup degrades to what
+            // it loaded before `myCloudAgents`: the environments a keypress
+            // would immediately need.
+            Err(err) => {
+                // These are fresh requests; a stop left over from an earlier
+                // 429 would strand them as spinners that never resolve.
+                stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
+                let sweep = app.initial_environments();
+                if sweep.is_empty() {
+                    // No target and no default project means nothing loads
+                    // lazily either — without this line an expired login
+                    // looks like an account with no agents anywhere.
+                    app.status = format!("Couldn't load agents: {err}");
+                } else {
+                    spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
+                }
+                None
+            }
+        },
+        Message::SessionsLoaded {
+            path,
+            agent_id,
+            result,
+        } => {
+            app.sessions_loaded(path, &agent_id, result);
             None
         }
         Message::LaunchStep(text) => {
@@ -939,7 +1071,73 @@ fn spawn_session_fetch(
                 Err(err.to_string())
             }
         };
-        let _ = tx.send(Message::SessionsLoaded { path, result });
+        let _ = tx.send(Message::SessionsLoaded {
+            path,
+            agent_id,
+            result,
+        });
+    });
+}
+
+/// Fetch a batch of agents' sessions, a few at a time.
+///
+/// Same discipline as [`spawn_sweep`]: the account-wide settle can name every
+/// running agent at once, and firing one request per agent simultaneously is
+/// the burst this TUI exists to avoid. The first 429 abandons the rest.
+fn spawn_session_prefetch(
+    effects: Vec<Effect>,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+    stop: StopFlag,
+) {
+    use std::sync::atomic::Ordering;
+
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_string();
+    tokio::spawn(async move {
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(SWEEP_CONCURRENCY));
+        for effect in effects {
+            let Effect::LoadSessions { agent_id, path } = effect else {
+                continue;
+            };
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let Ok(permit) = permits.clone().acquire_owned().await else {
+                return;
+            };
+            let tx = tx.clone();
+            let client = client.clone();
+            let backboard = backboard.clone();
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                match fetch_sessions(&client, &backboard, &agent_id).await {
+                    Ok(sessions) => {
+                        let _ = tx.send(Message::SessionsLoaded {
+                            path,
+                            agent_id,
+                            result: Ok(sessions),
+                        });
+                    }
+                    Err(err) => match rate_limit_from(&err) {
+                        Some(retry_after_secs) => {
+                            stop.store(true, Ordering::Relaxed);
+                            let _ = tx.send(Message::RateLimited { retry_after_secs });
+                        }
+                        None => {
+                            let _ = tx.send(Message::SessionsLoaded {
+                                path,
+                                agent_id,
+                                result: Err(err.to_string()),
+                            });
+                        }
+                    },
+                }
+                drop(permit);
+            });
+        }
     });
 }
 
