@@ -114,6 +114,9 @@ async fn browse() -> Result<()> {
     // return, now only for the rare case that actually needs it.
     // No preferences yet: offer to set them up rather than dropping someone in
     // front of a prompt whose target, agent and skills are all unanswered.
+    // Environments this machine has launched an agent in, so they load without
+    // the user going looking. `railway ca` no longer scans every project.
+    app.known_environments = configs.code_agent_environments();
     app.skills_source = skills_sync::populated_sources(&home)
         .first()
         .map(|(source, _)| source.slug.to_string());

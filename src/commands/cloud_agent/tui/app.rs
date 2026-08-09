@@ -54,6 +54,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("w", "wake"),
             ("d", "delete, with a confirmation"),
             ("r", "refresh"),
+            ("shift+r", "look for agents in every project"),
         ],
     ),
     (
@@ -649,6 +650,9 @@ pub enum Effect {
     SaveDefaultProject(Box<Target>),
     /// Open a link that was double-clicked in a session.
     OpenUrl(String),
+    /// Look for agents in every project, on request. See
+    /// [`App::scan_environments`].
+    ScanEverywhere,
     /// Put an `ssh` command for one session on the clipboard.
     CopySsh {
         agent_id: String,
@@ -696,6 +700,10 @@ pub struct App {
     /// Whether preferences exist yet. Decides whether the menu carries a Setup
     /// card or leaves setup to ⌥s.
     pub configured: bool,
+    /// Environments this machine has launched an agent in, from the CLI's own
+    /// records. Loaded eagerly, because an agent you made is one you expect to
+    /// find without hunting for it.
+    pub known_environments: Vec<String>,
     /// The target chooser, while it is open.
     pub target_pick: Option<TargetPicker>,
     /// The agent chooser, while it is open.
@@ -776,6 +784,7 @@ impl App {
         let mut app = Self {
             default_project,
             configured,
+            known_environments: Vec::new(),
             target_pick: None,
             agent_pick: None,
             maximized: false,
@@ -2235,26 +2244,50 @@ impl App {
         out
     }
 
-    /// Every environment that has never been fetched, as load requests.
+    /// The environments to fetch before anyone touches a key.
     ///
-    /// Used once at startup to fill the per-project counts: the counts are the
-    /// point of the tree — they are how you find the project that already has
-    /// an agent — and they cannot exist without asking each environment. Runs
-    /// in the background at a bounded rate, so the tree is usable immediately
-    /// and the numbers arrive behind it.
-    pub fn unloaded_environments(&mut self) -> Vec<Effect> {
+    /// Only where the answer is needed immediately: the prompt's target, which
+    /// New Session reads to decide whether it has an agent to work on, and the
+    /// default project, which the tree leads with. Everything else loads when
+    /// its row is expanded.
+    ///
+    /// This used to be every environment in every project in every workspace,
+    /// which is one request each. That is fine on a small account and hundreds
+    /// of requests on a large one — enough to rate limit the caller before the
+    /// tree had finished drawing, and enough backend load per launch to be
+    /// worth not doing. The cost of loading less is that a project's agent
+    /// count appears when you open it rather than immediately.
+    pub fn initial_environments(&mut self) -> Vec<Effect> {
+        let mut wanted: Vec<String> = self.known_environments.clone();
+        if let Some(target) = self.target.as_ref() {
+            wanted.push(target.environment_id.clone());
+        }
+        // The default project's environments, which is where the tree opens and
+        // where a launch with no target lands.
+        if let Some(project_id) = self.default_project.clone() {
+            for ws in &self.tree {
+                for project in &ws.projects {
+                    if project.id != project_id {
+                        continue;
+                    }
+                    wanted.extend(project.envs.iter().map(|env| env.id.clone()));
+                }
+            }
+        }
+
         let mut out = Vec::new();
         for w in 0..self.tree.len() {
             for p in 0..self.tree[w].projects.len() {
                 for e in 0..self.tree[w].projects[p].envs.len() {
                     let env = &mut self.tree[w].projects[p].envs[e];
-                    if env.agents == Load::NotLoaded {
-                        env.agents = Load::Loading;
-                        out.push(Effect::LoadAgents {
-                            environment_id: env.id.clone(),
-                            path: (w, p, e),
-                        });
+                    if env.agents != Load::NotLoaded || !wanted.contains(&env.id) {
+                        continue;
                     }
+                    env.agents = Load::Loading;
+                    out.push(Effect::LoadAgents {
+                        environment_id: env.id.clone(),
+                        path: (w, p, e),
+                    });
                 }
             }
         }
@@ -2698,6 +2731,9 @@ impl App {
             KeyCode::Char('s') => self.agent_op(AgentOp::Sleep),
             KeyCode::Char('w') => self.agent_op(AgentOp::Wake),
             KeyCode::Char('d') => self.agent_op(AgentOp::Delete),
+            // Startup loads only what a keypress needs, so this is how an agent
+            // in a project you haven't opened gets found.
+            KeyCode::Char('R') => Some(Effect::ScanEverywhere),
             KeyCode::Char('r') => {
                 let (w, p, e) = self.env_of(row?.kind)?;
                 let env = self.tree.get_mut(w)?.projects.get_mut(p)?.envs.get_mut(e)?;
@@ -2827,6 +2863,66 @@ impl App {
             }
             None => self.status = format!("Ended {session_name}"),
         }
+    }
+
+    /// Every environment that has not been fetched, as load requests.
+    ///
+    /// The whole-account scan, which is what `shift+r` asks for. Startup no
+    /// longer does this: it is one request per environment, so it costs a large
+    /// account hundreds of them. As a deliberate action the cost is the user's
+    /// to spend, and a rate limit stops it partway rather than pressing on.
+    pub fn scan_environments(&mut self) -> Vec<Effect> {
+        let mut out = Vec::new();
+        for w in 0..self.tree.len() {
+            for p in 0..self.tree[w].projects.len() {
+                for e in 0..self.tree[w].projects[p].envs.len() {
+                    let env = &mut self.tree[w].projects[p].envs[e];
+                    if env.agents != Load::NotLoaded {
+                        continue;
+                    }
+                    env.agents = Load::Loading;
+                    out.push(Effect::LoadAgents {
+                        environment_id: env.id.clone(),
+                        path: (w, p, e),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// A background fetch was refused for rate limiting.
+    ///
+    /// Anything still in flight is put back to "not loaded" rather than left
+    /// spinning: the request is not coming, and a row that never resolves reads
+    /// as a hung UI. Expanding it later retries, which is the right amount of
+    /// work for the user to have to do.
+    pub fn rate_limited(&mut self, retry_after_secs: Option<u64>) {
+        for ws in &mut self.tree {
+            for project in &mut ws.projects {
+                for env in &mut project.envs {
+                    if env.agents == Load::Loading {
+                        env.agents = Load::NotLoaded;
+                    }
+                    if let Load::Loaded(agents) = &mut env.agents {
+                        for agent in agents {
+                            if agent.sessions == LoadSessions::Loading {
+                                agent.sessions = LoadSessions::NotLoaded;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.toast_error(match retry_after_secs {
+            Some(secs) if secs > 90 => format!(
+                "Rate limited — try again in about {} minutes",
+                secs.div_ceil(60)
+            ),
+            Some(secs) => format!("Rate limited — try again in {secs}s"),
+            None => "Rate limited by the API".to_string(),
+        });
+        self.status = "Rate limited. Open a row to load it, or r to retry".into();
     }
 
     /// A lifecycle mutation came back.
@@ -5877,16 +5973,97 @@ mod tests {
         assert!(a.pending_copy.is_none());
     }
 
+    /// Startup loads what a keypress needs and nothing else. Loading every
+    /// environment in every project is one request each, which is what rate
+    /// limited a real account.
     #[test]
-    fn the_startup_sweep_claims_every_environment_once() {
+    fn startup_loads_only_the_target_and_the_default_project() {
         let mut a = app();
-        let first = a.unloaded_environments();
-        assert_eq!(first.len(), 2, "both environments in the fixture");
         assert!(
-            a.unloaded_environments().is_empty(),
-            "a second sweep must not refetch what is already in flight"
+            a.initial_environments().is_empty(),
+            "no target and no default means nothing to load up front"
         );
-        assert!(matches!(first[0], Effect::LoadAgents { .. }));
+
+        let mut a = app();
+        a.target = Some(Target {
+            project_id: "proj_1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_stg".into(),
+            environment_name: "staging".into(),
+        });
+        let effects = a.initial_environments();
+        assert_eq!(effects.len(), 1, "just the target: {effects:?}");
+        assert!(matches!(
+            &effects[0],
+            Effect::LoadAgents { environment_id, .. } if environment_id == "env_stg"
+        ));
+        assert!(
+            a.initial_environments().is_empty(),
+            "what is already in flight is not asked for twice"
+        );
+    }
+
+    /// The default project is where the tree opens and where an untargeted
+    /// launch lands, so all of its environments load up front.
+    #[test]
+    fn startup_loads_every_environment_of_the_default_project() {
+        let mut a = app();
+        a.default_project = Some("proj_1".into());
+        let effects = a.initial_environments();
+        assert_eq!(effects.len(), 2, "production and staging: {effects:?}");
+    }
+
+    /// An agent this machine made is one you expect to find without hunting,
+    /// even in a project that is neither the target nor the default.
+    #[test]
+    fn startup_loads_environments_this_machine_has_used() {
+        let mut a = app();
+        a.known_environments = vec!["env_stg".into()];
+        let effects = a.initial_environments();
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            &effects[0],
+            Effect::LoadAgents { environment_id, .. } if environment_id == "env_stg"
+        ));
+    }
+
+    /// `shift+r` is how an agent in a project nobody has opened gets found: the
+    /// scan startup used to do, when the user asks for it.
+    #[test]
+    fn shift_r_scans_every_environment() {
+        let mut a = loaded_app();
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('R'))),
+            Some(Effect::ScanEverywhere)
+        );
+
+        let mut a = app();
+        let effects = a.scan_environments();
+        assert_eq!(effects.len(), 2, "every environment in the fixture");
+        assert!(
+            a.scan_environments().is_empty(),
+            "a second scan must not refetch what is already in flight"
+        );
+    }
+
+    /// A rate limit puts what was in flight back, so opening the row retries
+    /// instead of showing a spinner that never resolves.
+    #[test]
+    fn a_rate_limit_releases_what_was_loading() {
+        let mut a = app();
+        a.default_project = Some("proj_1".into());
+        assert_eq!(a.initial_environments().len(), 2);
+        assert_eq!(a.tree[0].projects[0].envs[0].agents, Load::Loading);
+
+        a.rate_limited(Some(43));
+        assert_eq!(a.tree[0].projects[0].envs[0].agents, Load::NotLoaded);
+        assert_eq!(a.tree[0].projects[0].envs[1].agents, Load::NotLoaded);
+        let toast = a.toast.as_ref().expect("a toast");
+        assert!(toast.text.contains("43s"), "{}", toast.text);
+        assert!(!toast.ok, "a rate limit is not a success");
+
+        // And asking again works, rather than being blocked by the old claim.
+        assert_eq!(a.initial_environments().len(), 2);
     }
 
     #[test]

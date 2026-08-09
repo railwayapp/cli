@@ -337,7 +337,13 @@ where
     T: DeserializeOwned,
 {
     if response.status() == 429 {
-        return Err(RailwayError::Ratelimited);
+        // Backboard sets `Retry-After` on every 429 (see getRateLimitHeaders).
+        let retry_after_secs = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        return Err(RailwayError::Ratelimited { retry_after_secs });
     }
     let res: GraphQLResponse<T> = response.json().await?;
     if let Some(errors) = res.errors {
@@ -574,7 +580,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-            assert!(matches!(err, RailwayError::Ratelimited));
+            assert!(matches!(err, RailwayError::Ratelimited { .. }));
         }
 
         #[tokio::test]
