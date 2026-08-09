@@ -92,7 +92,10 @@ async fn create_default_project(
 }
 
 /// Write what first-run setup collected.
-fn save_setup(app: &App, outcome: &wizard::Outcome) -> Result<()> {
+fn save_setup(
+    app: &App,
+    outcome: &wizard::Outcome,
+) -> Result<crate::commands::cloud_agent::prefs::AgentPrefs> {
     use crate::commands::cloud_agent::prefs::{AgentPrefs, DefaultProject, SkillsPrefs};
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
@@ -113,7 +116,8 @@ fn save_setup(app: &App, outcome: &wizard::Outcome) -> Result<()> {
         theme: Some(outcome.theme.clone()),
     };
     let _ = app;
-    prefs.save_in(&home)
+    prefs.save_in(&home)?;
+    Ok(prefs)
 }
 
 /// Shorten a string for a toast, keeping the front — the host and the start of
@@ -560,7 +564,15 @@ pub async fn run(
                             session_name,
                             info: Box::new(info),
                         },
-                        Err(err) => Message::LaunchFailed(format!("{err:#}")),
+                        Err(err) => {
+                            let message = format!("{err:#}");
+                            super::telemetry::track_session_event(
+                                "reattach_connect_failed",
+                                Some(message.as_str()),
+                            )
+                            .await;
+                            Message::LaunchFailed(message)
+                        }
                     };
                     let _ = tx.send(message);
                 });
@@ -578,8 +590,21 @@ pub async fn run(
             }
             Some(Effect::SaveSetup(outcome)) => {
                 app.status = match save_setup(app, &outcome) {
-                    Ok(()) => "Saved — Setup again to change it".into(),
-                    Err(err) => format!("Couldn't save your setup: {err:#}"),
+                    Ok(prefs) => {
+                        tokio::spawn(async move {
+                            super::telemetry::track_setup_saved("wizard", &prefs).await;
+                        });
+                        "Saved — Setup again to change it".into()
+                    }
+                    Err(err) => {
+                        let message = format!("{err:#}");
+                        let telemetry_message = message.clone();
+                        tokio::spawn(async move {
+                            super::telemetry::track_setup_failed("wizard", &telemetry_message)
+                                .await;
+                        });
+                        format!("Couldn't save your setup: {message}")
+                    }
                 };
                 // Apply it to the session that just chose it, or the prompt
                 // would still offer the harness they replaced.
@@ -685,6 +710,7 @@ pub async fn run(
                         .await
                         .err()
                         .map(|e| format!("{e:#}"));
+                    super::telemetry::track_agent_op(op, error.as_deref()).await;
                     let _ = tx.send(Message::AgentOpDone {
                         agent_id,
                         environment_id,
@@ -857,10 +883,20 @@ fn handle_message(
             ) {
                 Ok(session) => {
                     app.attach_session(session, agent_id);
+                    tokio::spawn(super::telemetry::track_session_event("reattach", None));
                     None
                 }
                 Err(err) => {
-                    app.launch_failed(format!("couldn't reattach: {err}"));
+                    let message = format!("couldn't reattach: {err}");
+                    let telemetry_message = message.clone();
+                    tokio::spawn(async move {
+                        super::telemetry::track_session_event(
+                            "reattach_open_failed",
+                            Some(telemetry_message.as_str()),
+                        )
+                        .await;
+                    });
+                    app.launch_failed(message);
                     None
                 }
             }
@@ -876,6 +912,11 @@ fn handle_message(
             session_name,
             error,
         } => {
+            let telemetry_error = error.clone();
+            tokio::spawn(async move {
+                super::telemetry::track_session_event("kill_session", telemetry_error.as_deref())
+                    .await;
+            });
             app.session_killed(&session_name, error);
             // The list is the proof: refetch so the row goes, rather than
             // asserting it did.
@@ -943,7 +984,16 @@ fn open_session(
             app.reveal_environment(&prepared.environment_id)
         }
         Err(err) => {
-            app.launch_failed(format!("couldn't open the session: {err}"));
+            let message = format!("couldn't open the session: {err}");
+            let telemetry_message = message.clone();
+            tokio::spawn(async move {
+                super::telemetry::track_session_event(
+                    "launch_open_failed",
+                    Some(telemetry_message.as_str()),
+                )
+                .await;
+            });
+            app.launch_failed(message);
             None
         }
     }
@@ -1226,7 +1276,6 @@ async fn run_agent_op(
             .await?;
         }
     }
-    let _ = environment_id;
     Ok(())
 }
 
@@ -1253,20 +1302,30 @@ async fn close_and_sleep(app: &mut App, index: usize, client: &reqwest::Client, 
     session.detach();
     drop(session);
 
-    // Without the environment there is no relay target to flush through, so the
-    // disk cannot be quiesced first. Sleeping anyway is still right: an agent
-    // left awake with nothing watching it bills until someone notices.
-    let Some(environment_id) = environment_id else {
-        let _ = post_graphql::<mutations::CloudAgentSleep, _>(
+    // Without the environment there is no relay target, so the disk cannot be
+    // quiesced first. Sleeping anyway is still right: an agent left awake with
+    // nothing watching it bills until someone notices.
+    let result = match environment_id {
+        Some(environment_id) => {
+            crate::controllers::cloud_agent::sleep(client, backboard, &environment_id, &agent_id)
+                .await
+        }
+        None => post_graphql::<mutations::CloudAgentSleep, _>(
             client,
             backboard.to_string(),
             mutations::cloud_agent_sleep::Variables { id: agent_id },
         )
-        .await;
-        return;
+        .await
+        .map(|_| ())
+        .map_err(Into::into),
     };
-    let _ =
-        crate::controllers::cloud_agent::sleep(client, backboard, &environment_id, &agent_id).await;
+    // Worth its own event, not just a silent `let _ =`: a failure here is an
+    // agent left running and billing compute with nothing attached to it —
+    // exactly the case sleep-on-quit exists to prevent.
+    if let Err(err) = result {
+        let message = format!("{err:#}");
+        super::telemetry::track_session_event("quit_sleep_failed", Some(message.as_str())).await;
+    }
 }
 
 /// Keep the emulator the same shape as the pane it is drawn into — done after a

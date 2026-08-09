@@ -93,10 +93,10 @@ macro_rules! commands {
                                 command: command_name.to_string(),
                                 sub_command: subcommand_name,
                                 success: result.is_ok(),
-                                error_message: result.as_ref().err().map(|e| {
-                                    let msg = format!("{e}");
-                                    if msg.len() > 256 { msg[..256].to_string() } else { msg }
-                                }),
+                                error_message: result
+                                    .as_ref()
+                                    .err()
+                                    .map(|e| $crate::telemetry::truncate_message(&format!("{e}"))),
                                 duration_ms: duration.as_millis() as u64,
                                 cli_version: env!("CARGO_PKG_VERSION"),
                                 os: ::std::env::consts::OS,

@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod prefs;
 pub mod setup;
 pub mod skills_sync;
+pub mod telemetry;
 pub mod tui;
 
 use anyhow::{Context, Result};

@@ -2015,14 +2015,10 @@ impl ServerHandler for RailwayMcp {
             tool_name,
             duration_ms,
             result.is_ok(),
-            result.as_ref().err().map(|e| {
-                let msg = format!("{e}");
-                if msg.len() > 256 {
-                    msg[..256].to_string()
-                } else {
-                    msg
-                }
-            }),
+            result
+                .as_ref()
+                .err()
+                .map(|e| telemetry::truncate_message(&format!("{e}"))),
             mcp_client,
         )
         .await;
