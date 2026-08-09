@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod cloud_agent;
 pub mod cluster_scale;
 pub mod config;
 pub mod database;

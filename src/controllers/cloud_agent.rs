@@ -1,0 +1,575 @@
+//! Cloud agent lifecycle, shared by `railway ca` and `railway code`.
+//!
+//! The launcher grew these operations as flags on a command whose job is
+//! something else (`--new` creates, `--rm` destroys, `--keep-awake` declines to
+//! sleep). Pulling them here gives the flat `railway ca` verbs one
+//! implementation to call, and — more importantly — one place where the local
+//! agent pointer is kept honest. A delete that forgets to clear the pointer
+//! leaves `railway code` waking a corpse.
+
+use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
+
+use crate::client::post_graphql;
+use crate::config::Configs;
+use crate::gql::{mutations, queries};
+
+/// How long to wait for a created or woken agent to reach RUNNING.
+///
+/// Matches the launcher's budget: a cold create boots a microVM and publishes
+/// routes, a wake restores a checkpoint and is much quicker.
+const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Gap between readiness polls.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// An agent's lifecycle state, normalised across the four generated enums that
+/// describe the same thing.
+///
+/// Worth the conversion boilerplate: without it every caller matches on a
+/// per-operation enum, and the "is this thing usable" question gets answered
+/// slightly differently in each place it is asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    Running,
+    Sleeping,
+    Starting,
+    Crashed,
+    Failed,
+    Deleting,
+    /// A state this CLI predates. Treated as terminal — refusing to act on a
+    /// state we cannot reason about beats guessing.
+    Unknown(String),
+}
+
+impl Status {
+    /// Lowercase label for tables and messages.
+    pub fn label(&self) -> String {
+        match self {
+            Status::Running => "running".into(),
+            Status::Sleeping => "sleeping".into(),
+            Status::Starting => "starting".into(),
+            Status::Crashed => "crashed".into(),
+            Status::Failed => "failed".into(),
+            Status::Deleting => "deleting".into(),
+            Status::Unknown(s) => s.to_lowercase(),
+        }
+    }
+
+    /// The agent exists and can be brought back: it is worth listing, waking,
+    /// sleeping or connecting to.
+    pub fn is_live(&self) -> bool {
+        matches!(self, Status::Running | Status::Sleeping | Status::Starting)
+    }
+}
+
+/// Generate `From` impls for the per-operation status enums, which are
+/// structurally identical and separately generated.
+macro_rules! status_from {
+    ($($path:path),+ $(,)?) => {
+        $(
+            impl From<$path> for Status {
+                fn from(status: $path) -> Self {
+                    use $path as S;
+                    match status {
+                        S::RUNNING => Status::Running,
+                        S::SLEEPING => Status::Sleeping,
+                        S::STARTING => Status::Starting,
+                        S::CRASHED => Status::Crashed,
+                        S::FAILED => Status::Failed,
+                        S::DELETING => Status::Deleting,
+                        S::Other(other) => Status::Unknown(other),
+                    }
+                }
+            }
+        )+
+    };
+}
+
+status_from!(
+    queries::cloud_agent::CloudAgentStatus,
+    queries::cloud_agents::CloudAgentStatus,
+    queries::my_cloud_agents::CloudAgentStatus,
+    mutations::cloud_agent_create::CloudAgentStatus,
+);
+
+/// One cloud agent, as every `railway ca` verb sees it.
+#[derive(Clone, Debug)]
+pub struct Agent {
+    pub id: String,
+    pub name: String,
+    pub status: Status,
+    pub project_id: String,
+    pub environment_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Read one agent by id, scoped to its environment. `None` means it is gone —
+/// deleted, or it belongs to another environment — which is the caller's cue to
+/// forget the stored pointer rather than to fail.
+pub async fn get(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<Option<Agent>> {
+    let res = post_graphql::<queries::CloudAgent, _>(
+        client,
+        backboard,
+        queries::cloud_agent::Variables {
+            id: id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await?;
+    Ok(res.cloud_agent.map(|a| Agent {
+        id: a.id,
+        name: a.name,
+        status: a.status.into(),
+        project_id: a.project_id,
+        environment_id: a.environment_id,
+        created_at: a.created_at,
+    }))
+}
+
+/// Every agent the caller owns, across the whole account, in one request.
+///
+/// This is what makes the flat verbs work without a linked directory: agents
+/// are addressed by name, and the name has to be looked up somewhere.
+pub async fn list_mine(client: &reqwest::Client, backboard: &str) -> Result<Vec<Agent>> {
+    let res = post_graphql::<queries::MyCloudAgents, _>(
+        client,
+        backboard,
+        queries::my_cloud_agents::Variables {},
+    )
+    .await?;
+    Ok(res
+        .my_cloud_agents
+        .into_iter()
+        .map(|a| Agent {
+            id: a.id,
+            name: a.name,
+            status: a.status.into(),
+            project_id: a.project_id,
+            environment_id: a.environment_id,
+            created_at: a.created_at,
+        })
+        .collect())
+}
+
+/// Agents in one environment. `mine` is load-bearing rather than tidiness:
+/// agents authorize per environment, so an unfiltered list includes teammates'
+/// — and connecting to one would put this user's credentials on a box someone
+/// else is working in.
+pub async fn list_in_environment(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    mine: bool,
+) -> Result<Vec<Agent>> {
+    let res = post_graphql::<queries::CloudAgents, _>(
+        client,
+        backboard,
+        queries::cloud_agents::Variables {
+            environment_id: environment_id.to_owned(),
+            mine: Some(mine),
+        },
+    )
+    .await?;
+    Ok(res
+        .cloud_agents
+        .into_iter()
+        .map(|a| Agent {
+            id: a.id,
+            name: a.name,
+            status: a.status.into(),
+            project_id: a.project_id,
+            environment_id: a.environment_id,
+            created_at: a.created_at,
+        })
+        .collect())
+}
+
+/// Create an agent. The VM only — no harness, no credential, no session.
+/// Provisioning belongs to whatever opens a session on it, so an agent created
+/// here works with any of them.
+pub async fn create(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    name: Option<String>,
+    variables: Option<serde_json::Value>,
+) -> Result<Agent> {
+    let res = post_graphql::<mutations::CloudAgentCreate, _>(
+        client,
+        backboard,
+        mutations::cloud_agent_create::Variables {
+            input: mutations::cloud_agent_create::CloudAgentCreateInput {
+                environment_id: environment_id.to_owned(),
+                name,
+                variables,
+            },
+        },
+    )
+    .await?
+    .cloud_agent_create;
+    Ok(Agent {
+        id: res.id,
+        name: res.name,
+        status: res.status.into(),
+        project_id: res.project_id,
+        environment_id: res.environment_id,
+        created_at: res.created_at,
+    })
+}
+
+pub async fn wake(client: &reqwest::Client, backboard: &str, id: &str) -> Result<()> {
+    post_graphql::<mutations::CloudAgentWake, _>(
+        client,
+        backboard,
+        mutations::cloud_agent_wake::Variables { id: id.to_owned() },
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn sleep(client: &reqwest::Client, backboard: &str, id: &str) -> Result<()> {
+    post_graphql::<mutations::CloudAgentSleep, _>(
+        client,
+        backboard,
+        mutations::cloud_agent_sleep::Variables { id: id.to_owned() },
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn delete(client: &reqwest::Client, backboard: &str, id: &str) -> Result<()> {
+    post_graphql::<mutations::CloudAgentDelete, _>(
+        client,
+        backboard,
+        mutations::cloud_agent_delete::Variables { id: id.to_owned() },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Poll until the agent is RUNNING. A terminal state is reported immediately
+/// rather than burning the whole timeout on a box that will never come up.
+pub async fn wait_until_running(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<Agent> {
+    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let agent = match get(client, backboard, environment_id, id).await? {
+            Some(agent) => agent,
+            None => bail!("Agent {id} disappeared while starting."),
+        };
+        match agent.status {
+            Status::Running => return Ok(agent),
+            Status::Starting | Status::Sleeping => {}
+            Status::Crashed => bail!("Agent {} crashed while starting.", agent.name),
+            Status::Failed => bail!("Agent {} failed to start.", agent.name),
+            Status::Deleting => bail!("Agent {} is being deleted.", agent.name),
+            Status::Unknown(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Agent {} did not reach running within {}s (last state: {}).",
+                agent.name,
+                READY_TIMEOUT.as_secs(),
+                agent.status.label()
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Bring an existing agent up to RUNNING, waking it if it is asleep.
+///
+/// Deliberately unlike the launcher's [`crate::commands::code`] path, which
+/// treats a crashed agent as a cue to create a fresh one. That is a reasonable
+/// answer to "get me coding" and a terrible answer to "wake this agent": the
+/// caller named a machine, and silently handing back a different, empty one
+/// while the original's disk sits there is not a thing to do quietly.
+pub async fn ensure_running(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent: &Agent,
+) -> Result<Agent> {
+    match agent.status {
+        Status::Running => Ok(agent.clone()),
+        // STARTING means something else is already booting it, so this waits
+        // rather than issuing a second wake.
+        Status::Starting => {
+            wait_until_running(client, backboard, &agent.environment_id, &agent.id).await
+        }
+        Status::Sleeping => {
+            wake(client, backboard, &agent.id).await?;
+            wait_until_running(client, backboard, &agent.environment_id, &agent.id).await
+        }
+        _ => bail!(
+            "Agent {} is {} — it cannot be connected to. `railway ca delete {}` and create a new one.",
+            agent.name,
+            agent.status.label(),
+            agent.name
+        ),
+    }
+}
+
+/// A durable console session on an agent.
+///
+/// Sessions outlive the ssh that started them — that is the point of them — so
+/// reconnecting means finding the session by name rather than starting a second
+/// copy of the work alongside the first.
+pub struct ConsoleSession {
+    pub name: String,
+    pub command: String,
+    pub running: bool,
+    pub attached: bool,
+}
+
+pub async fn list_sessions(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent_id: &str,
+) -> Result<Vec<ConsoleSession>> {
+    let res = post_graphql::<queries::CloudAgentConsoleSessions, _>(
+        client,
+        backboard,
+        queries::cloud_agent_console_sessions::Variables {
+            cloud_agent_id: agent_id.to_owned(),
+        },
+    )
+    .await?;
+    Ok(res
+        .cloud_agent_console_sessions
+        .map(|conn| {
+            conn.edges
+                .into_iter()
+                .map(|edge| ConsoleSession {
+                    name: edge.node.name,
+                    command: edge.node.command,
+                    running: edge.node.run_state.running,
+                    attached: edge.node.attached,
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// How an agent was picked, so callers can say so.
+pub enum Resolution {
+    /// The caller named it.
+    Named,
+    /// It is the agent this machine last used in its environment.
+    Remembered,
+    /// It is the caller's only live agent in scope.
+    Sole,
+}
+
+/// Find the agent a command should act on.
+///
+/// One order for every verb, and no interactive prompt anywhere in it — a
+/// lifecycle command that stops to ask which agent it meant is unusable in a
+/// script, and the ambiguous case has a better answer anyway: print the
+/// candidates and let the next invocation name one.
+///
+/// Scope is the whole account unless `--project`/`--environment` narrows it,
+/// because agents are cross-project and the directory you happen to be in is
+/// about deploys.
+pub async fn resolve(
+    configs: &Configs,
+    client: &reqwest::Client,
+    selector: Option<&str>,
+    environment_id: Option<&str>,
+) -> Result<(Agent, Resolution)> {
+    let backboard = configs.get_backboard();
+    let candidates = match environment_id {
+        Some(env) => list_in_environment(client, &backboard, env, true).await?,
+        None => list_mine(client, &backboard).await?,
+    };
+
+    if let Some(selector) = selector {
+        return match_selector(candidates, selector).map(|agent| (agent, Resolution::Named));
+    }
+
+    let live: Vec<Agent> = candidates
+        .into_iter()
+        .filter(|a| a.status.is_live())
+        .collect();
+
+    // The pointer is what makes bare `railway ca ssh` mean "the agent I was
+    // just working in" rather than "whichever one sorts first".
+    let mut remembered: Vec<Agent> = live
+        .iter()
+        .filter(|a| configs.get_code_agent(&a.environment_id).as_deref() == Some(a.id.as_str()))
+        .cloned()
+        .collect();
+    if remembered.len() == 1 {
+        return Ok((remembered.remove(0), Resolution::Remembered));
+    }
+
+    match live.len() {
+        0 => bail!(
+            "You have no cloud agents{}. Create one with `railway ca create`.",
+            match environment_id {
+                Some(_) => " in this environment",
+                None => "",
+            }
+        ),
+        1 => Ok((
+            live.into_iter().next().expect("len checked"),
+            Resolution::Sole,
+        )),
+        _ => bail!(
+            "You have {} cloud agents and none is this directory's. Name one:\n{}",
+            live.len(),
+            describe(&live)
+        ),
+    }
+}
+
+/// Match a user-supplied selector against candidates: an exact id first, then
+/// an exact name. Ambiguity is reported rather than broken by picking one —
+/// names are not unique across projects, and guessing here would act on the
+/// wrong machine.
+fn match_selector(candidates: Vec<Agent>, selector: &str) -> Result<Agent> {
+    if let Some(agent) = candidates.iter().find(|a| a.id == selector) {
+        return Ok(agent.clone());
+    }
+    let mut by_name: Vec<Agent> = candidates
+        .into_iter()
+        .filter(|a| a.name == selector)
+        .collect();
+    match by_name.len() {
+        0 => bail!("No cloud agent named {selector:?}. `railway ca list` shows yours."),
+        1 => Ok(by_name.remove(0)),
+        _ => bail!(
+            "{} cloud agents are named {selector:?}. Use an id:\n{}",
+            by_name.len(),
+            describe(&by_name)
+        ),
+    }
+}
+
+/// Candidate list for an ambiguity error: the id is what disambiguates, so it
+/// is what this prints.
+fn describe(agents: &[Agent]) -> String {
+    agents
+        .iter()
+        .map(|a| format!("  {} ({}) — {}", a.name, a.status.label(), a.id))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Remember this agent as the environment's, and persist.
+pub fn remember(configs: &mut Configs, agent: &Agent) -> Result<()> {
+    configs.set_code_agent(&agent.environment_id, &agent.id);
+    configs.write()
+}
+
+/// Forget an environment's agent pointer, and persist.
+///
+/// Called on delete whether or not the delete reported success: a mutation that
+/// fails on an already-gone agent must not leave the CLI reaching for it
+/// forever.
+pub fn forget(configs: &mut Configs, environment_id: &str) -> Result<()> {
+    configs.remove_code_agent(environment_id);
+    configs.write()
+}
+
+/// Compact age for list output — the column answers "is this one stale", which
+/// needs one unit, not a timestamp.
+pub fn humanize_age(created_at: DateTime<Utc>) -> String {
+    let seconds = Utc::now().signed_duration_since(created_at).num_seconds();
+    if seconds < 0 {
+        return "just now".into();
+    }
+    match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(id: &str, name: &str, status: Status) -> Agent {
+        Agent {
+            id: id.into(),
+            name: name.into(),
+            status,
+            project_id: "project".into(),
+            environment_id: "env".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn selector_matches_id_before_name() {
+        // A name that happens to equal another agent's id must not win over the
+        // agent that actually has that id.
+        let candidates = vec![
+            agent("abc", "first", Status::Running),
+            agent("def", "abc", Status::Running),
+        ];
+        let found = match_selector(candidates, "abc").unwrap();
+        assert_eq!(found.name, "first");
+    }
+
+    #[test]
+    fn selector_matches_name() {
+        let candidates = vec![agent("abc", "sunny-cloud", Status::Sleeping)];
+        assert_eq!(match_selector(candidates, "sunny-cloud").unwrap().id, "abc");
+    }
+
+    #[test]
+    fn duplicate_names_are_ambiguous_rather_than_guessed() {
+        let candidates = vec![
+            agent("abc", "dev", Status::Running),
+            agent("def", "dev", Status::Running),
+        ];
+        let err = match_selector(candidates, "dev").unwrap_err().to_string();
+        assert!(err.contains("abc"), "error should list ids: {err}");
+        assert!(err.contains("def"), "error should list ids: {err}");
+    }
+
+    #[test]
+    fn unknown_selector_points_at_list() {
+        let err = match_selector(vec![agent("abc", "dev", Status::Running)], "nope")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("railway ca list"), "{err}");
+    }
+
+    #[test]
+    fn terminal_states_are_not_live() {
+        assert!(Status::Running.is_live());
+        assert!(Status::Sleeping.is_live());
+        assert!(Status::Starting.is_live());
+        assert!(!Status::Crashed.is_live());
+        assert!(!Status::Failed.is_live());
+        assert!(!Status::Deleting.is_live());
+        assert!(!Status::Unknown("wat".into()).is_live());
+    }
+
+    #[test]
+    fn age_uses_one_unit() {
+        assert_eq!(
+            humanize_age(Utc::now() - chrono::Duration::seconds(30)),
+            "30s"
+        );
+        assert_eq!(
+            humanize_age(Utc::now() - chrono::Duration::minutes(5)),
+            "5m"
+        );
+        assert_eq!(humanize_age(Utc::now() - chrono::Duration::hours(3)), "3h");
+        assert_eq!(humanize_age(Utc::now() - chrono::Duration::days(9)), "9d");
+    }
+}

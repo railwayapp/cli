@@ -5,6 +5,7 @@
 //! read the same preferences file, so the choice between them is only whether
 //! you want to browse first.
 
+pub mod lifecycle;
 pub mod prefs;
 pub mod setup;
 pub mod skills_sync;
@@ -26,7 +27,7 @@ use tui::{App, Outcome};
 #[derive(Parser)]
 #[clap(
     args_conflicts_with_subcommands = true,
-    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca start --claude         # skip the TUI and launch\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -45,12 +46,40 @@ enum Command {
 
     /// Launch a coding agent on a cloud agent VM, without the TUI
     Start(LaunchArgs),
+
+    /// List your cloud agents
+    #[clap(visible_alias = "ls")]
+    List(lifecycle::ListArgs),
+
+    /// Create a cloud agent VM, without connecting to it
+    #[clap(visible_alias = "new")]
+    Create(lifecycle::CreateArgs),
+
+    /// Connect to an existing cloud agent over SSH
+    #[clap(visible_alias = "connect")]
+    Ssh(lifecycle::SshArgs),
+
+    /// Wake a sleeping agent
+    Wake(lifecycle::WakeArgs),
+
+    /// Put an agent to sleep, keeping its disk and stopping the compute bill
+    Sleep(lifecycle::SleepArgs),
+
+    /// Delete an agent and everything on its disk
+    #[clap(visible_alias = "rm")]
+    Delete(lifecycle::DeleteArgs),
 }
 
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Some(Command::Setup(a)) => setup::command(a).await,
         Some(Command::Start(a)) => crate::commands::code::launch(a).await,
+        Some(Command::List(a)) => lifecycle::list(a).await,
+        Some(Command::Create(a)) => lifecycle::create(a).await,
+        Some(Command::Ssh(a)) => lifecycle::ssh(a).await,
+        Some(Command::Wake(a)) => lifecycle::wake(a).await,
+        Some(Command::Sleep(a)) => lifecycle::sleep(a).await,
+        Some(Command::Delete(a)) => lifecycle::delete(a).await,
         None if args.launch.is_bare() && is_stdout_terminal() => browse().await,
         // Flags given, or no terminal to draw on: behave like `railway code`.
         // A TUI in a pipe would be gibberish, and erroring instead would break
