@@ -7,6 +7,7 @@
 //! billed VM.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -14,6 +15,7 @@ use colored::Colorize;
 use is_terminal::IsTerminal;
 
 use crate::client::GQLClient;
+use crate::commands::cloud_agent::telemetry;
 use crate::commands::cloud_agent::tui::session;
 use crate::commands::code::{self, LaunchArgs, Progress};
 use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
@@ -411,6 +413,7 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
             println!("No running agents to sleep.");
             return Ok(());
         }
+        telemetry::track_lifecycle("sleep_all", Duration::ZERO, None).await;
         let spinner = create_spinner(format!("Sleeping {} agents", awake.len()));
         // Concurrently: each sleep now flushes the agent's disk over ssh first,
         // and run in sequence that would make the cost-control command take a
@@ -511,6 +514,22 @@ pub async fn delete(args: DeleteArgs) -> Result<()> {
 }
 
 pub async fn ssh(args: SshArgs) -> Result<()> {
+    let started = std::time::Instant::now();
+    let result = ssh_connect(args).await;
+    let message = result.as_ref().err().map(|e| format!("{e:#}"));
+    telemetry::track_lifecycle("ssh", started.elapsed(), message.as_deref()).await;
+
+    // A non-zero remote exit is the command's result, not a failure of ours, so
+    // it is reported as a success above and only then propagated as our own exit
+    // status — `exit` never returns, and reporting after it would never happen.
+    match result? {
+        0 => Ok(()),
+        code => std::process::exit(code),
+    }
+}
+
+/// Connect, and hand back what the remote side exited with.
+async fn ssh_connect(args: SshArgs) -> Result<i32> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let (configs, client) = (&mut configs, &client);
@@ -533,6 +552,7 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
     ca::remember(configs, &agent)?;
 
     let connected = if !args.command.is_empty() {
+        telemetry::track_lifecycle("ssh_command", Duration::ZERO, None).await;
         run_command(&agent, &args.command).await
     } else {
         attach(client, &backboard, &agent, args.session.as_deref()).await
@@ -576,10 +596,7 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
         }
     }
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Run one command on the agent instead of attaching. This is ssh's ordinary
@@ -629,7 +646,10 @@ async fn attach(
             name.to_string()
         }
         None => match running.len() {
-            0 => return start_session(agent).await,
+            0 => {
+                telemetry::track_lifecycle("ssh_new_session", Duration::ZERO, None).await;
+                return start_session(agent).await;
+            }
             1 => running[0].name.clone(),
             _ => bail!(
                 "Agent {} has {} running sessions. Pick one with --session:{}",
@@ -640,6 +660,7 @@ async fn attach(
         },
     };
 
+    telemetry::track_lifecycle("ssh_attach", Duration::ZERO, None).await;
     println!(
         "{}",
         format!("Attaching to {} · {}", agent.name, session_name).dimmed()

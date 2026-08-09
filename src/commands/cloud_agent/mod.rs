@@ -12,6 +12,8 @@ pub mod skills_sync;
 pub mod telemetry;
 pub mod tui;
 
+use std::future::Future;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
@@ -71,16 +73,31 @@ enum Command {
     Delete(lifecycle::DeleteArgs),
 }
 
+/// Time one lifecycle verb and report its outcome, passing the result through
+/// unchanged.
+///
+/// At the dispatch rather than inside each verb because the shape is identical
+/// for all of them. `ssh` is the exception and tracks itself: it ends in
+/// `std::process::exit` to propagate a remote exit status, which would skip
+/// anything wrapped around it.
+async fn tracked(kind: &'static str, run: impl Future<Output = Result<()>>) -> Result<()> {
+    let started = std::time::Instant::now();
+    let result = run.await;
+    let message = result.as_ref().err().map(|e| format!("{e:#}"));
+    telemetry::track_lifecycle(kind, started.elapsed(), message.as_deref()).await;
+    result
+}
+
 pub async fn command(args: Args) -> Result<()> {
     match args.command {
         Some(Command::Setup(a)) => setup::command(a).await,
         Some(Command::Start(a)) => crate::commands::code::launch(a).await,
-        Some(Command::List(a)) => lifecycle::list(a).await,
-        Some(Command::Create(a)) => lifecycle::create(a).await,
+        Some(Command::List(a)) => tracked("list", lifecycle::list(a)).await,
+        Some(Command::Create(a)) => tracked("create", lifecycle::create(a)).await,
         Some(Command::Ssh(a)) => lifecycle::ssh(a).await,
-        Some(Command::Wake(a)) => lifecycle::wake(a).await,
-        Some(Command::Sleep(a)) => lifecycle::sleep(a).await,
-        Some(Command::Delete(a)) => lifecycle::delete(a).await,
+        Some(Command::Wake(a)) => tracked("wake", lifecycle::wake(a)).await,
+        Some(Command::Sleep(a)) => tracked("sleep", lifecycle::sleep(a)).await,
+        Some(Command::Delete(a)) => tracked("delete", lifecycle::delete(a)).await,
         None if args.launch.is_bare() && is_stdout_terminal() => browse().await,
         // Flags given, or no terminal to draw on: behave like `railway code`.
         // A TUI in a pipe would be gibberish, and erroring instead would break
