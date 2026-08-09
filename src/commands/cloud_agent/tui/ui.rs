@@ -1022,7 +1022,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     // pane the chord is a no-op and the hint would just be a lie.
     let mut hint = hint;
     if app.sessions.len() > 1 {
-        hint.push(("⌥]", "next session"));
+        hint.push(("⌥[ ⌥]", "switch session"));
     }
     let spans = chord_spans(theme, &hint);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
