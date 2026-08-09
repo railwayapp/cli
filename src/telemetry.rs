@@ -153,6 +153,30 @@ fn env_var_is_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Cap an error message at 256 bytes for the `error_message` field, shared by
+/// every call site that truncates a `{err}`/`{err:#}` string before sending
+/// it (the generic dispatch event, `commands/ssh/tel.rs`,
+/// `commands/cloud_agent/telemetry.rs`).
+///
+/// A raw byte-length check (`s.len() > 256`) followed by slicing or
+/// `String::truncate` panics whenever the cut point lands mid-character —
+/// any error message with a non-ASCII byte near the boundary (a path with an
+/// accented/CJK/emoji character, a non-English GraphQL error) — and this
+/// crate builds with `panic = "abort"`, so that panic takes down the whole
+/// process instead of just failing to log. Walking back to the nearest char
+/// boundary first avoids that.
+pub(crate) fn truncate_message(message: &str) -> String {
+    const MAX_LEN: usize = 256;
+    if message.len() <= MAX_LEN {
+        return message.to_string();
+    }
+    let mut end = MAX_LEN;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_string()
+}
+
 fn safe_telemetry_value(value: &str) -> Option<String> {
     if value.is_empty() || value.len() > 256 {
         return None;
@@ -2139,9 +2163,32 @@ mod tests {
     use super::{
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
         caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, is_agent_harness,
-        new_session_uuid, parent_kind_from_command, residue_from_command, walk_ancestors,
+        new_session_uuid, parent_kind_from_command, residue_from_command, truncate_message,
+        walk_ancestors,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn truncate_message_leaves_short_messages_alone() {
+        assert_eq!(truncate_message("boom"), "boom");
+    }
+
+    #[test]
+    fn truncate_message_caps_long_ascii_messages() {
+        let long = "x".repeat(300);
+        assert_eq!(truncate_message(&long).len(), 256);
+    }
+
+    /// Regression test for the panic this function exists to avoid: a raw
+    /// byte-length cut (`s[..256]` or `String::truncate(256)`) panics here
+    /// because a multi-byte character straddles the 256-byte boundary.
+    #[test]
+    fn truncate_message_does_not_split_a_multibyte_character() {
+        let long = "x".repeat(255) + "💥" + &"y".repeat(50);
+        let truncated = truncate_message(&long);
+        assert!(truncated.len() <= 256);
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
 
     fn node(ppid: u32, command: &str) -> ProcessNode {
         ProcessNode {

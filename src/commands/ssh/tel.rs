@@ -15,10 +15,7 @@ pub async fn report_failure(stage: &str, message: &str) {
 /// SSH-backed commands (e.g. `sandbox ssh`) land in the same stage-failure
 /// dashboards with their own command tag.
 pub async fn report_failure_for(command: &str, stage: &str, message: &str) {
-    let mut truncated = message.to_string();
-    if truncated.len() > 256 {
-        truncated.truncate(256);
-    }
+    let truncated = telemetry::truncate_message(message);
 
     telemetry::send(CliTrackEvent {
         command: command.to_string(),
