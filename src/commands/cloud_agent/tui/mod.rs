@@ -200,6 +200,10 @@ enum Message {
     },
     SessionsLoaded {
         path: (usize, usize, usize, usize),
+        /// Applied by id, not by the index the request was issued with: the
+        /// environment can be refetched while sessions are in flight, and a
+        /// new agent shifting the list would attach these to the wrong row.
+        agent_id: String,
         result: Result<Vec<ConsoleSession>, String>,
     },
     LaunchStep(String),
@@ -437,9 +441,13 @@ pub async fn run(
 
     // Ask for every agent the caller owns, in one request. If the platform
     // predates `myCloudAgents`, the reply says so and startup degrades to
-    // loading just the environments a keypress would immediately need.
+    // loading just the environments a keypress would immediately need. On
+    // re-entry after a session the tree has already settled, and the settle
+    // would discard a fresh answer — so don't spend the request.
     let stop_fetching: StopFlag = Default::default();
-    spawn_my_agents_fetch(&tx, &client, &backboard);
+    if app.has_unloaded_environments() {
+        spawn_my_agents_fetch(&tx, &client, &backboard);
+    }
 
     loop {
         let mut rects = app.panes;
@@ -704,12 +712,31 @@ pub async fn run(
                 let client = client.clone();
                 let backboard = backboard.clone();
                 tokio::spawn(async move {
-                    let result = fetch_agents(&client, &backboard, &environment_id)
-                        .await
-                        .map_err(|e| e.to_string());
                     // A closed receiver just means the TUI already handed back;
                     // the next entry re-requests, so the drop is harmless.
-                    let _ = tx.send(Message::AgentsLoaded { path, result });
+                    match fetch_agents(&client, &backboard, &environment_id).await {
+                        Ok(agents) => {
+                            let _ = tx.send(Message::AgentsLoaded {
+                                path,
+                                result: Ok(agents),
+                            });
+                        }
+                        // The same classification the background fetches do:
+                        // a 429 puts the row back to "not loaded" with the
+                        // Retry-After toast, instead of pinning "rate limited"
+                        // to this one environment as if it were its failure.
+                        Err(err) => match rate_limit_from(&err) {
+                            Some(retry_after_secs) => {
+                                let _ = tx.send(Message::RateLimited { retry_after_secs });
+                            }
+                            None => {
+                                let _ = tx.send(Message::AgentsLoaded {
+                                    path,
+                                    result: Err(err.to_string()),
+                                });
+                            }
+                        },
+                    }
                 });
             }
         }
@@ -732,41 +759,54 @@ fn handle_message(
         Message::AgentsLoaded { path, result } => {
             app.agents_loaded(path, result);
             // Fill in each running agent's session count without waiting for
-            // someone to expand it.
-            for effect in app.sessions_to_prefetch() {
-                if let Effect::LoadSessions { agent_id, path } = effect {
-                    spawn_session_fetch(agent_id, path, tx, client, backboard);
-                }
+            // someone to expand it. Bounded: one environment usually holds a
+            // handful of agents, but nothing guarantees it.
+            let prefetch = app.sessions_to_prefetch();
+            if !prefetch.is_empty() {
+                spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
             }
             // A launch that just created an agent asked for it to be opened;
             // its row only exists now.
             app.expand_pending()
         }
-        Message::MyAgentsLoaded { result } => {
-            match result {
-                Ok(agents) => {
-                    app.my_agents_loaded(agents);
-                    for effect in app.sessions_to_prefetch() {
-                        if let Effect::LoadSessions { agent_id, path } = effect {
-                            spawn_session_fetch(agent_id, path, tx, client, backboard);
-                        }
-                    }
+        Message::MyAgentsLoaded { result } => match result {
+            Ok(agents) => {
+                app.my_agents_loaded(agents);
+                let prefetch = app.sessions_to_prefetch();
+                if !prefetch.is_empty() {
+                    spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
                 }
-                // Whether the field doesn't exist yet or the request died,
-                // the per-environment path still works, so startup degrades
-                // to what it loaded before `myCloudAgents`: the environments
-                // a keypress would immediately need.
-                Err(_) => {
-                    let sweep = app.initial_environments();
-                    if !sweep.is_empty() {
-                        spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
-                    }
-                }
+                // Normally redundant — a launch's own refetch answers this —
+                // but it is the safety net when that refetch failed before
+                // this settle arrived.
+                app.expand_pending()
             }
-            None
-        }
-        Message::SessionsLoaded { path, result } => {
-            app.sessions_loaded(path, result);
+            // Whether the field doesn't exist yet or the request died, the
+            // per-environment path still works, so startup degrades to what
+            // it loaded before `myCloudAgents`: the environments a keypress
+            // would immediately need.
+            Err(err) => {
+                // These are fresh requests; a stop left over from an earlier
+                // 429 would strand them as spinners that never resolve.
+                stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
+                let sweep = app.initial_environments();
+                if sweep.is_empty() {
+                    // No target and no default project means nothing loads
+                    // lazily either — without this line an expired login
+                    // looks like an account with no agents anywhere.
+                    app.status = format!("Couldn't load agents: {err}");
+                } else {
+                    spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
+                }
+                None
+            }
+        },
+        Message::SessionsLoaded {
+            path,
+            agent_id,
+            result,
+        } => {
+            app.sessions_loaded(path, &agent_id, result);
             None
         }
         Message::LaunchStep(text) => {
@@ -1031,7 +1071,73 @@ fn spawn_session_fetch(
                 Err(err.to_string())
             }
         };
-        let _ = tx.send(Message::SessionsLoaded { path, result });
+        let _ = tx.send(Message::SessionsLoaded {
+            path,
+            agent_id,
+            result,
+        });
+    });
+}
+
+/// Fetch a batch of agents' sessions, a few at a time.
+///
+/// Same discipline as [`spawn_sweep`]: the account-wide settle can name every
+/// running agent at once, and firing one request per agent simultaneously is
+/// the burst this TUI exists to avoid. The first 429 abandons the rest.
+fn spawn_session_prefetch(
+    effects: Vec<Effect>,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+    stop: StopFlag,
+) {
+    use std::sync::atomic::Ordering;
+
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_string();
+    tokio::spawn(async move {
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(SWEEP_CONCURRENCY));
+        for effect in effects {
+            let Effect::LoadSessions { agent_id, path } = effect else {
+                continue;
+            };
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let Ok(permit) = permits.clone().acquire_owned().await else {
+                return;
+            };
+            let tx = tx.clone();
+            let client = client.clone();
+            let backboard = backboard.clone();
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                match fetch_sessions(&client, &backboard, &agent_id).await {
+                    Ok(sessions) => {
+                        let _ = tx.send(Message::SessionsLoaded {
+                            path,
+                            agent_id,
+                            result: Ok(sessions),
+                        });
+                    }
+                    Err(err) => match rate_limit_from(&err) {
+                        Some(retry_after_secs) => {
+                            stop.store(true, Ordering::Relaxed);
+                            let _ = tx.send(Message::RateLimited { retry_after_secs });
+                        }
+                        None => {
+                            let _ = tx.send(Message::SessionsLoaded {
+                                path,
+                                agent_id,
+                                result: Err(err.to_string()),
+                            });
+                        }
+                    },
+                }
+                drop(permit);
+            });
+        }
     });
 }
 

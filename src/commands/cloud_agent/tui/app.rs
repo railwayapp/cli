@@ -1363,11 +1363,14 @@ impl App {
 
     /// The whole account's agents arrived in one `myCloudAgents` request.
     ///
-    /// Every environment becomes loaded: one absent from the response holds no
-    /// agents of the caller's, and saying so is what lets the tree show counts
-    /// everywhere without a request per environment. An environment that has
-    /// already answered — a launch just filled the target — keeps what it has,
-    /// which is at least as fresh and may carry session state.
+    /// Every unanswered environment becomes loaded: one absent from the
+    /// response holds no agents of the caller's, and saying so is what lets
+    /// the tree show counts everywhere without a request per environment. An
+    /// environment that has already answered — a launch just filled the
+    /// target — keeps what it has, which is at least as fresh and may carry
+    /// session state. One still loading keeps its spinner too: its request
+    /// went out after this one, so its reply is strictly newer, and settling
+    /// over it could hide an agent created since this snapshot.
     pub fn my_agents_loaded(&mut self, agents: Vec<(String, Agent)>) {
         let anchor = self.selected_row().map(|row| row.kind);
         let mut by_env: HashMap<String, Vec<Agent>> = HashMap::new();
@@ -1377,7 +1380,7 @@ impl App {
         for ws in &mut self.tree {
             for project in &mut ws.projects {
                 for env in &mut project.envs {
-                    if matches!(env.agents, Load::Loaded(_)) {
+                    if !matches!(env.agents, Load::NotLoaded | Load::Failed(_)) {
                         continue;
                     }
                     env.agents = Load::Loaded(by_env.remove(&env.id).unwrap_or_default());
@@ -1387,6 +1390,19 @@ impl App {
         self.settle_watched_agents();
         self.restore_cursor(anchor);
         self.select_pending();
+    }
+
+    /// Whether any environment still has no answer.
+    ///
+    /// Guards the account-wide fetch on re-entry from a session: a tree that
+    /// has already settled would discard the reply, so the request would be
+    /// spent for nothing.
+    pub fn has_unloaded_environments(&self) -> bool {
+        self.tree.iter().any(|ws| {
+            ws.projects
+                .iter()
+                .any(|project| project.envs.iter().any(|env| env.agents == Load::NotLoaded))
+        })
     }
 
     /// Fold up a project whose last agent has gone.
@@ -1455,9 +1471,31 @@ impl App {
     pub fn sessions_loaded(
         &mut self,
         path: (usize, usize, usize, usize),
+        agent_id: &str,
         result: Result<Vec<ConsoleSession>, String>,
     ) {
-        let (w, p, e, a) = path;
+        let (w, p, e, _) = path;
+        // Resolved by id rather than trusting the index the request went out
+        // with: the environment can be refetched while sessions are in
+        // flight, and a new agent shifting the list would otherwise attach
+        // these sessions to whoever now sits at that index.
+        let a = match self
+            .tree
+            .get(w)
+            .and_then(|ws| ws.projects.get(p))
+            .and_then(|proj| proj.envs.get(e))
+            .map(|env| &env.agents)
+        {
+            Some(Load::Loaded(agents)) => {
+                match agents.iter().position(|agent| agent.id == agent_id) {
+                    Some(a) => a,
+                    // The agent is gone (deleted, or the refetch dropped it);
+                    // its sessions have nowhere to belong.
+                    None => return,
+                }
+            }
+            _ => return,
+        };
         if let Some(Load::Loaded(agents)) = self
             .tree
             .get_mut(w)
@@ -5059,6 +5097,7 @@ mod tests {
         // Still listed: keep hiding it, the kill has not landed yet.
         a.sessions_loaded(
             (0, 0, 0, 0),
+            "ca_1",
             Ok(vec![ConsoleSession {
                 name: "claude-one".into(),
                 kind: "SHELL".into(),
@@ -5071,7 +5110,7 @@ mod tests {
         assert!(!a.rows().iter().any(|r| r.label == "claude-one"));
 
         // Gone from the agent: stop tracking it.
-        a.sessions_loaded((0, 0, 0, 0), Ok(Vec::new()));
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(Vec::new()));
         assert!(a.ending.is_empty());
     }
 
@@ -5248,6 +5287,7 @@ mod tests {
 
         a.sessions_loaded(
             (0, 0, 0, 0),
+            "ca_1",
             Ok(vec![ConsoleSession {
                 name: "claude-one".into(),
                 kind: "SHELL".into(),
@@ -5320,6 +5360,7 @@ mod tests {
         }
         a.sessions_loaded(
             (0, 0, 0, 0),
+            "ca_1",
             Ok(vec![ConsoleSession {
                 name: "claude-new".into(),
                 kind: "SHELL".into(),
@@ -5635,6 +5676,7 @@ mod tests {
 
         a.sessions_loaded(
             (0, 0, 0, 0),
+            "ca_1",
             Ok(vec![ConsoleSession {
                 name: "sess-7".into(),
                 command: Some("claude".into()),
@@ -6090,23 +6132,84 @@ mod tests {
 
     /// An environment that already answered keeps what it has: a launch may
     /// have just filled the target, and its rows can carry session state the
-    /// account-wide reply doesn't.
+    /// account-wide reply doesn't. One still loading keeps its spinner: its
+    /// request went out after this one, so its reply is strictly newer.
     #[test]
     fn my_agents_loaded_keeps_environments_that_already_answered() {
         let mut a = app();
         a.tree[0].projects[0].envs[0].agents =
             Load::Loaded(vec![agent("ca_fresh", "just-launched", "starting")]);
+        a.tree[0].projects[0].envs[1].agents = Load::Loading;
 
-        a.my_agents_loaded(vec![(
-            "env_prod".into(),
-            agent("ca_stale", "from-before", "running"),
-        )]);
+        a.my_agents_loaded(vec![
+            (
+                "env_prod".into(),
+                agent("ca_stale", "from-before", "running"),
+            ),
+            ("env_stg".into(), agent("ca_old", "snapshot", "running")),
+        ]);
 
         let prod = &a.tree[0].projects[0].envs[0].agents;
         let Load::Loaded(agents) = prod else {
             panic!("production should stay loaded: {prod:?}");
         };
         assert_eq!(agents[0].id, "ca_fresh");
+        assert_eq!(
+            a.tree[0].projects[0].envs[1].agents,
+            Load::Loading,
+            "an in-flight fetch answers with newer data than this snapshot"
+        );
+    }
+
+    /// A sessions reply is applied to the agent it was asked about, not to
+    /// whichever agent now sits at the index the request went out with — an
+    /// environment refetch can insert a newer agent above it meanwhile.
+    #[test]
+    fn a_sessions_reply_follows_its_agent_when_the_list_shifts() {
+        let mut a = loaded_app();
+        // The env was refetched while ca_1's sessions were in flight: a newer
+        // agent now occupies index 0.
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![
+                agent("ca_new", "just-created", "starting"),
+                agent("ca_1", "nimble-otter", "running"),
+            ]),
+        );
+
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "claude-one".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+            }]),
+        );
+
+        let Load::Loaded(agents) = &a.tree[0].projects[0].envs[0].agents else {
+            panic!("loaded");
+        };
+        assert!(
+            matches!(agents[0].sessions, LoadSessions::NotLoaded),
+            "the newcomer at index 0 must not inherit ca_1's sessions"
+        );
+        assert!(matches!(agents[1].sessions, LoadSessions::Loaded(ref s) if s.len() == 1));
+
+        // And a reply for an agent that no longer exists goes nowhere.
+        a.sessions_loaded((0, 0, 0, 0), "ca_gone", Ok(Vec::new()));
+    }
+
+    /// Re-entry from a session must not respend the account-wide request the
+    /// settled tree would discard.
+    #[test]
+    fn a_settled_tree_reports_no_unloaded_environments() {
+        let mut a = app();
+        assert!(a.has_unloaded_environments());
+        a.my_agents_loaded(Vec::new());
+        assert!(!a.has_unloaded_environments());
     }
 
     /// `shift+r` is how an agent in a project nobody has opened gets found: the
