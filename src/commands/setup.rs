@@ -148,15 +148,10 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            let message = err.to_string();
             telemetry::send_setup_agent(SetupAgentTrackEvent {
                 phase: SetupAgentPhase::Finish,
                 success: Some(false),
-                error_message: Some(if message.len() > 256 {
-                    message[..256].to_string()
-                } else {
-                    message
-                }),
+                error_message: Some(telemetry::truncate_message(&err.to_string())),
                 configured_clients: None,
             })
             .await;

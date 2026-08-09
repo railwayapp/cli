@@ -883,9 +883,7 @@ fn handle_message(
             ) {
                 Ok(session) => {
                     app.attach_session(session, agent_id);
-                    tokio::spawn(async move {
-                        super::telemetry::track_session_event("reattach", None).await;
-                    });
+                    tokio::spawn(super::telemetry::track_session_event("reattach", None));
                     None
                 }
                 Err(err) => {

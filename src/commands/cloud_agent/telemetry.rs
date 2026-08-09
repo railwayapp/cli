@@ -9,10 +9,16 @@
 //! flattened into `sub_command`, not just a failing stage) to want their own
 //! small mapping functions per call site.
 //!
-//! Nothing here logs free text: no prompts, no session/agent/project names,
-//! no repo-shaped values. Only IDs (already attached by
-//! [`crate::telemetry::send`]'s ambient context), fixed slugs (harness,
-//! theme, skills source), and truncated error messages.
+//! None of the structured fields carry free text: no prompts, no
+//! session/agent/project names, no repo-shaped values — only IDs (already
+//! attached by [`crate::telemetry::send`]'s ambient context) and fixed slugs
+//! (harness, theme, skills source). `error_message` is the one exception:
+//! like every other failure event in this CLI (the generic dispatch event,
+//! `commands/ssh/tel.rs`), it carries the underlying error's `Display`
+//! text truncated to 256 bytes, which can include a user-supplied
+//! identifier when the error type formats one in (an unknown environment or
+//! service name, for instance) — this module doesn't scrub that, it just
+//! doesn't add any of its own.
 
 use std::time::Duration;
 
@@ -21,14 +27,8 @@ use super::tui::app::AgentOp;
 use crate::config::Configs;
 use crate::telemetry::{self, CliTrackEvent};
 
-const TRUNCATE_AT: usize = 256;
-
 fn truncate(message: &str) -> String {
-    if message.len() > TRUNCATE_AT {
-        message[..TRUNCATE_AT].to_string()
-    } else {
-        message.to_string()
-    }
+    telemetry::truncate_message(message)
 }
 
 fn event(
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn truncate_caps_long_messages() {
         let long = "x".repeat(300);
-        assert_eq!(truncate(&long).len(), TRUNCATE_AT);
+        assert_eq!(truncate(&long).len(), 256);
     }
 
     #[test]
