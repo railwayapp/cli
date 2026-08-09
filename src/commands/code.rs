@@ -1686,6 +1686,29 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
     let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
     let agent = resolve_agent_choice(args, &mut prefs, &home)?;
 
+    // Timed and reported separately from `prepare_inner` so every caller
+    // (`railway code`, `railway ca start`, and the TUI's `start_launch`) gets
+    // the same outcome event without duplicating it at each call site — none
+    // of the three otherwise see the others' launch attempts at all.
+    let start = std::time::Instant::now();
+    let result = prepare_inner(args, progress, agent, prefs, &home).await;
+    crate::commands::cloud_agent::telemetry::track_launch_outcome(
+        agent.name(),
+        result.as_ref().ok().map(|p| p.created),
+        start.elapsed(),
+        result.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
+    )
+    .await;
+    result
+}
+
+async fn prepare_inner(
+    args: &LaunchArgs,
+    progress: &dyn Progress,
+    agent: Agent,
+    mut prefs: AgentPrefs,
+    home: &Path,
+) -> Result<Prepared> {
     // --- Resolve the local credential (client-side only, announced).
     //
     // Only the cheap sources run here. Codex and Grok read a local file, so a
@@ -1712,7 +1735,7 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
     // Pack the user's skills before spending a VM: a skills directory that has
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
-    let packed_skills = skills_sync::pack(&prefs, &home)?;
+    let packed_skills = skills_sync::pack(&prefs, home)?;
     if let Some(packed) = &packed_skills {
         progress.note(&format!(
             "Including {} of your skills ({})",
@@ -1725,7 +1748,7 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let (project_id, environment_id) =
-        resolve_target(&mut configs, &client, args, &mut prefs, &home).await?;
+        resolve_target(&mut configs, &client, args, &mut prefs, home).await?;
 
     let (cloud_agent, created) =
         resolve_agent(&mut configs, &client, args, &environment_id, progress).await?;

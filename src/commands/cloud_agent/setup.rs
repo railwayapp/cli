@@ -129,7 +129,13 @@ pub async fn command(args: Args) -> Result<()> {
         prompt(&home, existing).await?
     };
 
-    prefs.save_in(&home)?;
+    match prefs.save_in(&home) {
+        Ok(()) => super::telemetry::track_setup_saved("cli", &prefs).await,
+        Err(err) => {
+            super::telemetry::track_setup_failed("cli", &format!("{err:#}")).await;
+            return Err(err);
+        }
+    }
     print_summary(&home, &prefs)?;
     Ok(())
 }
