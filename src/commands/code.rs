@@ -116,7 +116,9 @@ pub struct LaunchArgs {
     #[clap(long)]
     keep_awake: bool,
 
-    /// Destroy this environment's agent and exit. Its disk goes with it
+    /// Destroy this environment's agent and exit. Its disk goes with it.
+    /// Superseded by `railway ca delete`, which can name any agent and asks
+    /// before it destroys one
     #[clap(long)]
     rm: bool,
 
@@ -999,17 +1001,6 @@ fn ssh_plumbing(
     bail!("SSH to the agent failed after {attempts} attempts (exit {code}):\n{reason}")
 }
 
-/// The literal `ssh` command for a relay target, for the disconnect hint. The
-/// relay is the same one this command connected through, so whatever worked here
-/// works when pasted — including the dev relay's non-default port.
-fn raw_ssh_hint(target: &str) -> String {
-    let (host, port) = Configs::get_ssh_relay();
-    match port {
-        Some(p) if p != 22 => format!("ssh -p {p} {target}@{host}"),
-        _ => format!("ssh {target}@{host}"),
-    }
-}
-
 /// One cloud agent, reduced to what this command steers on.
 #[derive(Clone)]
 struct CodeAgent {
@@ -1387,11 +1378,21 @@ fn warn_ignored_variables(args: &LaunchArgs) {
 }
 
 /// `railway code --rm`: destroy this environment's agent, disk and all.
+///
+/// Kept working for anyone with it in a script, but `railway ca delete` is the
+/// command now: it can name any agent rather than only this environment's, and
+/// it confirms before taking a disk away.
 async fn destroy_agent(
     configs: &mut Configs,
     client: &reqwest::Client,
     environment_id: &str,
 ) -> Result<()> {
+    use colored::Colorize;
+    eprintln!(
+        "{}",
+        "Note: `railway ca delete` supersedes --rm — it names any agent and confirms first."
+            .dimmed()
+    );
     let backboard = configs.get_backboard();
     let Some(id) = configs.get_code_agent(environment_id) else {
         println!("No agent recorded for this environment.");
@@ -1417,6 +1418,19 @@ async fn destroy_agent(
         None => println!("Agent {id} is already gone."),
     }
     Ok(())
+}
+
+/// The harness a launch would use right now: the saved default, or
+/// `RAILWAY_CA_AGENT`, or — on a terminal — one prompt whose answer is saved.
+///
+/// Public so `railway ca ssh` can start a session on an agent without
+/// duplicating that precedence. It takes no flags because the lifecycle verbs
+/// have none: choosing a harness per-invocation is what `railway ca start` and
+/// `railway code` are for.
+pub fn default_harness() -> Result<&'static str> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
+    let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
+    Ok(resolve_agent_choice(&LaunchArgs::default(), &mut prefs, &home)?.name())
 }
 
 /// Environment override for the saved default — one run, no file write. For
@@ -1546,7 +1560,6 @@ pub struct Prepared {
     pub relay_opts: Vec<String>,
     pub agent_id: String,
     pub agent_name: String,
-    pub project_id: String,
     pub environment_id: String,
     pub harness: &'static str,
     /// True when this run created the agent, which only affects messaging.
@@ -1620,18 +1633,19 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         "  railway code --{}   # wakes it and drops back into {}",
         prepared.harness, prepared.harness
     );
-    // `railway ssh` addresses services and deployments, not agents, so the
-    // plain-shell route is ssh itself against the relay. Only useful while the
-    // agent is awake — hence second, after the command that wakes it.
     println!(
-        "  {}   # plain shell (once awake)",
-        raw_ssh_hint(&prepared.ssh_target)
+        "  railway ca ssh {}   # same, by name — and reattaches your session",
+        prepared.agent_name
+    );
+    // The relay speaks plain ssh too, and `railway ca ssh -- bash` is that
+    // without having to hold the target format. Only useful while the agent is
+    // awake — hence after the commands that wake it.
+    println!(
+        "  railway ca ssh {} -- bash   # plain shell",
+        prepared.agent_name
     );
     println!("Destroy it:");
-    println!(
-        "  railway code --rm -p {} -e {}",
-        prepared.project_id, prepared.environment_id
-    );
+    println!("  railway ca delete {}", prepared.agent_name);
 
     if exit_code != 0 {
         std::process::exit(exit_code);
@@ -1663,12 +1677,11 @@ pub async fn sleep_agent(
     progress: &dyn Progress,
 ) -> Result<()> {
     progress.step("Sleeping the agent");
-    post_graphql::<mutations::CloudAgentSleep, _>(
+    crate::controllers::cloud_agent::sleep(
         client,
-        configs.get_backboard(),
-        mutations::cloud_agent_sleep::Variables {
-            id: prepared.agent_id.clone(),
-        },
+        &configs.get_backboard(),
+        &prepared.environment_id,
+        &prepared.agent_id,
     )
     .await?;
     progress.finish();
@@ -1778,7 +1791,9 @@ async fn prepare_inner(
     // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let (project_id, environment_id) = ssh_tel::track_for(
+    // The project is no longer carried on `Prepared` — its only reader was the
+    // launcher's exit hint, which now names the agent instead.
+    let (_project_id, environment_id) = ssh_tel::track_for(
         "cloud_agent_launch",
         "resolve_target",
         resolve_target(&mut configs, &client, args, &mut prefs, home).await,
@@ -1948,7 +1963,6 @@ async fn prepare_inner(
         relay_opts: relay.opts,
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
-        project_id,
         environment_id,
         harness: agent.name(),
         created,
@@ -1979,6 +1993,52 @@ pub async fn connect_info(environment_id: &str, agent_id: &str) -> Result<Connec
         identity,
         relay_opts: relay.opts,
     })
+}
+
+/// How long the pre-sleep flush may take before we sleep the agent anyway.
+const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Flush the agent's filesystem so sleeping it cannot discard recent work.
+///
+/// `cloudAgentSleep` snapshots the disk without quiescing the guest, so pages
+/// still dirty in its page cache are absent from the image the next wake
+/// restores. Measured on a scratch agent: a file written a second before a
+/// sleep was gone after waking, while the same write followed by `sync`
+/// survived — including when the sleep was issued immediately on disconnect.
+/// So the variable is the flush, not the timing.
+///
+/// A side connection is enough because `sync(2)` flushes the whole filesystem
+/// regardless of which process dirtied it: this covers whatever the durable
+/// session was writing without reaching into it.
+///
+/// Best-effort by design. Failing to reach the agent must not stop us sleeping
+/// it — agents have no idle timeout, so the alternative to an imperfect sleep is
+/// a machine that bills until someone remembers it.
+pub async fn flush_disk(environment_id: &str, agent_id: &str) {
+    // Deliberately not `ssh_plumbing`: its ~20s retry budget exists to cross the
+    // gap while a woken agent becomes attachable. Spending it here would make
+    // every disconnect slow whenever the relay is having a bad minute, to
+    // protect writes on a box we have already failed to reach twice.
+    let flush = async {
+        let info = connect_info(environment_id, agent_id).await.ok()?;
+        let mut opts = info.relay_opts;
+        opts.push("-o".to_string());
+        opts.push(format!("ConnectTimeout={}", FLUSH_TIMEOUT.as_secs()));
+        tokio::task::spawn_blocking(move || {
+            run_native_ssh_captured(
+                &info.ssh_target,
+                "sync",
+                info.identity.as_deref(),
+                None,
+                &opts,
+            )
+        })
+        .await
+        .ok()
+    };
+    // On timeout the blocking ssh is left to finish on its own: it is a `sync`,
+    // it harms nothing, and waiting on it is the thing we just declined to do.
+    let _ = tokio::time::timeout(FLUSH_TIMEOUT, flush).await;
 }
 
 /// End a durable session on an agent.

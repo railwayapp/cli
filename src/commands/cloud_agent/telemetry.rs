@@ -99,6 +99,39 @@ pub async fn track_agent_op(op: AgentOp, error: Option<&str>) {
     .await;
 }
 
+/// One `railway ca` lifecycle verb run from the command line — list, create,
+/// ssh, wake, sleep, delete — fired once per attempt so volume and failure rate
+/// are visible per verb.
+///
+/// Its own `cli_` prefix rather than sharing [`track_agent_op`]'s slugs: those
+/// are the same mutations reached from the TUI's manage screen, and rolling the
+/// two together would hide which surface people actually reach for. The generic
+/// per-dispatch event only says `command="cloud_agent"`, which cannot answer
+/// that either.
+///
+/// `kind` is a fixed slug — never a name, id, or anything the caller typed.
+/// Detail slugs (`ssh_attach`, `sleep_all`) pass [`Duration::ZERO`]: they record
+/// which path was taken, and the verb's own event already carries the timing.
+pub async fn track_lifecycle(kind: &str, duration: Duration, error: Option<&str>) {
+    telemetry::send(event(
+        "cloud_agent",
+        lifecycle_sub_command(kind, error.is_some()),
+        duration.as_millis() as u64,
+        error.is_none(),
+        error.map(truncate),
+    ))
+    .await;
+}
+
+/// The slug a lifecycle verb reports under. Split out so the shape dashboards
+/// group on is pinned by a test rather than by reading the call sites.
+fn lifecycle_sub_command(kind: &str, failed: bool) -> String {
+    match failed {
+        true => format!("cli_{kind}_failed"),
+        false => format!("cli_{kind}"),
+    }
+}
+
 /// A named session action outside the main launch pipeline — reattaching to
 /// an existing durable session, killing one by name, opening the ssh pane on
 /// a freshly prepared agent, or the auto-sleep-on-quit that keeps a
@@ -189,6 +222,22 @@ pub async fn track_setup_failed(entry: &str, error: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_slugs_are_prefixed_and_marked() {
+        assert_eq!(lifecycle_sub_command("create", false), "cli_create");
+        assert_eq!(lifecycle_sub_command("create", true), "cli_create_failed");
+    }
+
+    #[test]
+    fn lifecycle_slugs_do_not_collide_with_the_tui_ops() {
+        // Same three mutations, two surfaces. `agent_sleep` is the manage
+        // screen's; `cli_sleep` is the command line's. Merging them would hide
+        // which one people actually use.
+        for kind in ["sleep", "wake", "delete"] {
+            assert_ne!(lifecycle_sub_command(kind, false), format!("agent_{kind}"));
+        }
+    }
 
     #[test]
     fn truncate_caps_long_messages() {
