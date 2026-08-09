@@ -444,8 +444,12 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
     let result = ca::sleep(client, &backboard, &agent.id).await;
     spinner.finish_and_clear();
     result?;
+    // Present tense, not "is asleep": the mutation returns before the agent has
+    // finished transitioning, so a `railway ca list` run straight afterwards
+    // still reports it running. Claiming a state the next command contradicts is
+    // worse than describing the action taken.
     println!(
-        "✓ Agent {} is asleep — its disk is kept, compute is not billed.",
+        "✓ Sleeping agent {} — its disk is kept, compute stops billing.",
         agent.name.cyan()
     );
     Ok(())
@@ -509,8 +513,8 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
     // Never creates. The caller named a machine — or has exactly one — and
     // silently minting a second billed VM because a name was mistyped is not a
     // thing a connect command should be able to do.
-    let spinner = (!matches!(agent.status, ca::Status::Running))
-        .then(|| create_spinner(format!("Waking agent {}", agent.name)));
+    let was_running = matches!(agent.status, ca::Status::Running);
+    let spinner = (!was_running).then(|| create_spinner(format!("Waking agent {}", agent.name)));
     let ready = ca::ensure_running(client, &backboard, &agent).await;
     if let Some(spinner) = spinner {
         spinner.finish_and_clear();
@@ -518,10 +522,25 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
     let agent = ready?;
     ca::remember(configs, &agent)?;
 
-    let exit_code = if !args.command.is_empty() {
-        run_command(&agent, &args.command).await?
+    let connected = if !args.command.is_empty() {
+        run_command(&agent, &args.command).await
     } else {
-        attach(client, &backboard, &agent, args.session.as_deref()).await?
+        attach(client, &backboard, &agent, args.session.as_deref()).await
+    };
+
+    // A connection that never happened still woke a machine with no idle
+    // timeout, so put back what this run changed — but only that. An agent
+    // found already running was someone's deliberate state (possibly a session
+    // open in another terminal), and a failed connect here is no reason to
+    // suspend it.
+    let exit_code = match connected {
+        Ok(code) => code,
+        Err(e) => {
+            if !was_running && !args.keep_awake {
+                let _ = ca::sleep(client, &backboard, &agent.id).await;
+            }
+            return Err(e);
+        }
     };
 
     if args.keep_awake {
@@ -535,7 +554,7 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
         let slept = ca::sleep(client, &backboard, &agent.id).await;
         spinner.finish_and_clear();
         match slept {
-            Ok(()) => println!("\nDisconnected — agent {} is asleep.", agent.name.cyan()),
+            Ok(()) => println!("\nDisconnected — sleeping agent {}.", agent.name.cyan()),
             Err(e) => eprintln!(
                 "{}",
                 format!(
