@@ -148,6 +148,22 @@ pub async fn track_session_event(kind: &str, error: Option<&str>) {
     .await;
 }
 
+/// `railway ca` was run with no credential and sent the user through the login
+/// flow before doing what they asked. Fired once per forwarded run, so the
+/// share of `ca` invocations that are somebody's first Railway command — and
+/// how often that hand-off fails — is visible without inferring it from the
+/// gap between a `login` event and a `cloud_agent` one.
+pub async fn track_login_forwarded(error: Option<&str>) {
+    telemetry::send(event(
+        "cloud_agent",
+        "login_forwarded".to_string(),
+        0,
+        error.is_none(),
+        error.map(truncate),
+    ))
+    .await;
+}
+
 /// `railway ca setup` or the TUI wizard saved preferences. `entry` is
 /// `"cli"` or `"wizard"` — the two call sites share this mapping so both
 /// land in the same shape.
