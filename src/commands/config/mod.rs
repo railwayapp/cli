@@ -1670,6 +1670,56 @@ mod tests {
     }
 
     #[test]
+    fn pull_renderer_preserves_image_resource_limits() {
+        let resource = service_resource(
+            json!({ "image": "nginx:latest" }),
+            json!({
+                "limitOverride": {
+                    "containers": { "cpu": 2, "memoryBytes": 2_000_000_000_i64 }
+                }
+            }),
+        );
+
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+        );
+
+        assert!(rendered.contains("source: image(\"nginx:latest\")"));
+        assert!(rendered.contains("cpu: 2"));
+        assert!(rendered.contains("memoryBytes: 2000000000"));
+    }
+
+    #[test]
+    fn pull_renderer_preserves_quoted_bucket_references_when_values_are_visible() {
+        let mut resource = service_resource(json!({ "image": "nginx:latest" }), json!({}));
+        resource.variables = Some(
+            json!({
+                "InspectionsBucket__BucketName": {
+                    "type": "literal",
+                    "value": "${{inspections_media.BUCKET}}"
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            false,
+        );
+
+        assert!(
+            rendered.contains("InspectionsBucket__BucketName: \"${{inspections_media.BUCKET}}\"")
+        );
+    }
+
+    #[test]
     fn pull_renderer_preserves_supported_image_auto_updates_only() {
         let policy = json!({
             "type": "patch",
