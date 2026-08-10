@@ -19,10 +19,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::session;
 use super::theme::Theme;
 
-/// Harnesses the launcher can put a session on, in cycle order. `railway` is
-/// the one exception to this list's old name ("carry a credential to") — it
-/// needs none, using the VM's own integrated Railway credentials instead.
-pub const HARNESSES: &[&str] = &["claude", "codex", "grok", "railway"];
+/// Harnesses the launcher can put a session on, in cycle order. `railway`
+/// leads the list — and so is the default pick with nothing configured —
+/// since it is the one exception needing no credential of its own: no
+/// carry-a-local-sign-in step, just the VM's own integrated Railway
+/// credentials.
+pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok"];
 
 /// Everything the Manage screen responds to, grouped for the `?` overlay. The
 /// footer shows two or three of these; this is where the rest lives, so the
