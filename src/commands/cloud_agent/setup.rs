@@ -32,7 +32,10 @@ pub struct Args {
 /// The harnesses a cloud agent can launch today. Every one of these ships in
 /// `cloud-agent-base`; what differs is whether the launcher can carry the
 /// user's credential to it, which is why droid and cursor are absent — their
-/// CLI sign-ins have no copyable local form.
+/// CLI sign-ins have no copyable local form. Railway's own harness needs no
+/// credential at all — see `Agent::Railway` in `commands/code.rs` — so
+/// `config_dir`/`bin` here are only ever meaningful as a "you happen to have
+/// this installed locally too" hint, not a requirement.
 struct Harness {
     slug: &'static str,
     name: &'static str,
@@ -59,6 +62,12 @@ const HARNESSES: &[Harness] = &[
         name: "Grok",
         config_dir: ".grok",
         bin: "grok",
+    },
+    Harness {
+        slug: "railway",
+        name: "Railway",
+        config_dir: ".railway-agent",
+        bin: "railway-agent",
     },
 ];
 
@@ -575,7 +584,7 @@ mod tests {
             .iter()
             .map(|c| c.slug)
             .collect();
-        assert_eq!(slugs, vec!["claude", "codex", "grok"]);
+        assert_eq!(slugs, vec!["claude", "codex", "grok", "railway"]);
     }
 
     #[test]
