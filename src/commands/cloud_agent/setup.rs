@@ -46,6 +46,12 @@ struct Harness {
 
 const HARNESSES: &[Harness] = &[
     Harness {
+        slug: "railway",
+        name: "Railway",
+        config_dir: ".railway-agent",
+        bin: "railway-agent",
+    },
+    Harness {
         slug: "claude",
         name: "Claude Code",
         config_dir: ".claude",
@@ -62,12 +68,6 @@ const HARNESSES: &[Harness] = &[
         name: "Grok",
         config_dir: ".grok",
         bin: "grok",
-    },
-    Harness {
-        slug: "railway",
-        name: "Railway",
-        config_dir: ".railway-agent",
-        bin: "railway-agent",
     },
 ];
 
@@ -584,7 +584,7 @@ mod tests {
             .iter()
             .map(|c| c.slug)
             .collect();
-        assert_eq!(slugs, vec!["claude", "codex", "grok", "railway"]);
+        assert_eq!(slugs, vec!["railway", "claude", "codex", "grok"]);
     }
 
     #[test]

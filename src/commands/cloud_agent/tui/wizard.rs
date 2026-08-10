@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(w.project.as_ref().unwrap().environment_name, "staging");
 
         // The agent step opens on the harness already configured.
-        assert_eq!(w.cursor, 1, "codex was passed in");
+        assert_eq!(w.cursor, 2, "codex was passed in");
         w.select();
         assert_eq!(w.step, Step::Skills);
 
