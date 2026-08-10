@@ -50,21 +50,34 @@ use crate::commands::code::{self, LaunchArgs, Prepared, Progress};
 use crate::config::Configs;
 use crate::gql::{mutations, queries};
 
-/// Create the project first-run setup offers to make.
+/// Create the project first-run setup offers to make, in the workspace the
+/// wizard asked for.
+///
+/// `workspace_id` is `None` only when there was one workspace to choose from,
+/// so falling back to the first is the same answer the user would have given.
+/// An id that no longer resolves is an error rather than a silent fallback:
+/// creating the project somewhere other than where they pointed is how one ends
+/// up lost.
 async fn create_default_project(
     client: &reqwest::Client,
     backboard: &str,
+    workspace_id: Option<String>,
 ) -> Result<wizard::ProjectOption> {
     use crate::gql::mutations;
 
     let configs = Configs::new()?;
     let workspaces = crate::workspace::workspaces_with_client(client, &configs).await?;
-    // No prompt here: the TUI owns the screen. The first workspace is the only
-    // one most accounts have, and setup can be re-run to move it.
-    let workspace = workspaces
-        .first()
-        .map(|ws| ws.id().to_string())
-        .ok_or_else(|| anyhow::anyhow!("no workspace to create a project in"))?;
+    let workspace = match workspace_id {
+        Some(id) => workspaces
+            .iter()
+            .find(|ws| ws.id() == id)
+            .map(|ws| ws.id().to_string())
+            .ok_or_else(|| anyhow::anyhow!("that workspace is no longer available"))?,
+        None => workspaces
+            .first()
+            .map(|ws| ws.id().to_string())
+            .ok_or_else(|| anyhow::anyhow!("no workspace to create a project in"))?,
+    };
 
     let created = post_graphql::<mutations::ProjectCreate, _>(
         client,
@@ -260,6 +273,7 @@ pub async fn load_tree(client: &reqwest::Client, configs: &Configs) -> Result<Ve
     Ok(workspaces
         .into_iter()
         .map(|ws| WorkspaceNode {
+            id: ws.id().to_string(),
             name: ws.name().to_string(),
             expanded: false,
             projects: ws
@@ -577,12 +591,12 @@ pub async fn run(
                     let _ = tx.send(message);
                 });
             }
-            Some(Effect::CreateDefaultProject) => {
+            Some(Effect::CreateDefaultProject { workspace_id }) => {
                 let tx = tx.clone();
                 let client = client.clone();
                 let backboard = backboard.clone();
                 tokio::spawn(async move {
-                    let result = create_default_project(&client, &backboard)
+                    let result = create_default_project(&client, &backboard, workspace_id)
                         .await
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Message::ProjectCreated(result));
@@ -903,6 +917,17 @@ fn handle_message(
         }
         Message::ProjectCreated(result) => {
             if let Some(w) = app.wizard.as_mut() {
+                // Say where it went. The wizard moves straight on to the next
+                // question, so without this the only record of which workspace
+                // now holds a "Cloud Agents" project is the dashboard.
+                if let Ok(project) = &result {
+                    app.status = match &w.created_in {
+                        Some(workspace) => {
+                            format!("Created {} in {workspace}", project.project_name)
+                        }
+                        None => format!("Created {}", project.project_name),
+                    };
+                }
                 w.project_created(result);
             }
             None

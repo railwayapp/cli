@@ -21,6 +21,9 @@ pub enum Step {
     Project,
     /// Only when "use an existing project" was chosen.
     ProjectPick,
+    /// Only when "create a project" was chosen and there is more than one
+    /// workspace it could land in.
+    WorkspacePick,
     Agent,
     Skills,
     Theme,
@@ -33,6 +36,16 @@ pub struct ProjectOption {
     pub project_name: String,
     pub environment_id: String,
     pub environment_name: String,
+}
+
+/// A workspace the new project could be created in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceOption {
+    pub id: String,
+    pub name: String,
+    /// How many projects it already holds — the one fact that tells a personal
+    /// workspace from a team one at a glance.
+    pub projects: usize,
 }
 
 /// What the wizard asks for when it finishes.
@@ -54,6 +67,10 @@ pub struct Wizard {
     pub error: Option<String>,
     pub project: Option<ProjectOption>,
     pub projects: Vec<ProjectOption>,
+    pub workspaces: Vec<WorkspaceOption>,
+    /// The workspace the create in flight is going to, for the line that
+    /// reports where it landed.
+    pub created_in: Option<String>,
     pub agent: usize,
     pub skills: bool,
     pub skills_source: Option<String>,
@@ -66,8 +83,10 @@ pub enum Action {
     None,
     /// Redraw only; the theme step previews as the cursor moves.
     Redraw,
-    /// Create the default project, then call [`Wizard::project_created`].
-    CreateProject,
+    /// Create the default project in this workspace, then call
+    /// [`Wizard::project_created`]. `None` when the account has exactly one
+    /// workspace and there was nothing to ask.
+    CreateProject(Option<String>),
     /// The user finished; save these.
     Finish(Box<Outcome>),
     /// The user declined or backed out of the first question.
@@ -95,6 +114,14 @@ impl Wizard {
                 })
             })
             .collect();
+        let workspaces = tree
+            .iter()
+            .map(|ws| WorkspaceOption {
+                id: ws.id.clone(),
+                name: ws.name.clone(),
+                projects: ws.projects.len(),
+            })
+            .collect();
         Self {
             step: Step::Intro,
             cursor: 0,
@@ -102,6 +129,8 @@ impl Wizard {
             error: None,
             project: None,
             projects,
+            workspaces,
+            created_in: None,
             agent: harness
                 .and_then(|h| super::app::HARNESSES.iter().position(|x| *x == h))
                 .unwrap_or(0),
@@ -155,6 +184,17 @@ impl Wizard {
                     )
                 })
                 .collect(),
+            Step::WorkspacePick => self
+                .workspaces
+                .iter()
+                .map(|ws| {
+                    let what = match ws.projects {
+                        1 => "1 project".to_string(),
+                        n => format!("{n} projects"),
+                    };
+                    (ws.name.clone(), what)
+                })
+                .collect(),
             Step::Agent => super::app::HARNESSES
                 .iter()
                 .map(|slug| {
@@ -197,6 +237,7 @@ impl Wizard {
             Step::Intro => "Set up cloud agents?",
             Step::Project => "Where should agents live?",
             Step::ProjectPick => "Which project?",
+            Step::WorkspacePick => "Which workspace?",
             Step::Agent => "Which coding agent?",
             Step::Skills => "Bring your skills?",
             Step::Theme => "Pick a theme",
@@ -208,7 +249,9 @@ impl Wizard {
     pub fn position(&self) -> Option<(usize, usize)> {
         let index = match self.step {
             Step::Intro => return None,
-            Step::Project | Step::ProjectPick => 0,
+            // All three answer the same question — where agents live — so they
+            // share a dot rather than making the flow look longer than it is.
+            Step::Project | Step::ProjectPick | Step::WorkspacePick => 0,
             Step::Agent => 1,
             Step::Skills => 2,
             Step::Theme => 3,
@@ -252,9 +295,17 @@ impl Wizard {
             Step::Project => {
                 let has_existing = !self.projects.is_empty();
                 match (self.cursor, has_existing) {
+                    // More than one workspace: ask which, rather than picking
+                    // one for them. A project made in the wrong workspace is
+                    // invisible to everyone who cannot see that workspace, and
+                    // nothing in the flow would have said where it went.
+                    (0, _) if self.workspaces.len() > 1 => {
+                        self.go(Step::WorkspacePick);
+                        Action::Redraw
+                    }
                     (0, _) => {
-                        self.busy = Some("Creating Cloud Agents…".into());
-                        Action::CreateProject
+                        let only = self.workspaces.first().cloned();
+                        self.create_in(only)
                     }
                     (1, true) => {
                         self.go(Step::ProjectPick);
@@ -271,6 +322,12 @@ impl Wizard {
                 self.project = self.projects.get(self.cursor).cloned();
                 self.go(Step::Agent);
                 Action::Redraw
+            }
+            Step::WorkspacePick => {
+                let Some(workspace) = self.workspaces.get(self.cursor).cloned() else {
+                    return Action::None;
+                };
+                self.create_in(Some(workspace))
             }
             Step::Agent => {
                 self.agent = self.cursor.min(super::app::HARNESSES.len() - 1);
@@ -304,7 +361,7 @@ impl Wizard {
                 self.go(Step::Intro);
                 Action::Redraw
             }
-            Step::ProjectPick => {
+            Step::ProjectPick | Step::WorkspacePick => {
                 self.go(Step::Project);
                 Action::Redraw
             }
@@ -321,6 +378,20 @@ impl Wizard {
                 Action::Redraw
             }
         }
+    }
+
+    /// Hand the create off to the loop, with the workspace it answered for.
+    /// The workspace is named in the busy line whenever it was a choice, so
+    /// where the project is going is on screen while it goes there.
+    fn create_in(&mut self, workspace: Option<WorkspaceOption>) -> Action {
+        self.busy = Some(match &workspace {
+            Some(ws) if self.workspaces.len() > 1 => {
+                format!("Creating Cloud Agents in {}…", ws.name)
+            }
+            _ => "Creating Cloud Agents…".into(),
+        });
+        self.created_in = workspace.as_ref().map(|ws| ws.name.clone());
+        Action::CreateProject(workspace.map(|ws| ws.id))
     }
 
     fn go(&mut self, step: Step) {
@@ -352,6 +423,7 @@ mod tests {
 
     fn tree() -> Vec<WorkspaceNode> {
         vec![WorkspaceNode {
+            id: "ws1".into(),
             name: "Railway".into(),
             expanded: true,
             projects: vec![
@@ -433,7 +505,8 @@ mod tests {
     fn a_failed_create_keeps_the_step() {
         let mut w = wizard();
         w.select();
-        assert_eq!(w.select(), Action::CreateProject);
+        // One workspace, so the create goes straight through with it.
+        assert_eq!(w.select(), Action::CreateProject(Some("ws1".into())));
         assert!(w.busy.is_some());
 
         w.project_created(Err("no permission".into()));
@@ -504,6 +577,63 @@ mod tests {
         // flow is still walkable in both directions.
         assert_eq!(w.back(), Action::Redraw);
         assert_eq!(w.step, Step::Intro);
+    }
+
+    /// A second workspace means the create has a question to answer first:
+    /// which one it lands in. Nothing else about the flow changes.
+    #[test]
+    fn creating_with_several_workspaces_asks_which_one() {
+        let mut tree = tree();
+        tree.push(WorkspaceNode {
+            id: "ws2".into(),
+            name: "Acme".into(),
+            expanded: false,
+            projects: vec![ProjectNode {
+                id: "p3".into(),
+                name: "acme-api".into(),
+                expanded: false,
+                envs: vec![EnvNode {
+                    id: "e3".into(),
+                    name: "production".into(),
+                    expanded: false,
+                    agents: Load::NotLoaded,
+                }],
+            }],
+        });
+        let mut w = Wizard::new(&tree, Some("codex"), Theme::default_theme(), None);
+        w.select(); // set up now
+        assert_eq!(w.select(), Action::Redraw, "create asks first");
+        assert_eq!(w.step, Step::WorkspacePick);
+        assert!(w.busy.is_none(), "nothing is created until they answer");
+
+        let labels: Vec<String> = w.options().into_iter().map(|(label, _)| label).collect();
+        assert_eq!(labels, vec!["Railway", "Acme"]);
+        // The row says how big each workspace is; a name alone is not always
+        // enough to tell yours from your team's.
+        assert_eq!(w.options()[1].1, "1 project");
+
+        w.down();
+        assert_eq!(w.select(), Action::CreateProject(Some("ws2".into())));
+        assert!(w.busy.is_some());
+
+        // The step is still the picker, so a failure lands where the choice was
+        // made and another workspace can be tried.
+        w.project_created(Err("no permission".into()));
+        assert_eq!(w.step, Step::WorkspacePick);
+        assert_eq!(w.error.as_deref(), Some("no permission"));
+
+        // And escape from the picker goes back to the project question.
+        assert_eq!(w.back(), Action::Redraw);
+        assert_eq!(w.step, Step::Project);
+    }
+
+    /// The workspace question is part of "where should agents live?", not a
+    /// fifth step — the progress dots must not move because of it.
+    #[test]
+    fn the_workspace_question_shares_the_project_step() {
+        let mut w = wizard();
+        w.step = Step::WorkspacePick;
+        assert_eq!(w.position(), Some((0, 4)));
     }
 
     /// With no projects loaded there is nothing to pick, so the option is not

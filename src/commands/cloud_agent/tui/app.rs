@@ -227,6 +227,10 @@ pub struct ProjectNode {
 
 #[derive(Clone, Debug)]
 pub struct WorkspaceNode {
+    /// Carried for the wizard, which creates a project in one of these and so
+    /// needs to name a workspace the API will accept. The tree itself groups by
+    /// display name.
+    pub id: String,
     pub name: String,
     pub expanded: bool,
     pub projects: Vec<ProjectNode>,
@@ -646,8 +650,11 @@ pub enum Effect {
         environment_id: String,
         session_name: String,
     },
-    /// Create the default project the wizard asked for.
-    CreateDefaultProject,
+    /// Create the default project the wizard asked for, in the workspace it
+    /// picked (`None` when there was only one to pick from).
+    CreateDefaultProject {
+        workspace_id: Option<String>,
+    },
     /// Persist what first-run setup collected.
     SaveSetup(Box<super::wizard::Outcome>),
     /// Remember the default project chosen from the target card.
@@ -1686,7 +1693,9 @@ impl App {
             .unwrap_or(self.theme);
         match action {
             Action::None | Action::Redraw => None,
-            Action::CreateProject => Some(Effect::CreateDefaultProject),
+            Action::CreateProject(workspace_id) => {
+                Some(Effect::CreateDefaultProject { workspace_id })
+            }
             Action::Cancel => {
                 self.end_wizard();
                 None
@@ -3333,6 +3342,7 @@ mod tests {
 
     fn tree() -> Vec<WorkspaceNode> {
         vec![WorkspaceNode {
+            id: "ws1".into(),
             name: "Railway".into(),
             expanded: false,
             projects: vec![ProjectNode {
@@ -3376,6 +3386,7 @@ mod tests {
             envs: vec![env(&format!("{id}-prod"), "production")],
         };
         let tree = vec![WorkspaceNode {
+            id: "ws1".into(),
             name: "Railway".into(),
             expanded: true,
             projects: vec![
