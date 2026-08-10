@@ -5,6 +5,7 @@
 //! read the same preferences file, so the choice between them is only whether
 //! you want to browse first.
 
+pub mod access;
 pub mod lifecycle;
 pub mod prefs;
 pub mod setup;
@@ -162,10 +163,16 @@ async fn browse() -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
 
+    // Both under one spinner: the flag check is a small query against the same
+    // client, and running it beside the tree load rather than before it keeps
+    // the preflight off the clock for everyone who does have the flag.
     let spinner = create_spinner("Loading your projects".to_string());
-    let tree = tui::load_tree(&client, &configs).await;
+    let loaded = tokio::try_join!(
+        access::ensure_enabled(&client, &configs),
+        tui::load_tree(&client, &configs),
+    );
     spinner.finish_and_clear();
-    let tree = tree?;
+    let (_, tree) = loaded?;
     if tree.is_empty() {
         println!(
             "No projects with environments you can use. Create one with {} first.",

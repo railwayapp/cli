@@ -1579,6 +1579,15 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         return destroy_agent(&mut configs, &client, &environment_id).await;
     }
 
+    // Before anything is resolved, minted or provisioned: without the flag the
+    // create at the end of all that is refused, and the work up to it — a
+    // credential, possibly a browser round-trip — is spent for nothing.
+    {
+        let configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await?;
+    }
+
     eprintln!(
         "{}",
         "Warning: Railway cloud agents are experimental and APIs may change or break during testing."

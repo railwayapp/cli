@@ -164,6 +164,20 @@ pub async fn track_login_forwarded(error: Option<&str>) {
     .await;
 }
 
+/// Someone ran a cloud agent command without the `CLOUD_AGENTS` flag and was
+/// stopped by the preflight. Counts the demand sitting behind the flag, which
+/// the API-side rejection never surfaced as its own event.
+pub async fn track_access_blocked() {
+    telemetry::send(event(
+        "cloud_agent",
+        "flag_missing".to_string(),
+        0,
+        false,
+        None,
+    ))
+    .await;
+}
+
 /// `railway ca setup` or the TUI wizard saved preferences. `entry` is
 /// `"cli"` or `"wizard"` — the two call sites share this mapping so both
 /// land in the same shape.

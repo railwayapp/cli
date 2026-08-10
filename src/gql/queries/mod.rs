@@ -48,6 +48,17 @@ impl std::fmt::Display
 pub struct UserMeta;
 pub type RailwayUser = user_meta::UserMetaMe;
 
+/// The account's active feature flags, for the `railway ca` preflight. Its own
+/// query rather than a field on `UserMeta`: that one is on the login path and
+/// has no use for them.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgentAccess.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq"
+)]
+pub struct CloudAgentAccess;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
