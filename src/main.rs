@@ -333,9 +333,10 @@ async fn main() -> Result<()> {
                 )
             {
                 eprintln!(
-                    "{} v{} visit {} for more info",
+                    "{} v{} run {} to update ({} for more info)",
                     "New version available:".green().bold(),
                     latest_version.yellow(),
+                    "railway upgrade".cyan(),
                     "https://docs.railway.com/guides/cli".purple(),
                 );
             }
