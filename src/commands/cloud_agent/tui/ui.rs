@@ -168,6 +168,10 @@ fn render_screen(app: &App, f: &mut Frame, rects: &mut PaneRects) {
             render_menu(app, f, rects);
             render_wizard(app, f);
         }
+        Screen::Settings => {
+            render_menu(app, f, rects);
+            render_settings(app, f);
+        }
         Screen::Menu => render_menu(app, f, rects),
         Screen::Manage => render_manage(app, f, rects),
         Screen::TargetPick => {
@@ -301,14 +305,12 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         MenuFocus::Prompt => &[
             ("enter", "launch"),
             ("shift+tab", "agent"),
-            ("⌥t", "theme"),
-            ("⌥s", "setup"),
+            ("⌥s", "settings"),
         ],
         MenuFocus::Cards => &[
             ("↑↓", "select"),
             ("enter", "open"),
-            ("⌥t", "theme"),
-            ("⌥s", "setup"),
+            ("⌥s", "settings"),
             ("q", "quit"),
         ],
     };
@@ -1155,7 +1157,9 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         if !row.tag.is_empty() {
             spans.push(Span::styled(
                 format!("  {}", row.tag),
-                Style::default().fg(theme.dim),
+                // The tag steps forward with its row: on the settings card it
+                // is the current value, which is the thing being changed.
+                Style::default().fg(if on { theme.fg } else { theme.dim }),
             ));
         }
         lines.push(Line::from(spans));
@@ -1220,6 +1224,98 @@ fn render_wizard(app: &App, f: &mut Frame) {
             position: wizard.position(),
             rows: &rows,
             cursor: wizard.cursor,
+            footer,
+        },
+    );
+}
+
+/// The ⌥s settings card: every preference with its current value beside it,
+/// or the project sub-picker while it is open.
+fn render_settings(app: &App, f: &mut Frame) {
+    let Some(settings) = app.settings.as_ref() else {
+        return;
+    };
+    let theme = app.theme;
+
+    // The sub-picker replaces the card wholesale, like a wizard step.
+    if let Some(pick) = settings.pick {
+        let rows: Vec<PanelRow> = settings
+            .picker_options()
+            .into_iter()
+            .map(|(label, tag, detail)| PanelRow { label, tag, detail })
+            .collect();
+        let footer = if let Some(busy) = settings.busy.as_deref() {
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", spinner_frame(app.loading.tick)),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(busy.to_string(), Style::default().fg(theme.fg)),
+            ])
+        } else if let Some(error) = settings.error.as_deref() {
+            Line::from(Span::styled(
+                format!("  {error}"),
+                Style::default().fg(theme.pending),
+            ))
+        } else {
+            Line::from(chord_spans(
+                theme,
+                &[("↑↓", "choose"), ("enter", "set default"), ("esc", "back")],
+            ))
+        };
+        render_panel(
+            f,
+            theme,
+            f.area(),
+            Panel {
+                title: "settings",
+                heading: "Where should agents live?",
+                position: None,
+                rows: &rows,
+                cursor: pick,
+                footer,
+            },
+        );
+        return;
+    }
+
+    let cycles = settings.cycles();
+    let rows: Vec<PanelRow> = settings
+        .options()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (label, value, detail))| PanelRow {
+            // Padded so the values read as a column.
+            label: format!("{label:<19}"),
+            // The highlighted value grows arrows when ←/→ changes it in
+            // place — the hint that this row edits right here.
+            tag: if i == settings.cursor && cycles {
+                format!("‹ {value} ›")
+            } else {
+                value
+            },
+            detail,
+        })
+        .collect();
+    let footer = Line::from(chord_spans(
+        theme,
+        &[
+            ("↑↓", "choose"),
+            ("←→", "change"),
+            ("enter", "edit"),
+            ("esc", "close"),
+        ],
+    ));
+    render_panel(
+        f,
+        theme,
+        f.area(),
+        Panel {
+            title: "settings",
+            heading: "Cloud agent settings",
+            position: None,
+            rows: &rows,
+            cursor: settings.cursor,
             footer,
         },
     );
@@ -1961,8 +2057,11 @@ mod tests {
             .rfind(|l| l.contains("launch"))
             .expect("the menu footer");
         assert!(footer.contains("enter"), "{footer}");
-        assert!(footer.contains("theme"), "{footer}");
-        assert!(footer.contains("setup"), "{footer}");
+        assert!(footer.contains("settings"), "{footer}");
+        assert!(
+            !footer.contains("theme"),
+            "the theme moved onto the settings card: {footer}"
+        );
         // The target shortcut moved onto the target line itself — see
         // `target_shortcut_sits_on_its_own_line`.
         assert!(!footer.contains("target"), "{footer}");
@@ -2032,14 +2131,18 @@ mod tests {
         );
     }
 
-    /// Setup is on the menu only while there is nothing set up; after that it
-    /// is the ⌥s in the footer, which is there either way.
+    /// Setup is on the menu only while there is nothing set up; after that
+    /// the answers live behind the ⌥s in the footer, which is there either
+    /// way.
     #[test]
     fn setup_is_a_card_only_on_a_first_run() {
         let mut app = app_with_tree();
         let out = draw(&app, 100, 40);
         assert!(!out.contains("Default agent, skills"), "{out}");
-        assert!(out.contains("setup"), "the chord is still offered:\n{out}");
+        assert!(
+            out.contains("settings"),
+            "the chord is still offered:\n{out}"
+        );
 
         app.configured = false;
         let out = draw(&app, 100, 40);
@@ -2815,6 +2918,47 @@ mod tests {
             lines[first + 1].contains("staging"),
             "rows should be adjacent:\n{out}"
         );
+    }
+
+    /// The settings card shows every value beside its name, and the
+    /// highlighted one wears the cycle arrows.
+    #[test]
+    fn the_settings_card_shows_values_in_place() {
+        let mut app = app_with_tree();
+        app.skills_source = Some("claude".into());
+        app.skills_enabled = true;
+        app.start_settings();
+
+        let out = draw(&app, 100, 40);
+        assert!(out.contains("Cloud agent settings"), "{out}");
+        assert!(
+            out.contains("‹ claude ›"),
+            "the highlighted row cycles in place:\n{out}"
+        );
+        assert!(out.contains("on · claude"), "{out}");
+        assert!(out.contains("Railway"), "the theme's label:\n{out}");
+        assert!(out.contains("Run first-time setup again"), "{out}");
+        assert!(
+            out.contains("not set"),
+            "no default project reads as such:\n{out}"
+        );
+    }
+
+    /// The project row opens the wizard's question as a sub-card and comes
+    /// straight back, rather than walking the rest of a flow.
+    #[test]
+    fn the_settings_project_picker_is_the_setup_question() {
+        let mut app = app_with_tree();
+        app.start_settings();
+        if let Some(settings) = app.settings.as_mut() {
+            settings.down(); // the project row
+            settings.select(); // opens the picker
+        }
+
+        let out = draw(&app, 100, 40);
+        assert!(out.contains("Where should agents live?"), "{out}");
+        assert!(out.contains("devtools (production)"), "{out}");
+        assert!(out.contains("Decide later"), "{out}");
     }
 
     /// A tree with nothing in it must not panic the renderer.
