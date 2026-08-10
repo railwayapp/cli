@@ -44,7 +44,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("enter", "connect and type in it"),
             ("⌥f", "give it the whole screen · again to restore"),
-            ("shift+enter / f", "leave the TUI and connect full screen"),
+            ("⌥enter / f", "leave the TUI and connect full screen"),
             ("c", "copy an ssh command for it"),
             ("⌥esc / ^]", "stop typing in it"),
             ("wheel", "scroll its output"),
@@ -2251,8 +2251,13 @@ impl App {
 
     /// Hand the whole terminal to the session under the cursor.
     ///
-    /// Shift-Enter is the intended chord, but plenty of terminals do not send a
+    /// ⌥enter is the intended chord, but plenty of terminals do not send a
     /// modifier with Enter at all, so `f` does the same thing.
+    ///
+    /// Deliberately not shift+enter: that one belongs to the harness, where it
+    /// is the newline every text field gives you. This binding only ever fires
+    /// with the tree focused, so ⌥enter inside a session still reaches the
+    /// agent as `ESC CR` — which is the other newline chord harnesses take.
     fn full_screen_current(&mut self) -> Option<Effect> {
         // The row under the cursor if it names a session, else whatever the
         // pane is showing.
@@ -2800,7 +2805,7 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1),
             // Full screen, before the plain Enter arm below claims the key.
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.full_screen_current()
             }
             KeyCode::Char('f') => self.full_screen_current(),
@@ -6074,7 +6079,7 @@ mod tests {
         assert_eq!(a.refresh_agent_sessions("nope"), None);
     }
 
-    /// Shift-enter hands the whole terminal over; `f` does the same, because
+    /// ⌥enter hands the whole terminal over; `f` does the same, because
     /// plenty of terminals never send a modifier with Enter.
     #[test]
     fn full_screen_has_two_ways_in() {
@@ -6082,12 +6087,12 @@ mod tests {
         a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
         a.focus = ManageFocus::Tree;
 
-        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
         let Some(Effect::FullScreen {
             agent_id,
             session_name,
             ..
-        }) = a.on_key(shift_enter)
+        }) = a.on_key(alt_enter)
         else {
             panic!("expected a full-screen request");
         };
@@ -6098,6 +6103,32 @@ mod tests {
             a.on_key(key(KeyCode::Char('f'))),
             Some(Effect::FullScreen { .. })
         ));
+    }
+
+    /// shift+enter belongs to the harness, which reads it as the newline every
+    /// text field gives you. The TUI must not claim it from either focus.
+    #[test]
+    fn shift_enter_is_the_harnesss_to_keep() {
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+
+        // With the tree focused it is not the full-screen chord any more; the
+        // row under the cursor is a workspace, so a plain Enter would expand
+        // it and a claimed shift+enter would show up as something happening.
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.focus = ManageFocus::Tree;
+        assert!(
+            !matches!(a.on_key(shift_enter), Some(Effect::FullScreen { .. })),
+            "shift+enter must not hand the terminal over"
+        );
+
+        // And with the session focused it falls straight through to the agent,
+        // like every other key the pane does not reserve.
+        let mut b = loaded_app();
+        b.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        b.focus = ManageFocus::Session;
+        assert_eq!(b.on_key(shift_enter), None);
+        assert_eq!(b.focus, ManageFocus::Session, "it must not release either");
     }
 
     /// Rows are named by the session, not by a truncated launch line.

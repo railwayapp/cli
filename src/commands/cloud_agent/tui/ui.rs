@@ -991,7 +991,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             Some(RowKind::Session(..)) => vec![
                 ("enter", "connect"),
                 ("⌥f", "maximize"),
-                ("shift+enter", "full screen"),
+                ("⌥enter", "full screen"),
                 ("c", "copy ssh"),
                 ("x", "end session"),
                 if sleeping {
