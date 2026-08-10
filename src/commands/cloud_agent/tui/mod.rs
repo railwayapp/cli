@@ -17,6 +17,7 @@
 
 pub mod app;
 pub mod session;
+pub mod settings;
 pub mod theme;
 mod ui;
 pub mod wizard;
@@ -111,6 +112,63 @@ fn save_setup(
     let _ = app;
     prefs.save_in(&home)?;
     Ok(prefs)
+}
+
+/// Write a change made on the ⌥s settings card.
+///
+/// Merged over the file rather than built fresh: the card saves on every
+/// change, and the skills exclude list — which no card edits — must survive
+/// a stroll through the settings untouched.
+fn save_settings(
+    outcome: &wizard::Outcome,
+) -> Result<crate::commands::cloud_agent::prefs::AgentPrefs> {
+    use crate::commands::cloud_agent::prefs::{AgentPrefs, DefaultProject};
+
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
+    prefs.version = crate::commands::cloud_agent::prefs::CURRENT_VERSION;
+    prefs.agent = Some(outcome.agent.clone());
+    prefs.skills.enabled = outcome.skills;
+    prefs.skills.source = outcome.skills_source.clone();
+    prefs.default_project = outcome.project.as_ref().map(|p| DefaultProject {
+        project_id: p.project_id.clone(),
+        project_name: p.project_name.clone(),
+        environment_id: p.environment_id.clone(),
+        environment_name: p.environment_name.clone(),
+    });
+    prefs.theme = Some(outcome.theme.clone());
+    prefs.save_in(&home)?;
+    Ok(prefs)
+}
+
+/// Persist a settings-card change and bring the session along with it.
+///
+/// Quiet on success — the card itself shows the new value, and a status line
+/// per keypress while cycling a theme would be noise. Failure says so: a save
+/// that silently didn't happen is the worst thing a settings card can do.
+fn apply_settings(app: &mut App, outcome: &wizard::Outcome) {
+    match save_settings(outcome) {
+        // There are preferences now, whatever there was before.
+        Ok(_) => app.configured = true,
+        Err(err) => app.status = format!("Couldn't save your settings: {err:#}"),
+    }
+    app.set_harness(Some(&outcome.agent));
+    app.set_theme(Some(&outcome.theme));
+    app.skills_enabled = outcome.skills;
+    match &outcome.project {
+        Some(project) => {
+            app.default_project = Some(project.project_id.clone());
+            app.target = Some(Target {
+                project_id: project.project_id.clone(),
+                project_name: project.project_name.clone(),
+                environment_id: project.environment_id.clone(),
+                environment_name: project.environment_name.clone(),
+            });
+        }
+        // "Decide later": the default is gone, but the target stays aimed for
+        // this run — clearing the default is not pointing the prompt away.
+        None => app.default_project = None,
+    }
 }
 
 /// Shorten a string for a toast, keeping the front — the host and the start of
@@ -467,9 +525,11 @@ pub async fn run(
             Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard, &stop_fetching),
             // Animate the loading screen. Only armed while it is showing, so an
             // idle TUI still blocks rather than spinning on a timer.
-            // The wizard borrows the same tick for its "creating…" spinner.
+            // The wizard and settings borrow the same tick for their
+            // "creating…" spinners.
             _ = tokio::time::sleep(SPINNER_TICK), if app.loading.active
-                || app.wizard.as_ref().is_some_and(|w| w.busy.is_some()) => {
+                || app.wizard.as_ref().is_some_and(|w| w.busy.is_some())
+                || app.settings.as_ref().is_some_and(|s| s.busy.is_some()) => {
                 app.tick();
                 None
             }
@@ -622,6 +682,9 @@ pub async fn run(
                         environment_name: project.environment_name,
                     });
                 }
+            }
+            Some(Effect::SaveSettings(outcome)) => {
+                apply_settings(app, &outcome);
             }
             Some(Effect::ScanEverywhere) => {
                 // A deliberate scan clears a previous rate-limit stop: the user
@@ -908,6 +971,13 @@ fn handle_message(
         Message::ProjectCreated(result) => {
             if let Some(w) = app.wizard.as_mut() {
                 w.project_created(result);
+            } else if let Some(outcome) = app
+                .settings
+                .as_mut()
+                .and_then(|s| s.project_created(result))
+            {
+                // A create that stuck is a change; it saves like any other.
+                apply_settings(app, &outcome);
             }
             None
         }

@@ -221,6 +221,8 @@ async fn browse() -> Result<()> {
     app.skills_source = skills_sync::populated_sources(&home)
         .first()
         .map(|(source, _)| source.slug.to_string());
+    // Mirrored so the ⌥s settings card opens showing the saved answer.
+    app.skills_enabled = saved.skills.enabled;
     // No preferences yet: ask whether to set them up, rather than dropping
     // someone in front of a prompt whose target, agent and skills are all
     // unanswered. Choosing Setup from the menu skips that question — they have
