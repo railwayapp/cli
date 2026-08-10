@@ -6,9 +6,10 @@
 //! moment someone has no idea what a "target" or a "harness" is, so each step
 //! carries a line saying what the choice does.
 //!
-//! The project step reads from the tree the TUI already loaded, so choosing an
-//! existing project costs no network. Creating one does, and that is the only
-//! step that can fail.
+//! The target step reads from the tree the TUI already loaded, so browsing it
+//! costs no network: workspaces list first, and expanding one (or a project
+//! inside it) reveals what is under it, exactly like the tree on the Manage
+//! screen. Creating a project is the only step that can fail.
 
 use super::app::WorkspaceNode;
 use super::theme::{THEMES, Theme};
@@ -18,9 +19,8 @@ use super::theme::{THEMES, Theme};
 pub enum Step {
     /// The modal that opens it: set up now, or not.
     Intro,
-    Project,
-    /// Only when "use an existing project" was chosen.
-    ProjectPick,
+    /// Workspace → project → environment, expandable in place.
+    Target,
     Agent,
     Skills,
     Theme,
@@ -45,6 +45,48 @@ pub struct Outcome {
     pub theme: String,
 }
 
+/// An environment leaf under a [`TargetProject`]. Selecting one finishes the
+/// target step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetEnv {
+    pub id: String,
+    pub name: String,
+}
+
+/// A project under a [`TargetWorkspace`]. Expands to show its environments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetProject {
+    pub id: String,
+    pub name: String,
+    pub expanded: bool,
+    pub envs: Vec<TargetEnv>,
+}
+
+/// A workspace, the top level of the target step. Expands to show its
+/// projects, and (once expanded) a row to create a new project inside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetWorkspace {
+    pub id: String,
+    pub name: String,
+    pub expanded: bool,
+    pub projects: Vec<TargetProject>,
+}
+
+/// One visible row of the target step's flattened, indented tree. Recomputed
+/// from `Wizard::workspaces` on every render and every keypress, so it never
+/// drifts from the expand state that produced it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TargetRow {
+    Workspace(usize),
+    /// Create a project inside workspace `usize` — the first row under it
+    /// once expanded, ahead of its existing projects.
+    CreateProject(usize),
+    Project(usize, usize),
+    Env(usize, usize, usize),
+    /// Pinned last: a way out at any depth.
+    DecideLater,
+}
+
 pub struct Wizard {
     pub step: Step,
     pub cursor: usize,
@@ -53,7 +95,7 @@ pub struct Wizard {
     /// Shown under the card when a step went wrong.
     pub error: Option<String>,
     pub project: Option<ProjectOption>,
-    pub projects: Vec<ProjectOption>,
+    pub workspaces: Vec<TargetWorkspace>,
     pub agent: usize,
     pub skills: bool,
     pub skills_source: Option<String>,
@@ -66,8 +108,9 @@ pub enum Action {
     None,
     /// Redraw only; the theme step previews as the cursor moves.
     Redraw,
-    /// Create the default project, then call [`Wizard::project_created`].
-    CreateProject,
+    /// Create the default project in this workspace, then call
+    /// [`Wizard::project_created`].
+    CreateProject(String),
     /// The user finished; save these.
     Finish(Box<Outcome>),
     /// The user declined or backed out of the first question.
@@ -75,39 +118,124 @@ pub enum Action {
 }
 
 impl Wizard {
-    /// Build the flow, taking the project list from the loaded tree.
+    /// Build the flow, taking the workspace tree from the loaded tree. The
+    /// first workspace opens by default — mirroring the Manage screen, so the
+    /// target step is never a wall of collapsed rows — and everything under
+    /// it stays collapsed until asked for.
     pub fn new(
         tree: &[WorkspaceNode],
         harness: Option<&str>,
         theme: &Theme,
         skills_source: Option<String>,
     ) -> Self {
-        let projects = tree
+        let mut workspaces: Vec<TargetWorkspace> = tree
             .iter()
-            .flat_map(|ws| ws.projects.iter())
-            .filter_map(|project| {
-                let env = project.envs.first()?;
-                Some(ProjectOption {
-                    project_id: project.id.clone(),
-                    project_name: project.name.clone(),
-                    environment_id: env.id.clone(),
-                    environment_name: env.name.clone(),
-                })
+            .map(|ws| TargetWorkspace {
+                id: ws.id.clone(),
+                name: ws.name.clone(),
+                expanded: false,
+                projects: ws
+                    .projects
+                    .iter()
+                    .map(|project| TargetProject {
+                        id: project.id.clone(),
+                        name: project.name.clone(),
+                        expanded: false,
+                        envs: project
+                            .envs
+                            .iter()
+                            .map(|env| TargetEnv {
+                                id: env.id.clone(),
+                                name: env.name.clone(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
             })
             .collect();
+        if let Some(first) = workspaces.first_mut() {
+            first.expanded = true;
+        }
         Self {
             step: Step::Intro,
             cursor: 0,
             busy: None,
             error: None,
             project: None,
-            projects,
+            workspaces,
             agent: harness
                 .and_then(|h| super::app::HARNESSES.iter().position(|x| *x == h))
                 .unwrap_or(0),
             skills: skills_source.is_some(),
             skills_source,
             theme: theme.index(),
+        }
+    }
+
+    /// The target step's rows, flattened and in display order: each
+    /// workspace, then (if expanded) a create-project row and its projects,
+    /// then (for each expanded project) its environments — "Decide later"
+    /// pinned at the end regardless of depth.
+    fn target_rows(&self) -> Vec<TargetRow> {
+        let mut rows = Vec::new();
+        for (w, workspace) in self.workspaces.iter().enumerate() {
+            rows.push(TargetRow::Workspace(w));
+            if !workspace.expanded {
+                continue;
+            }
+            rows.push(TargetRow::CreateProject(w));
+            for (p, project) in workspace.projects.iter().enumerate() {
+                rows.push(TargetRow::Project(w, p));
+                if !project.expanded {
+                    continue;
+                }
+                for e in 0..project.envs.len() {
+                    rows.push(TargetRow::Env(w, p, e));
+                }
+            }
+        }
+        rows.push(TargetRow::DecideLater);
+        rows
+    }
+
+    /// The label and description for one target row, indented by depth. Only
+    /// workspaces and projects carry an expand marker — an environment is
+    /// always a leaf.
+    fn target_row_label(&self, row: TargetRow) -> (String, String) {
+        match row {
+            TargetRow::Workspace(w) => {
+                let workspace = &self.workspaces[w];
+                let marker = if workspace.expanded { "▾" } else { "▸" };
+                let count = workspace.projects.len();
+                (
+                    format!("{marker} {}", workspace.name),
+                    format!("{count} project{}", if count == 1 { "" } else { "s" }),
+                )
+            }
+            TargetRow::CreateProject(w) => (
+                "    + Create a project".into(),
+                format!(
+                    "a new project named \"Cloud Agents\" in {}",
+                    self.workspaces[w].name
+                ),
+            ),
+            TargetRow::Project(w, p) => {
+                let project = &self.workspaces[w].projects[p];
+                let marker = if project.expanded { "▾" } else { "▸" };
+                let count = project.envs.len();
+                (
+                    format!("  {marker} {}", project.name),
+                    format!("{count} environment{}", if count == 1 { "" } else { "s" }),
+                )
+            }
+            TargetRow::Env(w, p, e) => {
+                let env = &self.workspaces[w].projects[p].envs[e];
+                (format!("    {}", env.name), String::new())
+            }
+            TargetRow::DecideLater => (
+                "Decide later".into(),
+                "Pick a target each time you launch".into(),
+            ),
         }
     }
 
@@ -125,35 +253,10 @@ impl Wizard {
                     "Everything still works; you will be asked for a target each time".into(),
                 ),
             ],
-            Step::Project => {
-                let mut options = vec![(
-                    "Create a project".into(),
-                    "A new Railway project named \"Cloud Agents\" to keep them in".into(),
-                )];
-                if !self.projects.is_empty() {
-                    options.push((
-                        "Use an existing project".into(),
-                        format!("Choose one of your {} projects", self.projects.len()),
-                    ));
-                }
-                options.push((
-                    "Decide later".into(),
-                    "Pick a target each time you launch".into(),
-                ));
-                options
-            }
-            // The environment rides in the label. As a description it was the
-            // same sentence on every row, which is a lot of words to say
-            // "production" a dozen times.
-            Step::ProjectPick => self
-                .projects
-                .iter()
-                .map(|p| {
-                    (
-                        format!("{} ({})", p.project_name, p.environment_name),
-                        String::new(),
-                    )
-                })
+            Step::Target => self
+                .target_rows()
+                .into_iter()
+                .map(|row| self.target_row_label(row))
                 .collect(),
             Step::Agent => super::app::HARNESSES
                 .iter()
@@ -161,7 +264,9 @@ impl Wizard {
                     let what = match *slug {
                         "claude" => "Anthropic's Claude Code",
                         "codex" => "OpenAI's Codex",
-                        _ => "xAI's Grok",
+                        "grok" => "xAI's Grok",
+                        "railway" => "Railway's own agent — no sign-in needed",
+                        _ => "",
                     };
                     ((*slug).to_string(), what.to_string())
                 })
@@ -188,15 +293,14 @@ impl Wizard {
 
     /// Start at the first question rather than at "do you want to?".
     pub fn skip_intro(&mut self) {
-        self.step = Step::Project;
+        self.step = Step::Target;
         self.cursor = 0;
     }
 
     pub fn title(&self) -> &'static str {
         match self.step {
             Step::Intro => "Set up cloud agents?",
-            Step::Project => "Where should agents live?",
-            Step::ProjectPick => "Which project?",
+            Step::Target => "Where should agents live?",
             Step::Agent => "Which coding agent?",
             Step::Skills => "Bring your skills?",
             Step::Theme => "Pick a theme",
@@ -208,7 +312,7 @@ impl Wizard {
     pub fn position(&self) -> Option<(usize, usize)> {
         let index = match self.step {
             Step::Intro => return None,
-            Step::Project | Step::ProjectPick => 0,
+            Step::Target => 0,
             Step::Agent => 1,
             Step::Skills => 2,
             Step::Theme => 3,
@@ -246,32 +350,43 @@ impl Wizard {
                 if self.cursor == 1 {
                     return Action::Cancel;
                 }
-                self.go(Step::Project);
+                self.go(Step::Target);
                 Action::Redraw
             }
-            Step::Project => {
-                let has_existing = !self.projects.is_empty();
-                match (self.cursor, has_existing) {
-                    (0, _) => {
-                        self.busy = Some("Creating Cloud Agents…".into());
-                        Action::CreateProject
-                    }
-                    (1, true) => {
-                        self.go(Step::ProjectPick);
-                        Action::Redraw
-                    }
-                    _ => {
-                        self.project = None;
-                        self.go(Step::Agent);
-                        Action::Redraw
-                    }
+            Step::Target => match self.target_rows().get(self.cursor).copied() {
+                Some(TargetRow::Workspace(w)) => {
+                    let workspace = &mut self.workspaces[w];
+                    workspace.expanded = !workspace.expanded;
+                    Action::Redraw
                 }
-            }
-            Step::ProjectPick => {
-                self.project = self.projects.get(self.cursor).cloned();
-                self.go(Step::Agent);
-                Action::Redraw
-            }
+                Some(TargetRow::Project(w, p)) => {
+                    let project = &mut self.workspaces[w].projects[p];
+                    project.expanded = !project.expanded;
+                    Action::Redraw
+                }
+                Some(TargetRow::Env(w, p, e)) => {
+                    let project = &self.workspaces[w].projects[p];
+                    let env = &project.envs[e];
+                    self.project = Some(ProjectOption {
+                        project_id: project.id.clone(),
+                        project_name: project.name.clone(),
+                        environment_id: env.id.clone(),
+                        environment_name: env.name.clone(),
+                    });
+                    self.go(Step::Agent);
+                    Action::Redraw
+                }
+                Some(TargetRow::CreateProject(w)) => {
+                    let workspace = &self.workspaces[w];
+                    self.busy = Some(format!("Creating Cloud Agents in {}…", workspace.name));
+                    Action::CreateProject(workspace.id.clone())
+                }
+                Some(TargetRow::DecideLater) | None => {
+                    self.project = None;
+                    self.go(Step::Agent);
+                    Action::Redraw
+                }
+            },
             Step::Agent => {
                 self.agent = self.cursor.min(super::app::HARNESSES.len() - 1);
                 self.go(Step::Skills);
@@ -300,16 +415,12 @@ impl Wizard {
     pub fn back(&mut self) -> Action {
         match self.step {
             Step::Intro => Action::Cancel,
-            Step::Project => {
+            Step::Target => {
                 self.go(Step::Intro);
                 Action::Redraw
             }
-            Step::ProjectPick => {
-                self.go(Step::Project);
-                Action::Redraw
-            }
             Step::Agent => {
-                self.go(Step::Project);
+                self.go(Step::Target);
                 Action::Redraw
             }
             Step::Skills => {
@@ -332,7 +443,7 @@ impl Wizard {
         };
     }
 
-    /// The project step finished, one way or the other.
+    /// The create-project step finished, one way or the other.
     pub fn project_created(&mut self, result: Result<ProjectOption, String>) {
         self.busy = None;
         match result {
@@ -352,6 +463,7 @@ mod tests {
 
     fn tree() -> Vec<WorkspaceNode> {
         vec![WorkspaceNode {
+            id: "ws1".into(),
             name: "Railway".into(),
             expanded: true,
             projects: vec![
@@ -392,21 +504,42 @@ mod tests {
         assert_eq!(w.select(), Action::Cancel);
     }
 
-    /// The whole flow, ending in the preferences it collected.
+    /// The first workspace opens by default, so its projects are visible
+    /// right away and nothing about them is listed until expanded.
+    #[test]
+    fn the_first_workspace_opens_by_default() {
+        let mut w = wizard();
+        w.skip_intro();
+        let options = w.options();
+        assert_eq!(options[0].0, "▾ Railway");
+        assert!(options.iter().any(|(label, _)| label.contains("devtools")));
+        assert!(options.iter().any(|(label, _)| label.contains("mono")));
+        assert!(
+            !options
+                .iter()
+                .any(|(label, _)| label.contains("production")),
+            "environments stay hidden until their project is expanded"
+        );
+    }
+
+    /// The whole flow, ending in the preferences it collected: expand into a
+    /// project, then pick one of its environments.
     #[test]
     fn the_flow_collects_every_answer() {
         let mut w = wizard();
         assert_eq!(w.select(), Action::Redraw); // set up now
-        assert_eq!(w.step, Step::Project);
+        assert_eq!(w.step, Step::Target);
 
-        w.down(); // use an existing project
-        assert_eq!(w.select(), Action::Redraw);
-        assert_eq!(w.step, Step::ProjectPick);
+        // Rows: ▾ Railway, + Create a project, ▸ devtools, ▸ mono, Decide later.
+        w.down(); // create a project
+        w.down(); // devtools
         w.down(); // mono
+        assert_eq!(w.select(), Action::Redraw); // expand mono
+        w.down(); // staging, just revealed under mono
         w.select();
         assert_eq!(w.step, Step::Agent);
         assert_eq!(w.project.as_ref().unwrap().project_name, "mono");
-        // The project's first environment comes along with it.
+        // The environment picked comes along with it.
         assert_eq!(w.project.as_ref().unwrap().environment_name, "staging");
 
         // The agent step opens on the harness already configured.
@@ -432,12 +565,13 @@ mod tests {
     #[test]
     fn a_failed_create_keeps_the_step() {
         let mut w = wizard();
-        w.select();
-        assert_eq!(w.select(), Action::CreateProject);
+        w.select(); // set up now
+        w.down(); // + Create a project, under the already-open workspace
+        assert_eq!(w.select(), Action::CreateProject("ws1".into()));
         assert!(w.busy.is_some());
 
         w.project_created(Err("no permission".into()));
-        assert_eq!(w.step, Step::Project);
+        assert_eq!(w.step, Step::Target);
         assert!(w.busy.is_none());
         assert_eq!(w.error.as_deref(), Some("no permission"));
 
@@ -456,10 +590,11 @@ mod tests {
     fn escape_walks_back() {
         let mut w = wizard();
         w.select();
+        w.down();
         w.select(); // create → busy, but the step is what matters here
         w.step = Step::Agent;
         assert_eq!(w.back(), Action::Redraw);
-        assert_eq!(w.step, Step::Project);
+        assert_eq!(w.step, Step::Target);
         assert_eq!(w.back(), Action::Redraw);
         assert_eq!(w.step, Step::Intro);
         assert_eq!(w.back(), Action::Cancel);
@@ -476,28 +611,13 @@ mod tests {
         assert_ne!(w.previewed_theme().slug, first);
     }
 
-    /// The project rows carry their environment in the label, so the list is
-    /// not a column of identical sentences.
-    #[test]
-    fn project_rows_name_their_environment_inline() {
-        let mut w = wizard();
-        w.step = Step::ProjectPick;
-        let options = w.options();
-        assert_eq!(options[0].0, "devtools (production)");
-        assert_eq!(options[1].0, "mono (staging)");
-        assert!(
-            options.iter().all(|(_, what)| what.is_empty()),
-            "no repeated description line"
-        );
-    }
-
     /// Chosen from the menu, setup starts at the first question: "do you want
     /// to set up?" has already been answered by choosing it.
     #[test]
     fn skipping_the_intro_starts_at_the_first_question() {
         let mut w = wizard();
         w.skip_intro();
-        assert_eq!(w.step, Step::Project);
+        assert_eq!(w.step, Step::Target);
         assert_eq!(w.position(), Some((0, 4)));
 
         // And escape from there goes back to the intro rather than out, so the
@@ -506,19 +626,67 @@ mod tests {
         assert_eq!(w.step, Step::Intro);
     }
 
-    /// With no projects loaded there is nothing to pick, so the option is not
-    /// offered at all.
+    /// With no workspaces at all there is nothing to expand into, so the only
+    /// way through is the escape hatch.
     #[test]
-    fn the_pick_option_is_hidden_without_projects() {
+    fn with_no_workspaces_only_decide_later_is_offered() {
         let mut w = Wizard::new(&[], None, Theme::default_theme(), None);
-        w.select();
+        w.select(); // set up now
         let labels: Vec<String> = w.options().into_iter().map(|(label, _)| label).collect();
-        assert_eq!(labels, vec!["Create a project", "Decide later"]);
+        assert_eq!(labels, vec!["Decide later"]);
 
-        // And "decide later" still lands on the next question.
-        w.down();
         w.select();
         assert_eq!(w.step, Step::Agent);
         assert!(w.project.is_none());
+    }
+
+    /// A second workspace stays collapsed until asked for, and expanding it
+    /// does not disturb the first.
+    #[test]
+    fn other_workspaces_stay_collapsed_until_expanded() {
+        let mut tree = tree();
+        tree.push(WorkspaceNode {
+            id: "ws2".into(),
+            name: "Personal".into(),
+            expanded: false,
+            projects: vec![ProjectNode {
+                id: "p3".into(),
+                name: "side-project".into(),
+                expanded: false,
+                envs: vec![EnvNode {
+                    id: "e3".into(),
+                    name: "production".into(),
+                    expanded: false,
+                    agents: Load::NotLoaded,
+                }],
+            }],
+        });
+        let mut w = Wizard::new(&tree, Some("codex"), Theme::default_theme(), None);
+        w.skip_intro();
+
+        let before = w.options();
+        assert!(
+            !before
+                .iter()
+                .any(|(label, _)| label.contains("side-project"))
+        );
+
+        let personal_row = before
+            .iter()
+            .position(|(label, _)| label.contains("Personal"))
+            .expect("the second workspace row");
+        w.cursor = personal_row;
+        w.select();
+
+        let after = w.options();
+        assert!(
+            after
+                .iter()
+                .any(|(label, _)| label.contains("side-project"))
+        );
+        assert!(
+            after.iter().any(|(label, _)| label.contains("devtools")),
+            "the first workspace is still expanded"
+        );
     }
 }

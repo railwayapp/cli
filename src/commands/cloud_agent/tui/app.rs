@@ -19,8 +19,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::session;
 use super::theme::Theme;
 
-/// Harnesses the launcher can carry a credential to, in cycle order.
-pub const HARNESSES: &[&str] = &["claude", "codex", "grok"];
+/// Harnesses the launcher can put a session on, in cycle order. `railway` is
+/// the one exception to this list's old name ("carry a credential to") — it
+/// needs none, using the VM's own integrated Railway credentials instead.
+pub const HARNESSES: &[&str] = &["claude", "codex", "grok", "railway"];
 
 /// Everything the Manage screen responds to, grouped for the `?` overlay. The
 /// footer shows two or three of these; this is where the rest lives, so the
@@ -227,6 +229,7 @@ pub struct ProjectNode {
 
 #[derive(Clone, Debug)]
 pub struct WorkspaceNode {
+    pub id: String,
     pub name: String,
     pub expanded: bool,
     pub projects: Vec<ProjectNode>,
@@ -646,8 +649,8 @@ pub enum Effect {
         environment_id: String,
         session_name: String,
     },
-    /// Create the default project the wizard asked for.
-    CreateDefaultProject,
+    /// Create the default project the wizard asked for, in this workspace.
+    CreateDefaultProject(String),
     /// Persist what first-run setup collected.
     SaveSetup(Box<super::wizard::Outcome>),
     /// Remember the default project chosen from the target card.
@@ -1686,7 +1689,7 @@ impl App {
             .unwrap_or(self.theme);
         match action {
             Action::None | Action::Redraw => None,
-            Action::CreateProject => Some(Effect::CreateDefaultProject),
+            Action::CreateProject(workspace_id) => Some(Effect::CreateDefaultProject(workspace_id)),
             Action::Cancel => {
                 self.end_wizard();
                 None
@@ -3333,6 +3336,7 @@ mod tests {
 
     fn tree() -> Vec<WorkspaceNode> {
         vec![WorkspaceNode {
+            id: "ws_1".into(),
             name: "Railway".into(),
             expanded: false,
             projects: vec![ProjectNode {
@@ -3376,6 +3380,7 @@ mod tests {
             envs: vec![env(&format!("{id}-prod"), "production")],
         };
         let tree = vec![WorkspaceNode {
+            id: "ws_1".into(),
             name: "Railway".into(),
             expanded: true,
             projects: vec![
@@ -4073,6 +4078,8 @@ mod tests {
         a.menu_focus = MenuFocus::Cards;
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "grok");
+        a.on_key(key(KeyCode::BackTab));
+        assert_eq!(a.harness_name(), "railway");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "claude", "cycling wraps");
     }

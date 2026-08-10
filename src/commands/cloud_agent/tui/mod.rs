@@ -50,21 +50,14 @@ use crate::commands::code::{self, LaunchArgs, Prepared, Progress};
 use crate::config::Configs;
 use crate::gql::{mutations, queries};
 
-/// Create the project first-run setup offers to make.
+/// Create the project first-run setup offers to make, in the workspace the
+/// target step's "+ Create a project" row was chosen under.
 async fn create_default_project(
     client: &reqwest::Client,
     backboard: &str,
+    workspace_id: String,
 ) -> Result<wizard::ProjectOption> {
     use crate::gql::mutations;
-
-    let configs = Configs::new()?;
-    let workspaces = crate::workspace::workspaces_with_client(client, &configs).await?;
-    // No prompt here: the TUI owns the screen. The first workspace is the only
-    // one most accounts have, and setup can be re-run to move it.
-    let workspace = workspaces
-        .first()
-        .map(|ws| ws.id().to_string())
-        .ok_or_else(|| anyhow::anyhow!("no workspace to create a project in"))?;
 
     let created = post_graphql::<mutations::ProjectCreate, _>(
         client,
@@ -72,7 +65,7 @@ async fn create_default_project(
         mutations::project_create::Variables {
             name: Some("Cloud Agents".to_string()),
             description: Some("Home for Railway cloud agents".to_string()),
-            workspace_id: Some(workspace),
+            workspace_id: Some(workspace_id),
         },
     )
     .await?
@@ -260,6 +253,7 @@ pub async fn load_tree(client: &reqwest::Client, configs: &Configs) -> Result<Ve
     Ok(workspaces
         .into_iter()
         .map(|ws| WorkspaceNode {
+            id: ws.id().to_string(),
             name: ws.name().to_string(),
             expanded: false,
             projects: ws
@@ -577,12 +571,12 @@ pub async fn run(
                     let _ = tx.send(message);
                 });
             }
-            Some(Effect::CreateDefaultProject) => {
+            Some(Effect::CreateDefaultProject(workspace_id)) => {
                 let tx = tx.clone();
                 let client = client.clone();
                 let backboard = backboard.clone();
                 tokio::spawn(async move {
-                    let result = create_default_project(&client, &backboard)
+                    let result = create_default_project(&client, &backboard, workspace_id)
                         .await
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Message::ProjectCreated(result));

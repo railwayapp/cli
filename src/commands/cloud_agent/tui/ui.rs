@@ -1818,6 +1818,7 @@ mod tests {
 
     pub(super) fn app_with_tree() -> App {
         let tree = vec![WorkspaceNode {
+            id: "ws_1".into(),
             name: "Railway".into(),
             expanded: true,
             projects: vec![ProjectNode {
@@ -2724,32 +2725,30 @@ mod tests {
     #[test]
     fn wizard_rows_without_a_description_have_no_gap() {
         let mut app = app_with_tree();
-        // A second project, so "adjacent" means something.
-        app.tree[0].projects.push(ProjectNode {
-            id: "proj_2".into(),
-            name: "mono".into(),
+        // A second environment, so "adjacent" means something.
+        app.tree[0].projects[0].envs.push(EnvNode {
+            id: "env_stg".into(),
+            name: "staging".into(),
             expanded: false,
-            envs: vec![EnvNode {
-                id: "env_stg".into(),
-                name: "staging".into(),
-                expanded: false,
-                agents: Load::NotLoaded,
-            }],
+            agents: Load::NotLoaded,
         });
         app.skills_source = None;
         app.start_wizard(false);
         if let Some(w) = app.wizard.as_mut() {
-            w.step = crate::commands::cloud_agent::tui::wizard::Step::ProjectPick;
+            w.step = crate::commands::cloud_agent::tui::wizard::Step::Target;
+            // Expand the workspace's only project to reveal its environments
+            // — leaf rows carry no description.
+            w.workspaces[0].projects[0].expanded = true;
         }
 
         let out = draw(&app, 100, 30);
         let lines: Vec<&str> = out.lines().collect();
         let first = lines
             .iter()
-            .position(|l| l.contains("devtools (production)"))
-            .expect("the project row");
+            .position(|l| l.contains("production"))
+            .expect("the environment row");
         assert!(
-            lines[first + 1].contains("mono (staging)"),
+            lines[first + 1].contains("staging"),
             "rows should be adjacent:\n{out}"
         );
     }
