@@ -775,6 +775,10 @@ pub struct App {
     pub harness: usize,
     pub target: Option<Target>,
     pub tree: Vec<WorkspaceNode>,
+    /// Every workspace the account can see, empty ones included — where setup
+    /// can put a new project, as opposed to `tree`, which is what can be
+    /// browsed. See [`App::new`].
+    pub workspaces: Vec<super::wizard::WorkspaceOption>,
     pub cursor: usize,
     /// Transient one-line message shown in the header.
     pub status: String,
@@ -792,7 +796,25 @@ impl App {
         let harness = harness
             .and_then(|h| HARNESSES.iter().position(|x| *x == h))
             .unwrap_or(0);
+        // Two views of the same listing. The tree shows what can be browsed, so
+        // a workspace holding nothing is dropped from it — an empty row that
+        // expands to nothing. Setup wants the full list: a workspace with no
+        // projects yet is still somewhere a project can be created, and for a
+        // team someone just joined it is often the one they mean.
+        let workspaces = tree
+            .iter()
+            .map(|ws| super::wizard::WorkspaceOption {
+                id: ws.id.clone(),
+                name: ws.name.clone(),
+                projects: ws.projects.len(),
+            })
+            .collect();
+        let tree = tree
+            .into_iter()
+            .filter(|ws| !ws.projects.is_empty())
+            .collect();
         let mut app = Self {
+            workspaces,
             default_project,
             configured,
             known_environments: Vec::new(),
@@ -1037,6 +1059,7 @@ impl App {
     pub fn start_wizard(&mut self, ask_first: bool) {
         let mut wizard = super::wizard::Wizard::new(
             &self.tree,
+            self.workspaces.clone(),
             Some(self.harness_name()),
             self.theme,
             self.skills_source.clone(),

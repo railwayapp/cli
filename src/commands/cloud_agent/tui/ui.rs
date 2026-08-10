@@ -2761,12 +2761,13 @@ mod tests {
     #[test]
     fn the_workspace_card_and_its_result_are_both_on_screen() {
         let mut app = app_with_tree();
-        app.tree.push(WorkspaceNode {
-            id: "ws2".into(),
-            name: "Acme".into(),
-            expanded: false,
-            projects: Vec::new(),
-        });
+        // An empty workspace: never in the browse tree, always in the picker.
+        app.workspaces
+            .push(crate::commands::cloud_agent::tui::wizard::WorkspaceOption {
+                id: "ws2".into(),
+                name: "Acme".into(),
+                projects: 0,
+            });
         app.start_wizard(false);
         if let Some(w) = app.wizard.as_mut() {
             w.step = crate::commands::cloud_agent::tui::wizard::Step::WorkspacePick;
@@ -2774,6 +2775,7 @@ mod tests {
         let out = draw(&app, 100, 30);
         assert!(out.contains("Which workspace?"), "{out}");
         assert!(out.contains("Acme"), "{out}");
+        assert!(out.contains("no projects yet"), "{out}");
 
         app.status = "Created Cloud Agents in Acme".into();
         let out = draw(&app, 100, 30);

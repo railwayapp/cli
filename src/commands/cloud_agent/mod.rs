@@ -73,7 +73,9 @@ async fn browse() -> Result<()> {
     let tree = tui::load_tree(&client, &configs).await;
     spinner.finish_and_clear();
     let tree = tree?;
-    if tree.is_empty() {
+    // Workspaces alone are not enough to browse — the listing now keeps the
+    // empty ones, for setup to create a project in — so ask about projects.
+    if tree.iter().all(|ws| ws.projects.is_empty()) {
         println!(
             "No projects with environments you can use. Create one with {} first.",
             "railway init".cyan()

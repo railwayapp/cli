@@ -268,6 +268,10 @@ impl Progress for ChannelProgress {
 /// Build the tree from the workspace listing. Deleted projects are dropped, and
 /// so are environments the caller cannot access — an agent can't be listed or
 /// created in either, so showing them would only offer dead ends.
+///
+/// Workspaces with nothing left in them stay: they are dropped from the browse
+/// tree by [`App::new`], but setup still offers them as somewhere to create the
+/// default project, which is the whole point of an empty workspace.
 pub async fn load_tree(client: &reqwest::Client, configs: &Configs) -> Result<Vec<WorkspaceNode>> {
     let workspaces = crate::workspace::workspaces_with_client(client, configs).await?;
     Ok(workspaces
@@ -299,7 +303,6 @@ pub async fn load_tree(client: &reqwest::Client, configs: &Configs) -> Result<Ve
                 .filter(|p| !p.envs.is_empty())
                 .collect(),
         })
-        .filter(|ws| !ws.projects.is_empty())
         .collect())
 }
 

@@ -95,8 +95,13 @@ pub enum Action {
 
 impl Wizard {
     /// Build the flow, taking the project list from the loaded tree.
+    ///
+    /// `workspaces` is passed in rather than derived from `tree` because the
+    /// two differ: the tree carries only workspaces with something to browse,
+    /// and a new project can go in any of them.
     pub fn new(
         tree: &[WorkspaceNode],
+        workspaces: Vec<WorkspaceOption>,
         harness: Option<&str>,
         theme: &Theme,
         skills_source: Option<String>,
@@ -112,14 +117,6 @@ impl Wizard {
                     environment_id: env.id.clone(),
                     environment_name: env.name.clone(),
                 })
-            })
-            .collect();
-        let workspaces = tree
-            .iter()
-            .map(|ws| WorkspaceOption {
-                id: ws.id.clone(),
-                name: ws.name.clone(),
-                projects: ws.projects.len(),
             })
             .collect();
         Self {
@@ -189,6 +186,9 @@ impl Wizard {
                 .iter()
                 .map(|ws| {
                     let what = match ws.projects {
+                        // A workspace with nothing in it is a fine home for
+                        // agents and the row should not read like a warning.
+                        0 => "no projects yet".to_string(),
                         1 => "1 project".to_string(),
                         n => format!("{n} projects"),
                     };
@@ -453,8 +453,27 @@ mod tests {
         }]
     }
 
+    /// The workspace list the app derives from the same listing the tree came
+    /// from — see [`super::app::App::new`].
+    fn workspaces(tree: &[WorkspaceNode]) -> Vec<WorkspaceOption> {
+        tree.iter()
+            .map(|ws| WorkspaceOption {
+                id: ws.id.clone(),
+                name: ws.name.clone(),
+                projects: ws.projects.len(),
+            })
+            .collect()
+    }
+
     fn wizard() -> Wizard {
-        Wizard::new(&tree(), Some("codex"), Theme::default_theme(), None)
+        let tree = tree();
+        Wizard::new(
+            &tree,
+            workspaces(&tree),
+            Some("codex"),
+            Theme::default_theme(),
+            None,
+        )
     }
 
     #[test]
@@ -600,7 +619,13 @@ mod tests {
                 }],
             }],
         });
-        let mut w = Wizard::new(&tree, Some("codex"), Theme::default_theme(), None);
+        let mut w = Wizard::new(
+            &tree,
+            workspaces(&tree),
+            Some("codex"),
+            Theme::default_theme(),
+            None,
+        );
         w.select(); // set up now
         assert_eq!(w.select(), Action::Redraw, "create asks first");
         assert_eq!(w.step, Step::WorkspacePick);
@@ -627,6 +652,29 @@ mod tests {
         assert_eq!(w.step, Step::Project);
     }
 
+    /// A workspace with nothing in it never reaches the browse tree, but it is
+    /// still somewhere a project can go — often the point of a team workspace
+    /// someone has just joined.
+    #[test]
+    fn an_empty_workspace_is_offered_as_a_home() {
+        let tree = tree();
+        let mut workspaces = workspaces(&tree);
+        workspaces.push(WorkspaceOption {
+            id: "ws2".into(),
+            name: "Acme".into(),
+            projects: 0,
+        });
+        let mut w = Wizard::new(&tree, workspaces, None, Theme::default_theme(), None);
+        w.select(); // set up now
+        w.select(); // create → which workspace?
+        assert_eq!(w.step, Step::WorkspacePick);
+        assert_eq!(w.options()[1], ("Acme".into(), "no projects yet".into()));
+
+        w.down();
+        assert_eq!(w.select(), Action::CreateProject(Some("ws2".into())));
+        assert_eq!(w.busy.as_deref(), Some("Creating Cloud Agents in Acme…"));
+    }
+
     /// The workspace question is part of "where should agents live?", not a
     /// fifth step — the progress dots must not move because of it.
     #[test]
@@ -640,7 +688,7 @@ mod tests {
     /// offered at all.
     #[test]
     fn the_pick_option_is_hidden_without_projects() {
-        let mut w = Wizard::new(&[], None, Theme::default_theme(), None);
+        let mut w = Wizard::new(&[], Vec::new(), None, Theme::default_theme(), None);
         w.select();
         let labels: Vec<String> = w.options().into_iter().map(|(label, _)| label).collect();
         assert_eq!(labels, vec!["Create a project", "Decide later"]);
