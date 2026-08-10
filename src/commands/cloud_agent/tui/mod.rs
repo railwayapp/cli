@@ -721,8 +721,10 @@ pub async fn run(
             }
             Some(Effect::Launch(req)) => {
                 // Minting needs a browser and a paste, neither of which works
-                // underneath a frame.
-                if req.harness == "claude" && !code::claude_credential_cached() {
+                // underneath a frame. Only a mint that can actually run needs
+                // the step-out: with nothing to mint from, the launch goes
+                // ahead and claude signs in on the agent.
+                if req.harness == "claude" && code::claude_needs_local_mint() {
                     return Ok(Outcome::NeedsCredential(req));
                 }
                 start_launch(app, req, &tx);

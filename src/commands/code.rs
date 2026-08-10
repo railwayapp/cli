@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use colored::Colorize;
 use is_terminal::IsTerminal;
@@ -42,6 +42,14 @@ use crate::util::shell::shell_join;
 // login isn't available", and their own claude-code-action has Pro/Max users
 // mint locally, store the token, and use it on remote runners — the same shape
 // as this command.
+//
+// All three are a convenience, not a requirement. Carrying the credential saves
+// signing in twice; when the local half isn't there — no `~/.codex/auth.json`,
+// no `~/.grok/auth.json`, no local `claude` to mint with — the launch goes ahead
+// without one and the harness asks for a sign-in on the agent, exactly as it
+// would on any new machine. Every harness here has a working device/browser
+// sign-in of its own, so refusing to launch would cost the user a session over
+// a file they never had to have.
 //
 // Every credential is announced to the user, read client-side, and rides ssh
 // stdin into a 0600 file on the VM: deliberately NOT a create-time variable, so
@@ -90,10 +98,11 @@ pub async fn command(args: Args) -> Result<()> {
 // renders those as `long_about` and it would show up in `--help`.
 #[derive(Parser, Default)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs: disconnecting sleeps yours, and the next\n`railway code` wakes it with your work still on disk. `--keep-awake` leaves it\nrunning; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs: disconnecting sleeps yours, and the next\n`railway code` wakes it with your work still on disk. `--keep-awake` leaves it\nrunning; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
-    /// Launch OpenAI Codex using your local ChatGPT sign-in (~/.codex/auth.json)
+    /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
+    /// (~/.codex/auth.json) when there is one to carry
     #[clap(long)]
     codex: bool,
 
@@ -103,7 +112,8 @@ pub struct LaunchArgs {
     #[clap(long)]
     claude: bool,
 
-    /// Launch Grok CLI using your local sign-in (~/.grok/auth.json)
+    /// Launch Grok CLI, carrying your local sign-in (~/.grok/auth.json) when
+    /// there is one to carry
     #[clap(long)]
     grok: bool,
 
@@ -269,6 +279,29 @@ impl Agent {
             Agent::Codex => CODEX_SEED,
             Agent::Claude => CLAUDE_SEED,
             Agent::Grok => GROK_SEED,
+        }
+    }
+
+    /// The local sign-in file this command copies, as `$HOME`-relative
+    /// components. `None` for Claude, whose credential is minted rather than
+    /// copied — sharing the local sign-in's rotating refresh token across two
+    /// machines is the thing the setup-token exists to avoid.
+    fn local_signin_file(self) -> Option<[&'static str; 2]> {
+        match self {
+            Agent::Codex => Some([".codex", "auth.json"]),
+            Agent::Grok => Some([".grok", "auth.json"]),
+            Agent::Claude => None,
+        }
+    }
+
+    /// What to tell someone whose launch carries no credential: the harness
+    /// will ask them to sign in on the agent, and this is how that goes. Each
+    /// one has a browser/device flow that works fine from a VM.
+    fn sign_in_on_agent_hint(self) -> &'static str {
+        match self {
+            Agent::Codex => "sign in there with `codex login --device-auth`",
+            Agent::Claude => "sign in there with `/login`",
+            Agent::Grok => "sign in there when it asks",
         }
     }
 }
@@ -513,46 +546,44 @@ fn terminal_reset_printf() -> String {
     format!("printf '{}'", TERMINAL_RESET.replace('\x1b', "\\033"))
 }
 
-/// Read the local Codex sign-in (`~/.codex/auth.json`). Returns the
-/// credential bytes plus a human label for the announce line.
-fn codex_credentials() -> Result<(Vec<u8>, String)> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
-    let auth_path = home.join(".codex").join("auth.json");
+/// Read a harness's local sign-in file — codex's `~/.codex/auth.json`, grok's
+/// `~/.grok/auth.json` — so the agent starts already signed in.
+///
+/// A missing or empty file is not a failure. It means this machine never had
+/// that harness signed in, so there is nothing to carry and the harness on the
+/// agent asks for a sign-in itself; the launch is worth more than the
+/// convenience. A file that exists but cannot be read *is* an error: the user
+/// has a sign-in, and silently launching without it would look like the copy
+/// worked.
+fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
+    let Some(parts) = agent.local_signin_file() else {
+        return Err(anyhow!(
+            "{} has no local sign-in file to copy",
+            agent.display()
+        ));
+    };
+    let auth_path = home.join(parts[0]).join(parts[1]);
+    let missing = || PendingAuth::SignInOnAgent {
+        note: format!(
+            "No {} sign-in on this machine ({}) — starting {} unauthenticated; {}.",
+            agent.display(),
+            auth_path.display(),
+            agent.display(),
+            agent.sign_in_on_agent_hint()
+        ),
+    };
     if !auth_path.exists() {
-        bail!(
-            "No Codex sign-in found at {}.\nRun `codex login` locally first (or `codex login --device-auth` on this machine), then re-run this command.",
-            auth_path.display()
-        );
+        return Ok(missing());
     }
-    let bytes = std::fs::read(&auth_path)?;
+    let bytes = std::fs::read(&auth_path)
+        .with_context(|| format!("Couldn't read {}", auth_path.display()))?;
     if bytes.is_empty() {
-        bail!(
-            "{} is empty — run `codex login` locally first.",
-            auth_path.display()
-        );
+        return Ok(missing());
     }
-    Ok((bytes, auth_path.display().to_string()))
-}
-
-/// Read the local Grok sign-in (`~/.grok/auth.json`) — the same
-/// copy-the-local-login shape as codex.
-fn grok_credentials() -> Result<(Vec<u8>, String)> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
-    let auth_path = home.join(".grok").join("auth.json");
-    if !auth_path.exists() {
-        bail!(
-            "No Grok sign-in found at {}.\nRun `grok` locally and sign in first, then re-run this command.",
-            auth_path.display()
-        );
-    }
-    let bytes = std::fs::read(&auth_path)?;
-    if bytes.is_empty() {
-        bail!(
-            "{} is empty — run `grok` locally and sign in first.",
-            auth_path.display()
-        );
-    }
-    Ok((bytes, auth_path.display().to_string()))
+    Ok(PendingAuth::Ready {
+        line: bytes,
+        source: auth_path.display().to_string(),
+    })
 }
 
 /// Where a minted `claude setup-token` grant is cached between runs.
@@ -623,10 +654,43 @@ enum PendingAuth {
     /// Only obtainable by running Claude's OAuth flow. Deferred until we know
     /// the agent doesn't already have one.
     MintClaude,
+    /// Nothing to carry, and nothing local to get it from. The harness signs
+    /// in on the agent instead, the way it does on any machine it has not seen
+    /// before. `note` is the line the user gets so the extra sign-in isn't a
+    /// surprise.
+    SignInOnAgent { note: String },
+}
+
+/// Set once a Claude mint has been offered this run and come away empty — no
+/// local `claude`, no terminal, nothing pasted.
+///
+/// The launch pipeline resolves the credential twice on the TUI path (once
+/// out-of-frame in [`ensure_claude_credential_cached`], once inside
+/// [`prepare_inner`]), and without this the second pass would re-run a flow
+/// that just failed — underneath a ratatui frame, where its browser wait and
+/// paste prompt cannot render. Asked once, answered once.
+static CLAUDE_MINT_DECLINED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn claude_sign_in_note() -> String {
+    format!(
+        "No {} credential to carry from this machine — starting it unauthenticated; {}.",
+        Agent::Claude.display(),
+        Agent::Claude.sign_in_on_agent_hint()
+    )
+}
+
+fn claude_sign_in_on_agent() -> PendingAuth {
+    PendingAuth::SignInOnAgent {
+        note: claude_sign_in_note(),
+    }
 }
 
 /// Resolve a Claude credential from the sources that cost nothing: this
-/// command's own cache, then the environment. Anything else needs a mint.
+/// command's own cache, then the environment. Anything else needs a mint —
+/// unless there is nothing here to mint with, in which case the agent's own
+/// sign-in is the flow, and the user finds that out before a VM is spent
+/// rather than through a browser prompt that never arrives.
 fn claude_credentials_cheap() -> Result<PendingAuth> {
     for var in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] {
         if let Ok(tok) = std::env::var(var) {
@@ -646,6 +710,15 @@ fn claude_credentials_cheap() -> Result<PendingAuth> {
             source: "cached setup-token".to_string(),
         });
     }
+    if CLAUDE_MINT_DECLINED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(claude_sign_in_on_agent());
+    }
+    // The mint runs the user's own `claude setup-token`. Without that binary
+    // there is no flow to offer, and the manual paste prompt it falls back to
+    // asks for the output of a command this machine cannot run.
+    if which::which("claude").is_err() {
+        return Ok(claude_sign_in_on_agent());
+    }
     Ok(PendingAuth::MintClaude)
 }
 
@@ -654,13 +727,23 @@ fn claude_credentials_cheap() -> Result<PendingAuth> {
 /// Mirrors mono's agent-vm Connect tab flow: a deliberate long-lived grant, NOT
 /// the local sign-in's `.credentials.json`, whose rotating refresh token two
 /// machines cannot safely share.
-fn mint_claude_credentials() -> Result<(Vec<u8>, String)> {
+/// `Ok(None)` when there is no credential to be had here — the caller launches
+/// without one and the user signs in on the agent. Reserved for "this machine
+/// can't produce one": a bad token that someone actually supplied is still an
+/// error, because launching past it would look like it was accepted.
+fn mint_claude_credentials() -> Result<Option<(Vec<u8>, String)>> {
     use colored::Colorize;
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        bail!(
-            "No Claude credential found. Set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or ANTHROPIC_API_KEY, then re-run this command."
+        // Nothing to prompt: the OAuth flow needs a terminal. Say what would
+        // have skipped the sign-in, then get out of the way.
+        eprintln!(
+            "{}",
+            "No Claude credential found — set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or ANTHROPIC_API_KEY to carry one from this machine."
+                .yellow()
         );
+        CLAUDE_MINT_DECLINED.store(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok(None);
     }
 
     // Automatic path: mint a fresh token with the user's own claude install,
@@ -678,10 +761,10 @@ fn mint_claude_credentials() -> Result<(Vec<u8>, String)> {
             spinner.finish_and_clear();
             validate_claude_token(&tok)?;
             cache_claude_token(&tok);
-            return Ok((
+            return Ok(Some((
                 format!("CLAUDE_CODE_OAUTH_TOKEN={tok}\n").into_bytes(),
                 "claude setup-token".to_string(),
-            ));
+            )));
         }
         Err(e) => {
             spinner.finish_and_clear();
@@ -696,18 +779,21 @@ fn mint_claude_credentials() -> Result<(Vec<u8>, String)> {
     }
 
     let tok = crate::util::prompt::prompt_secret(
-        "Run `claude setup-token` on this machine, then paste the token",
+        "Run `claude setup-token` on this machine, then paste the token (enter to skip and sign in on the agent)",
     )?;
     let tok = tok.trim().to_string();
+    // Skipped: an empty answer to an optional convenience is an answer, not a
+    // failure. The agent still launches; claude asks for the sign-in there.
     if tok.is_empty() {
-        bail!("No token pasted — run `claude setup-token` and paste its output.");
+        CLAUDE_MINT_DECLINED.store(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok(None);
     }
     validate_claude_token(&tok)?;
     cache_claude_token(&tok);
-    Ok((
+    Ok(Some((
         format!("CLAUDE_CODE_OAUTH_TOKEN={tok}\n").into_bytes(),
         "claude setup-token".to_string(),
-    ))
+    )))
 }
 
 /// How long the hidden setup-token flow may wait for the browser round-trip
@@ -1750,20 +1836,19 @@ async fn prepare_inner(
 ) -> Result<Prepared> {
     // --- Resolve the local credential (client-side only, announced).
     //
-    // Only the cheap sources run here. Codex and Grok read a local file, so a
-    // missing sign-in still fails before a VM is spent. Claude's mint costs a
-    // browser round-trip, so it is deferred until we know whether the agent
-    // already holds a credential from a previous run — see `PendingAuth`.
+    // Only the cheap sources run here. Codex and Grok read a local file, and a
+    // missing one means the session starts unauthenticated rather than not at
+    // all. Claude's mint costs a browser round-trip, so it is deferred until we
+    // know whether the agent already holds a credential from a previous run —
+    // see `PendingAuth`.
     let pending = match agent {
-        Agent::Codex => {
-            let (line, source) =
-                ssh_tel::track_for("cloud_agent_launch", "credential", codex_credentials()).await?;
-            PendingAuth::Ready { line, source }
-        }
-        Agent::Grok => {
-            let (line, source) =
-                ssh_tel::track_for("cloud_agent_launch", "credential", grok_credentials()).await?;
-            PendingAuth::Ready { line, source }
+        Agent::Codex | Agent::Grok => {
+            ssh_tel::track_for(
+                "cloud_agent_launch",
+                "credential",
+                local_signin(agent, home),
+            )
+            .await?
         }
         Agent::Claude => {
             ssh_tel::track_for(
@@ -1774,11 +1859,15 @@ async fn prepare_inner(
             .await?
         }
     };
-    if let PendingAuth::Ready { ref source, .. } = pending {
-        progress.note(&format!(
+    match pending {
+        PendingAuth::Ready { ref source, .. } => progress.note(&format!(
             "Using your {} credential ({source}) on the agent",
             agent.display()
-        ));
+        )),
+        // Said up front, before the VM: the sign-in is the first thing waiting
+        // on the other end, and finding that out on arrival reads as a bug.
+        PendingAuth::SignInOnAgent { ref note } => progress.note(note),
+        PendingAuth::MintClaude => {}
     }
     // Pack the user's skills before spending a VM: a skills directory that has
     // grown into something unshippable should fail here, not after a create.
@@ -1836,6 +1925,7 @@ async fn prepare_inner(
     // Probe first, and only pay for the flow when there is nothing there.
     let auth = match pending {
         PendingAuth::Ready { line, source } => Some((line, source)),
+        PendingAuth::SignInOnAgent { .. } => None,
         PendingAuth::MintClaude => {
             // A fresh agent has nothing to inherit, and --refresh-auth is an
             // explicit request to replace whatever is there; neither needs a probe.
@@ -1863,16 +1953,26 @@ async fn prepare_inner(
                 );
                 None
             } else {
-                let (line, source) = ssh_tel::track_for(
+                match ssh_tel::track_for(
                     "cloud_agent_launch",
                     "claude_mint",
                     mint_claude_credentials(),
                 )
-                .await?;
-                progress.note(&format!(
-                    "Using your Claude Code credential ({source}) on the agent"
-                ));
-                Some((line, source))
+                .await?
+                {
+                    Some((line, source)) => {
+                        progress.note(&format!(
+                            "Using your Claude Code credential ({source}) on the agent"
+                        ));
+                        Some((line, source))
+                    }
+                    // Nothing to mint with, or nothing pasted: launch anyway
+                    // and let claude run its own sign-in on the agent.
+                    None => {
+                        progress.note(&claude_sign_in_note());
+                        None
+                    }
+                }
             }
         }
     };
@@ -2109,13 +2209,19 @@ echo "KILLED:$killed""#
     )
 }
 
-/// Is a Claude credential already available without asking the user anything?
+/// Does a Claude launch need the terminal back before it can start?
 ///
-/// The TUI checks this before a launch: a cached token means the whole pipeline
-/// can run behind a frame, and no token means the terminal has to go back to
-/// the mint flow first.
-pub fn claude_credential_cached() -> bool {
-    matches!(claude_credentials_cheap(), Ok(PendingAuth::Ready { .. }))
+/// The TUI checks this: a cached token means the whole pipeline can run behind
+/// a frame, and so does having nothing to mint with — that launch just goes
+/// unauthenticated and claude asks for the sign-in on the agent. Only a mint
+/// that can actually run needs the terminal, for its browser wait and paste
+/// prompt. An error resolving the credential says yes too, so it surfaces out
+/// of frame where it is readable.
+pub fn claude_needs_local_mint() -> bool {
+    !matches!(
+        claude_credentials_cheap(),
+        Ok(PendingAuth::Ready { .. } | PendingAuth::SignInOnAgent { .. })
+    )
 }
 
 /// Make sure a Claude credential exists locally, running the interactive mint
@@ -2124,14 +2230,21 @@ pub fn claude_credential_cached() -> bool {
 /// A TUI caller must do this *before* it takes the terminal: the mint opens a
 /// browser and reads a pasted token from stdin, neither of which can happen
 /// underneath a ratatui frame. Cheap and silent when the token is already
-/// cached, which after the first run it is.
+/// cached, which after the first run it is. A mint that comes away empty is
+/// not an error — the launch continues without a credential, and
+/// `CLAUDE_MINT_DECLINED` keeps the pipeline from asking a second time under
+/// the frame.
 pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
     if harness != "claude" {
         return Ok(());
     }
     if let PendingAuth::MintClaude = claude_credentials_cheap()? {
-        let (_line, source) = mint_claude_credentials()?;
-        eprintln!("Using your Claude Code credential ({source}) on the agent");
+        match mint_claude_credentials()? {
+            Some((_line, source)) => {
+                eprintln!("Using your Claude Code credential ({source}) on the agent")
+            }
+            None => eprintln!("{}", claude_sign_in_note()),
+        }
     }
     Ok(())
 }
@@ -2139,6 +2252,73 @@ pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn note_of(pending: PendingAuth) -> String {
+        match pending {
+            PendingAuth::SignInOnAgent { note } => note,
+            PendingAuth::Ready { source, .. } => panic!("expected a fallback, got {source}"),
+            PendingAuth::MintClaude => panic!("expected a fallback, got a mint"),
+        }
+    }
+
+    #[test]
+    fn a_missing_local_signin_falls_back_to_signing_in_on_the_agent() {
+        let home = tempfile::tempdir().unwrap();
+        let note = note_of(local_signin(Agent::Codex, home.path()).unwrap());
+        assert!(note.contains("codex login --device-auth"), "{note}");
+
+        let note = note_of(local_signin(Agent::Grok, home.path()).unwrap());
+        assert!(note.contains("Grok"), "{note}");
+    }
+
+    #[test]
+    fn an_empty_local_signin_falls_back_too() {
+        // Half-finished sign-ins leave the file behind; it carries nothing, so
+        // it is the same case as no file at all.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::write(home.path().join(".codex").join("auth.json"), "").unwrap();
+        note_of(local_signin(Agent::Codex, home.path()).unwrap());
+    }
+
+    #[test]
+    fn a_local_signin_is_carried_verbatim() {
+        let home = tempfile::tempdir().unwrap();
+        let auth = home.path().join(".grok").join("auth.json");
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(&auth, r#"{"k":1}"#).unwrap();
+        match local_signin(Agent::Grok, home.path()).unwrap() {
+            PendingAuth::Ready { line, source } => {
+                assert_eq!(line, br#"{"k":1}"#);
+                // Compared against the constructed path rather than a literal
+                // suffix: the separator is the platform's, and `.grok/auth.json`
+                // never matches on Windows.
+                assert_eq!(source, auth.display().to_string());
+            }
+            _ => panic!("expected the local sign-in to be carried"),
+        }
+    }
+
+    #[test]
+    fn an_unauthenticated_launch_still_provisions_the_agent() {
+        // The credential seed is the only thing the fallback drops: no
+        // `cat >` truncating a file we have nothing to write to, and every
+        // reconnect seed and readiness marker still there.
+        for agent in [Agent::Codex, Agent::Claude, Agent::Grok] {
+            let script = provision_script(agent, false);
+            assert!(!script.contains("cat > ~/"), "{script}");
+            assert!(script.contains("railway-code agent autostart"));
+            assert!(script.contains("AGENT-READY"));
+            assert!(script.contains(&format!("echo {} > ~/.railway-code-agent", agent.name())));
+        }
+    }
+
+    #[test]
+    fn the_claude_fallback_says_how_to_sign_in_on_the_agent() {
+        let note = claude_sign_in_note();
+        assert!(note.contains("Claude Code"), "{note}");
+        assert!(note.contains("/login"), "{note}");
+    }
 
     #[test]
     fn provision_script_delivers_credentials_only() {
