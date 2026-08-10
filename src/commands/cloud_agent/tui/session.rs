@@ -41,6 +41,29 @@ pub fn durable_name(harness: &str) -> String {
     format!("{harness}-{suffix}")
 }
 
+/// The reply to a device-status-report cursor-position query (`ESC[6n`),
+/// found anywhere in a chunk of remote output — `Some` iff the query is
+/// there.
+///
+/// The query is how a program without a trustworthy `ioctl` answer (this
+/// pane's remote side is a real pty, but a program can still choose to probe
+/// rather than assume) works out where the cursor already is; some terminal
+/// setup code — `railway-agent-tui`'s among them — sends it and blocks on a
+/// reply before drawing anything. The query lives entirely inside the byte
+/// stream this emulator parses: nothing forwards it to the real terminal this
+/// pane itself is drawn in, so unless the emulator answers on the query's
+/// behalf, the remote program hangs until it gives up. `ESC[row;colR`,
+/// 1-indexed, is what a real terminal would have sent back — read off the
+/// emulator's own idea of the cursor position after this chunk lands, so it
+/// reflects everything the chunk itself just drew.
+fn dsr_reply(chunk: &[u8], screen: &vt100::Screen) -> Option<Vec<u8>> {
+    const QUERY: &[u8] = b"\x1b[6n";
+    chunk.windows(QUERY.len()).any(|w| w == QUERY).then(|| {
+        let (row, col) = screen.cursor_position();
+        format!("\x1b[{};{}R", row + 1, col + 1).into_bytes()
+    })
+}
+
 /// Read the environment back out of a relay target (`agent:<env>:<agent>`).
 ///
 /// Returns `None` for anything else rather than guessing: the caller uses this
@@ -70,7 +93,10 @@ pub struct Session {
     pub identity: Option<std::path::PathBuf>,
     pub relay_opts: Vec<String>,
     parser: Arc<Mutex<vt100::Parser>>,
-    writer: Box<dyn Write + Send>,
+    /// Shared with the reader thread, which also writes to it — a synthetic
+    /// cursor-position reply (see [`dsr_reply`]) has to go back over the same
+    /// pty the keyboard does, and `take_writer` can only be called once.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     /// Set by the reader thread when ssh's output ends — the session is over
@@ -89,6 +115,15 @@ impl Session {
     /// the disk first.
     pub fn environment_id(&self) -> Option<&str> {
         environment_from_target(&self.ssh_target)
+    }
+
+    /// Write straight to the pty — keystrokes, pointer reports, and the
+    /// reader thread's own DSR replies all go through this one shared writer.
+    fn write_raw(&self, bytes: &[u8]) {
+        if let Ok(mut writer) = self.writer.lock() {
+            let _ = writer.write_all(bytes);
+            let _ = writer.flush();
+        }
     }
 
     /// Spawn `ssh` under a pty and start reading it.
@@ -175,22 +210,31 @@ impl Session {
             .master
             .try_clone_reader()
             .context("Failed to read the agent session")?;
-        let writer = pty
-            .master
-            .take_writer()
-            .context("Failed to write to the agent session")?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+            pty.master
+                .take_writer()
+                .context("Failed to write to the agent session")?,
+        ));
 
         {
             let parser = parser.clone();
             let ended = ended.clone();
+            let writer = writer.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            if let Ok(mut parser) = parser.lock() {
+                            let reply = parser.lock().ok().and_then(|mut parser| {
                                 parser.process(&buf[..n]);
+                                dsr_reply(&buf[..n], parser.screen())
+                            });
+                            if let Some(reply) = reply {
+                                if let Ok(mut writer) = writer.lock() {
+                                    let _ = writer.write_all(&reply);
+                                    let _ = writer.flush();
+                                }
                             }
                             notify();
                         }
@@ -362,10 +406,9 @@ impl Session {
         if !wanted {
             return false;
         }
-        // `write_all`, not `send`: this is not typing, and it must not cancel a
+        // Not through `send`: this is not typing, and it must not cancel a
         // scrollback the way a keystroke does.
-        let _ = self.writer.write_all(&pointer_report(kind, at, encoding));
-        let _ = self.writer.flush();
+        self.write_raw(&pointer_report(kind, at, encoding));
         true
     }
 
@@ -430,8 +473,7 @@ impl Session {
             }
             // Not through `send`: this is not typing, and it must not snap the
             // view back to live.
-            let _ = self.writer.write_all(&out);
-            let _ = self.writer.flush();
+            self.write_raw(&out);
             return;
         }
         if alternate {
@@ -467,8 +509,7 @@ impl Session {
     pub fn send(&mut self, bytes: &[u8]) {
         // Typing is a statement of intent to be at the bottom.
         self.scroll_to_live();
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        self.write_raw(bytes);
     }
 
     pub fn send_key(&mut self, key: KeyEvent) {
@@ -538,7 +579,8 @@ impl Session {
         let child = pty.slave.spawn_command(CommandBuilder::new("cat"))?;
         drop(pty.slave);
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 4000)));
-        let writer = pty.master.take_writer()?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(pty.master.take_writer()?));
 
         // The same reader the real session runs. Without it the emulator never
         // sees a byte, and a test against this fixture would be testing
@@ -1002,6 +1044,26 @@ mod tests {
         assert_eq!(legacy[3], 96, "button 64 plus the 32 offset");
         assert_eq!(legacy[4], 255, "clamped to the encodable maximum");
         assert_eq!(legacy[5], 34);
+    }
+
+    /// The reply the emulator would send back for a cursor-position query —
+    /// 1-indexed, and read off wherever the chunk that carried the query
+    /// itself left the cursor.
+    #[test]
+    fn dsr_reply_answers_with_the_current_cursor_position() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"hello\r\n\x1b[6n");
+        let reply = dsr_reply(b"hello\r\n\x1b[6n", parser.screen());
+        assert_eq!(reply, Some(b"\x1b[2;1R".to_vec()));
+    }
+
+    /// Ordinary output — the vast majority of what comes through — is not a
+    /// query, and must not be answered as though it were one.
+    #[test]
+    fn dsr_reply_is_none_without_a_query() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"just some output\r\n");
+        assert_eq!(dsr_reply(b"just some output\r\n", parser.screen()), None);
     }
 
     /// An application with mouse reporting on gets the wheel; the emulator's
