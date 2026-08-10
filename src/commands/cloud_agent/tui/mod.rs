@@ -1405,7 +1405,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     // TUI implements drag-to-copy itself.
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
     // Ask for the enhanced keyboard protocol, which is what makes a modifier on
-    // Escape reportable at all: a plain terminal sends shift+esc as a bare Escape,
+    // Escape reportable at all: a plain terminal sends ⌥esc as a bare Escape,
     // indistinguishable from the one meant for the agent. Terminals that do not
     // support it ignore the request, which is why `^]` and `^o` also release.
     if matches!(

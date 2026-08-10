@@ -46,7 +46,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("⌥f", "give it the whole screen · again to restore"),
             ("shift+enter / f", "leave the TUI and connect full screen"),
             ("c", "copy an ssh command for it"),
-            ("shift+esc / ^]", "stop typing in it"),
+            ("⌥esc / ^]", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
@@ -1634,14 +1634,15 @@ impl App {
         if self.focus == ManageFocus::Session && self.screen != Screen::Menu {
             // Three ways out, because terminals disagree about what they will
             // report. `^]` is the classic escape chord and works everywhere;
-            // shift+esc needs the enhanced keyboard protocol, without which it
-            // arrives as a bare Escape meant for the agent; `^o` stays for
-            // anyone who learned it.
+            // ⌥esc — the ⌥ family's release, matching every other chord here —
+            // needs the enhanced keyboard protocol, without which it arrives
+            // as a bare Escape meant for the agent; `^o` stays for anyone who
+            // learned it.
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let shift_esc = key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::SHIFT);
+            let alt_esc = key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::ALT);
             let ctrl_bracket = ctrl && key.code == KeyCode::Char(']');
             let ctrl_o = ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'));
-            if shift_esc || ctrl_bracket || ctrl_o {
+            if alt_esc || ctrl_bracket || ctrl_o {
                 self.focus = ManageFocus::Tree;
                 return None;
             }
@@ -5347,12 +5348,12 @@ mod tests {
     }
 
     /// Three ways out of a focused session, because terminals disagree about
-    /// what they report: shift+esc only exists with the enhanced keyboard protocol,
+    /// what they report: ⌥esc only exists with the enhanced keyboard protocol,
     /// so `^]` and `^o` have to work without it.
     #[test]
     fn every_release_chord_works() {
         for release in [
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT),
             KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
         ] {
