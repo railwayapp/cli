@@ -2733,24 +2733,48 @@ mod tests {
             "ca_1".into(),
         );
         app.toast_error("Launch failed: boom");
-        let out = draw(&app, 100, 30);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut rects = crate::commands::cloud_agent::tui::app::PaneRects::default();
+        terminal
+            .draw(|f| {
+                let (r, _) = render_with_layout(&app, f);
+                rects = r;
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let out = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let lines: Vec<&str> = out.lines().collect();
         let row = lines
             .iter()
             .position(|l| l.contains("✕"))
             .expect("the error toast");
         assert!(row > lines.len() * 2 / 3, "near the bottom: {row}");
-        let start = lines[row].find("Launch failed: boom").expect("the reason");
-        let end = start + "Launch failed: boom".len();
-        // Centered within the session pane, which begins right of the tree.
-        assert!(start > TREE_W as usize, "inside the session pane: {start}");
-        let pane_left = (PAGE_MARGIN_X + TREE_W) as usize;
-        let pane_right = 100 - PAGE_MARGIN_X as usize;
-        let pane_mid = (pane_left + pane_right) / 2;
+        // Char positions, not byte offsets: the row is full of multi-byte
+        // box-drawing cells, and columns are what centering is measured in.
+        let line: Vec<char> = lines[row].chars().collect();
+        let needle: Vec<char> = "Launch failed: boom".chars().collect();
+        let start = line
+            .windows(needle.len())
+            .position(|w| w == needle.as_slice())
+            .expect("the reason");
+        let end = start + needle.len();
+        // Centered within the session pane the frame actually drew.
+        assert!(
+            start > rects.session.x as usize,
+            "inside the session pane: {start}"
+        );
+        let pane_mid = rects.session.x as usize + rects.session.w as usize / 2;
         let toast_mid = (start + end) / 2;
         assert!(
             toast_mid.abs_diff(pane_mid) <= 3,
-            "centered in the pane: toast mid {toast_mid}, pane mid {pane_mid}"
+            "centered in the pane: toast mid {toast_mid}, pane mid {pane_mid}\n{out}"
         );
     }
 
