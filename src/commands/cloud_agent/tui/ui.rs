@@ -53,20 +53,34 @@ const PAGE_MARGIN_X: u16 = 2;
 /// as tall as it is wide — the same gap on screen on every side.
 const PAGE_MARGIN_Y: u16 = 1;
 
+/// What the page margin leaves of a `width` × `height` terminal. Skipped when
+/// the terminal is too small to spend cells on air — a cramped layout beats a
+/// truncated one.
+///
+/// The single source of that answer: [`page`] shapes what is drawn with it,
+/// and [`session_pane_size`] shapes the PTY with it. They must agree — an
+/// emulator wrapping wider than its pane puts the last columns of every row
+/// somewhere the screen never shows, which shears anything long enough to
+/// wrap (an OAuth URL loses four characters at every fold).
+fn page_size(width: u16, height: u16) -> (u16, u16) {
+    if width < 40 || height < 12 {
+        (width, height)
+    } else {
+        (width - PAGE_MARGIN_X * 2, height - PAGE_MARGIN_Y * 2)
+    }
+}
+
 /// The page: the frame minus a slim outer margin, so boxes never press
 /// against the terminal's edges. Every screen and floating card lays out
-/// against this. Skipped when the terminal is too small to spend cells on
-/// air — a cramped layout beats a truncated one.
+/// against this.
 fn page(f: &Frame) -> Rect {
     let area = f.area();
-    if area.width < 40 || area.height < 12 {
-        return area;
-    }
+    let (width, height) = page_size(area.width, area.height);
     Rect {
-        x: area.x + PAGE_MARGIN_X,
-        y: area.y + PAGE_MARGIN_Y,
-        width: area.width - PAGE_MARGIN_X * 2,
-        height: area.height - PAGE_MARGIN_Y * 2,
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
     }
 }
 
@@ -883,16 +897,19 @@ pub fn session_pane_size(
     maximized: bool,
 ) -> Option<(u16, u16)> {
     let area = area?;
+    // The same inset the renderer applies — see `page_size` for why the two
+    // must never disagree.
+    let (width, height) = page_size(area.width, area.height);
     // Maximized there is no tree to leave room for, so no minimum width to
     // meet either.
-    if !maximized && area.width < 70 {
+    if !maximized && width < 70 {
         return None;
     }
     // Rows: header, gap, panes, hint. Columns: the tree, then what is left.
     // Both minus the pane's own border.
-    let rows = area.height.saturating_sub(3).saturating_sub(2).max(1);
+    let rows = height.saturating_sub(3).saturating_sub(2).max(1);
     let tree = if maximized { 0 } else { TREE_W };
-    let cols = area.width.saturating_sub(tree).saturating_sub(2).max(1);
+    let cols = width.saturating_sub(tree).saturating_sub(2).max(1);
     Some((rows, cols))
 }
 
@@ -2703,6 +2720,37 @@ mod tests {
 
     /// A drag that reached the clipboard says so in the corner — the only other
     /// evidence is the clipboard itself, which is not on the screen.
+    /// The PTY and the drawn pane are the same size. An emulator wrapping
+    /// wider than its pane puts the tail of every row somewhere the screen
+    /// never shows — four characters per fold of anything long enough to
+    /// wrap, which sheared OAuth login URLs into invalid links.
+    #[test]
+    fn the_session_pty_matches_the_drawn_pane() {
+        use crate::commands::cloud_agent::tui::session::Session;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut rects = crate::commands::cloud_agent::tui::app::PaneRects::default();
+        terminal
+            .draw(|f| {
+                let (r, _) = render_with_layout(&app, f);
+                rects = r;
+            })
+            .unwrap();
+        let (rows, cols) =
+            session_pane_size(Some(ratatui::layout::Size::new(100, 40)), false).unwrap();
+        assert_eq!(
+            (cols, rows),
+            (rects.session.w, rects.session.h),
+            "the PTY must be exactly the pane the emulator is drawn into"
+        );
+    }
+
     #[test]
     fn a_toast_floats_in_the_bottom_corner() {
         use crate::commands::cloud_agent::tui::session::Session;
@@ -2850,8 +2898,9 @@ mod tests {
         });
         let (_, split) = session_pane_size(size, false).unwrap();
         let (_, full) = session_pane_size(size, true).unwrap();
-        assert_eq!(split, 100 - TREE_W - 2);
-        assert_eq!(full, 98);
+        // Inside the page margin, like the panes it must agree with.
+        assert_eq!(split, 100 - PAGE_MARGIN_X * 2 - TREE_W - 2);
+        assert_eq!(full, 100 - PAGE_MARGIN_X * 2 - 2);
 
         // And a terminal too narrow for two panes is wide enough for one.
         let narrow = Some(ratatui::layout::Size {
