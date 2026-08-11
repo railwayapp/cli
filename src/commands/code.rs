@@ -1901,9 +1901,7 @@ async fn prepare_inner(
         // Said up front, before the VM: the sign-in is the first thing waiting
         // on the other end, and finding that out on arrival reads as a bug.
         PendingAuth::SignInOnAgent { ref note } => progress.note(note),
-        PendingAuth::None => {
-            progress.note("Using the agent's own integrated Railway credentials")
-        }
+        PendingAuth::None => progress.note("Using the agent's own integrated Railway credentials"),
         PendingAuth::MintClaude => {}
     }
     // Pack the user's skills before spending a VM: a skills directory that has
@@ -2295,6 +2293,7 @@ mod tests {
             PendingAuth::SignInOnAgent { note } => note,
             PendingAuth::Ready { source, .. } => panic!("expected a fallback, got {source}"),
             PendingAuth::MintClaude => panic!("expected a fallback, got a mint"),
+            PendingAuth::None => panic!("expected a fallback, got a harness needing no credential"),
         }
     }
 
