@@ -102,7 +102,7 @@ derive_more = { version = "2.1.1", features = ["display"] }
 nix = { version = "0.30.1", features = ["signal"] }
 fs2 = "0.4.3"
 async-trait = "0.1.89"
-ratatui = "0.29"
+ratatui = "0.30"
 scopeguard = "1.2"
 schemars = "0.8"
 rmcp = { version = "1.4", features = ["transport-io"] }
@@ -117,7 +117,7 @@ russh = { version = "0.60.2", default-features = false, features = [
 ] }
 tempfile = "3.23.0"
 portable-pty = "0.8"
-vt100 = "0.15"
+vt100 = "0.16"
 
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2.0"

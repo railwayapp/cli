@@ -1552,7 +1552,11 @@ fn screen_lines(screen: &vt100::Screen, focused: bool) -> Vec<Line<'static>> {
                 Some(cell) => (
                     {
                         let c = cell.contents();
-                        if c.is_empty() { " ".to_string() } else { c }
+                        if c.is_empty() {
+                            " ".to_string()
+                        } else {
+                            c.to_string()
+                        }
                     },
                     cell_style(cell),
                 ),
@@ -2277,6 +2281,53 @@ mod tests {
             .position(|l| l.contains("╭ Prompt"))
             .expect("the prompt box");
         assert_eq!(rects.prompt.y as usize, prompt);
+    }
+
+    /// The pane renders history from any depth, not just the last screenful.
+    /// This drives the real draw path — `render_session` → `screen_lines` →
+    /// `Screen::cell` — with the view sitting several screens back, which the
+    /// old emulator could not compose at all.
+    #[test]
+    fn a_deeply_scrolled_pane_draws_old_history() {
+        use crate::commands::cloud_agent::tui::session::Session;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+
+        let session = app.sessions.last_mut().expect("just attached");
+        session.resize(6, 40);
+        for i in 0..80 {
+            session.send(format!("line-{i}\r\n").as_bytes());
+        }
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen = session
+                .with_screen(|screen| screen.contents().contains("line-79"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+        }
+        session.scroll_by(isize::MAX);
+        assert!(session.scrolled_back());
+
+        let out = draw(&app, 92, 20);
+        assert!(
+            out.contains("line-0"),
+            "the top of history should be on screen:\n{out}"
+        );
+        assert!(
+            !out.contains("line-79"),
+            "the tail should be scrolled out of view:\n{out}"
+        );
+        assert!(
+            out.contains("scrolled back"),
+            "the pane should say where it is:\n{out}"
+        );
     }
 
     /// A drag that reached the clipboard says so in the corner — the only other
