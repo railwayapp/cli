@@ -379,8 +379,25 @@ cat > ~/.codex/auth.json"#;
 /// ignoring the env token and showing the first-run login picker — is
 /// express-agent's to seed, along with per-project trust for `$HOME` and
 /// `/app`. It runs at boot, before this command can connect.
-const CLAUDE_SEED: &str = r#"cat > ~/.claude-code-env
+///
+/// Written through a compare so an unchanged token leaves the file untouched:
+/// the env-sourcing guards decide between this token and an on-agent `/login`
+/// by mtime (see [`CLAUDE_ENV_GUARD`]), and a rewrite of identical bytes on
+/// every launch would make this file perpetually "newer" and un-outrankable.
+/// The temp file inherits the provision script's `umask 077`.
+const CLAUDE_SEED: &str = r#"tmp="$(mktemp)"
+cat > "$tmp"
+if cmp -s "$tmp" ~/.claude-code-env; then rm -f "$tmp"; else mv "$tmp" ~/.claude-code-env; fi
 chmod 600 ~/.claude-code-env"#;
+
+/// Source the carried Claude token unless a later on-agent `/login` outranks
+/// it. Claude itself prefers `CLAUDE_CODE_OAUTH_TOKEN` over the credentials
+/// file, so exporting the env var unconditionally means a deliberate sign-in
+/// on the agent silently loses on the next session — the classic "my models
+/// came back after /login, then went away again". Newer wins instead: a fresh
+/// `/login` beats an old carried token, and `--refresh-auth` (which rewrites
+/// the env file) beats an old login.
+const CLAUDE_ENV_GUARD: &str = r#"if [ -f "$HOME/.claude-code-env" ] && ! [ "$HOME/.claude/.credentials.json" -nt "$HOME/.claude-code-env" ]; then set -a; . "$HOME/.claude-code-env"; set +a; fi"#;
 
 /// Grok-specific VM seed: the credential is the user's local
 /// `~/.grok/auth.json`, arriving on stdin into a 0600 file like codex. grok's
@@ -419,18 +436,25 @@ const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:
 ///   keeps scp-style and command sessions out. The trailing printf restores
 ///   terminal state a TUI can leave behind on an unclean exit (kitty keyboard
 ///   mode et al) — see `TERMINAL_RESET`.
+/// The autostart block is versioned: the v2 marker gates the append, and the
+/// sed strips any earlier version first (comment line through the closing
+/// `fi` at column zero), so an agent provisioned before the env-guard change
+/// picks it up on its next provision instead of keeping v1 forever.
 const COMMON_SEED: &str = r#"grep -q "^COLORTERM=" /etc/environment 2>/dev/null || echo "COLORTERM=truecolor" >> /etc/environment 2>/dev/null || true
-if ! grep -q "railway-code agent autostart" ~/.profile 2>/dev/null; then
+if ! grep -q "railway-code agent autostart v2" ~/.profile 2>/dev/null; then
+sed -i '/# railway-code agent autostart/,/^fi$/d' ~/.profile 2>/dev/null || true
 cat >> ~/.profile <<'PROFEOF'
 
-# railway-code agent autostart (connecting drops into the agent; exit it for a shell)
+# railway-code agent autostart v2 (connecting drops into the agent; exit it for a shell)
 if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ -s "$HOME/.railway-code-agent" ]; then
   agent="$(cat "$HOME/.railway-code-agent")"
   [ -d "$HOME/.grok/bin" ] && export PATH="$HOME/.grok/bin:$PATH"
   if command -v "$agent" >/dev/null 2>&1; then
     export RAILWAY_CODE_AUTOSTARTED=1
     [ -f "$HOME/.gh-token" ] && export GH_TOKEN="$(cat "$HOME/.gh-token")"
-    [ -f "$HOME/.claude-code-env" ] && set -a && . "$HOME/.claude-code-env" && set +a
+    if [ -f "$HOME/.claude-code-env" ] && ! [ "$HOME/.claude/.credentials.json" -nt "$HOME/.claude-code-env" ]; then
+      set -a; . "$HOME/.claude-code-env"; set +a
+    fi
     "$agent"
     printf '\033[<u\033[<u\033[=0;1u\033[?2004l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?25h'
   fi
@@ -686,6 +710,28 @@ fn write_token_0600(path: &std::path::Path, token: &str) {
     }
 }
 
+/// How long ago the cached setup-token was minted, from the cache file's
+/// mtime — the file is written once per mint, so its age is the token's.
+fn claude_token_age_days() -> Option<u64> {
+    let meta = std::fs::metadata(claude_token_cache_path()?).ok()?;
+    Some(meta.modified().ok()?.elapsed().ok()?.as_secs() / 86_400)
+}
+
+/// Name the cached credential with its age. A setup-token is bound for its
+/// whole year to the account picked at mint time, and a months-old token
+/// quietly explaining a missing model list is exactly the thing worth a
+/// visible age and an exit. The re-mint hint waits for 30 days: younger
+/// tokens are rarely the problem, and the hint would just be noise.
+fn cached_token_source(age_days: Option<u64>) -> String {
+    match age_days {
+        None | Some(0) => "cached setup-token".to_string(),
+        Some(days @ 1..30) => format!("cached setup-token from {days}d ago"),
+        Some(days) => {
+            format!("cached setup-token from {days}d ago — --refresh-auth re-mints")
+        }
+    }
+}
+
 /// Forget the cached token. Called by `railway logout`.
 pub fn clear_claude_token_cache() {
     if let Some(path) = claude_token_cache_path() {
@@ -770,7 +816,7 @@ fn claude_credentials_cheap(refresh_auth: bool) -> Result<PendingAuth> {
     } else if let Some(tok) = cached_claude_token() {
         return Ok(PendingAuth::Ready {
             line: format!("CLAUDE_CODE_OAUTH_TOKEN={tok}\n").into_bytes(),
-            source: "cached setup-token".to_string(),
+            source: cached_token_source(claude_token_age_days()),
         });
     }
     if CLAUDE_MINT_DECLINED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -2103,7 +2149,7 @@ async fn prepare_inner(
     ssh_tel::track_for("cloud_agent_launch", "provision", provision).await?;
 
     let env_prefix = format!(
-        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; [ -f ~/.claude-code-env ] && set -a && . ~/.claude-code-env && set +a; "
+        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
     );
     let remote_cmd = remote_command(
         agent,
@@ -2375,7 +2421,10 @@ mod tests {
         assert!(codex.contains("echo codex > ~/.railway-code-agent"));
 
         let claude = provision_script(Agent::Claude, true);
-        assert!(claude.contains("cat > ~/.claude-code-env"));
+        // Written through a compare: an unchanged token must not touch the
+        // file's mtime, or it would outrank an on-agent /login forever.
+        assert!(claude.contains("cat > \"$tmp\""));
+        assert!(claude.contains("cmp -s \"$tmp\" ~/.claude-code-env"));
         assert!(claude.contains("echo claude > ~/.railway-code-agent"));
 
         let grok = provision_script(Agent::Grok, true);
@@ -2419,13 +2468,50 @@ mod tests {
         }
     }
 
+    /// A deliberate `/login` on the agent must be able to outrank the carried
+    /// token, and `--refresh-auth` must be able to take it back: both guards
+    /// compare mtimes, so the seed must not rewrite identical bytes, and every
+    /// place the env file is sourced must carry the newer-login check.
+    #[test]
+    fn a_fresh_on_agent_login_outranks_the_carried_token() {
+        for guard in [CLAUDE_ENV_GUARD, COMMON_SEED] {
+            assert!(
+                guard.contains(
+                    "! [ \"$HOME/.claude/.credentials.json\" -nt \"$HOME/.claude-code-env\" ]"
+                ),
+                "{guard}"
+            );
+        }
+        // The v2 marker gates the append and the strip clears any older block,
+        // so agents provisioned before this change converge on their next run.
+        assert!(COMMON_SEED.contains("railway-code agent autostart v2"));
+        assert!(COMMON_SEED.contains("sed -i '/# railway-code agent autostart/,/^fi$/d'"));
+    }
+
+    /// The launch note names the cached token's age once it has one, and only
+    /// nags about re-minting when the token is old enough to plausibly be the
+    /// problem.
+    #[test]
+    fn the_cached_token_source_carries_its_age() {
+        assert_eq!(cached_token_source(None), "cached setup-token");
+        assert_eq!(cached_token_source(Some(0)), "cached setup-token");
+        assert_eq!(
+            cached_token_source(Some(12)),
+            "cached setup-token from 12d ago"
+        );
+        assert_eq!(
+            cached_token_source(Some(92)),
+            "cached setup-token from 92d ago — --refresh-auth re-mints"
+        );
+    }
+
     // Reusing an agent's existing credential must omit the seed, not run it with
     // empty stdin — `cat > ~/.claude-code-env` would truncate the file we chose
     // to keep.
     #[test]
     fn provision_script_omits_the_seed_when_reusing_a_credential() {
         let claude = provision_script(Agent::Claude, false);
-        assert!(!claude.contains("cat > ~/.claude-code-env"));
+        assert!(!claude.contains("cat > \"$tmp\""));
         // Everything else still runs.
         assert!(claude.contains("$HOME/.local/bin"));
         assert!(claude.contains("railway-code agent autostart"));
@@ -2449,7 +2535,7 @@ mod tests {
     fn railway_needs_no_credential_seed() {
         let script = provision_script(Agent::Railway, false);
         for other_seed in [
-            "cat > ~/.claude-code-env",
+            "cat > \"$tmp\"",
             "cat > ~/.codex/auth.json",
             "cat > ~/.grok/auth.json",
         ] {
