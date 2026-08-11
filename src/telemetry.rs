@@ -25,6 +25,67 @@ pub struct CliTrackEvent {
     pub is_ci: bool,
 }
 
+/// Normalize CLI telemetry subcommands to the endpoint's lowercase snake_case
+/// contract. Structured producers can use separators, camelCase GraphQL fields,
+/// and numeric identifiers; normalizing at the send boundary keeps those details
+/// without allowing one producer to make the whole event invalid.
+fn normalize_cli_subcommand(value: &str) -> Option<String> {
+    const MAX_LEN: usize = 64;
+    const DIGIT_WORDS: [&str; 10] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+
+    let mut normalized = String::with_capacity(value.len().min(MAX_LEN));
+    let push_separator = |output: &mut String| {
+        if !output.is_empty() && !output.ends_with('_') && output.len() < MAX_LEN {
+            output.push('_');
+        }
+    };
+    let mut chars = value.chars().peekable();
+    let mut previous: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_lowercase() {
+            if normalized.len() == MAX_LEN {
+                break;
+            }
+            normalized.push(ch);
+        } else if ch.is_ascii_uppercase() {
+            let starts_word = previous.is_some_and(|previous| {
+                previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase()
+                        && chars.peek().is_some_and(|next| next.is_ascii_lowercase()))
+            });
+            if starts_word {
+                push_separator(&mut normalized);
+            }
+            if normalized.len() == MAX_LEN {
+                break;
+            }
+            normalized.push(ch.to_ascii_lowercase());
+        } else if ch.is_ascii_digit() {
+            push_separator(&mut normalized);
+            let word = DIGIT_WORDS[(ch as u8 - b'0') as usize];
+            if normalized.len() + word.len() > MAX_LEN {
+                break;
+            }
+            normalized.push_str(word);
+            push_separator(&mut normalized);
+        } else {
+            push_separator(&mut normalized);
+        }
+
+        previous = Some(ch);
+    }
+
+    while normalized.ends_with('_') {
+        normalized.pop();
+    }
+
+    (!normalized.is_empty()).then_some(normalized)
+}
+
 pub struct SetupAgentTrackEvent {
     pub phase: SetupAgentPhase,
     pub success: Option<bool>,
@@ -1964,9 +2025,13 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
     } else {
         Some(error_class(event.error_message.as_deref()))
     };
+    let sub_command = event
+        .sub_command
+        .as_deref()
+        .and_then(normalize_cli_subcommand);
     let input = CliEventTrackInput {
         command: event.command.clone(),
-        sub_command: event.sub_command.clone(),
+        sub_command: sub_command.clone(),
         duration_ms: event.duration_ms as i64,
         success: event.success,
         error_message: event.error_message.clone(),
@@ -1992,7 +2057,7 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
     if !post_telemetry_body(&client, configs.get_backboard(), body).await {
         let legacy_input = LegacyCliEventTrackInput {
             command: event.command,
-            sub_command: event.sub_command,
+            sub_command,
             duration_ms: event.duration_ms as i64,
             success: event.success,
             error_message: event.error_message,

@@ -287,12 +287,11 @@ async fn main() -> Result<()> {
     // automated CLI users. They are allowed to refresh the update cache and
     // kick off background installs, but we keep staged-binary apply TTY-only
     // so the running binary never changes under a scripted invocation.
-    let auto_applied_version =
-        if auto_update_enabled && is_tty && !is_update_management_cmd && !is_read_only_invocation {
-            util::self_update::try_apply_staged()
-        } else {
-            None
-        };
+    let auto_update_applied = auto_update_enabled
+        && is_tty
+        && !is_update_management_cmd
+        && !is_read_only_invocation
+        && util::self_update::try_apply_staged().is_some();
 
     let update = UpdateCheck::read_normalized();
     let skipped_version = update.skipped_version.clone();
@@ -367,7 +366,7 @@ async fn main() -> Result<()> {
         }
     } else if !env_or_ci_suppressed && !is_help_or_error && !embedded_setup {
         // Non-TTY counterpart of the banner above, for agent callers only.
-        // Staged-binary apply is TTY-gated (see auto_applied_version), so a
+        // Staged-binary apply is TTY-gated (see auto_update_applied), so a
         // machine whose railway usage is entirely agent-driven would
         // otherwise never apply a downloaded update nor see a reason to —
         // tell the driving agent once per pending version instead. Skipped
@@ -458,10 +457,10 @@ async fn main() -> Result<()> {
     let exec_result = exec_cli(cli).await;
 
     // Send telemetry for silent auto-update apply (after auth is available).
-    if let Some(ref version) = auto_applied_version {
+    if auto_update_applied {
         telemetry::send(telemetry::CliTrackEvent {
             command: "autoupdate_apply".to_string(),
-            sub_command: Some(version.clone()),
+            sub_command: None,
             success: true,
             error_message: None,
             duration_ms: 0,
