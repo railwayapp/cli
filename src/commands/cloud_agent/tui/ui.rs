@@ -178,14 +178,16 @@ pub fn render_with_layout(app: &App, f: &mut Frame) -> (PaneRects, Option<String
 fn render_inner(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     f.render_widget(Clear, f.area());
     render_screen(app, f, rects);
-    render_toast(app, f);
+    render_toast(app, f, rects);
 }
 
 /// The corner confirmation, over whatever is underneath it.
 ///
-/// Bottom right, clear of the key strip on the left of the same row and of the
-/// `? keys` badge on its right — it sits a line above both.
-fn render_toast(app: &App, f: &mut Frame) {
+/// A confirmation sits bottom right, clear of the key strip on the left of the
+/// same row and of the `? keys` badge on its right — a glance, out of the way.
+/// An error is the thing that needs reading, so it sits front and center at
+/// the bottom of the session pane (or of the page, when no pane is drawn).
+fn render_toast(app: &App, f: &mut Frame, rects: &PaneRects) {
     let Some(toast) = app.toast.as_ref().filter(|toast| !toast.expired()) else {
         return;
     };
@@ -194,13 +196,34 @@ fn render_toast(app: &App, f: &mut Frame) {
     let text = format!(" {}  {}  ", if toast.ok { "✓" } else { "✕" }, toast.text);
     let w = (text.chars().count() as u16 + DIALOG_CHROME_X).min(area.width);
     let h = 3.min(area.height);
-    // Clear of the key strip on the last row and of the pane border above it,
-    // so it floats inside the pane rather than colliding with its corner.
-    let rect = Rect {
-        x: area.right().saturating_sub(w + 2),
-        y: area.bottom().saturating_sub(h + 2),
-        width: w,
-        height: h,
+    let rect = if toast.ok {
+        // Clear of the key strip on the last row and of the pane border above
+        // it, so it floats inside the pane rather than colliding with its
+        // corner.
+        Rect {
+            x: area.right().saturating_sub(w + 2),
+            y: area.bottom().saturating_sub(h + 2),
+            width: w,
+            height: h,
+        }
+    } else {
+        let host = if rects.session.w > 0 {
+            Rect {
+                x: rects.session.x,
+                y: rects.session.y,
+                width: rects.session.w,
+                height: rects.session.h,
+            }
+        } else {
+            area
+        };
+        let w = w.min(host.width);
+        Rect {
+            x: host.x + host.width.saturating_sub(w) / 2,
+            y: host.bottom().saturating_sub(h + 1).max(host.y),
+            width: w,
+            height: h,
+        }
     };
     let accent = if toast.ok {
         theme.accent
@@ -2693,6 +2716,41 @@ mod tests {
             (cols, rows),
             (rects.session.w, rects.session.h),
             "the PTY must be exactly the pane the emulator is drawn into"
+        );
+    }
+
+    /// An error toast sits front and center at the bottom of the session
+    /// pane, where it can actually be read — not squeezed in beside the
+    /// wordmark like a piece of header furniture.
+    #[test]
+    fn an_error_toast_centers_over_the_session_pane() {
+        use crate::commands::cloud_agent::tui::session::Session;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        app.toast_error("Launch failed: boom");
+        let out = draw(&app, 100, 30);
+        let lines: Vec<&str> = out.lines().collect();
+        let row = lines
+            .iter()
+            .position(|l| l.contains("✕"))
+            .expect("the error toast");
+        assert!(row > lines.len() * 2 / 3, "near the bottom: {row}");
+        let start = lines[row].find("Launch failed: boom").expect("the reason");
+        let end = start + "Launch failed: boom".len();
+        // Centered within the session pane, which begins right of the tree.
+        assert!(start > TREE_W as usize, "inside the session pane: {start}");
+        let pane_left = (PAGE_MARGIN_X + TREE_W) as usize;
+        let pane_right = 100 - PAGE_MARGIN_X as usize;
+        let pane_mid = (pane_left + pane_right) / 2;
+        let toast_mid = (start + end) / 2;
+        assert!(
+            toast_mid.abs_diff(pane_mid) <= 3,
+            "centered in the pane: toast mid {toast_mid}, pane mid {pane_mid}"
         );
     }
 
