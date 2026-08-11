@@ -777,6 +777,10 @@ pub enum Effect {
         offer: SshKeyOffer,
         then: Option<HeldConnect>,
     },
+    /// Leave the TUI for the Claude mint's manual-paste fallback; the caller
+    /// re-enters with the same request. Raised only after the hidden mint
+    /// already ran and failed under the frame.
+    StepOutForMint(LaunchRequest),
     Quit,
 }
 

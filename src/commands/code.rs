@@ -861,29 +861,31 @@ fn mint_claude_credentials() -> Result<Option<(Vec<u8>, String)>> {
     // existing session + prior consent it completes hands-free; an approve
     // click also works. Only the degenerate paste-the-code-into-the-terminal
     // path can't complete hidden — that times out and falls back to the
-    // manual paste prompt below.
-    let spinner = create_shimmer_spinner(
-        "Minting a Claude token — approve the browser prompt if one appears",
-    );
-    match run_claude_setup_token() {
-        Ok(tok) => {
-            spinner.finish_and_clear();
-            validate_claude_token(&tok)?;
-            cache_claude_token(&tok);
-            return Ok(Some((
-                format!("CLAUDE_CODE_OAUTH_TOKEN={tok}\n").into_bytes(),
-                "claude setup-token".to_string(),
-            )));
-        }
-        Err(e) => {
-            spinner.finish_and_clear();
-            eprintln!(
-                "{}",
-                format!(
-                    "Couldn't mint a token automatically ({e}) — run `claude setup-token` in another terminal instead."
+    // manual paste prompt below. Skipped when the TUI already ran (and lost)
+    // this exact flow under its frame: re-running it here would spend another
+    // two-minute timeout to arrive at the same paste prompt.
+    if !CLAUDE_AUTO_MINT_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        let spinner = create_shimmer_spinner(
+            "Minting a Claude token — approve the browser prompt if one appears",
+        );
+        match mint_claude_credential_headless() {
+            Ok(tok) => {
+                spinner.finish_and_clear();
+                return Ok(Some((
+                    format!("CLAUDE_CODE_OAUTH_TOKEN={tok}\n").into_bytes(),
+                    "claude setup-token".to_string(),
+                )));
+            }
+            Err(e) => {
+                spinner.finish_and_clear();
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Couldn't mint a token automatically ({e}) — run `claude setup-token` in another terminal instead."
+                    )
+                    .yellow()
                 )
-                .yellow()
-            )
+            }
         }
     }
 
@@ -909,6 +911,36 @@ fn mint_claude_credentials() -> Result<Option<(Vec<u8>, String)>> {
 /// before we kill it and fall back to the manual paste prompt. Generous: the
 /// user may need to click Approve (or even sign in) in the browser first.
 const SETUP_TOKEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Set once the hidden mint has run and lost this process, so no later path
+/// spends another two-minute timeout re-running automation on its way to the
+/// same manual paste prompt.
+static CLAUDE_AUTO_MINT_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The hidden half of the mint, for a TUI that stays on screen: the browser
+/// does all the interacting, the terminal is never touched, and success lands
+/// in the cache the launch pipeline already reads. `Err` means this flow needs
+/// the real terminal (the manual paste fallback) — the caller steps out the
+/// way it always has, and the step-out skips straight to the paste prompt.
+///
+/// Blocking (a child process wait) — a TUI calls it via `spawn_blocking`.
+pub fn mint_claude_credential_headless() -> Result<String> {
+    let minted = run_claude_setup_token().and_then(|tok| {
+        validate_claude_token(&tok)?;
+        Ok(tok)
+    });
+    match minted {
+        Ok(tok) => {
+            cache_claude_token(&tok);
+            Ok(tok)
+        }
+        Err(e) => {
+            CLAUDE_AUTO_MINT_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+            Err(e)
+        }
+    }
+}
 
 /// Run `claude setup-token` invisibly under `script(1)`'s PTY: claude's TUI
 /// needs a tty, `script` provides one and records every byte to a file, and
