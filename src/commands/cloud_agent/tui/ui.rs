@@ -873,7 +873,10 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                     } else {
                         theme.accent_dim
                     }))
-                    .title(Span::styled(" projects ", Style::default().fg(theme.dim))),
+                    .title(Span::styled(
+                        " cloud agents ",
+                        Style::default().fg(theme.dim),
+                    )),
             )
             .highlight_style(
                 Style::default()
@@ -1011,6 +1014,13 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 },
                 ("d", "delete agent"),
             ],
+            // A group is a place, not a thing to open: the keys that matter
+            // are the ones that act on the environment it stands for.
+            Some(RowKind::Group(..)) => vec![
+                ("n", "new agent here"),
+                ("t", "target"),
+                ("shift+r", "find agents"),
+            ],
             _ => vec![
                 ("enter", "open"),
                 ("n", "new agent"),
@@ -1022,7 +1032,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     // pane the chord is a no-op and the hint would just be a lie.
     let mut hint = hint;
     if app.sessions.len() > 1 {
-        hint.push(("⌥]", "next session"));
+        hint.push(("⌥[ ⌥]", "switch session"));
     }
     let spans = chord_spans(theme, &hint);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1552,7 +1562,11 @@ fn screen_lines(screen: &vt100::Screen, focused: bool) -> Vec<Line<'static>> {
                 Some(cell) => (
                     {
                         let c = cell.contents();
-                        if c.is_empty() { " ".to_string() } else { c }
+                        if c.is_empty() {
+                            " ".to_string()
+                        } else {
+                            c.to_string()
+                        }
                     },
                     cell_style(cell),
                 ),
@@ -1693,7 +1707,7 @@ fn tree_line(theme: &Theme, row: &Row) -> Line<'static> {
             "─".repeat(TREE_W.saturating_sub(4) as usize),
             Style::default().fg(theme.accent_dim),
         )),
-        (RowKind::Note(..), _) => spans.push(Span::styled(
+        (RowKind::Note(..) | RowKind::Hint, _) => spans.push(Span::styled(
             row.label.clone(),
             Style::default()
                 .fg(theme.dim)
@@ -1715,6 +1729,9 @@ fn tree_line(theme: &Theme, row: &Row) -> Line<'static> {
                 RowKind::Workspace(_) => Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
+                // A group heads its agents the way a workspace used to head
+                // everything: bold, so the sections read at a glance.
+                RowKind::Group(..) => Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 _ => Style::default().fg(theme.fg),
             };
             spans.push(Span::styled(row.label.clone(), style));
@@ -1845,7 +1862,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             }
             lines
         }
-        RowKind::Environment(w, p, e) => {
+        RowKind::Environment(w, p, e) | RowKind::Group(w, p, e) => {
             let proj = &app.tree[w].projects[p];
             let env = &proj.envs[e];
             let count = match &env.agents {
@@ -1930,7 +1947,20 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             )));
             lines
         }
-        RowKind::Separator | RowKind::Note(..) => vec![Line::from("")],
+        RowKind::OtherProjects => vec![
+            Line::from(Span::styled(
+                " projects without agents",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " open one and press n to start an agent there",
+                Style::default().fg(theme.dim),
+            )),
+        ],
+        RowKind::Separator | RowKind::Note(..) | RowKind::Hint => vec![Line::from("")],
     }
 }
 
@@ -2279,6 +2309,53 @@ mod tests {
         assert_eq!(rects.prompt.y as usize, prompt);
     }
 
+    /// The pane renders history from any depth, not just the last screenful.
+    /// This drives the real draw path — `render_session` → `screen_lines` →
+    /// `Screen::cell` — with the view sitting several screens back, which the
+    /// old emulator could not compose at all.
+    #[test]
+    fn a_deeply_scrolled_pane_draws_old_history() {
+        use crate::commands::cloud_agent::tui::session::Session;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+
+        let session = app.sessions.last_mut().expect("just attached");
+        session.resize(6, 40);
+        for i in 0..80 {
+            session.send(format!("line-{i}\r\n").as_bytes());
+        }
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen = session
+                .with_screen(|screen| screen.contents().contains("line-79"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+        }
+        session.scroll_by(isize::MAX);
+        assert!(session.scrolled_back());
+
+        let out = draw(&app, 92, 20);
+        assert!(
+            out.contains("line-0"),
+            "the top of history should be on screen:\n{out}"
+        );
+        assert!(
+            !out.contains("line-79"),
+            "the tail should be scrolled out of view:\n{out}"
+        );
+        assert!(
+            out.contains("scrolled back"),
+            "the pane should say where it is:\n{out}"
+        );
+    }
+
     /// A drag that reached the clipboard says so in the corner — the only other
     /// evidence is the clipboard itself, which is not on the screen.
     #[test]
@@ -2386,11 +2463,11 @@ mod tests {
             "ca_1".into(),
         );
         let before = draw(&app, 100, 30);
-        assert!(before.contains("projects"), "the tree is there first");
+        assert!(before.contains("cloud agents"), "the tree is there first");
 
         app.maximized = true;
         let out = draw(&app, 100, 30);
-        assert!(!out.contains(" projects "), "the tree is gone:\n{out}");
+        assert!(!out.contains(" cloud agents "), "the tree is gone:\n{out}");
         assert!(!out.contains("devtools"), "no tree rows:\n{out}");
         assert!(out.contains("restore the tree"), "the way back:\n{out}");
 
@@ -2549,7 +2626,8 @@ mod tests {
             .position(|r| r.label == "nimble-otter")
             .unwrap();
         let out = draw(&app, 100, 30);
-        assert!(out.contains("Railway"));
+        // The group header carries the project; the environment shows in the
+        // detail pane rather than as a level of its own.
         assert!(out.contains("devtools"));
         assert!(out.contains("production"));
         assert!(out.contains("nimble-otter"));

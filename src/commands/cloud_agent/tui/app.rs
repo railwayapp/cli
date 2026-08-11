@@ -57,7 +57,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "agents",
         &[
-            ("n", "new agent (on a project or environment)"),
+            ("n", "new agent (on a group, project, or environment)"),
             ("s", "sleep"),
             ("w", "wake"),
             ("d", "delete, with a confirmation"),
@@ -521,12 +521,21 @@ pub enum RowKind {
     Workspace(usize),
     Project(usize, usize),
     Environment(usize, usize, usize),
+    /// An environment that has agents, promoted to a top-level heading. The
+    /// tree leads with these — the screen is about agents, so the containers
+    /// read as context on the way to them, not as levels to open.
+    Group(usize, usize, usize),
     Agent(usize, usize, usize, usize),
     /// A reattachable session on an agent's VM.
     Session(usize, usize, usize, usize, usize),
     /// A non-selectable line under an environment: loading, empty, or failed.
     Note(usize, usize, usize),
-    /// A rule between the default project and the rest.
+    /// The collapsible tail of projects with no agents — where `n` goes to
+    /// start somewhere new.
+    OtherProjects,
+    /// A non-selectable line that belongs to no environment: the empty state.
+    Hint,
+    /// A rule between the agent groups and the projects tail.
     Separator,
 }
 
@@ -546,7 +555,10 @@ pub struct Row {
 
 impl Row {
     pub fn selectable(&self) -> bool {
-        !matches!(self.kind, RowKind::Note(..) | RowKind::Separator)
+        !matches!(
+            self.kind,
+            RowKind::Note(..) | RowKind::Hint | RowKind::Separator
+        )
     }
 }
 
@@ -785,6 +797,10 @@ pub struct App {
     pub target: Option<Target>,
     pub tree: Vec<WorkspaceNode>,
     pub cursor: usize,
+    /// Whether the projects tail is open. `None` decides automatically: open
+    /// while there are no agents to show — the tail is the whole tree then —
+    /// and folded away once agent groups exist to lead with.
+    pub others_expanded: Option<bool>,
     /// Transient one-line message shown in the header.
     pub status: String,
 }
@@ -839,13 +855,20 @@ impl App {
             target,
             tree,
             cursor: 0,
+            others_expanded: None,
             status: String::new(),
         };
-        // Open the first workspace so Manage is never a wall of collapsed rows.
+        // Open the first workspace so the projects tail is never a wall of
+        // collapsed rows on a multi-workspace account.
         if let Some(ws) = app.tree.first_mut() {
             ws.expanded = true;
         }
         app.clamp_cursor();
+        // The tree can lead with an unselectable hint; the cursor belongs on
+        // the first row a key can act on.
+        if app.selected_row().is_some_and(|row| !row.selectable()) {
+            app.move_cursor_inner(1);
+        }
         app
     }
 
@@ -1108,66 +1131,258 @@ impl App {
         HARNESSES[self.harness.min(HARNESSES.len() - 1)]
     }
 
-    /// The flattened, currently-visible tree.
+    /// The flattened, currently-visible tree: agent groups first, then the
+    /// projects tail.
+    ///
+    /// Agents are what this screen is about, so every environment that has
+    /// any is promoted to a top-level group — always open, never a level to
+    /// expand. The containers survive as context rather than navigation: the
+    /// group is labelled with its project (and environment, when that adds
+    /// something), and projects with nothing in them wait in a collapsible
+    /// tail at the bottom, which is where `n` goes to start an agent
+    /// somewhere new.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        for (w, ws) in self.tree.iter().enumerate() {
+        let groups = self.agent_groups();
+        for &(w, p, e) in &groups {
+            let proj = &self.tree[w].projects[p];
             rows.push(Row {
                 depth: 0,
-                kind: RowKind::Workspace(w),
-                label: ws.name.clone(),
-                note: "workspace".into(),
+                kind: RowKind::Group(w, p, e),
+                label: group_label(proj, e),
+                note: self.group_note(w, p),
                 status: None,
-                expanded: Some(ws.expanded),
+                // Always open: collapsing the thing the screen exists to show
+                // would only manufacture a place to lose it.
+                expanded: Some(true),
                 dimmed: false,
             });
-            if !ws.expanded {
+            self.push_agent_rows(&mut rows, w, p, e);
+        }
+        if groups.is_empty() {
+            // "None yet" is a definitive claim, so it waits until every
+            // environment has actually answered; anything still on its way
+            // reads as searching, and a failure says so rather than passing
+            // itself off as an empty account.
+            let mut envs = self
+                .tree
+                .iter()
+                .flat_map(|ws| ws.projects.iter())
+                .flat_map(|project| project.envs.iter());
+            let searching = envs
+                .clone()
+                .any(|env| matches!(env.agents, Load::NotLoaded | Load::Loading));
+            let failed = envs.any(|env| matches!(env.agents, Load::Failed(_)));
+            rows.push(Row {
+                depth: 0,
+                kind: RowKind::Hint,
+                label: if searching {
+                    "looking for cloud agents…".into()
+                } else if failed {
+                    "couldn't check every environment — r retries".into()
+                } else {
+                    "no cloud agents yet — n creates one".into()
+                },
+                note: String::new(),
+                status: None,
+                expanded: None,
+                dimmed: false,
+            });
+        }
+        self.push_project_tail(&mut rows, &groups);
+        rows
+    }
+
+    /// One group's agents, sessions still nested beneath them.
+    fn push_agent_rows(&self, rows: &mut Vec<Row>, w: usize, p: usize, e: usize) {
+        let env = &self.tree[w].projects[p].envs[e];
+        let agents = env.agents_vec();
+        for a in sorted_agents(agents) {
+            let agent = &agents[a];
+            let pending = self.ops.get(agent.id.as_str()).copied();
+            rows.push(Row {
+                depth: 1,
+                kind: RowKind::Agent(w, p, e, a),
+                label: agent.name.clone(),
+                note: match pending {
+                    Some(op) => op.to_string(),
+                    None => agent_note(agent, &self.ending),
+                },
+                status: Some(
+                    pending
+                        .map(str::to_string)
+                        .unwrap_or_else(|| agent.status.clone()),
+                ),
+                expanded: Some(agent.expanded),
+                dimmed: false,
+            });
+            if !agent.expanded {
                 continue;
             }
-            let order = sorted_projects(ws, self.default_project.as_deref());
-            for (position, p) in order.iter().copied().enumerate() {
-                let proj = &ws.projects[p];
-                let is_default = Some(proj.id.as_str()) == self.default_project.as_deref();
+            // The agent's own sessions: what the platform says is running in
+            // there, which outlives our connections and can be rejoined by
+            // name.
+            match &agent.sessions {
+                LoadSessions::Loaded(sessions)
+                    if !sessions.iter().any(|session| {
+                        session.is_interesting() && !self.ending.contains(&session.name)
+                    }) =>
+                {
+                    rows.push(note_row(w, p, e, 2, "no sessions on this agent"));
+                }
+                LoadSessions::Loaded(sessions) => {
+                    for (i, session) in sessions.iter().enumerate() {
+                        if !session.is_interesting() || self.ending.contains(&session.name) {
+                            continue;
+                        }
+                        // Every listed session is running, so the only state
+                        // worth showing is whether this UI is attached to it.
+                        // The platform's own `attached` flag counts other
+                        // clients too, which is why it flickered.
+                        let connected = self.pane_for(&session.name).is_some();
+                        rows.push(Row {
+                            depth: 2,
+                            kind: RowKind::Session(w, p, e, a, i),
+                            label: session.label(),
+                            note: String::new(),
+                            status: connected.then(|| "connected".to_string()),
+                            expanded: None,
+                            dimmed: false,
+                        });
+                    }
+                }
+                LoadSessions::Loading => {
+                    rows.push(note_row(w, p, e, 2, "loading sessions…"));
+                }
+                LoadSessions::Failed(err) => {
+                    rows.push(note_row(
+                        w,
+                        p,
+                        e,
+                        2,
+                        &format!("couldn't load sessions: {err}"),
+                    ));
+                }
+                LoadSessions::NotLoaded => {}
+            }
+        }
+    }
+
+    /// The projects with agent-less environments, folded under one heading at
+    /// the bottom.
+    ///
+    /// This is the browse-to-create surface the groups can't be: selecting a
+    /// project or environment here and pressing `n` is how the first agent
+    /// gets somewhere new. A project appears whenever it has an environment
+    /// that is not a group above — usually because it has no agents at all,
+    /// but also when its staging sits empty next to an occupied production;
+    /// every environment stays reachable for `n`, `t`, and `r`. Workspaces
+    /// appear as a level only when there is more than one to tell apart.
+    fn push_project_tail(&self, rows: &mut Vec<Row>, groups: &[(usize, usize, usize)]) {
+        let default_project = self.default_project.as_deref();
+        let tails: Vec<(usize, Vec<usize>)> = self
+            .tree
+            .iter()
+            .enumerate()
+            .map(|(w, ws)| {
+                let order = sorted_projects(ws, default_project)
+                    .into_iter()
+                    .filter(|&p| {
+                        ws.projects[p]
+                            .envs
+                            .iter()
+                            .any(|env| env.agents_vec().is_empty())
+                    })
+                    .collect();
+                (w, order)
+            })
+            .collect();
+        let total: usize = tails.iter().map(|(_, order)| order.len()).sum();
+        if total == 0 {
+            return;
+        }
+        if !groups.is_empty() {
+            rows.push(separator_row());
+        }
+        let open = self.others_expanded.unwrap_or(groups.is_empty());
+        rows.push(Row {
+            depth: 0,
+            kind: RowKind::OtherProjects,
+            // "Other" is relative to the groups; without any there is nothing
+            // for these to be other than.
+            label: if groups.is_empty() {
+                "projects".into()
+            } else {
+                "other projects".into()
+            },
+            note: format!("({total})"),
+            status: None,
+            expanded: Some(open),
+            dimmed: false,
+        });
+        if !open {
+            return;
+        }
+        let multi_workspace = self.tree.len() > 1;
+        for (w, order) in tails {
+            if order.is_empty() {
+                continue;
+            }
+            let ws = &self.tree[w];
+            let base = if multi_workspace {
                 rows.push(Row {
                     depth: 1,
+                    kind: RowKind::Workspace(w),
+                    label: ws.name.clone(),
+                    note: "workspace".into(),
+                    status: None,
+                    expanded: Some(ws.expanded),
+                    dimmed: false,
+                });
+                if !ws.expanded {
+                    continue;
+                }
+                2
+            } else {
+                1
+            };
+            for p in order {
+                let proj = &ws.projects[p];
+                let is_default = Some(proj.id.as_str()) == default_project;
+                rows.push(Row {
+                    depth: base,
                     kind: RowKind::Project(w, p),
                     label: proj.name.clone(),
                     note: if is_default {
-                        match project_agent_count(proj) {
-                            0 => "(default)".to_string(),
-                            n => format!("(default · {n})"),
-                        }
+                        "(default)".to_string()
                     } else {
-                        project_count_note(proj)
+                        String::new()
                     },
                     status: None,
                     expanded: Some(proj.expanded),
-                    // Nothing provisioned here yet, so it recedes — still
-                    // selectable, and `n` promotes it into the group above.
-                    // The default never recedes: it is where agents go, so it
-                    // has to be findable even while empty.
-                    dimmed: !is_default && project_agent_count(proj) == 0,
+                    // Everything here is empty, so everything recedes — except
+                    // the default, which is where agents go and has to be
+                    // findable even while empty.
+                    dimmed: !is_default,
                 });
-                let separate_after = is_default && position + 1 < order.len();
                 if !proj.expanded {
-                    if separate_after {
-                        rows.push(separator_row());
-                    }
                     continue;
                 }
                 for (e, env) in proj.envs.iter().enumerate() {
+                    // An environment with agents is a group above; repeating
+                    // it down here would be the same thing twice.
+                    if !env.agents_vec().is_empty() {
+                        continue;
+                    }
                     let note = match &env.agents {
-                        // Nothing at all when there is nothing here: a marker
-                        // against every empty environment is noise, and the
-                        // count exists to make the ones with agents stand out.
-                        Load::Loaded(agents) if agents.is_empty() => String::new(),
-                        Load::Loaded(agents) => format!("({})", agents.len()),
                         Load::Loading => "…".into(),
                         Load::Failed(_) => "!".into(),
-                        Load::NotLoaded => String::new(),
+                        // Everything left here is empty, and a marker against
+                        // every empty environment would be noise.
+                        _ => String::new(),
                     };
                     rows.push(Row {
-                        depth: 2,
+                        depth: base + 1,
                         kind: RowKind::Environment(w, p, e),
                         label: env.name.clone(),
                         note,
@@ -1179,116 +1394,76 @@ impl App {
                         continue;
                     }
                     match &env.agents {
-                        Load::Loaded(agents) if agents.is_empty() => rows.push(Row {
-                            depth: 3,
-                            kind: RowKind::Note(w, p, e),
-                            label: "no agents here".into(),
-                            note: String::new(),
-                            status: None,
-                            expanded: None,
-                            dimmed: false,
-                        }),
-                        Load::Loaded(agents) => {
-                            for (a, agent) in agents.iter().enumerate() {
-                                let pending = self.ops.get(agent.id.as_str()).copied();
-                                rows.push(Row {
-                                    depth: 3,
-                                    kind: RowKind::Agent(w, p, e, a),
-                                    label: agent.name.clone(),
-                                    note: match pending {
-                                        Some(op) => op.to_string(),
-                                        None => agent_note(agent, &self.ending),
-                                    },
-                                    status: Some(
-                                        pending
-                                            .map(str::to_string)
-                                            .unwrap_or_else(|| agent.status.clone()),
-                                    ),
-                                    expanded: Some(agent.expanded),
-                                    dimmed: false,
-                                });
-                                if !agent.expanded {
-                                    continue;
-                                }
-                                // The agent's own sessions: what the platform
-                                // says is running in there, which outlives our
-                                // connections and can be rejoined by name.
-                                match &agent.sessions {
-                                    LoadSessions::Loaded(sessions)
-                                        if !sessions.iter().any(|session| {
-                                            session.is_interesting()
-                                                && !self.ending.contains(&session.name)
-                                        }) =>
-                                    {
-                                        rows.push(note_row(w, p, e, "no sessions on this agent"));
-                                    }
-                                    LoadSessions::Loaded(sessions) => {
-                                        for (i, session) in sessions.iter().enumerate() {
-                                            if !session.is_interesting()
-                                                || self.ending.contains(&session.name)
-                                            {
-                                                continue;
-                                            }
-                                            // Every listed session is running,
-                                            // so the only state worth showing
-                                            // is whether this UI is attached to
-                                            // it. The platform's own `attached`
-                                            // flag counts other clients too,
-                                            // which is why it flickered.
-                                            let connected = self.pane_for(&session.name).is_some();
-                                            rows.push(Row {
-                                                depth: 4,
-                                                kind: RowKind::Session(w, p, e, a, i),
-                                                label: session.label(),
-                                                note: String::new(),
-                                                status: connected.then(|| "connected".to_string()),
-                                                expanded: None,
-                                                dimmed: false,
-                                            });
-                                        }
-                                    }
-                                    LoadSessions::Loading => {
-                                        rows.push(note_row(w, p, e, "loading sessions…"));
-                                    }
-                                    LoadSessions::Failed(err) => {
-                                        rows.push(note_row(
-                                            w,
-                                            p,
-                                            e,
-                                            &format!("couldn't load sessions: {err}"),
-                                        ));
-                                    }
-                                    LoadSessions::NotLoaded => {}
-                                }
-                            }
+                        Load::Loaded(agents) if agents.is_empty() => {
+                            rows.push(note_row(w, p, e, base + 2, "no agents here"));
                         }
-                        Load::Loading => rows.push(Row {
-                            depth: 3,
-                            kind: RowKind::Note(w, p, e),
-                            label: "loading…".into(),
-                            note: String::new(),
-                            status: None,
-                            expanded: None,
-                            dimmed: false,
-                        }),
-                        Load::Failed(err) => rows.push(Row {
-                            depth: 3,
-                            kind: RowKind::Note(w, p, e),
-                            label: format!("couldn't load: {err}"),
-                            note: String::new(),
-                            status: None,
-                            expanded: None,
-                            dimmed: false,
-                        }),
-                        Load::NotLoaded => {}
+                        Load::Loading => rows.push(note_row(w, p, e, base + 2, "loading…")),
+                        Load::Failed(err) => {
+                            rows.push(note_row(
+                                w,
+                                p,
+                                e,
+                                base + 2,
+                                &format!("couldn't load: {err}"),
+                            ));
+                        }
+                        // Loaded and non-empty lives in the groups; nothing to
+                        // add under it here.
+                        Load::Loaded(_) | Load::NotLoaded => {}
                     }
-                }
-                if separate_after {
-                    rows.push(separator_row());
                 }
             }
         }
-        rows
+    }
+
+    /// Every environment with agents, as `(workspace, project, environment)`
+    /// paths in display order: the groups with something running first, then
+    /// the default project, then by name.
+    ///
+    /// Indices rather than references, so `RowKind` keeps pointing at the same
+    /// environment as statuses change and the order shifts under it — the
+    /// cursor is restored by identity, not by position.
+    fn agent_groups(&self) -> Vec<(usize, usize, usize)> {
+        let mut groups = Vec::new();
+        for (w, ws) in self.tree.iter().enumerate() {
+            for (p, proj) in ws.projects.iter().enumerate() {
+                for (e, env) in proj.envs.iter().enumerate() {
+                    if !env.agents_vec().is_empty() {
+                        groups.push((w, p, e));
+                    }
+                }
+            }
+        }
+        let default = self.default_project.as_deref();
+        let running = |(w, p, e): &(usize, usize, usize)| {
+            self.tree[*w].projects[*p].envs[*e]
+                .agents_vec()
+                .iter()
+                .any(|agent| agent.status == "running")
+        };
+        groups.sort_by(|a, b| {
+            let (pa, pb) = (&self.tree[a.0].projects[a.1], &self.tree[b.0].projects[b.1]);
+            let is_default = |p: &ProjectNode| Some(p.id.as_str()) == default;
+            running(b)
+                .cmp(&running(a))
+                .then_with(|| is_default(pb).cmp(&is_default(pa)))
+                .then_with(|| pa.name.to_lowercase().cmp(&pb.name.to_lowercase()))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        groups
+    }
+
+    /// What sits to the right of a group header: the default marker, and the
+    /// workspace when there is more than one for the project to belong to.
+    fn group_note(&self, w: usize, p: usize) -> String {
+        let mut parts = Vec::new();
+        if Some(self.tree[w].projects[p].id.as_str()) == self.default_project.as_deref() {
+            parts.push("(default)".to_string());
+        }
+        if self.tree.len() > 1 {
+            parts.push(self.tree[w].name.clone());
+        }
+        parts.join(" · ")
     }
 
     pub fn selected_row(&self) -> Option<Row> {
@@ -1299,9 +1474,10 @@ impl App {
     /// and `n` work with the cursor on an agent, not just on its environment.
     fn env_of(&self, kind: RowKind) -> Option<(usize, usize, usize)> {
         match kind {
-            RowKind::Environment(w, p, e) | RowKind::Agent(w, p, e, _) | RowKind::Note(w, p, e) => {
-                Some((w, p, e))
-            }
+            RowKind::Environment(w, p, e)
+            | RowKind::Group(w, p, e)
+            | RowKind::Agent(w, p, e, _)
+            | RowKind::Note(w, p, e) => Some((w, p, e)),
             _ => None,
         }
     }
@@ -1394,16 +1570,27 @@ impl App {
         // moves up — so the cursor is put back by row identity rather than
         // left on whatever index it was.
         let anchor = self.selected_row().map(|row| row.kind);
+        let mut refresh_failed = None;
         if let Some(env) = self
             .tree
             .get_mut(w)
             .and_then(|ws| ws.projects.get_mut(p))
             .and_then(|proj| proj.envs.get_mut(e))
         {
-            env.agents = match result {
-                Ok(agents) => Load::Loaded(agents),
-                Err(err) => Load::Failed(err),
+            let previous = std::mem::replace(&mut env.agents, Load::NotLoaded);
+            env.agents = match (result, previous) {
+                (Ok(agents), _) => Load::Loaded(agents),
+                // A refresh that fails must not take the agents with it:
+                // stale beats gone, and the status line carries the reason.
+                (Err(err), Load::Loaded(agents)) => {
+                    refresh_failed = Some(err);
+                    Load::Loaded(agents)
+                }
+                (Err(err), _) => Load::Failed(err),
             };
+        }
+        if let Some(err) = refresh_failed {
+            self.status = format!("Couldn't refresh: {err}");
         }
         self.collapse_if_empty(w, p);
         self.settle_watched_agents();
@@ -1483,13 +1670,32 @@ impl App {
     }
 
     /// Put the cursor back on the row it was on, wherever that row now sits.
+    ///
+    /// A load can promote the environment under the cursor into a group — or
+    /// demote it back into the tail — and it is the same place under either
+    /// name, so the cursor follows it. A row can also be gone entirely — a
+    /// load can fold the projects tail the cursor was in — and then the
+    /// nearest selectable row is the best that can be done.
     fn restore_cursor(&mut self, anchor: Option<RowKind>) {
-        if let Some(kind) = anchor
-            && let Some(index) = self.rows().iter().position(|row| row.kind == kind)
-        {
-            self.cursor = index;
+        if let Some(kind) = anchor {
+            let rows = self.rows();
+            let position = |kind: RowKind| rows.iter().position(|row| row.kind == kind);
+            let index = position(kind).or_else(|| match kind {
+                RowKind::Environment(w, p, e) => position(RowKind::Group(w, p, e)),
+                RowKind::Group(w, p, e) => position(RowKind::Environment(w, p, e)),
+                _ => None,
+            });
+            if let Some(index) = index {
+                self.cursor = index;
+            }
         }
         self.clamp_cursor();
+        if self.selected_row().is_some_and(|row| !row.selectable()) {
+            self.move_cursor_inner(1);
+        }
+        if self.selected_row().is_some_and(|row| !row.selectable()) {
+            self.move_cursor_inner(-1);
+        }
     }
 
     /// Expand or collapse an agent, fetching its sessions the first time.
@@ -1646,14 +1852,15 @@ impl App {
                 self.focus = ManageFocus::Tree;
                 return None;
             }
-            // Two chords are taken from the agent, both because the moment you
-            // want them is while you are using it: ⌥f for room, ⌥] to move on
-            // to the next pane. ⌥f costs Meta-f (forward-word) in a shell;
-            // readline leaves Meta-] unbound, and `^]` (character-search) is
-            // untouched because only the Meta form is claimed. Nothing else is
-            // intercepted — ⌥s still reaches the agent from here.
+            // Three chords are taken from the agent, all because the moment
+            // you want them is while you are using it: ⌥f for room, ⌥] and ⌥[
+            // to move between panes. ⌥f costs Meta-f (forward-word) in a
+            // shell; readline leaves Meta-] and Meta-[ unbound, and `^]`
+            // (character-search) is untouched because only the Meta forms are
+            // claimed. Nothing else is intercepted — ⌥s still reaches the
+            // agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'f' | ']')
+                && matches!(chord, 'f' | ']' | '[')
             {
                 return self.alt_action(chord);
             }
@@ -2420,8 +2627,8 @@ impl App {
     ///
     /// Only where the answer is needed immediately: the prompt's target, which
     /// New Session reads to decide whether it has an agent to work on, and the
-    /// default project, which the tree leads with. Everything else loads when
-    /// its row is expanded.
+    /// default project, whose agents the tree wants to lead with. Everything
+    /// else loads when its row is expanded.
     ///
     /// This used to be every environment in every project in every workspace,
     /// which is one request each. That is fine on a small account and hundreds
@@ -2434,8 +2641,8 @@ impl App {
         if let Some(target) = self.target.as_ref() {
             wanted.push(target.environment_id.clone());
         }
-        // The default project's environments, which is where the tree opens and
-        // where a launch with no target lands.
+        // The default project's environments, whose agents the tree leads
+        // with and where a launch with no target lands.
         if let Some(project_id) = self.default_project.clone() {
             for ws in &self.tree {
                 for project in &ws.projects {
@@ -2525,9 +2732,14 @@ impl App {
                     self.tree[w].expanded = true;
                     self.tree[w].projects[p].expanded = true;
                     // Always refetch: the launch may have just created the
-                    // agent we are about to select.
+                    // agent we are about to select. What is already loaded
+                    // stays on screen while the reply is on its way — blanking
+                    // it would fold the group mid-poll and shove every row
+                    // (and the cursor) somewhere else.
                     self.tree[w].projects[p].envs[e].expanded = true;
-                    self.tree[w].projects[p].envs[e].agents = Load::Loading;
+                    if !matches!(self.tree[w].projects[p].envs[e].agents, Load::Loaded(_)) {
+                        self.tree[w].projects[p].envs[e].agents = Load::Loading;
+                    }
                     return Some(Effect::LoadAgents {
                         environment_id: environment_id.to_string(),
                         path: (w, p, e),
@@ -2553,19 +2765,21 @@ impl App {
                 self.toggle_maximized();
                 None
             }
-            ']' => self.cycle_session(),
+            ']' => self.cycle_session(true),
+            '[' => self.cycle_session(false),
             _ => None,
         }
     }
 
-    /// Move the pane to the next open session, wrapping at the end.
+    /// Move the pane to the next or previous open session, wrapping.
     ///
     /// Scoped to panes that are already open rather than every session in the
     /// tree, and that is the whole design: waking a sleeping agent is a cold
     /// boot — seconds of wall clock and a VM that starts billing — so holding
-    /// `⌥]` must never fan out wakes across agents you were only passing
-    /// through. Opening something new stays the deliberate `enter` on a row.
-    fn cycle_session(&mut self) -> Option<Effect> {
+    /// `⌥]` or `⌥[` must never fan out wakes across agents you were only
+    /// passing through. Opening something new stays the deliberate `enter` on
+    /// a row.
+    fn cycle_session(&mut self, forward: bool) -> Option<Effect> {
         match self.sessions.len() {
             0 => {
                 self.status = "No open sessions".to_string();
@@ -2579,7 +2793,13 @@ impl App {
             _ => {}
         }
         let count = self.sessions.len();
-        let next = self.active.map_or(0, |i| (i + 1) % count);
+        let next = match (self.active, forward) {
+            (Some(i), true) => (i + 1) % count,
+            (Some(i), false) => (i + count - 1) % count,
+            // No pane yet: forward starts at the front, back at the end.
+            (None, true) => 0,
+            (None, false) => count - 1,
+        };
         self.active = Some(next);
         self.select_row_for_active();
         if let Some(name) = self.active_session().map(|s| s.agent_name.clone()) {
@@ -2915,7 +3135,11 @@ impl App {
             KeyCode::Char('r') => {
                 let (w, p, e) = self.env_of(row?.kind)?;
                 let env = self.tree.get_mut(w)?.projects.get_mut(p)?.envs.get_mut(e)?;
-                env.agents = Load::Loading;
+                // What is already loaded stays put while the reply is on its
+                // way: blanking it would fold the group and move every row.
+                if !matches!(env.agents, Load::Loaded(_)) {
+                    env.agents = Load::Loading;
+                }
                 Some(Effect::LoadAgents {
                     environment_id: env.id.clone(),
                     path: (w, p, e),
@@ -2935,12 +3159,15 @@ impl App {
     ///
     /// On an agent (or one of its sessions) another session on that same
     /// agent — the agent is already there, and a second one would be a second
-    /// VM nobody asked for. On a project or an environment, a whole new agent,
-    /// because that is the only thing "new" can mean there.
+    /// VM nobody asked for. On a project, an environment, or a group, a whole
+    /// new agent, because that is the only thing "new" can mean there.
+    /// Anywhere else — the tail header, an empty tree — it falls back to the
+    /// target, the same place the menu's New Cloud Agent goes: the empty
+    /// state advertises `n`, so `n` has to work from where the cursor starts.
     fn new_here(&mut self) -> Option<Effect> {
-        let row = self.selected_row()?;
-        match row.kind {
-            RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => {
+        let kind = self.selected_row().map(|row| row.kind);
+        match kind {
+            Some(RowKind::Agent(w, p, e, a)) | Some(RowKind::Session(w, p, e, a, _)) => {
                 let (agent_id, agent_name) = self.agent_at(w, p, e, a)?;
                 self.target = self.target_at((w, p, e));
                 let target = self.target.clone()?;
@@ -2956,11 +3183,11 @@ impl App {
                     label: format!("{agent_name} · new session"),
                 }))
             }
-            RowKind::Environment(w, p, e) => {
+            Some(RowKind::Environment(w, p, e)) | Some(RowKind::Group(w, p, e)) => {
                 self.target = self.target_at((w, p, e));
                 self.launch(None, true)
             }
-            RowKind::Project(w, p) => {
+            Some(RowKind::Project(w, p)) => {
                 // A project is not a place an agent can live; its first
                 // environment is the only unambiguous reading, and the status
                 // line says which one it picked.
@@ -2970,8 +3197,10 @@ impl App {
                 self.status = format!("New agent in {name}");
                 self.launch(None, true)
             }
+            _ if self.target.is_some() => self.launch(None, true),
             _ => {
-                self.status = "Select a project, an environment, or an agent".into();
+                self.start_target_pick();
+                self.status = "Pick where this should run".into();
                 None
             }
         }
@@ -3210,6 +3439,13 @@ impl App {
 
     fn set_expanded(&mut self, kind: RowKind, open: bool) -> Option<Effect> {
         match kind {
+            // A group is always open; there is nothing to do in either
+            // direction, and quietly folding agents away would be the old
+            // tree's problem reintroduced on purpose.
+            RowKind::Group(..) => {}
+            RowKind::OtherProjects => {
+                self.others_expanded = Some(open);
+            }
             RowKind::Workspace(w) => {
                 self.tree.get_mut(w)?.expanded = open;
             }
@@ -3264,20 +3500,14 @@ impl App {
                 self.clamp_cursor();
                 return None;
             }
-            // Collapsing from a child row closes the environment above it,
-            // which is where the cursor should land too.
-            RowKind::Agent(w, p, e, _) | RowKind::Note(w, p, e) if !open => {
-                self.tree
-                    .get_mut(w)?
-                    .projects
-                    .get_mut(p)?
-                    .envs
-                    .get_mut(e)?
-                    .expanded = false;
+            // Collapsing a closed agent walks the cursor up to its group
+            // header. The group itself never folds, so this is as far out as
+            // `h` can go.
+            RowKind::Agent(w, p, e, _) if !open => {
                 if let Some(i) = self
                     .rows()
                     .iter()
-                    .position(|r| r.kind == RowKind::Environment(w, p, e))
+                    .position(|r| r.kind == RowKind::Group(w, p, e))
                 {
                     self.cursor = i;
                 }
@@ -3289,8 +3519,8 @@ impl App {
     }
 }
 
-/// A rule under the default project, so it reads as its own group rather than
-/// as the first of a list.
+/// A rule between the agent groups and the projects tail, so the tail reads
+/// as its own section rather than as one more group.
 fn separator_row() -> Row {
     Row {
         depth: 0,
@@ -3303,9 +3533,9 @@ fn separator_row() -> Row {
     }
 }
 
-fn note_row(w: usize, p: usize, e: usize, text: &str) -> Row {
+fn note_row(w: usize, p: usize, e: usize, depth: usize, text: &str) -> Row {
     Row {
-        depth: 4,
+        depth,
         kind: RowKind::Note(w, p, e),
         label: text.to_string(),
         note: String::new(),
@@ -3313,6 +3543,38 @@ fn note_row(w: usize, p: usize, e: usize, text: &str) -> Row {
         expanded: None,
         dimmed: false,
     }
+}
+
+/// What a group header says: the project, and the environment only when it
+/// adds something. Most projects have a single `production`, and repeating
+/// that against every group would be the same noise the environment level was
+/// as a row of its own.
+fn group_label(project: &ProjectNode, e: usize) -> String {
+    let env = &project.envs[e];
+    if project.envs.len() > 1 && env.name != "production" {
+        return format!("{}/{}", project.name, env.name);
+    }
+    project.name.clone()
+}
+
+/// Display order for a group's agents: running first, waking next, sleeping
+/// last, then by name. Indices for the same reason as [`App::agent_groups`].
+fn sorted_agents(agents: &[Agent]) -> Vec<usize> {
+    let rank = |agent: &Agent| match agent.status.as_str() {
+        "running" => 0,
+        "starting" => 1,
+        _ => 2,
+    };
+    let mut order: Vec<usize> = (0..agents.len()).collect();
+    order.sort_by(|&a, &b| {
+        rank(&agents[a]).cmp(&rank(&agents[b])).then_with(|| {
+            agents[a]
+                .name
+                .to_lowercase()
+                .cmp(&agents[b].name.to_lowercase())
+        })
+    });
+    order
 }
 
 /// What sits to the right of an agent: its status, plus how many sessions are
@@ -3365,22 +3627,6 @@ fn project_agent_count(project: &ProjectNode) -> usize {
         .sum()
 }
 
-/// The agent count shown beside a project, as `(3)`.
-///
-/// Counts only environments whose agents have arrived — the startup sweep fills
-/// these in within a second or two, and a number that grows as they land is
-/// better than a placeholder that has to be explained.
-fn project_count_note(project: &ProjectNode) -> String {
-    let total = project_agent_count(project);
-    // Nothing at all when there is nothing to find: a marker against every
-    // empty project is noise, and the count exists to make the projects that
-    // *do* have agents stand out.
-    if total == 0 {
-        return String::new();
-    }
-    format!("({total})")
-}
-
 /// Map a keystroke to an Alt-chord action letter.
 ///
 /// Two ways in. The real one is `KeyModifiers::ALT`, which is what a terminal
@@ -3391,13 +3637,18 @@ fn project_count_note(project: &ProjectNode) -> String {
 /// is unreachable without Meta, which is why every card also keeps its bare
 /// letter while the cards have focus.
 ///
-/// `]` is the one non-letter, and it has no `[` twin on purpose: under Meta,
-/// Option+`[` is the two bytes `ESC [` — byte-identical to the CSI prefix that
-/// starts every arrow key and escape sequence — so it can never be told apart
-/// from a cursor key. `ESC ]` is OSC, which terminals effectively never send,
-/// so the forward direction is safe on its own.
+/// The brackets are the non-letters, and they are not equals. `ESC ]` is OSC,
+/// which terminals effectively never send, so under Meta ⌥] is safe
+/// everywhere. ⌥[ under Meta is the two bytes `ESC [` — byte-identical to the
+/// CSI prefix that starts every arrow key — so a legacy terminal can never
+/// deliver it; the parser eats the bytes as an unfinished escape sequence and
+/// no key event exists to match. `[` is still in the table for the terminals
+/// that can say it unambiguously: under the kitty keyboard protocol (pushed at
+/// startup) it arrives as a genuine ALT+`[` event, and composed-mode macOS
+/// sends it as a curly double quote. Everywhere else the reverse chord is
+/// simply absent — it can go dead, but never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['f', 's', ']'];
+    const ACTIONS: &[char] = &['f', 's', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = c.to_ascii_lowercase();
@@ -3409,10 +3660,12 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
-        // Option+] composes to a left curly quote, Option+shift+] to the right
-        // one. Both are the same chord as far as anyone pressing it is
-        // concerned, matching how the letters fold their shifted forms.
+        // Option+] composes to a left curly single quote, Option+shift+] to
+        // the right one; Option+[ does the same with the double quotes. Each
+        // pair is one chord as far as anyone pressing it is concerned,
+        // matching how the letters fold their shifted forms.
         KeyCode::Char('\u{2018}') | KeyCode::Char('\u{2019}') => Some(']'),
+        KeyCode::Char('\u{201C}') | KeyCode::Char('\u{201D}') => Some('['),
         _ => None,
     }
 }
@@ -3504,24 +3757,28 @@ mod tests {
             .collect()
     }
 
-    /// A target-less app: the first workspace opens so Manage has something in
-    /// it, but nothing below it is expanded yet.
+    /// A target-less app with nothing loaded yet: no agents to lead with, so
+    /// the projects tail is the whole tree, open, behind the search hint.
     #[test]
-    fn opens_with_the_first_workspace_expanded() {
+    fn opens_with_the_projects_tail_open() {
         let a = app();
         let rows = a.rows();
-        assert_eq!(rows.len(), 2, "{rows:#?}");
-        assert_eq!(rows[0].label, "Railway");
-        assert_eq!(rows[1].label, "devtools");
+        assert_eq!(rows.len(), 3, "{rows:#?}");
+        assert_eq!(rows[0].label, "looking for cloud agents…");
+        assert!(!rows[0].selectable());
+        assert_eq!(rows[1].label, "projects");
+        assert_eq!(rows[2].label, "devtools");
+        // The cursor starts on a row a key can act on, not on the hint.
+        assert_eq!(a.cursor, 1);
     }
 
     #[test]
     fn expanding_an_environment_requests_its_agents_once() {
         let mut a = app();
         a.screen = Screen::Manage;
-        a.cursor = 1; // devtools
+        a.cursor = 2; // devtools
         assert_eq!(a.on_key(key(KeyCode::Right)), None);
-        a.cursor = 2; // production
+        a.cursor = 3; // production
         let effect = a.on_key(key(KeyCode::Right)).unwrap();
         assert_eq!(
             effect,
@@ -3539,9 +3796,9 @@ mod tests {
     fn a_loading_environment_shows_a_note_that_cannot_be_selected() {
         let mut a = app();
         a.screen = Screen::Manage;
-        a.cursor = 1;
+        a.cursor = 2; // devtools
         a.on_key(key(KeyCode::Right));
-        a.cursor = 2;
+        a.cursor = 3; // production
         a.on_key(key(KeyCode::Right));
         let rows = a.rows();
         let note = rows.iter().find(|r| r.label == "loading…").unwrap();
@@ -3971,8 +4228,7 @@ mod tests {
         a
     }
 
-    /// ⌥] walks the open panes and wraps, so a single key reaches every
-    /// session without needing a reverse chord.
+    /// ⌥] walks the open panes and wraps, and ⌥[ walks them the other way.
     #[test]
     fn alt_bracket_cycles_forward_through_open_sessions_and_wraps() {
         let mut a = with_sessions(&["ca_1", "ca_2", "ca_3"]);
@@ -3986,6 +4242,20 @@ mod tests {
         assert_eq!(a.active, Some(2), "back where it started");
     }
 
+    /// The reverse chord retraces the forward one exactly, wrap included.
+    #[test]
+    fn alt_left_bracket_cycles_backward_and_wraps() {
+        let mut a = with_sessions(&["ca_1", "ca_2", "ca_3"]);
+        assert_eq!(a.active, Some(2), "the newest attach is active");
+
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(1));
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(0));
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(2), "wraps past the front");
+    }
+
     /// The chord has to work from inside the pane — that is where you are when
     /// you want the next one. ⌥s must still fall through to the agent.
     #[test]
@@ -3997,7 +4267,13 @@ mod tests {
         assert_eq!(a.active, Some(0));
         assert_eq!(a.focus, ManageFocus::Session, "cycling does not detach");
 
-        // Still only ⌥f and ⌥] are taken from the agent.
+        // ⌥[ is taken from the agent too — going back is the same moment as
+        // going forward.
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(1), "retraces the forward step");
+        assert_eq!(a.focus, ManageFocus::Session, "cycling does not detach");
+
+        // Still only ⌥f, ⌥] and ⌥[ are taken from the agent.
         let screen = a.screen;
         a.on_key(alt('s'));
         assert_eq!(a.screen, screen, "⌥s belongs to whatever is running");
@@ -4018,11 +4294,18 @@ mod tests {
         assert!(b.status.contains("Only one session"), "{}", b.status);
     }
 
-    /// Without Option-as-Meta macOS composes ⌥] into a curly quote; both the
-    /// plain and shifted forms are the same chord.
+    /// Without Option-as-Meta macOS composes the bracket chords into curly
+    /// quotes — singles for ⌥], doubles for ⌥[ — and each pair folds its
+    /// shifted form into the same chord.
     #[test]
-    fn option_composed_curly_quotes_are_the_bracket_chord() {
+    fn option_composed_curly_quotes_are_the_bracket_chords() {
         for composed in ['\u{2018}', '\u{2019}'] {
+            let mut a = with_sessions(&["ca_1", "ca_2"]);
+            assert_eq!(a.on_key(key(KeyCode::Char(composed))), None);
+            assert_eq!(a.active, Some(0), "composed {composed:?} should cycle");
+            assert!(a.prompt.is_empty(), "a chord is not text");
+        }
+        for composed in ['\u{201C}', '\u{201D}'] {
             let mut a = with_sessions(&["ca_1", "ca_2"]);
             assert_eq!(a.on_key(key(KeyCode::Char(composed))), None);
             assert_eq!(a.active, Some(0), "composed {composed:?} should cycle");
@@ -4030,16 +4313,17 @@ mod tests {
         }
     }
 
-    /// There is deliberately no ⌥[ twin: under Meta it is the two bytes
-    /// `ESC [`, which is the CSI prefix every arrow key starts with, so it
-    /// cannot be told apart from a cursor key. Guard the omission.
+    /// ⌥[ only exists where the terminal can say it unambiguously — as a real
+    /// ALT event under the kitty protocol, or as macOS's composed quote. In a
+    /// legacy Meta terminal it is the CSI prefix `ESC [` and never reaches the
+    /// key handler at all, so recognizing the clean forms risks nothing.
     #[test]
-    fn there_is_no_alt_left_bracket_chord() {
-        assert_eq!(alt_chord(&alt('[')), None);
+    fn alt_left_bracket_is_the_reverse_chord() {
+        assert_eq!(alt_chord(&alt('[')), Some('['));
         assert_eq!(
             alt_chord(&key(KeyCode::Char('\u{201C}'))),
-            None,
-            "the composed ⌥[ quote is not a chord either"
+            Some('['),
+            "the composed ⌥[ quote is the same chord"
         );
     }
 
@@ -4799,7 +5083,7 @@ mod tests {
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "production")
+            .position(|r| matches!(r.kind, RowKind::Group(..)))
             .unwrap();
         assert_eq!(a.on_key(key(KeyCode::Char('d'))), None);
         assert!(a.confirm.is_none());
@@ -5023,44 +5307,79 @@ mod tests {
         assert!(req.new_session, "must not reuse the open pane");
         assert!(req.wants_new_session());
 
-        // On an environment: a whole new agent.
+        // On a group header — the environment's stand-in: a whole new agent.
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "production")
+            .position(|r| matches!(r.kind, RowKind::Group(..)))
             .unwrap();
         let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Char('n'))) else {
             panic!("expected a launch");
         };
         assert!(req.force_new);
         assert_eq!(req.agent_id, None);
+        assert_eq!(req.environment_id, "env_prod");
 
-        // On a project: a new agent in its first environment, and it says so.
-        a.cursor = a.rows().iter().position(|r| r.label == "devtools").unwrap();
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Char('n'))) else {
+        // On a project in the tail: a new agent in its first environment, and
+        // it says so.
+        let mut b = ordering_app();
+        b.screen = Screen::Manage;
+        b.cursor = b.rows().iter().position(|r| r.label == "Alpha").unwrap();
+        let Some(Effect::Launch(req)) = b.on_key(key(KeyCode::Char('n'))) else {
             panic!("expected a launch");
         };
         assert!(req.force_new);
-        assert_eq!(req.environment_id, "env_prod");
-        assert!(a.status.contains("production"), "{}", a.status);
+        assert_eq!(req.environment_id, "p2-prod");
+        assert!(b.status.contains("production"), "{}", b.status);
     }
 
     /// Clicking a row with children opens it, and clicking again closes it —
     /// the one gesture every tree has.
     #[test]
     fn clicking_a_collapsible_row_toggles_it() {
-        let mut a = loaded_app();
+        let mut a = ordering_app();
+        a.screen = Screen::Manage;
         a.panes = panes_fixture();
-        let devtools = a.rows().iter().position(|r| r.label == "devtools").unwrap();
+        let alpha = a.rows().iter().position(|r| r.label == "Alpha").unwrap();
 
-        // Open in the fixture; a click closes it.
-        a.on_mouse(MouseAction::Down, 5, 3 + devtools as u16);
-        assert!(!a.tree[0].projects[0].expanded);
-        assert!(!a.rows().iter().any(|r| r.label == "production"));
+        // Closed in the fixture; a click opens it and shows its environment.
+        a.on_mouse(MouseAction::Down, 5, 3 + alpha as u16);
+        assert!(a.tree[0].projects[1].expanded);
+        assert!(a.rows().iter().any(|r| r.label == "production"));
 
-        // And a second click opens it again.
-        a.on_mouse(MouseAction::Down, 5, 3 + devtools as u16);
-        assert!(a.tree[0].projects[0].expanded);
+        // And a second click closes it again.
+        a.on_mouse(MouseAction::Down, 5, 3 + alpha as u16);
+        assert!(!a.tree[0].projects[1].expanded);
+    }
+
+    /// The projects tail folds and unfolds like any other branch, and its
+    /// state sticks once it has been touched.
+    #[test]
+    fn clicking_the_tail_header_toggles_it() {
+        let mut a = ordering_app();
+        a.screen = Screen::Manage;
+        a.panes = panes_fixture();
+        let header = a
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::OtherProjects))
+            .unwrap();
+
+        // Open (nothing else to show); a click folds every project away.
+        a.on_mouse(MouseAction::Down, 5, 3 + header as u16);
+        assert!(
+            !a.rows()
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Project(..)))
+        );
+
+        // And a second click brings them back.
+        a.on_mouse(MouseAction::Down, 5, 3 + header as u16);
+        assert!(
+            a.rows()
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Project(..)))
+        );
     }
 
     /// Clicking a collapsed environment has to fetch its agents, the same as
@@ -5173,10 +5492,11 @@ mod tests {
         );
     }
 
-    /// An empty environment carries no marker at all — the count is there to
-    /// pick out the ones with agents.
+    /// An environment in the tail carries no marker at all unless it is
+    /// mid-load or failed — everything down there is empty, so a count would
+    /// say nothing.
     #[test]
-    fn environment_counts_have_no_empty_marker() {
+    fn tail_environments_have_no_empty_marker() {
         let mut a = app();
         let note =
             |a: &App, name: &str| a.rows().into_iter().find(|r| r.label == name).unwrap().note;
@@ -5186,8 +5506,8 @@ mod tests {
         a.agents_loaded((0, 0, 0), Ok(Vec::new()));
         assert_eq!(note(&a, "production"), "", "loaded and empty");
 
-        a.agents_loaded((0, 0, 1), Ok(vec![agent("ca_1", "one", "running")]));
-        assert_eq!(note(&a, "staging"), "(1)");
+        a.tree[0].projects[0].envs[1].agents = Load::Loading;
+        assert_eq!(note(&a, "staging"), "…");
     }
 
     /// The dot next to a session means "open in this UI", nothing else. The
@@ -5708,45 +6028,50 @@ mod tests {
         assert!(a.tree[0].projects[0].expanded);
     }
 
-    /// The default project leads the list, separated from the rest — it is
-    /// where agents go, so it is not just another row.
+    /// The default project leads the tail and is never dimmed — it is where
+    /// agents go, so it has to be findable even while empty.
     #[test]
-    fn the_default_project_sorts_first_with_a_rule_under_it() {
+    fn the_default_project_leads_the_tail() {
         let mut a = ordering_app();
-        // `zebra` has agents, so it would otherwise lead.
-        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        assert_eq!(project_order(&a)[0], "zebra");
-
-        // `mono` is the default and takes the top regardless.
         a.default_project = Some("p3".into());
-        assert_eq!(project_order(&a), ["mono", "zebra", "Alpha", "beta"]);
+        assert_eq!(project_order(&a), ["mono", "Alpha", "beta", "zebra"]);
 
         let rows = a.rows();
         let mono = rows.iter().position(|r| r.label == "mono").unwrap();
-        assert!(
-            matches!(rows[mono + 1].kind, RowKind::Separator),
-            "a rule should follow the default project"
-        );
-        assert!(!rows[mono + 1].selectable(), "the rule is not a stop");
         assert_eq!(rows[mono].note, "(default)", "marked, and not dimmed");
         assert!(!rows[mono].dimmed, "the default is always findable");
-
-        // With agents it carries the count alongside the marker.
-        a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_2", "two", "running")]));
-        let rows = a.rows();
-        let mono = rows.iter().position(|r| r.label == "mono").unwrap();
-        assert_eq!(rows[mono].note, "(default · 1)");
-
-        // Moving down skips the rule rather than landing on it.
-        a.screen = Screen::Manage;
-        a.cursor = mono;
-        a.on_key(key(KeyCode::Down));
-        assert_eq!(a.selected_row().unwrap().label, "zebra");
     }
 
-    /// With no default, nothing is separated and the old order stands.
+    /// The rule sits between the agent groups and the projects tail, and
+    /// moving down skips it rather than landing on it.
     #[test]
-    fn no_default_project_means_no_rule() {
+    fn a_rule_separates_the_groups_from_the_tail() {
+        let mut a = ordering_app();
+        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
+        let rows = a.rows();
+        let sep = rows
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Separator))
+            .expect("a rule under the groups");
+        assert!(
+            matches!(rows[sep - 1].kind, RowKind::Agent(..)),
+            "{rows:#?}"
+        );
+        assert!(matches!(rows[sep + 1].kind, RowKind::OtherProjects));
+        assert!(!rows[sep].selectable(), "the rule is not a stop");
+
+        a.screen = Screen::Manage;
+        a.cursor = sep - 1;
+        a.on_key(key(KeyCode::Down));
+        assert!(matches!(
+            a.selected_row().unwrap().kind,
+            RowKind::OtherProjects
+        ));
+    }
+
+    /// With no agents there are no groups, so there is nothing to rule off.
+    #[test]
+    fn no_groups_means_no_rule() {
         let a = ordering_app();
         assert!(
             !a.rows()
@@ -5763,19 +6088,50 @@ mod tests {
         assert_eq!(project_order(&a), ["Alpha", "beta", "mono", "zebra"]);
     }
 
-    /// Projects with agents come first, and stay alphabetical within their
-    /// group — that is the whole point of the ordering.
+    /// A project that gains agents leaves the tail and leads the tree as a
+    /// group — groups with something running first.
     #[test]
-    fn projects_with_agents_sort_to_the_top() {
+    fn projects_with_agents_become_groups() {
         let mut a = ordering_app();
-        // `mono` (index 2) and `zebra` (index 0) gain agents.
-        a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_2", "two", "running")]));
-        assert_eq!(project_order(&a), ["mono", "zebra", "Alpha", "beta"]);
+        // `zebra` gains a sleeping agent, `mono` a running one.
+        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "sleeping")]));
+        a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_2", "two", "running")]));
+        let groups: Vec<String> = a
+            .rows()
+            .iter()
+            .filter(|r| matches!(r.kind, RowKind::Group(..)))
+            .map(|r| r.label.clone())
+            .collect();
+        assert_eq!(groups, ["mono", "zebra"], "running leads");
+
+        // Groups exist now, so the untouched tail folded itself away…
+        assert_eq!(project_order(&a), Vec::<String>::new());
+        // …and holds the rest once opened.
+        a.others_expanded = Some(true);
+        assert_eq!(project_order(&a), ["Alpha", "beta"]);
 
         // An environment that answers with nothing does not promote anyone.
         a.agents_loaded((0, 1, 0), Ok(Vec::new()));
-        assert_eq!(project_order(&a), ["mono", "zebra", "Alpha", "beta"]);
+        assert_eq!(project_order(&a), ["Alpha", "beta"]);
+    }
+
+    /// A group names its project, and its environment only when that says
+    /// something — not `production`, and not the only environment there is.
+    #[test]
+    fn group_labels_fold_the_environment_in_only_when_it_matters() {
+        let mut a = app();
+        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
+        let group_labels = |a: &App| -> Vec<String> {
+            a.rows()
+                .iter()
+                .filter(|r| matches!(r.kind, RowKind::Group(..)))
+                .map(|r| r.label.clone())
+                .collect()
+        };
+        assert_eq!(group_labels(&a), ["devtools"], "production says nothing");
+
+        a.agents_loaded((0, 0, 1), Ok(vec![agent("ca_2", "two", "running")]));
+        assert_eq!(group_labels(&a), ["devtools", "devtools/staging"]);
     }
 
     /// Empty projects are de-emphasised, and stop being so the moment they
@@ -5795,49 +6151,37 @@ mod tests {
         assert!(!mono.dimmed);
     }
 
-    /// Re-ordering must not move the selection to a different project: the
-    /// cursor is an index, and the row under it would otherwise change.
+    /// Re-ordering must not move the selection to a different row: the cursor
+    /// is an index, and the row under it would otherwise change.
     #[test]
     fn the_cursor_stays_on_its_row_when_the_order_changes() {
         let mut a = ordering_app();
-        let beta = a.rows().iter().position(|r| r.label == "beta").unwrap();
-        a.cursor = beta;
+        // `zebra` has a sleeping agent, and the cursor is on it.
+        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "sleeping")]));
+        a.cursor = a.rows().iter().position(|r| r.label == "one").unwrap();
 
-        // `zebra` gains an agent and jumps to the top, shifting `beta` down.
-        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        assert_eq!(a.selected_row().unwrap().label, "beta");
+        // `mono` gains a running agent and its group jumps above zebra's.
+        a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_2", "two", "running")]));
+        assert_eq!(a.selected_row().unwrap().label, "one");
     }
 
-    /// `(N)` beside a project, and nothing at all when there is nothing to
-    /// find — a marker against every empty project is noise.
+    /// The tail header counts the projects folded under it, and says what
+    /// they are other than once there are groups to be other than.
     #[test]
-    fn project_counts_read_as_n_in_parentheses() {
-        let mut a = app();
-        let project_note = |a: &App| {
+    fn the_tail_header_counts_its_projects() {
+        let mut a = ordering_app();
+        let header = |a: &App| {
             a.rows()
                 .into_iter()
-                .find(|r| r.label == "devtools")
+                .find(|r| matches!(r.kind, RowKind::OtherProjects))
                 .unwrap()
-                .note
         };
-        assert_eq!(project_note(&a), "", "nothing fetched yet");
+        assert_eq!(header(&a).label, "projects");
+        assert_eq!(header(&a).note, "(4)");
 
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        assert_eq!(project_note(&a), "(1)");
-
-        a.agents_loaded(
-            (0, 0, 1),
-            Ok(vec![
-                agent("ca_2", "two", "sleeping"),
-                agent("ca_3", "three", "running"),
-            ]),
-        );
-        assert_eq!(project_note(&a), "(3)", "summed across environments");
-
-        let mut empty = app();
-        empty.agents_loaded((0, 0, 0), Ok(vec![]));
-        empty.agents_loaded((0, 0, 1), Ok(vec![]));
-        assert_eq!(project_note(&empty), "", "no marker on an empty project");
+        assert_eq!(header(&a).label, "other projects");
+        assert_eq!(header(&a).note, "(3)");
     }
 
     /// Expanding an agent asks the platform what is running on it, every time:
@@ -6477,9 +6821,10 @@ mod tests {
     #[test]
     fn a_stale_load_result_is_ignored() {
         let mut a = app();
+        let before = a.rows();
         a.agents_loaded((9, 9, 9), Ok(vec![]));
         a.agents_loaded((0, 0, 5), Err("boom".into()));
-        assert_eq!(a.rows().len(), 2);
+        assert_eq!(a.rows(), before);
     }
 
     #[test]
@@ -6491,5 +6836,137 @@ mod tests {
         let rows = a.rows();
         assert!(rows.iter().any(|r| r.label.contains("502 from backboard")));
         assert!(!rows.iter().any(|r| r.label == "no agents here"));
+    }
+
+    /// `r` refetches without blanking what is on screen: a group that
+    /// vanished for every refresh would shove the rows — and the cursor —
+    /// somewhere else once every poll tick during a wake.
+    #[test]
+    fn refreshing_a_group_keeps_it_on_screen() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        let effect = a.on_key(key(KeyCode::Char('r')));
+        assert_eq!(
+            effect,
+            Some(Effect::LoadAgents {
+                environment_id: "env_prod".into(),
+                path: (0, 0, 0)
+            })
+        );
+        assert!(a.rows().iter().any(|r| r.label == "nimble-otter"));
+        assert_eq!(a.selected_row().unwrap().label, "nimble-otter");
+
+        // The same when a watch polls the environment behind the scenes.
+        a.reveal_environment("env_prod");
+        assert!(a.rows().iter().any(|r| r.label == "nimble-otter"));
+    }
+
+    /// A refresh that fails keeps the stale list — stale beats gone — and
+    /// says why in the status line.
+    #[test]
+    fn a_failed_refresh_keeps_the_agents_and_reports() {
+        let mut a = loaded_app();
+        a.agents_loaded((0, 0, 0), Err("502 from backboard".into()));
+        assert!(a.rows().iter().any(|r| r.label == "nimble-otter"));
+        assert!(a.status.contains("502 from backboard"), "{}", a.status);
+    }
+
+    /// A project with agents in one environment still shows its empty ones in
+    /// the tail — they have to stay reachable for `n`, `t`, and `r`.
+    #[test]
+    fn empty_environments_of_a_grouped_project_stay_reachable() {
+        let mut a = loaded_app();
+        a.others_expanded = Some(true);
+        let rows = a.rows();
+        assert!(
+            rows.iter()
+                .any(|r| r.kind == RowKind::Environment(0, 0, 1) && r.label == "staging"),
+            "{rows:#?}"
+        );
+        // The occupied environment is a group above, not a tail row too.
+        assert!(!rows.iter().any(|r| r.kind == RowKind::Environment(0, 0, 0)));
+
+        // Once every environment has agents the project leaves the tail.
+        a.agents_loaded((0, 0, 1), Ok(vec![agent("ca_9", "niner", "running")]));
+        assert!(
+            !a.rows()
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Project(..)))
+        );
+    }
+
+    /// The empty state advertises `n`, so `n` must work from where the cursor
+    /// starts: with a target it launches there, without one it asks for one.
+    #[test]
+    fn n_falls_back_to_the_target_from_the_tail_header() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        assert!(matches!(
+            a.selected_row().unwrap().kind,
+            RowKind::OtherProjects
+        ));
+        a.on_key(key(KeyCode::Char('n')));
+        assert_eq!(a.screen, Screen::TargetPick, "no target: ask for one");
+
+        let mut b = app();
+        b.screen = Screen::Manage;
+        b.target = Some(Target {
+            project_id: "proj_1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        let Some(Effect::Launch(req)) = b.on_key(key(KeyCode::Char('n'))) else {
+            panic!("expected a launch into the target");
+        };
+        assert!(req.force_new);
+        assert_eq!(req.environment_id, "env_prod");
+    }
+
+    /// Loading an environment from the tail can promote it into a group; the
+    /// cursor follows it up rather than being stranded in the folded tail.
+    #[test]
+    fn the_cursor_follows_an_environment_promoted_to_a_group() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.cursor = a.rows().iter().position(|r| r.label == "devtools").unwrap();
+        a.on_key(key(KeyCode::Right));
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "production")
+            .unwrap();
+        a.on_key(key(KeyCode::Right));
+        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
+        assert_eq!(
+            a.selected_row().unwrap().kind,
+            RowKind::Group(0, 0, 0),
+            "{:#?}",
+            a.rows()
+        );
+    }
+
+    /// "None yet" is a definitive claim: the hint searches while anything is
+    /// unanswered, owns up to failures, and only then declares the account
+    /// empty.
+    #[test]
+    fn the_hint_waits_for_answers_before_claiming_empty() {
+        let mut a = app();
+        let hint = |a: &App| a.rows().first().unwrap().label.clone();
+        assert_eq!(hint(&a), "looking for cloud agents…", "not loaded");
+
+        a.tree[0].projects[0].envs[0].agents = Load::Loading;
+        assert_eq!(hint(&a), "looking for cloud agents…", "still in flight");
+
+        a.agents_loaded((0, 0, 0), Ok(Vec::new()));
+        a.agents_loaded((0, 0, 1), Err("boom".into()));
+        assert_eq!(hint(&a), "couldn't check every environment — r retries");
+
+        a.agents_loaded((0, 0, 1), Ok(Vec::new()));
+        assert_eq!(hint(&a), "no cloud agents yet — n creates one");
     }
 }

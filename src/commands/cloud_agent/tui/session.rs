@@ -297,14 +297,11 @@ impl Session {
         }
         self.size = (rows, cols);
         if let Ok(mut parser) = self.parser.lock() {
-            parser.set_size(rows, cols);
-            // A smaller pane means a lower ceiling; an offset held over from a
-            // taller one would underflow inside the emulator.
-            let ceiling = rows.saturating_sub(1) as usize;
-            if self.scroll > ceiling {
-                self.scroll = ceiling;
-                parser.set_scrollback(ceiling);
-            }
+            parser.screen_mut().set_size(rows, cols);
+            // Resizing can reflow rows between the screen and history; read
+            // the offset back so the held position stays whatever the
+            // emulator says the view now is.
+            self.scroll = parser.screen().scrollback();
         }
         let _ = self.master.resize(PtySize {
             rows,
@@ -373,7 +370,7 @@ impl Session {
                         index = Some(text.chars().count());
                     }
                     match screen.cell(r, c).map(|cell| cell.contents()) {
-                        Some(s) if !s.is_empty() => text.push_str(&s),
+                        Some(s) if !s.is_empty() => text.push_str(s),
                         // Empty, or a wide character's second cell: still a
                         // column.
                         _ => text.push(' '),
@@ -434,25 +431,16 @@ impl Session {
 
     /// Scroll back through the emulator's history.
     ///
-    /// Clamped to the screen height, which is a limit of the emulator rather
-    /// than a choice: vt100 0.15 composes the scrolled view as
-    /// `scrollback[len-offset..] ++ rows[..rows_len-offset]`, so an offset past
-    /// the number of screen rows underflows that second subtraction. In debug
-    /// that panics; in release it wraps to a huge `take` and quietly renders
-    /// the live screen — which is what "scrolling does nothing" looked like.
-    ///
-    /// One screenful of history at a time, therefore. Going further back needs
-    /// a newer vt100, which currently conflicts with ratatui's pinned
-    /// `unicode-width`.
+    /// The only ceiling is the history that actually exists: the emulator
+    /// clamps the offset to it, so ask for the position and read back where
+    /// it settled. (vt100 0.15 could not compose a view more than one screen
+    /// deep — a clamp used to sit here working around that.)
     pub fn scroll_by(&mut self, delta: isize) {
         let Ok(mut parser) = self.parser.lock() else {
             return;
         };
-        let ceiling = self.size.0.saturating_sub(1) as isize;
-        let wanted = (self.scroll as isize + delta).clamp(0, ceiling.max(0)) as usize;
-        parser.set_scrollback(wanted);
-        // It also clamps to the history that exists, so read back what it
-        // settled on rather than trusting the request.
+        let wanted = (self.scroll as isize).saturating_add(delta).max(0) as usize;
+        parser.screen_mut().set_scrollback(wanted);
         self.scroll = parser.screen().scrollback();
     }
 
@@ -513,7 +501,7 @@ impl Session {
         }
         self.scroll = 0;
         if let Ok(mut parser) = self.parser.lock() {
-            parser.set_scrollback(0);
+            parser.screen_mut().set_scrollback(0);
         }
     }
 
@@ -1009,6 +997,218 @@ mod tests {
         // Typing returns to the live view.
         session.send(b"x");
         assert!(!session.scrolled_back());
+    }
+
+    /// The whole retained history is reachable, not one screenful. The old
+    /// emulator could not compose a view deeper than the pane is tall, so a
+    /// clamp in `scroll_by` stopped exactly here — this is the regression
+    /// test for its removal.
+    #[test]
+    fn scrolling_reaches_the_whole_history() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(6, 40);
+
+        for i in 0..120 {
+            session.send(format!("line-{i}\r\n").as_bytes());
+        }
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen = session
+                .with_screen(|screen| screen.contents().contains("line-119"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+        }
+
+        // Ask for infinitely far back; the emulator clamps to what exists.
+        session.scroll_by(isize::MAX);
+        assert!(
+            session.scroll > 100,
+            "120 lines through a 6-row pane should leave far more than one \
+             screen of history, got offset {}",
+            session.scroll
+        );
+        let top = session.with_screen(|s| s.contents()).unwrap();
+        assert!(
+            top.contains("line-0"),
+            "the very first line should be visible at full depth:\n{top}"
+        );
+
+        // And all the way forward again.
+        session.scroll_by(isize::MIN);
+        assert!(!session.scrolled_back());
+        let live = session.with_screen(|s| s.contents()).unwrap();
+        assert!(live.contains("line-119"), "back to the tail:\n{live}");
+    }
+
+    /// Successive wheel notches keep going past one screenful, through the
+    /// same entry point the mouse uses.
+    #[test]
+    fn scrolling_walks_past_one_screenful() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(6, 40);
+
+        for i in 0..60 {
+            session.send(format!("line-{i}\r\n").as_bytes());
+        }
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen = session
+                .with_screen(|screen| screen.contents().contains("line-59"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+        }
+
+        // No mouse reporting and no alternate screen here, so each wheel goes
+        // to the emulator's own scrollback.
+        session.scroll(true, 5, (1, 1));
+        let one = session.scroll;
+        session.scroll(true, 5, (1, 1));
+        let two = session.scroll;
+        session.scroll(true, 5, (1, 1));
+        let three = session.scroll;
+        assert!(one < two && two < three, "each notch must go deeper");
+        assert!(
+            three > 6,
+            "three notches should pass the height of the pane, got {three}"
+        );
+
+        let deep = session.with_screen(|s| s.contents()).unwrap();
+        assert!(
+            !deep.contains("line-59"),
+            "the tail should have scrolled out of view:\n{deep}"
+        );
+    }
+
+    /// A deep offset survives the pane changing shape. Resize used to clamp
+    /// the offset to the new height because the old emulator would underflow
+    /// past it; now the offset just rides along.
+    #[test]
+    fn a_deep_scroll_survives_resize() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(10, 40);
+
+        for i in 0..100 {
+            session.send(format!("line-{i}\r\n").as_bytes());
+        }
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen = session
+                .with_screen(|screen| screen.contents().contains("line-99"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+        }
+
+        session.scroll_by(60);
+        assert!(session.scroll > 10, "start well past one screen");
+
+        // Shrink, then grow. Either way the view must keep rendering — in
+        // debug builds an underflow inside the emulator would panic here.
+        session.resize(4, 40);
+        assert!(session.scrolled_back(), "the offset survives shrinking");
+        let shrunk = session.with_screen(|s| s.contents()).unwrap();
+        assert!(!shrunk.is_empty(), "a shrunk pane still renders history");
+
+        session.resize(20, 40);
+        let grown = session.with_screen(|s| s.contents()).unwrap();
+        assert!(!grown.is_empty(), "a grown pane still renders history");
+
+        // Typing is still the way back to live.
+        session.send(b"x");
+        assert!(!session.scrolled_back());
+    }
+
+    /// Scrolling, resizing, and live output all at once. None of these
+    /// operations may wedge the offset, wedge each other, or leave the view
+    /// unable to render — the wheel arrives whenever it arrives, not when the
+    /// pane is conveniently idle.
+    #[test]
+    fn scrollback_survives_churn() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(8, 40);
+
+        // Interleave output with scrolls and reshapes, deterministically.
+        let sizes = [(4u16, 30u16), (12, 60), (6, 40), (24, 80), (8, 40)];
+        for (round, &(rows, cols)) in sizes.iter().enumerate() {
+            for i in 0..40 {
+                session.send(format!("round-{round}-line-{i}\r\n").as_bytes());
+            }
+            session.scroll_by(37);
+            session.resize(rows, cols);
+            session.scroll_by(-13);
+            let held = session.scroll;
+            let history = session
+                .with_screen(|s| s.scrollback())
+                .expect("the emulator stays lockable");
+            assert_eq!(held, history, "the held offset tracks the emulator");
+            assert!(
+                session.with_screen(|s| s.contents()).is_some(),
+                "the view renders mid-churn"
+            );
+        }
+
+        // Wait for the tail so the final checks see settled history.
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen = session
+                .with_screen(|screen| screen.contents().contains("round-4-line-39"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+        }
+
+        session.scroll_by(isize::MAX);
+        let top = session.with_screen(|s| s.contents()).unwrap();
+        assert!(
+            top.contains("round-0-line-"),
+            "the first round is still reachable at full depth:\n{top}"
+        );
+        session.send(b"x");
+        assert!(!session.scrolled_back(), "typing still snaps back to live");
+    }
+
+    /// Past the emulator's retention the offset clamps to what is kept, and
+    /// the oldest lines are the ones to go — the view at full depth is the
+    /// start of the *retained* history, never garbage.
+    #[test]
+    fn scrollback_clamps_at_capacity() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(6, 40);
+
+        // More than the 4000 lines the parser retains.
+        for i in 0..4200 {
+            session.send(format!("line-{i}\r\n").as_bytes());
+        }
+        for _ in 0..300 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen = session
+                .with_screen(|screen| screen.contents().contains("line-4199"))
+                .unwrap_or(false);
+            if seen {
+                break;
+            }
+        }
+
+        session.scroll_by(isize::MAX);
+        assert_eq!(
+            session.scroll, 4000,
+            "full depth is the retention limit, no further"
+        );
+        let top = session.with_screen(|s| s.contents()).unwrap();
+        assert!(
+            !top.contains("line-0\r") && !top.contains("line-0\n"),
+            "the very first lines fell out of retention:\n{top}"
+        );
+        assert!(
+            top.contains("line-"),
+            "what is shown is still real history:\n{top}"
+        );
     }
 
     /// An application that asked for mouse reporting gets a real wheel event,
