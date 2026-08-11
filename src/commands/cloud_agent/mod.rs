@@ -32,7 +32,7 @@ use tui::{App, Outcome};
 #[derive(Parser)]
 #[clap(
     args_conflicts_with_subcommands = true,
-    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -198,28 +198,32 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
     let stored = AgentPrefs::load_in(&home);
     let first_run = stored.is_none();
     let saved = stored.unwrap_or_default();
-    // The configured default wins: it is the answer to "where do agents go",
-    // and a linked directory is about deploys, not agents. A linked project is
-    // still the fallback when no default has been set.
-    let target = saved
-        .default_project
-        .as_ref()
-        .map(|project| tui::Target {
+    // A linked directory wins: `railway link` (or a linked service checkout) is
+    // an explicit, per-directory statement of "this is the project I'm working
+    // in", which outranks a person-wide preference chosen once from wherever
+    // the terminal happened to be. The configured default is still the
+    // fallback when this directory has no link.
+    let linked = linked_target(&mut configs, &client, &tree).await;
+    let target = linked.clone().or_else(|| {
+        saved.default_project.as_ref().map(|project| tui::Target {
             project_id: project.project_id.clone(),
             project_name: project.project_name.clone(),
             environment_id: project.environment_id.clone(),
             environment_name: project.environment_name.clone(),
         })
-        .or(linked_target(&mut configs, &client, &tree).await);
+    });
+    // Same order for the "(default)" label in the tree: a linked project shows
+    // as the default over whatever is in the preferences file.
+    let default_project_id = linked
+        .as_ref()
+        .map(|t| t.project_id.clone())
+        .or_else(|| saved.default_project.as_ref().map(|p| p.project_id.clone()));
     let mut app = App::new(
         tree,
         target,
         saved.agent.as_deref(),
         saved.theme.as_deref(),
-        saved
-            .default_project
-            .as_ref()
-            .map(|project| project.project_id.clone()),
+        default_project_id,
         !first_run,
     );
 

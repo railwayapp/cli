@@ -721,8 +721,9 @@ pub struct LaunchRequest {
 }
 
 pub struct App {
-    /// The project new agents go to, from preferences. Sorted to the top of the
-    /// tree and separated from the rest.
+    /// The project new agents go to: the linked directory's project, or the
+    /// preferences file when this directory has no link. Sorted to the top of
+    /// the tree and separated from the rest.
     pub default_project: Option<String>,
     /// Whether preferences exist yet. Decides whether the menu carries a Setup
     /// card or leaves changing things to the ⌥s settings card.
