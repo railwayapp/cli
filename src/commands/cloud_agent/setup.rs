@@ -114,6 +114,16 @@ impl fmt::Display for SourceChoice {
     }
 }
 
+impl Args {
+    /// Whether this run needs a Railway credential. `--show` only prints what
+    /// is already on disk, and the non-interactive path picks a harness from
+    /// what it can see locally; only the prompts reach the API, to ask which
+    /// project agents should land in.
+    pub fn needs_credential(&self, interactive: bool) -> bool {
+        !self.show && !self.yes && interactive
+    }
+}
+
 pub async fn command(args: Args) -> Result<()> {
     let home = dirs::home_dir().context("Unable to get home directory")?;
     let existing = AgentPrefs::load_in(&home);

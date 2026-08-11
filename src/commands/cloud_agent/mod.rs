@@ -21,6 +21,7 @@ use colored::Colorize;
 use crate::client::GQLClient;
 use crate::commands::code::LaunchArgs;
 use crate::config::Configs;
+use crate::errors::RailwayError;
 use crate::macros::is_stdout_terminal;
 use crate::util::progress::create_spinner;
 use prefs::AgentPrefs;
@@ -89,6 +90,15 @@ async fn tracked(kind: &'static str, run: impl Future<Output = Result<()>>) -> R
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    // `railway ca` is often the first Railway command someone runs, so a logged
+    // out user gets the login flow inline instead of an error telling them to
+    // run `railway login` and type this again. The command they asked for then
+    // continues on the credential that flow just wrote.
+    let interactive = is_stdout_terminal();
+    if needs_credential(args.command.as_ref(), interactive) {
+        ensure_logged_in(interactive).await?;
+    }
+
     match args.command {
         Some(Command::Setup(a)) => setup::command(a).await,
         Some(Command::Start(a)) => crate::commands::code::launch(a).await,
@@ -104,6 +114,43 @@ pub async fn command(args: Args) -> Result<()> {
         // scripted callers that reasonably expect the launcher.
         None => crate::commands::code::launch(args.launch).await,
     }
+}
+
+/// Whether this invocation will talk to the API, and so needs a credential
+/// before it starts. Only `setup` can get by without one — everything else
+/// (the TUI, `start`, a bare launch flag) opens with a query.
+fn needs_credential(command: Option<&Command>, interactive: bool) -> bool {
+    match command {
+        Some(Command::Setup(a)) => a.needs_credential(interactive),
+        _ => true,
+    }
+}
+
+/// Run the login flow in place when there is no credential to work with.
+///
+/// Any credential counts, including a project token: those callers are already
+/// authenticated as far as this command is concerned, and `railway login`
+/// short-circuits on `RAILWAY_TOKEN` anyway, so sending them there would be a
+/// detour to nowhere. An expired login is not a case to handle here — `main`
+/// refreshes and clears dead credentials before dispatch, so it reaches this
+/// check as no credential at all.
+async fn ensure_logged_in(interactive: bool) -> Result<()> {
+    if Configs::new()?.has_auth_credentials() {
+        return Ok(());
+    }
+    // Piped or scripted: the login flow would sit on a device code nobody is
+    // watching. Fail the way every other command does instead.
+    if !interactive {
+        return Err(RailwayError::Unauthorized.into());
+    }
+
+    println!("{}", "Log in to Railway to continue.".bold());
+    let result = crate::commands::login::prompt_login().await;
+    telemetry::track_login_forwarded(result.as_ref().err().map(|e| format!("{e:#}")).as_deref())
+        .await;
+    result?;
+    println!();
+    Ok(())
 }
 
 /// The TUI loop. `run` gives the terminal back whenever something needs the
@@ -274,4 +321,39 @@ async fn linked_target(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn setup_args(argv: &[&str]) -> Command {
+        Command::Setup(setup::Args::parse_from(
+            std::iter::once("setup").chain(argv.iter().copied()),
+        ))
+    }
+
+    #[test]
+    fn launch_paths_need_a_credential() {
+        assert!(needs_credential(None, true));
+        assert!(needs_credential(None, false));
+        assert!(needs_credential(
+            Some(&Command::Start(LaunchArgs::parse_from(["start"]))),
+            true
+        ));
+    }
+
+    #[test]
+    fn local_setup_runs_logged_out() {
+        assert!(!needs_credential(Some(&setup_args(&["--show"])), true));
+        assert!(!needs_credential(Some(&setup_args(&["-y"])), true));
+        // Piped setup takes the same non-interactive path as `-y`.
+        assert!(!needs_credential(Some(&setup_args(&[])), false));
+    }
+
+    #[test]
+    fn interactive_setup_needs_a_credential_for_the_project_picker() {
+        assert!(needs_credential(Some(&setup_args(&[])), true));
+    }
 }
