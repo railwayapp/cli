@@ -1401,6 +1401,11 @@ fn finish_copy(app: &mut App, text: Option<String>) {
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
+    // While the TUI holds the terminal, no inquire prompt can work — the event
+    // loop would eat its keystrokes and the next frame would paint over it.
+    // This flag makes every prompt helper (and ensure_ssh_key's registration
+    // fallback) fail fast instead of deadlocking the caller.
+    crate::util::prompt::set_terminal_owned(true);
     // Mouse capture takes the terminal's own selection away, which is why the
     // TUI implements drag-to-copy itself.
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
@@ -1448,6 +1453,7 @@ fn restore_terminal() {
     // them off on both.
     let _ = execute!(stdout(), DisableMouseCapture);
     let _ = disable_raw_mode();
+    crate::util::prompt::set_terminal_owned(false);
     let _ = stdout().flush();
 }
 

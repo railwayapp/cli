@@ -194,6 +194,19 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
         return Ok(());
     }
 
+    // Settle the SSH key while the real terminal can still host a prompt: the
+    // first-run registration flow asks a question on stdin, and once the TUI
+    // owns the screen no prompt can work (every launch used to hang there).
+    // After this, the launch pipeline's own ensure_ssh_key lookup finds the
+    // registered key and stays silent. Best-effort: the TUI also sleeps and
+    // deletes agents, so a missing key degrades connecting, not managing.
+    let ssh_preflight = crate::commands::ssh::tel::track_for(
+        "cloud_agent_launch",
+        "ssh_key_preflight",
+        crate::commands::ssh::ensure_ssh_key_quiet(&client, &configs).await,
+    )
+    .await;
+
     let home = dirs::home_dir().context("Unable to get home directory")?;
     let stored = AgentPrefs::load_in(&home);
     let first_run = stored.is_none();
@@ -240,6 +253,14 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
         .map(|(source, _)| source.slug.to_string());
     // Mirrored so the ⌥s settings card opens showing the saved answer.
     app.skills_enabled = saved.skills.enabled;
+    // The preflight's terminal output is gone once the alternate screen opens,
+    // so carry the failure in as a toast. Launch attempts repeat the full
+    // instructions in their own error.
+    if let Err(err) = &ssh_preflight {
+        let reason = err.to_string();
+        let reason = reason.lines().next().unwrap_or("SSH key setup failed");
+        app.toast_error(format!("SSH setup needed before connecting: {reason}"));
+    }
     // No preferences yet: ask whether to set them up, rather than dropping
     // someone in front of a prompt whose target, agent and skills are all
     // unanswered. Choosing Setup from the menu skips that question — they have
