@@ -38,6 +38,15 @@ pub enum RailwayError {
     #[error("Unauthorized. Please run `railway login` again.")]
     UnauthorizedLogin,
 
+    /// The session is demonstrably alive (a token refresh just succeeded)
+    /// but the server still refused the resource: an authorization failure,
+    /// not an authentication one. Kept free of the AUTH_FAILURE_MARKERS
+    /// substrings on purpose — re-authenticating cannot fix a grant that
+    /// doesn't cover the resource, so the MCP layer must not burn a re-auth
+    /// retry on it, and the user must not be told to simply log in again.
+    #[error("You do not have access to this resource.")]
+    OAuthInsufficientGrant,
+
     #[error(
         "Invalid {0}. Please check that it is valid and has access to the resource you're trying to use."
     )]
@@ -193,6 +202,7 @@ impl RailwayError {
             RailwayError::OAuthAccessDenied => "OAUTH_ACCESS_DENIED",
             RailwayError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",
             RailwayError::OAuthInvalidGrant(_) => "OAUTH_INVALID_GRANT",
+            RailwayError::OAuthInsufficientGrant => "OAUTH_INSUFFICIENT_GRANT",
             RailwayError::OAuthError(_) => "OAUTH_ERROR",
             RailwayError::NotAuthenticated => "NOT_AUTHENTICATED",
         }
@@ -206,6 +216,9 @@ impl RailwayError {
             RailwayError::NotAuthenticated | RailwayError::OAuthInvalidGrant(_) => {
                 Some("Run `railway login` to authenticate, then re-run.")
             }
+            RailwayError::OAuthInsufficientGrant => Some(
+                "If you believe you have access, run `railway login` again and ensure the integration has access to this project.",
+            ),
             RailwayError::NoLinkedProject | RailwayError::ProjectNotFound => {
                 Some("Run `railway link` to connect to a project.")
             }
