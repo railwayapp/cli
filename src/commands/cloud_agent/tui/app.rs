@@ -58,6 +58,8 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         "agents",
         &[
             ("n", "new agent (on a group, project, or environment)"),
+            ("⌥n", "new session, choosing the agent first"),
+            ("⌥p", "new session from a prompt"),
             ("s", "sleep"),
             ("w", "wake"),
             ("d", "delete, with a confirmation"),
@@ -268,6 +270,11 @@ pub enum Screen {
     /// setup flow asks with — picking a target is the same question, so it
     /// should not send anyone through the whole management tree to answer it.
     TargetPick,
+    /// ⌥n on Manage: choosing which agent a new session runs, over the tree.
+    HarnessPick,
+    /// ⌥p on Manage: composing a prompt for a new session, over the tree —
+    /// the menu's prompt box, without the walk back to the menu.
+    ManagePrompt,
     Manage,
 }
 
@@ -734,6 +741,10 @@ pub struct App {
     pub known_environments: Vec<String>,
     /// The target chooser, while it is open.
     pub target_pick: Option<TargetPicker>,
+    /// ⌥n's picker cursor while [`Screen::HarnessPick`] is up.
+    pub harness_pick: Option<usize>,
+    /// ⌥p's draft while [`Screen::ManagePrompt`] is up.
+    pub manage_prompt: Option<String>,
     /// The agent chooser, while it is open.
     pub agent_pick: Option<AgentPicker>,
     /// The session pane has the whole screen: no tree, no detail column.
@@ -823,6 +834,8 @@ impl App {
             configured,
             known_environments: Vec::new(),
             target_pick: None,
+            harness_pick: None,
+            manage_prompt: None,
             agent_pick: None,
             maximized: false,
             pointer_to_app: false,
@@ -1818,8 +1831,19 @@ impl App {
     }
 
     fn launch(&self, agent_id: Option<String>, force_new: bool) -> Option<Effect> {
+        let draft = (!self.prompt.trim().is_empty()).then(|| self.prompt.trim().to_string());
+        self.launch_prompted(agent_id, force_new, draft)
+    }
+
+    /// [`Self::launch`], with the prompt supplied by the caller instead of
+    /// read from the menu's box — what the ⌥p composer sends.
+    fn launch_prompted(
+        &self,
+        agent_id: Option<String>,
+        force_new: bool,
+        prompt: Option<String>,
+    ) -> Option<Effect> {
         let target = self.target.clone()?;
-        let prompt = (!self.prompt.trim().is_empty()).then(|| self.prompt.trim().to_string());
         Some(Effect::Launch(LaunchRequest {
             project_id: target.project_id.clone(),
             environment_id: target.environment_id.clone(),
@@ -1838,7 +1862,12 @@ impl App {
         // Esc must reach its editor, and ⌥/^ chords belong to whatever is
         // running in there. Only one chord is reserved, and it is one no agent
         // binds: ^o hands focus back to the tree.
-        if self.focus == ManageFocus::Session && self.screen != Screen::Menu {
+        //
+        // Only while the session is the frontmost thing, though. A card
+        // floated over it — the ⌥n picker, the ⌥p composer — is what the
+        // keyboard is for while it is up, and focus stays on the session
+        // underneath so closing the card returns to typing in it.
+        if self.focus == ManageFocus::Session && self.screen == Screen::Manage {
             // Three ways out, because terminals disagree about what they will
             // report. `^]` is the classic escape chord and works everywhere;
             // ⌥esc — the ⌥ family's release, matching every other chord here —
@@ -1851,17 +1880,26 @@ impl App {
             let ctrl_o = ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'));
             if alt_esc || ctrl_bracket || ctrl_o {
                 self.focus = ManageFocus::Tree;
+                // Releasing means "show me the tree" — a maximized pane has
+                // it folded away, so give it back rather than handing focus
+                // to something invisible.
+                self.maximized = false;
                 return None;
             }
             // Three chords are taken from the agent, all because the moment
             // you want them is while you are using it: ⌥f for room, ⌥] and ⌥[
-            // to move between panes. ⌥f costs Meta-f (forward-word) in a
-            // shell; readline leaves Meta-] and Meta-[ unbound, and `^]`
-            // (character-search) is untouched because only the Meta forms are
-            // claimed. Nothing else is intercepted — ⌥s still reaches the
-            // agent from here.
+            // to move between panes, ⌥n and ⌥p to start more work — the
+            // thought "this needs its own session" arrives while reading one,
+            // and going out to the tree first to act on it is the friction
+            // they exist to remove. The costs, all in a shell: ⌥f is Meta-f
+            // (forward-word), ⌥n and ⌥p are Meta-n / Meta-p (the
+            // non-incremental history searches, which few people bind and
+            // both harnesses ignore). Readline leaves Meta-] and Meta-[
+            // unbound, and `^]` (character-search) is untouched because only
+            // the Meta forms are claimed. Nothing else is intercepted — ⌥s
+            // still reaches the agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'f' | ']' | '[')
+                && matches!(chord, 'f' | 'n' | 'p' | ']' | '[')
             {
                 return self.alt_action(chord);
             }
@@ -1913,6 +1951,8 @@ impl App {
             Screen::Settings => self.on_key_settings(key),
             Screen::TargetPick => self.on_key_target_pick(key),
             Screen::AgentPick => self.on_key_agent_pick(key),
+            Screen::HarnessPick => self.on_key_harness_pick(key),
+            Screen::ManagePrompt => self.on_key_manage_prompt(key),
             Screen::Menu => self.on_key_menu(key),
             Screen::Manage => self.on_key_manage(key),
         }
@@ -2768,6 +2808,19 @@ impl App {
             }
             ']' => self.cycle_session(true),
             '[' => self.cycle_session(false),
+            // The launchers live on the Manage screen, where the tree the
+            // launch aims at is on screen. The menu already has both: its
+            // prompt box and its cards.
+            'n' if self.screen == Screen::Manage => {
+                self.harness_pick = Some(self.harness);
+                self.screen = Screen::HarnessPick;
+                None
+            }
+            'p' if self.screen == Screen::Manage => {
+                self.manage_prompt = Some(String::new());
+                self.screen = Screen::ManagePrompt;
+                None
+            }
             _ => None,
         }
     }
@@ -3067,19 +3120,39 @@ impl App {
                         self.launch(Some(id), false)
                     }
                     RowKind::Session(..) => self.reattach_row(kind),
-                    // Straight through to the first environment's agents, which
-                    // is what someone opening a project is looking for.
+                    // A toggle: open drills straight through to the first
+                    // environment's agents — what someone opening a project is
+                    // looking for — and a second enter folds the whole thing
+                    // back up rather than going dead once everything under it
+                    // is already open. The cursor stays on the project row so
+                    // the second enter lands where the first one did.
                     RowKind::Project(w, p) => {
-                        self.set_expanded(RowKind::Project(w, p), true);
-                        let effect = self.set_expanded(RowKind::Environment(w, p, 0), true);
-                        if let Some(index) = self
-                            .rows()
-                            .iter()
-                            .position(|r| r.kind == RowKind::Environment(w, p, 0))
-                        {
-                            self.cursor = index;
+                        let open = self
+                            .tree
+                            .get(w)
+                            .and_then(|ws| ws.projects.get(p))
+                            .is_some_and(|project| project.expanded);
+                        if open {
+                            self.set_expanded(RowKind::Project(w, p), false)
+                        } else {
+                            self.set_expanded(RowKind::Project(w, p), true);
+                            self.set_expanded(RowKind::Environment(w, p, 0), true)
                         }
-                        effect
+                    }
+                    // Workspaces and environments toggle the same way: enter
+                    // on something already open closes it.
+                    RowKind::Workspace(w) => {
+                        let open = self.tree.get(w).is_some_and(|ws| ws.expanded);
+                        self.set_expanded(RowKind::Workspace(w), !open)
+                    }
+                    RowKind::Environment(w, p, e) => {
+                        let open = self
+                            .tree
+                            .get(w)
+                            .and_then(|ws| ws.projects.get(p))
+                            .and_then(|project| project.envs.get(e))
+                            .is_some_and(|env| env.expanded);
+                        self.set_expanded(RowKind::Environment(w, p, e), !open)
                     }
                     other => self.set_expanded(other, true),
                 }
@@ -3166,6 +3239,13 @@ impl App {
     /// target, the same place the menu's New Cloud Agent goes: the empty
     /// state advertises `n`, so `n` has to work from where the cursor starts.
     fn new_here(&mut self) -> Option<Effect> {
+        self.new_here_prompted(None)
+    }
+
+    /// [`Self::new_here`], carrying a prompt from the ⌥p composer. `None`
+    /// keeps `n`'s behavior exactly: the agent-row launch sends no prompt,
+    /// and the create-an-agent paths fall back to the menu box's draft.
+    fn new_here_prompted(&mut self, prompt: Option<String>) -> Option<Effect> {
         let kind = self.selected_row().map(|row| row.kind);
         match kind {
             Some(RowKind::Agent(w, p, e, a)) | Some(RowKind::Session(w, p, e, a, _)) => {
@@ -3180,13 +3260,16 @@ impl App {
                     force_new: false,
                     new_session: true,
                     harness: self.harness_name().to_string(),
-                    prompt: None,
+                    prompt,
                     label: format!("{agent_name} · new session"),
                 }))
             }
             Some(RowKind::Environment(w, p, e)) | Some(RowKind::Group(w, p, e)) => {
                 self.target = self.target_at((w, p, e));
-                self.launch(None, true)
+                match prompt {
+                    Some(p) => self.launch_prompted(None, true, Some(p)),
+                    None => self.launch(None, true),
+                }
             }
             Some(RowKind::Project(w, p)) => {
                 // A project is not a place an agent can live; its first
@@ -3196,12 +3279,87 @@ impl App {
                 let name = env.name.clone();
                 self.target = self.target_at((w, p, 0));
                 self.status = format!("New agent in {name}");
-                self.launch(None, true)
+                match prompt {
+                    Some(p) => self.launch_prompted(None, true, Some(p)),
+                    None => self.launch(None, true),
+                }
             }
-            _ if self.target.is_some() => self.launch(None, true),
+            _ if self.target.is_some() => match prompt {
+                Some(p) => self.launch_prompted(None, true, Some(p)),
+                None => self.launch(None, true),
+            },
             _ => {
                 self.start_target_pick();
                 self.status = "Pick where this should run".into();
+                None
+            }
+        }
+    }
+
+    /// Keys while the ⌥n picker is up: choose the agent, then the same new
+    /// session `n` would have made where the cursor points.
+    fn on_key_harness_pick(&mut self, key: KeyEvent) -> Option<Effect> {
+        let cursor = self.harness_pick?;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.harness_pick = Some(cursor.saturating_sub(1));
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.harness_pick = Some((cursor + 1).min(HARNESSES.len() - 1));
+                None
+            }
+            KeyCode::Enter => {
+                self.harness = cursor.min(HARNESSES.len() - 1);
+                self.harness_pick = None;
+                self.screen = Screen::Manage;
+                self.new_here()
+            }
+            KeyCode::Esc => {
+                self.harness_pick = None;
+                self.screen = Screen::Manage;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Keys while the ⌥p composer is up: the menu prompt box's contract —
+    /// type, shift+tab cycles the agent, enter sends, esc closes.
+    fn on_key_manage_prompt(&mut self, key: KeyEvent) -> Option<Effect> {
+        let mut draft = self.manage_prompt.take()?;
+        match key.code {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                draft.push(c);
+                self.manage_prompt = Some(draft);
+                None
+            }
+            KeyCode::Backspace => {
+                draft.pop();
+                self.manage_prompt = Some(draft);
+                None
+            }
+            KeyCode::BackTab => {
+                self.harness = (self.harness + 1) % HARNESSES.len();
+                self.manage_prompt = Some(draft);
+                None
+            }
+            KeyCode::Enter if !draft.trim().is_empty() => {
+                self.screen = Screen::Manage;
+                self.new_here_prompted(Some(draft.trim().to_string()))
+            }
+            // Enter on an empty draft is a slip, not a request for an
+            // unprompted session; the box stays up.
+            KeyCode::Enter => {
+                self.manage_prompt = Some(draft);
+                None
+            }
+            KeyCode::Esc => {
+                self.screen = Screen::Manage;
+                None
+            }
+            _ => {
+                self.manage_prompt = Some(draft);
                 None
             }
         }
@@ -3649,7 +3807,7 @@ fn project_agent_count(project: &ProjectNode) -> usize {
 /// sends it as a curly double quote. Everywhere else the reverse chord is
 /// simply absent — it can go dead, but never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['f', 's', ']', '['];
+    const ACTIONS: &[char] = &['f', 's', 'n', 'p', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = c.to_ascii_lowercase();
@@ -3658,9 +3816,13 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
         return None;
     }
     // macOS Option-composed characters, for the terminals that send them.
+    // ⌥n has no composed form: Option+N is the dead key for `~` and emits
+    // nothing until the next keystroke, so without Meta it simply doesn't
+    // exist — the same trade ⌥[ documents above.
     match key.code {
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
+        KeyCode::Char('π') => Some('p'),
         // Option+] composes to a left curly single quote, Option+shift+] to
         // the right one; Option+[ does the same with the double quotes. Each
         // pair is one chord as far as anyone pressing it is concerned,
@@ -5432,10 +5594,12 @@ mod tests {
         assert!(a.status.contains("enter to reattach"), "{}", a.status);
     }
 
-    /// Enter on a project goes straight to its first environment's agents;
-    /// enter on an environment still means that one exactly.
+    /// Enter on a project toggles it: the first press opens it straight
+    /// through to its first environment's agents, and a second press folds
+    /// it back up instead of going dead. The cursor stays on the project so
+    /// the second press lands where the first one did.
     #[test]
-    fn enter_on_a_project_opens_its_first_environment() {
+    fn enter_on_a_project_toggles_it() {
         let mut a = app();
         a.screen = Screen::Manage;
         a.cursor = a.rows().iter().position(|r| r.label == "devtools").unwrap();
@@ -5456,9 +5620,155 @@ mod tests {
         );
         assert_eq!(
             a.selected_row().unwrap().label,
-            "production",
-            "the cursor follows into it"
+            "devtools",
+            "the cursor stays put, so enter again can close it"
         );
+
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert!(
+            !a.tree[0].projects[0].expanded,
+            "the second enter folds the project"
+        );
+    }
+
+    /// ⌥n floats the agent picker over the tree; enter launches the same new
+    /// session `n` would have made, on the harness just chosen.
+    #[test]
+    fn alt_n_picks_a_harness_then_launches() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        let opened_on = a.harness;
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(
+            a.harness_pick,
+            Some(opened_on),
+            "the picker opens on the current choice"
+        );
+        a.on_key(key(KeyCode::Down));
+        let effect = a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::Manage);
+        let Some(Effect::Launch(req)) = effect else {
+            panic!("expected a launch, got {effect:?}");
+        };
+        let picked = (opened_on + 1).min(HARNESSES.len() - 1);
+        assert_eq!(
+            req.harness, HARNESSES[picked],
+            "the picked harness rides along"
+        );
+
+        // Esc just closes it.
+        a.on_key(alt('n'));
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.screen, Screen::Manage);
+    }
+
+    /// ⌥p floats the menu's prompt box over the tree: type, shift+tab to
+    /// change the agent, enter to spin up a session carrying the prompt.
+    #[test]
+    fn alt_p_composes_a_prompted_session() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        assert_eq!(a.on_key(alt('p')), None);
+        assert_eq!(a.screen, Screen::ManagePrompt);
+        for c in "fix it".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        let before = a.harness;
+        a.on_key(key(KeyCode::BackTab));
+        assert_eq!(a.harness, (before + 1) % HARNESSES.len());
+
+        let effect = a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::Manage);
+        let Some(Effect::Launch(req)) = effect else {
+            panic!("expected a launch, got {effect:?}");
+        };
+        assert_eq!(req.prompt.as_deref(), Some("fix it"));
+
+        // An empty draft doesn't send: enter is a slip there, and the menu
+        // box's own contract is that esc closes without launching.
+        a.on_key(alt('p'));
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(a.screen, Screen::ManagePrompt, "nothing to send yet");
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.screen, Screen::Manage);
+    }
+
+    /// The launchers work from inside a session, which is where the thought
+    /// "this needs its own session" actually arrives. The card floated over
+    /// it takes the keyboard while it is up — otherwise the draft would be
+    /// typed into the harness — and focus returns to the session on esc.
+    #[test]
+    fn alt_p_and_alt_n_reach_past_a_focused_session() {
+        let mut a = loaded_app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.sessions
+            .push(super::super::session::Session::for_test("ca_1", "builder").unwrap());
+        a.active = Some(0);
+        a.focus = ManageFocus::Session;
+
+        assert_eq!(a.on_key(alt('p')), None);
+        assert_eq!(
+            a.screen,
+            Screen::ManagePrompt,
+            "⌥p is not swallowed by the session"
+        );
+        for c in "ship it".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            a.manage_prompt.as_deref(),
+            Some("ship it"),
+            "the card has the keyboard, not the harness"
+        );
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.screen, Screen::Manage);
+        assert_eq!(
+            a.focus,
+            ManageFocus::Session,
+            "closing the card returns to typing in the session"
+        );
+
+        // Same for the picker.
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.screen, Screen::Manage);
+    }
+
+    /// Releasing a focused session with ⌥esc also un-maximizes: focus moving
+    /// to a pane that is folded away would land on something invisible.
+    #[test]
+    fn releasing_a_maximized_session_restores_the_tree() {
+        let mut a = loaded_app();
+        a.screen = Screen::Manage;
+        a.sessions
+            .push(super::super::session::Session::for_test("ca_1", "builder").unwrap());
+        a.active = Some(0);
+        a.focus = ManageFocus::Session;
+        a.maximized = true;
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT);
+        assert_eq!(a.on_key(esc), None);
+        assert_eq!(a.focus, ManageFocus::Tree);
+        assert!(!a.maximized, "the tree pane comes back with focus");
     }
 
     /// Every environment is a row, not just each project's first: an agent

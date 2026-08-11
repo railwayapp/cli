@@ -403,6 +403,31 @@ pub async fn resolve(
     selector: Option<&str>,
     environment_id: Option<&str>,
 ) -> Result<(Agent, Resolution)> {
+    match resolve_or_none(configs, client, selector, environment_id).await? {
+        Some(found) => Ok(found),
+        None => bail!(
+            "You have no cloud agents{}. Create one with `railway ca create`.",
+            match environment_id {
+                Some(_) => " in this environment",
+                None => "",
+            }
+        ),
+    }
+}
+
+/// [`resolve`], with the empty account handed back instead of an error.
+///
+/// `None` means exactly "no live agents in scope, and no name was given" —
+/// the one case where a caller can reasonably do something other than fail,
+/// e.g. a connect command creating the first agent. Every other outcome
+/// (a named agent missing, more than one candidate) is still an error here,
+/// because acting on a guess would touch the wrong machine.
+pub async fn resolve_or_none(
+    configs: &Configs,
+    client: &reqwest::Client,
+    selector: Option<&str>,
+    environment_id: Option<&str>,
+) -> Result<Option<(Agent, Resolution)>> {
     let backboard = configs.get_backboard();
     let candidates = match environment_id {
         Some(env) => list_in_environment(client, &backboard, env, true).await?,
@@ -410,7 +435,7 @@ pub async fn resolve(
     };
 
     if let Some(selector) = selector {
-        return match_selector(candidates, selector).map(|agent| (agent, Resolution::Named));
+        return match_selector(candidates, selector).map(|agent| Some((agent, Resolution::Named)));
     }
 
     let live: Vec<Agent> = candidates
@@ -426,21 +451,15 @@ pub async fn resolve(
         .cloned()
         .collect();
     if remembered.len() == 1 {
-        return Ok((remembered.remove(0), Resolution::Remembered));
+        return Ok(Some((remembered.remove(0), Resolution::Remembered)));
     }
 
     match live.len() {
-        0 => bail!(
-            "You have no cloud agents{}. Create one with `railway ca create`.",
-            match environment_id {
-                Some(_) => " in this environment",
-                None => "",
-            }
-        ),
-        1 => Ok((
+        0 => Ok(None),
+        1 => Ok(Some((
             live.into_iter().next().expect("len checked"),
             Resolution::Sole,
-        )),
+        ))),
         _ => bail!(
             "You have {} cloud agents and none is this directory's. Name one:\n{}",
             live.len(),

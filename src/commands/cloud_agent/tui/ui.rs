@@ -182,6 +182,14 @@ fn render_screen(app: &App, f: &mut Frame, rects: &mut PaneRects) {
             render_menu(app, f, rects);
             render_agent_pick(app, f);
         }
+        Screen::HarnessPick => {
+            render_manage(app, f, rects);
+            render_harness_pick(app, f);
+        }
+        Screen::ManagePrompt => {
+            render_manage(app, f, rects);
+            render_manage_prompt(app, f);
+        }
     }
 }
 
@@ -1142,8 +1150,25 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         );
     }
 
+    // The card clamps to the terminal, so a long list (a real account's
+    // projects) can hold more rows than the body has lines. Window the rows
+    // to keep the cursor visible: walk the start of the window forward until
+    // everything from there through the cursor fits.
+    let avail = rows[3].height as usize;
+    let row_height = |row: &PanelRow| if row.detail.is_empty() { 1 } else { 2 };
+    let mut first = 0usize;
+    while first < panel.cursor
+        && panel.rows[first..=panel.cursor.min(panel.rows.len() - 1)]
+            .iter()
+            .map(row_height)
+            .sum::<usize>()
+            > avail
+    {
+        first += 1;
+    }
+
     let mut lines: Vec<Line> = Vec::with_capacity(panel.rows.len() * 2);
-    for (i, row) in panel.rows.iter().enumerate() {
+    for (i, row) in panel.rows.iter().enumerate().skip(first) {
         let on = i == panel.cursor;
         let mut spans = vec![
             Span::styled(
@@ -1365,6 +1390,100 @@ fn render_agent_pick(app: &App, f: &mut Frame) {
             cursor: picker.cursor,
             footer,
         },
+    );
+}
+
+/// ⌥n's picker: which agent runs the new session. The wizard's agent step,
+/// floated over the tree the launch is aimed at.
+fn render_harness_pick(app: &App, f: &mut Frame) {
+    let Some(cursor) = app.harness_pick else {
+        return;
+    };
+    let theme = app.theme;
+    let rows: Vec<PanelRow> = crate::commands::cloud_agent::tui::app::HARNESSES
+        .iter()
+        .map(|slug| PanelRow {
+            label: (*slug).to_string(),
+            tag: String::new(),
+            detail: super::wizard::harness_blurb(slug).to_string(),
+        })
+        .collect();
+    let footer = Line::from(chord_spans(
+        theme,
+        &[
+            ("↑↓", "choose"),
+            ("enter", "new session"),
+            ("esc", "cancel"),
+        ],
+    ));
+
+    render_panel(
+        f,
+        theme,
+        f.area(),
+        Panel {
+            title: "new session",
+            heading: "Which agent should run it?",
+            position: None,
+            rows: &rows,
+            cursor,
+            footer,
+        },
+    );
+}
+
+/// ⌥p's composer: the menu's prompt box, floated over the tree so a new
+/// request doesn't cost the walk back to the menu.
+fn render_manage_prompt(app: &App, f: &mut Frame) {
+    let Some(draft) = app.manage_prompt.as_ref() else {
+        return;
+    };
+    let theme = app.theme;
+    let area = f.area();
+    let outer = centered(66.min(area.width.saturating_sub(4)), 7, area);
+    f.render_widget(Clear, outer);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            " New Session ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(vec![
+            Span::styled(
+                format!(" {} ", app.harness_name()),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("shift+tab ", Style::default().fg(theme.dim)),
+        ]))
+        .title_bottom(
+            Line::from(Span::styled(
+                " enter send · esc close ",
+                Style::default().fg(theme.dim),
+            ))
+            .right_aligned(),
+        );
+
+    let text = format!("{draft}▏");
+    // Keep the cursor line in view once the wrapped text outgrows the box,
+    // same as the menu's prompt.
+    let inner_w = outer.width.saturating_sub(2).max(1) as usize;
+    let inner_h = outer.height.saturating_sub(2).max(1) as usize;
+    let scroll_y = wrapped_lines(&text, inner_w).saturating_sub(inner_h) as u16;
+
+    f.render_widget(
+        Paragraph::new(text)
+            .block(block)
+            .style(Style::default().fg(theme.fg))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((scroll_y, 0)),
+        outer,
     );
 }
 

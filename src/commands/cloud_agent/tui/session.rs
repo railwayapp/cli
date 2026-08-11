@@ -64,6 +64,56 @@ fn dsr_reply(chunk: &[u8], screen: &vt100::Screen) -> Option<Vec<u8>> {
     })
 }
 
+/// Track and answer the kitty keyboard protocol inside the pane's stream.
+///
+/// A harness that wants unambiguous keys (shift+enter as a newline, most
+/// visibly) queries with `CSI ? u`, and only enables the protocol when a
+/// reply comes back — which, inside this emulator, nothing sent until now,
+/// so every harness fell back to legacy keys where shift+enter and enter are
+/// the same byte. Answering the query (with the current flags) and watching
+/// for the push (`CSI > flags u`) / pop (`CSI < u`) that follow lets
+/// [`Session::send_key`] know when the modified-Enter CSI-u encodings will
+/// be understood on the far side.
+///
+/// Scanning is chunk-wise, like [`dsr_reply`]: a sequence split across two
+/// reads is missed, which costs one retry of a query, not correctness.
+fn kitty_scan(chunk: &[u8], kitty: &AtomicBool) -> Option<Vec<u8>> {
+    let mut reply = None;
+    let mut i = 0;
+    while let Some(at) = chunk[i..].windows(2).position(|w| w == b"\x1b[") {
+        let seq = &chunk[i + at + 2..];
+        let Some(end) = seq.iter().position(|b| *b == b'u') else {
+            break;
+        };
+        match seq.first() {
+            // Query: answer with the flags in effect, like a real terminal.
+            Some(b'?') if seq[1..end].iter().all(u8::is_ascii_digit) => {
+                let flags = u8::from(kitty.load(Ordering::Relaxed));
+                reply = Some(format!("\x1b[?{flags}u").into_bytes());
+            }
+            // Push: the protocol is on iff any flag bit is set.
+            Some(b'>') if seq[1..end].iter().all(u8::is_ascii_digit) => {
+                let flags: u32 = std::str::from_utf8(&seq[1..end])
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                kitty.store(flags != 0, Ordering::Relaxed);
+            }
+            // Pop: back to legacy keys. One level of depth is all the
+            // harnesses use; a counter would be pretending to more fidelity
+            // than chunk-wise scanning has anyway.
+            Some(b'<') if seq[1..end].iter().all(u8::is_ascii_digit) => {
+                kitty.store(false, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        // Step past the introducer only: the found `u` may belong to plain
+        // text far ahead, and skipping there would jump over real sequences.
+        i += at + 2;
+    }
+    reply
+}
+
 /// A running `ssh` under a pty, plus the emulator that makes sense of it.
 pub struct Session {
     pub agent_id: String,
@@ -96,6 +146,9 @@ pub struct Session {
     /// Set by the reader thread on the first byte. An attach that never sets
     /// this is talking to a session whose process is gone.
     got_output: Arc<AtomicBool>,
+    /// The remote program pushed the kitty keyboard protocol (see
+    /// [`kitty_scan`]), so modified Enter goes out CSI-u encoded.
+    kitty_keys: Arc<AtomicBool>,
     /// Last size pushed to the pty, so a redraw at the same size is free.
     size: (u16, u16),
     /// Rows scrolled back from the live view. Typing snaps back to 0 — nobody
@@ -194,6 +247,7 @@ impl Session {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 4000)));
         let ended = Arc::new(AtomicBool::new(false));
         let got_output = Arc::new(AtomicBool::new(false));
+        let kitty_keys = Arc::new(AtomicBool::new(false));
         let mut reader = pty
             .master
             .try_clone_reader()
@@ -209,6 +263,7 @@ impl Session {
             let ended = ended.clone();
             let writer = writer.clone();
             let got_output = got_output.clone();
+            let kitty_keys = kitty_keys.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -216,13 +271,17 @@ impl Session {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             got_output.store(true, Ordering::Relaxed);
-                            let reply = parser.lock().ok().and_then(|mut parser| {
+                            let mut replies =
+                                kitty_scan(&buf[..n], &kitty_keys).unwrap_or_default();
+                            if let Some(dsr) = parser.lock().ok().and_then(|mut parser| {
                                 parser.process(&buf[..n]);
                                 dsr_reply(&buf[..n], parser.screen())
-                            });
-                            if let Some(reply) = reply {
+                            }) {
+                                replies.extend_from_slice(&dsr);
+                            }
+                            if !replies.is_empty() {
                                 if let Ok(mut writer) = writer.lock() {
-                                    let _ = writer.write_all(&reply);
+                                    let _ = writer.write_all(&replies);
                                     let _ = writer.flush();
                                 }
                             }
@@ -251,6 +310,7 @@ impl Session {
             reattach,
             spawned_at: std::time::Instant::now(),
             got_output,
+            kitty_keys,
             size: (rows, cols),
             scroll: 0,
         })
@@ -521,7 +581,7 @@ impl Session {
     }
 
     pub fn send_key(&mut self, key: KeyEvent) {
-        if let Some(bytes) = encode_key(key) {
+        if let Some(bytes) = encode_key_for(key, self.kitty_keys.load(Ordering::Relaxed)) {
             self.send(&bytes);
         }
     }
@@ -624,6 +684,7 @@ impl Session {
             reattach: false,
             spawned_at: std::time::Instant::now(),
             got_output: Arc::new(AtomicBool::new(true)),
+            kitty_keys: Arc::new(AtomicBool::new(false)),
             size: (24, 80),
             scroll: 0,
         })
@@ -707,6 +768,36 @@ fn wheel_report(up: bool, at: (u16, u16), encoding: vt100::MouseProtocolEncoding
     }
 }
 
+/// [`encode_key`], plus the encodings that only exist once the remote side
+/// has pushed the kitty keyboard protocol (see [`kitty_scan`]).
+///
+/// Modified Enter is the whole reason this split exists: legacy terminals
+/// send `\r` for shift+enter, ctrl+enter and plain enter alike, which is why
+/// shift+enter never made a newline in a harness. The CSI-u form says which
+/// one it was — but only to a program expecting it, so it is sent only after
+/// the push. Anything else would read the escape sequence as typed text.
+///
+/// Separate from `Session` so the choice is testable without a pty: Windows'
+/// ConPTY interprets escape sequences instead of forwarding them, so a
+/// round-trip test can only run on unix.
+fn encode_key_for(key: KeyEvent, kitty: bool) -> Option<Vec<u8>> {
+    if kitty
+        && key.code == KeyCode::Enter
+        && key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL)
+    {
+        // The kitty modifier field is a 1-based bitfield: shift 1, alt 2,
+        // ctrl 4. 13 is Enter's codepoint.
+        let m = 1
+            + u8::from(key.modifiers.contains(KeyModifiers::SHIFT))
+            + 2 * u8::from(key.modifiers.contains(KeyModifiers::ALT))
+            + 4 * u8::from(key.modifiers.contains(KeyModifiers::CONTROL));
+        return Some(format!("\x1b[13;{m}u").into_bytes());
+    }
+    encode_key(key)
+}
+
 /// Encode a key event as the bytes a terminal would send.
 ///
 /// Enough of xterm's vocabulary for a coding agent: text, the control chords
@@ -784,6 +875,97 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The kitty keyboard protocol dance, as a harness does it: query, get
+    /// an answer, push, and only then is modified Enter CSI-u encoded.
+    #[test]
+    fn kitty_query_push_and_pop_are_tracked() {
+        let kitty = AtomicBool::new(false);
+
+        // The query gets the current flags back — none yet.
+        let reply = kitty_scan(b"setup\x1b[?u more", &kitty);
+        assert_eq!(reply.as_deref(), Some(b"\x1b[?0u".as_slice()));
+        assert!(!kitty.load(Ordering::Relaxed));
+
+        // Push turns it on; the next query reports it.
+        assert_eq!(kitty_scan(b"\x1b[>1u", &kitty), None);
+        assert!(kitty.load(Ordering::Relaxed));
+        let reply = kitty_scan(b"\x1b[?u", &kitty);
+        assert_eq!(reply.as_deref(), Some(b"\x1b[?1u".as_slice()));
+
+        // A push of zero flags is legacy keys by another name.
+        kitty_scan(b"\x1b[>0u", &kitty);
+        assert!(!kitty.load(Ordering::Relaxed));
+
+        // Pop turns it off.
+        kitty_scan(b"\x1b[>1u", &kitty);
+        kitty_scan(b"\x1b[<1u", &kitty);
+        assert!(!kitty.load(Ordering::Relaxed));
+
+        // Ordinary output — including a stray `u` — changes nothing.
+        assert_eq!(kitty_scan(b"\x1b[38;5;2mgreen up\x1b[0m", &kitty), None);
+        assert!(!kitty.load(Ordering::Relaxed));
+    }
+
+    /// Shift+enter reaches the harness as a newline only via the kitty
+    /// encoding — legacy `\r` for every modified Enter is exactly the
+    /// ambiguity being fixed.
+    #[test]
+    fn modified_enter_is_csi_u_encoded_once_kitty_is_active() {
+        let enter = |m| KeyEvent::new(KeyCode::Enter, m);
+        let bytes = |key, kitty| encode_key_for(key, kitty).unwrap();
+
+        // Each modifier its own bit, and combinations sum.
+        assert_eq!(bytes(enter(KeyModifiers::SHIFT), true), b"\x1b[13;2u");
+        assert_eq!(bytes(enter(KeyModifiers::ALT), true), b"\x1b[13;3u");
+        assert_eq!(bytes(enter(KeyModifiers::CONTROL), true), b"\x1b[13;5u");
+        assert_eq!(
+            bytes(enter(KeyModifiers::SHIFT | KeyModifiers::CONTROL), true),
+            b"\x1b[13;6u"
+        );
+
+        // Unmodified Enter is `\r` either way: it is not ambiguous, and a
+        // harness reading CSI-u for it would never see a plain submit.
+        assert_eq!(bytes(enter(KeyModifiers::NONE), true), b"\r");
+        assert_eq!(bytes(enter(KeyModifiers::NONE), false), b"\r");
+
+        // No push, no CSI-u: to a legacy program the escape sequence is
+        // typed text, which is worse than the ambiguity it replaces.
+        assert_eq!(bytes(enter(KeyModifiers::SHIFT), false), b"\r");
+
+        // Everything else routes through the legacy encoder untouched.
+        assert_eq!(bytes(key(KeyCode::Char('a')), true), b"a");
+        assert_eq!(bytes(key(KeyCode::Tab), true), b"\t");
+    }
+
+    /// Unix only: this needs an escape sequence to survive the trip through
+    /// the pty, and Windows' ConPTY interprets those for itself instead of
+    /// passing them along, so the emulator never sees what was sent. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn the_kitty_encoding_goes_out_on_the_wire() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.kitty_keys.store(true, Ordering::Relaxed);
+        session.send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        for _ in 0..40 {
+            if session
+                .with_screen(|s| s.contents().contains("[13;2u"))
+                .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // `cat` echoes what it was sent, so the emulator shows the sequence
+        // (ESC swallowed) — proof the CSI-u bytes went out, not `\r`.
+        assert!(
+            session
+                .with_screen(|s| s.contents().contains("[13;2u"))
+                .unwrap_or(false),
+            "expected the kitty encoding on the wire"
+        );
     }
 
     #[test]
