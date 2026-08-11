@@ -893,10 +893,14 @@ mod tests {
         let mut session = Session::for_test("ca", "test").unwrap();
         session.resize(6, 60);
         session.send(b"open https://railway.com/deploy now\r\n");
+        // Wait for the whole URL, not just the host. A pty delivers the line in
+        // whatever chunks it likes, and "railway.com" is already on screen while
+        // the path is still arriving — which left the assertion below comparing
+        // against a truncated `…/dep` on a loaded runner.
         for _ in 0..40 {
             if session
                 .with_screen(|s| s.contents_between(0, 0, 0, u16::MAX))
-                .is_some_and(|line| line.contains("railway.com"))
+                .is_some_and(|line| line.contains("https://railway.com/deploy"))
             {
                 break;
             }
