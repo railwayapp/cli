@@ -41,18 +41,25 @@ const CARD_GUTTER: usize = 3;
 /// Width of the tree column in Manage, borders included.
 const TREE_W: u16 = 32;
 
+/// One inverse-styled key badge, e.g. ` ^t `. The building block of
+/// [`chord_spans`], and also used solo wherever a shortcut sits beside the
+/// thing it acts on instead of in the footer's own chord list.
+fn chord_badge(theme: &Theme, chord: &str) -> Span<'static> {
+    Span::styled(
+        format!(" {chord} "),
+        Style::default()
+            .fg(theme.on_accent)
+            .bg(theme.accent_dim)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 /// Footer chords: an inverse badge for the key, dim text for what it does.
 /// Shared so the menu and the manage screen read as the same product.
 fn chord_spans(theme: &Theme, chords: &[(&str, &str)]) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(chords.len() * 2);
     for (chord, what) in chords {
-        spans.push(Span::styled(
-            format!(" {chord} "),
-            Style::default()
-                .fg(theme.on_accent)
-                .bg(theme.accent_dim)
-                .add_modifier(Modifier::BOLD),
-        ));
+        spans.push(chord_badge(theme, chord));
         spans.push(Span::styled(
             format!(" {what}   "),
             Style::default().fg(theme.dim),
@@ -294,14 +301,12 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         MenuFocus::Prompt => &[
             ("enter", "launch"),
             ("shift+tab", "agent"),
-            ("^t", "target"),
             ("⌥t", "theme"),
             ("⌥s", "setup"),
         ],
         MenuFocus::Cards => &[
             ("↑↓", "select"),
             ("enter", "open"),
-            ("^t", "target"),
             ("⌥t", "theme"),
             ("⌥s", "setup"),
             ("q", "quit"),
@@ -313,26 +318,28 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     );
 }
 
-/// `Target Project  name (environment)`, or an invitation to set one.
+/// `^t  Target Project  name (environment)`, or an invitation to set one.
+/// The shortcut sits right on the field it changes rather than in the
+/// footer's own chord list, which otherwise says nothing about what "target"
+/// even refers to.
 fn target_line(app: &App) -> Line<'static> {
     let theme = app.theme;
-    let label = Span::styled(
-        "Target Project  ",
-        Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
-    );
-    match app.target.as_ref() {
-        Some(target) => Line::from(vec![
-            label,
-            Span::styled(
-                format!("{} ({})", target.project_name, target.environment_name),
-                Style::default().fg(theme.accent),
-            ),
-        ]),
-        None => Line::from(vec![
-            label,
-            Span::styled("not set", Style::default().fg(theme.pending)),
-        ]),
-    }
+    let mut spans = vec![
+        chord_badge(theme, "^t"),
+        Span::raw(" "),
+        Span::styled(
+            "Target Project  ",
+            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    spans.push(match app.target.as_ref() {
+        Some(target) => Span::styled(
+            format!("{} ({})", target.project_name, target.environment_name),
+            Style::default().fg(theme.accent),
+        ),
+        None => Span::styled("not set", Style::default().fg(theme.pending)),
+    });
+    Line::from(spans)
 }
 
 /// The wait, with the task in front of you.
@@ -1927,9 +1934,11 @@ mod tests {
             .rfind(|l| l.contains("launch"))
             .expect("the menu footer");
         assert!(footer.contains("enter"), "{footer}");
-        assert!(footer.contains("target"), "{footer}");
         assert!(footer.contains("theme"), "{footer}");
         assert!(footer.contains("setup"), "{footer}");
+        // The target shortcut moved onto the target line itself — see
+        // `target_shortcut_sits_on_its_own_line`.
+        assert!(!footer.contains("target"), "{footer}");
         assert!(!footer.contains("menu"), "the arrow hint is gone: {footer}");
         // The old run-on line separated with interpuncts; the badges do not.
         assert!(!footer.contains(" · "), "{footer}");
@@ -2043,6 +2052,34 @@ mod tests {
             .position(|l| l.contains("launch"))
             .expect("the footer");
         assert!(target < footer, "the target sits above the shortcuts");
+    }
+
+    /// The shortcut for changing the target sits right on the field it acts
+    /// on, not lumped into the footer's own chord list where it read like a
+    /// command with no object.
+    #[test]
+    fn the_target_shortcut_sits_on_its_own_line() {
+        let app = app_with_tree();
+        let out = draw(&app, 100, 40);
+        let target = out
+            .lines()
+            .find(|l| l.contains("Target Project"))
+            .expect("the target indicator");
+        let chord_at = target.find("^t").expect("the chord badge: {target}");
+        let label_at = target.find("Target Project").unwrap();
+        assert!(
+            chord_at < label_at,
+            "the chord badge comes before the label: {target}"
+        );
+
+        let footer = out
+            .lines()
+            .rfind(|l| l.contains("theme") || l.contains("setup"))
+            .expect("the menu footer");
+        assert!(
+            !footer.contains("^t"),
+            "the chord moved out of the footer: {footer}"
+        );
     }
 
     /// With nowhere to launch, the indicator says so rather than going blank.
