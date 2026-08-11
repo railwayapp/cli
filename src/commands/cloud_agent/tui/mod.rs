@@ -291,6 +291,12 @@ enum Message {
         result: Result<(), String>,
         then: Option<HeldConnect>,
     },
+    /// The under-frame Claude mint finished: the launch resumes on success,
+    /// and steps out for the manual-paste fallback on failure.
+    ClaudeMintDone {
+        ok: bool,
+        req: Box<LaunchRequest>,
+    },
     /// Ask again for one agent's sessions.
     RefreshAgentSessions(String),
     /// The session produced output, so the screen needs redrawing.
@@ -657,6 +663,9 @@ pub async fn run(
                     let _ = tx.send(message);
                 });
             }
+            Some(Effect::StepOutForMint(req)) => {
+                return Ok(Outcome::NeedsCredential(req));
+            }
             Some(Effect::RegisterSshKey { offer, then }) => {
                 let tx = tx.clone();
                 let client = client.clone();
@@ -828,12 +837,26 @@ pub async fn run(
                 if app.hold_for_ssh_key(HeldConnect::Launch(req.clone())) {
                     continue;
                 }
-                // Minting needs a browser and a paste, neither of which works
-                // underneath a frame. Only a mint that can actually run needs
-                // the step-out: with nothing to mint from, the launch goes
-                // ahead and claude signs in on the agent.
+                // The mint's browser round-trip needs no terminal — the
+                // browser does the interacting and the flow runs hidden — so
+                // it runs under the frame with the loading screen narrating.
+                // Only its manual-paste fallback needs the real terminal, and
+                // only that failure steps out (see ClaudeMintDone).
                 if req.harness == "claude" && code::claude_needs_local_mint() {
-                    return Ok(Outcome::NeedsCredential(req));
+                    app.start_loading(&req);
+                    let _ = tx.send(Message::LaunchStep(
+                        "Minting a Claude token — approve the browser prompt if one appears"
+                            .to_string(),
+                    ));
+                    let tx = tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let ok = code::mint_claude_credential_headless().is_ok();
+                        let _ = tx.send(Message::ClaudeMintDone {
+                            ok,
+                            req: Box::new(req),
+                        });
+                    });
+                    continue;
                 }
                 start_launch(app, req, &tx);
             }
@@ -1021,6 +1044,20 @@ fn handle_message(
             {
                 // A create that stuck is a change; it saves like any other.
                 apply_settings(app, &outcome);
+            }
+            None
+        }
+        Message::ClaudeMintDone { ok, req } => {
+            if ok {
+                // The cache holds the token now; the pipeline reads it there.
+                start_launch(app, *req, tx);
+            } else {
+                // The manual paste needs the real terminal. Stop the loading
+                // screen and hand the request back through the step-out; the
+                // fallback skips straight to the paste prompt rather than
+                // re-running the automation that just lost.
+                app.loading.active = false;
+                return Some(Effect::StepOutForMint(*req));
             }
             None
         }
