@@ -846,6 +846,16 @@ fn encode_key_for(key: KeyEvent, kitty: bool) -> Option<Vec<u8>> {
             + 4 * u8::from(key.modifiers.contains(KeyModifiers::CONTROL));
         return Some(format!("\x1b[13;{m}u").into_bytes());
     }
+    // Without the push the CSI-u form would land as typed text, so ⇧enter falls
+    // back to meta+enter — `ESC CR`, the newline chord harnesses have always
+    // taken, and the exact bytes Claude Code's own `/terminal-setup` binds
+    // shift+enter to. A bare `\r` submits the half-written prompt, the one
+    // outcome the chord exists to prevent, so guessing newline is the better
+    // way to be wrong. ⌥enter already encodes this way through `encode_key`'s
+    // Alt prefix; this puts ⇧enter alongside it.
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        return Some(b"\x1b\r".to_vec());
+    }
     encode_key(key)
 }
 
@@ -982,8 +992,12 @@ mod tests {
         assert_eq!(bytes(enter(KeyModifiers::NONE), false), b"\r");
 
         // No push, no CSI-u: to a legacy program the escape sequence is
-        // typed text, which is worse than the ambiguity it replaces.
-        assert_eq!(bytes(enter(KeyModifiers::SHIFT), false), b"\r");
+        // typed text, which is worse than the ambiguity it replaces. ⇧enter
+        // still must not submit, so it falls back to the legacy newline chord.
+        assert_eq!(bytes(enter(KeyModifiers::SHIFT), false), b"\x1b\r");
+        assert_eq!(bytes(enter(KeyModifiers::ALT), false), b"\x1b\r");
+        // Ctrl is not a newline in anyone's legacy vocabulary — leave it alone.
+        assert_eq!(bytes(enter(KeyModifiers::CONTROL), false), b"\r");
 
         // Everything else routes through the legacy encoder untouched.
         assert_eq!(bytes(key(KeyCode::Char('a')), true), b"a");

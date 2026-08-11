@@ -988,9 +988,9 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
         .selected_agent_status()
         .is_some_and(|status| status != "running");
     let hint: Vec<(&str, &str)> = if app.maximized {
-        vec![("⌥f", "restore the tree"), ("⌥esc / ^]", "stop typing")]
+        vec![("⌥f", "restore the tree"), ("⌥/⇧esc / ^]", "stop typing")]
     } else if app.focus == ManageFocus::Session {
-        let mut keys = vec![("⌥esc / ^]", "stop typing"), ("⌥f", "maximize")];
+        let mut keys = vec![("⌥/⇧esc / ^]", "stop typing"), ("⌥f", "maximize")];
         // The agent is taking the clicks, so say how to take one back — this is
         // the terminal's own convention, but nobody guesses it.
         if app.active_session().is_some_and(|s| s.wants_mouse()) {
@@ -2947,7 +2947,7 @@ mod tests {
         let out = draw(&app, 100, 30);
         assert!(out.contains("keys"));
         assert!(out.contains("refresh"), "{out}");
-        assert!(out.contains("⌥esc / ^]"), "{out}");
+        assert!(out.contains("⌥/⇧esc / ^]"), "{out}");
         assert!(out.contains("any key closes"));
     }
 
