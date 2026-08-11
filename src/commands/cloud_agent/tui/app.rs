@@ -19,8 +19,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::session;
 use super::theme::Theme;
 
-/// Harnesses the launcher can carry a credential to, in cycle order.
-pub const HARNESSES: &[&str] = &["claude", "codex", "grok"];
+/// Harnesses the launcher can put a session on, in cycle order. `railway`
+/// leads the list — and so is the default pick with nothing configured —
+/// since it is the one exception needing no credential of its own: no
+/// carry-a-local-sign-in step, just the VM's own integrated Railway
+/// credentials.
+pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok"];
 
 /// Everything the Manage screen responds to, grouped for the `?` overlay. The
 /// footer shows two or three of these; this is where the rest lives, so the
@@ -227,6 +231,7 @@ pub struct ProjectNode {
 
 #[derive(Clone, Debug)]
 pub struct WorkspaceNode {
+    pub id: String,
     pub name: String,
     pub expanded: bool,
     pub projects: Vec<ProjectNode>,
@@ -646,8 +651,8 @@ pub enum Effect {
         environment_id: String,
         session_name: String,
     },
-    /// Create the default project the wizard asked for.
-    CreateDefaultProject,
+    /// Create the default project the wizard asked for, in this workspace.
+    CreateDefaultProject(String),
     /// Persist what first-run setup collected.
     SaveSetup(Box<super::wizard::Outcome>),
     /// Remember the default project chosen from the target card.
@@ -1686,7 +1691,7 @@ impl App {
             .unwrap_or(self.theme);
         match action {
             Action::None | Action::Redraw => None,
-            Action::CreateProject => Some(Effect::CreateDefaultProject),
+            Action::CreateProject(workspace_id) => Some(Effect::CreateDefaultProject(workspace_id)),
             Action::Cancel => {
                 self.end_wizard();
                 None
@@ -2550,6 +2555,16 @@ impl App {
             .unwrap_or(TOAST_LIFETIME)
     }
 
+    /// Time until an attached pane would first count as stalled, for the loop
+    /// to wake once and draw the notice. `None` when no pane is waiting on
+    /// its first byte.
+    pub fn stall_check_remaining(&self) -> Option<std::time::Duration> {
+        self.sessions
+            .iter()
+            .filter_map(|session| session.stall_remaining())
+            .min()
+    }
+
     /// Give the session pane the whole screen, or give the tree back.
     ///
     /// Only where there is a session to give it to: on the menu, or with
@@ -3333,6 +3348,7 @@ mod tests {
 
     fn tree() -> Vec<WorkspaceNode> {
         vec![WorkspaceNode {
+            id: "ws_1".into(),
             name: "Railway".into(),
             expanded: false,
             projects: vec![ProjectNode {
@@ -3376,6 +3392,7 @@ mod tests {
             envs: vec![env(&format!("{id}-prod"), "production")],
         };
         let tree = vec![WorkspaceNode {
+            id: "ws_1".into(),
             name: "Railway".into(),
             expanded: true,
             projects: vec![
@@ -4073,6 +4090,8 @@ mod tests {
         a.menu_focus = MenuFocus::Cards;
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "grok");
+        a.on_key(key(KeyCode::BackTab));
+        assert_eq!(a.harness_name(), "railway");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "claude", "cycling wraps");
     }

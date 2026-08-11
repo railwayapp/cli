@@ -20,8 +20,9 @@ use crate::util::progress::create_shimmer_spinner;
 use crate::util::shell::shell_join;
 
 // ---------------------------------------------------------------------------
-// `railway code --codex` / `railway code --claude` / `railway code --grok` —
-// launch a coding agent on a Railway cloud agent VM, on the user's own plan.
+// `railway code --codex` / `railway code --claude` / `railway code --grok` /
+// `railway code --railway` — launch a coding agent on a Railway cloud agent
+// VM, on the user's own plan.
 //
 // The VM does most of the work. `cloud-agent-base` bakes every harness
 // (claude, codex, grok, cursor, droid, opencode, pi, railway-agent), and the
@@ -41,7 +42,10 @@ use crate::util::shell::shell_join;
 // for "CI pipelines, scripts, or other environments where interactive browser
 // login isn't available", and their own claude-code-action has Pro/Max users
 // mint locally, store the token, and use it on remote runners — the same shape
-// as this command.
+// as this command. Railway's own harness is the odd one out: there is no local
+// sign-in to bring, because the VM already carries a server-minted LLM relay
+// credential and Railway platform tools, reconciled the same way as skills and
+// MCP config — see `Agent::Railway`.
 //
 // All three are a convenience, not a requirement. Carrying the credential saves
 // signing in twice; when the local half isn't there — no `~/.codex/auth.json`,
@@ -67,8 +71,10 @@ use crate::util::shell::shell_join;
 // cache.
 //
 // Lifecycle: agents are durable and have no idle timeout, so unlike a sandbox
-// nothing eventually reaps one. Disconnecting therefore SLEEPS the agent —
-// disk and work survive, compute stops billing — and the next run wakes it.
+// nothing eventually reaps one. Disconnecting leaves the agent RUNNING —
+// sleeping kills every process on the VM (including durable sessions the
+// platform keeps listing as reattachable), so it is a deliberate act:
+// `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
 /// `railway code` is the launcher on its own: the same flags and the same
@@ -98,7 +104,7 @@ pub async fn command(args: Args) -> Result<()> {
 // renders those as `long_about` and it would show up in `--help`.
 #[derive(Parser, Default)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs: disconnecting sleeps yours, and the next\n`railway code` wakes it with your work still on disk. `--keep-awake` leaves it\nrunning; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -117,13 +123,18 @@ pub struct LaunchArgs {
     #[clap(long)]
     grok: bool,
 
+    /// Launch Railway's own agent — no sign-in needed; it uses credentials
+    /// already on the VM
+    #[clap(long)]
+    railway: bool,
+
     /// Always create a fresh agent instead of reusing this environment's
     #[clap(long)]
     pub new: bool,
 
-    /// Leave the agent running on disconnect instead of putting it to sleep.
-    /// A running agent keeps billing for compute
-    #[clap(long)]
+    /// Accepted for compatibility; agents now always stay running on
+    /// disconnect. `railway ca sleep` stops the compute bill
+    #[clap(long, hide = true)]
     keep_awake: bool,
 
     /// Destroy this environment's agent and exit. Its disk goes with it.
@@ -186,6 +197,7 @@ impl LaunchArgs {
         !self.codex
             && !self.claude
             && !self.grok
+            && !self.railway
             && !self.new
             && !self.keep_awake
             && !self.rm
@@ -205,6 +217,7 @@ impl LaunchArgs {
         self.claude = slug == "claude";
         self.codex = slug == "codex";
         self.grok = slug == "grok";
+        self.railway = slug == "railway";
     }
 
     /// The launch the TUI asks for: an explicit project and environment, an
@@ -235,32 +248,59 @@ impl LaunchArgs {
 /// The coding agent to launch, and the two things that differ between them:
 /// where the local sign-in lives, and how its credential is written on the VM.
 /// Installing and configuring the harness is the image's job, not ours.
+///
+/// `Railway` is the exception to both: it is Railway's own harness (built on
+/// `railway-agent`/pi-rs), and the VM already carries everything it needs —
+/// an LLM relay credential and Railway platform tools — minted server-side at
+/// create time, the same way skills and MCP config are reconciled by
+/// express-agent. There is no local sign-in to copy or mint, so it needs none
+/// of the client-side credential machinery the other three do.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Agent {
     Codex,
     Claude,
     Grok,
+    Railway,
 }
 
 impl Agent {
-    /// The remote binary name (also what's autostarted on reconnect).
+    /// The remote binary name — what's actually exec'd, and what's
+    /// autostarted on reconnect. Only ever used for that: anywhere this agent
+    /// needs a name a person reads, use [`Self::slug`] instead. The one
+    /// exception to "identical to the slug": the interactive frontend binary
+    /// is `railway-agent-tui`, not `railway-agent` (that name is the headless
+    /// `run`/`serve` CLI it drives).
     fn name(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
             Agent::Claude => "claude",
             Agent::Grok => "grok",
+            Agent::Railway => "railway-agent-tui",
         }
     }
 
-    /// The slug persisted in `agent-prefs.json` and accepted by
-    /// `RAILWAY_CA_AGENT`. Identical to the remote binary name, deliberately:
-    /// one string for the user to recognise in a config file, a log line, and
-    /// the process list on the VM.
+    /// The slug persisted in `agent-prefs.json`, accepted by
+    /// `RAILWAY_CA_AGENT`, and used anywhere this agent needs a short,
+    /// user-facing identifier — session name prefixes, the "get back in"
+    /// hint, launch messages. Identical to [`Self::name`] for every agent
+    /// except Railway's own: "railway" reads better than "railway-agent-tui"
+    /// in a flag, a config file, or a session name, and there is only the one
+    /// harness it could mean.
+    fn slug(self) -> &'static str {
+        match self {
+            Agent::Codex => "codex",
+            Agent::Claude => "claude",
+            Agent::Grok => "grok",
+            Agent::Railway => "railway",
+        }
+    }
+
     fn from_slug(slug: &str) -> Option<Self> {
         match slug {
             "claude" => Some(Agent::Claude),
             "codex" => Some(Agent::Codex),
             "grok" => Some(Agent::Grok),
+            "railway" => Some(Agent::Railway),
             _ => None,
         }
     }
@@ -271,37 +311,48 @@ impl Agent {
             Agent::Codex => "Codex",
             Agent::Claude => "Claude Code",
             Agent::Grok => "Grok",
+            Agent::Railway => "Railway",
         }
     }
 
+    /// Unreachable for `Railway`: it is never asked for a credential seed —
+    /// see [`Agent`]'s doc comment — so `prepare_inner` never sets
+    /// `write_credential` for it.
     fn credential_seed(self) -> &'static str {
         match self {
             Agent::Codex => CODEX_SEED,
             Agent::Claude => CLAUDE_SEED,
             Agent::Grok => GROK_SEED,
+            Agent::Railway => "",
         }
     }
 
     /// The local sign-in file this command copies, as `$HOME`-relative
     /// components. `None` for Claude, whose credential is minted rather than
     /// copied — sharing the local sign-in's rotating refresh token across two
-    /// machines is the thing the setup-token exists to avoid.
+    /// machines is the thing the setup-token exists to avoid — and for
+    /// Railway's own harness, whose credential the VM is given at create time.
     fn local_signin_file(self) -> Option<[&'static str; 2]> {
         match self {
             Agent::Codex => Some([".codex", "auth.json"]),
             Agent::Grok => Some([".grok", "auth.json"]),
-            Agent::Claude => None,
+            Agent::Claude | Agent::Railway => None,
         }
     }
 
     /// What to tell someone whose launch carries no credential: the harness
     /// will ask them to sign in on the agent, and this is how that goes. Each
     /// one has a browser/device flow that works fine from a VM.
+    ///
+    /// Railway's own harness never reaches this — it resolves to
+    /// [`PendingAuth::None`] before anything asks for a hint — but the arm
+    /// states the reason rather than leaving the match to guess at one.
     fn sign_in_on_agent_hint(self) -> &'static str {
         match self {
             Agent::Codex => "sign in there with `codex login --device-auth`",
             Agent::Claude => "sign in there with `/login`",
             Agent::Grok => "sign in there when it asks",
+            Agent::Railway => "no sign-in needed — the agent carries its own",
         }
     }
 }
@@ -659,6 +710,9 @@ enum PendingAuth {
     /// before. `note` is the line the user gets so the extra sign-in isn't a
     /// surprise.
     SignInOnAgent { note: String },
+    /// Railway's own harness: nothing to push, ever. Its credential is a
+    /// server-minted VM env var, not a client-side file.
+    None,
 }
 
 /// Set once a Claude mint has been offered this run and come away empty — no
@@ -1516,7 +1570,10 @@ async fn destroy_agent(
 pub fn default_harness() -> Result<&'static str> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
     let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
-    Ok(resolve_agent_choice(&LaunchArgs::default(), &mut prefs, &home)?.name())
+    // The slug, not the remote binary name: this feeds `LaunchArgs::for_target`,
+    // which matches a harness flag by slug, and it's echoed back to the user
+    // in `start_session`'s "starting {harness}" line.
+    Ok(resolve_agent_choice(&LaunchArgs::default(), &mut prefs, &home)?.slug())
 }
 
 /// Environment override for the saved default — one run, no file write. For
@@ -1532,19 +1589,28 @@ const AGENT_ENV_VAR: &str = "RAILWAY_CA_AGENT";
 /// `prefs` is updated in place when the prompt runs, so the caller's copy
 /// reflects what was saved.
 fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) -> Result<Agent> {
-    match (args.codex, args.claude, args.grok) {
-        (true, false, false) => return Ok(Agent::Codex),
-        (false, true, false) => return Ok(Agent::Claude),
-        (false, false, true) => return Ok(Agent::Grok),
-        (false, false, false) => {}
-        _ => bail!("Pick one agent: --codex, --claude, or --grok."),
+    let flagged: Vec<Agent> = [
+        (args.codex, Agent::Codex),
+        (args.claude, Agent::Claude),
+        (args.grok, Agent::Grok),
+        (args.railway, Agent::Railway),
+    ]
+    .into_iter()
+    .filter_map(|(set, agent)| set.then_some(agent))
+    .collect();
+    match flagged.as_slice() {
+        [agent] => return Ok(*agent),
+        [] => {}
+        _ => bail!("Pick one agent: --codex, --claude, --grok, or --railway."),
     }
 
     if let Ok(slug) = std::env::var(AGENT_ENV_VAR) {
         let slug = slug.trim().to_lowercase();
         if !slug.is_empty() {
             let agent = Agent::from_slug(&slug).ok_or_else(|| {
-                anyhow!("{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, or grok).")
+                anyhow!(
+                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, grok, or railway)."
+                )
             })?;
             return Ok(agent);
         }
@@ -1697,28 +1763,15 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         let _ = out.flush();
     }
 
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    if args.keep_awake {
-        println!(
-            "\nDisconnected — agent {} is still running (--keep-awake).",
-            prepared.agent_name.cyan()
-        );
-    } else {
-        let progress = CliProgress::default();
-        if let Err(e) = sleep_agent(&client, &configs, &prepared, &progress).await {
-            progress.finish();
-            eprintln!(
-                "{}",
-                format!(
-                    "Agent {} is still running and billing compute. Sleep it from the dashboard, or `railway code --rm` to destroy it. ({e})",
-                    prepared.agent_name
-                )
-                .yellow()
-            );
-        }
-        progress.finish();
-    }
+    // Disconnecting no longer sleeps the agent: sleep kills every process on
+    // the VM — including the durable session just detached from — while the
+    // platform keeps listing those sessions as running, so the next reattach
+    // landed on a dead name and a blank screen. Sleeping is deliberate now.
+    println!(
+        "\nDisconnected — agent {} is still running. `railway ca sleep {}` stops the compute bill.",
+        prepared.agent_name.cyan(),
+        prepared.agent_name
+    );
 
     if prepared.created {
         println!("Agents persist between runs — this one is yours until you --rm it.");
@@ -1762,27 +1815,6 @@ pub fn run_session(prepared: &Prepared) -> Result<i32> {
     code
 }
 
-/// Put the agent back to sleep. Agents have no idle timeout, so nothing else
-/// ever will: leaving one running bills compute until the user remembers it,
-/// and sleeping keeps the disk so the next run wakes into the same work.
-pub async fn sleep_agent(
-    client: &reqwest::Client,
-    configs: &Configs,
-    prepared: &Prepared,
-    progress: &dyn Progress,
-) -> Result<()> {
-    progress.step("Sleeping the agent");
-    crate::controllers::cloud_agent::sleep(
-        client,
-        &configs.get_backboard(),
-        &prepared.environment_id,
-        &prepared.agent_id,
-    )
-    .await?;
-    progress.finish();
-    Ok(())
-}
-
 /// Everything between "the user asked" and "there is a session to open":
 /// credential, skills, the agent itself, and provisioning it.
 ///
@@ -1818,7 +1850,7 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
 
     let result = prepare_inner(args, progress, agent, prefs, &home).await;
     crate::commands::cloud_agent::telemetry::track_launch_outcome(
-        agent.name(),
+        agent.slug(),
         result.as_ref().ok().map(|p| p.created),
         start.elapsed(),
         result.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
@@ -1858,6 +1890,8 @@ async fn prepare_inner(
             )
             .await?
         }
+        // Nothing to read or mint — the VM already carries its own.
+        Agent::Railway => PendingAuth::None,
     };
     match pending {
         PendingAuth::Ready { ref source, .. } => progress.note(&format!(
@@ -1867,6 +1901,7 @@ async fn prepare_inner(
         // Said up front, before the VM: the sign-in is the first thing waiting
         // on the other end, and finding that out on arrival reads as a bug.
         PendingAuth::SignInOnAgent { ref note } => progress.note(note),
+        PendingAuth::None => progress.note("Using the agent's own integrated Railway credentials"),
         PendingAuth::MintClaude => {}
     }
     // Pack the user's skills before spending a VM: a skills directory that has
@@ -1925,7 +1960,7 @@ async fn prepare_inner(
     // Probe first, and only pay for the flow when there is nothing there.
     let auth = match pending {
         PendingAuth::Ready { line, source } => Some((line, source)),
-        PendingAuth::SignInOnAgent { .. } => None,
+        PendingAuth::SignInOnAgent { .. } | PendingAuth::None => None,
         PendingAuth::MintClaude => {
             // A fresh agent has nothing to inherit, and --refresh-auth is an
             // explicit request to replace whatever is there; neither needs a probe.
@@ -2073,7 +2108,7 @@ async fn prepare_inner(
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
         environment_id,
-        harness: agent.name(),
+        harness: agent.slug(),
         created,
     })
 }
@@ -2258,6 +2293,7 @@ mod tests {
             PendingAuth::SignInOnAgent { note } => note,
             PendingAuth::Ready { source, .. } => panic!("expected a fallback, got {source}"),
             PendingAuth::MintClaude => panic!("expected a fallback, got a mint"),
+            PendingAuth::None => panic!("expected a fallback, got a harness needing no credential"),
         }
     }
 
@@ -2393,6 +2429,26 @@ mod tests {
         }
     }
 
+    /// Railway's own harness never has a credential to push — `prepare_inner`
+    /// always resolves it to `PendingAuth::None`, so `write_credential` is
+    /// always false — but it still runs the reconnect/PATH seeds and reports
+    /// its own binary name like every other harness.
+    #[test]
+    fn railway_needs_no_credential_seed() {
+        let script = provision_script(Agent::Railway, false);
+        for other_seed in [
+            "cat > ~/.claude-code-env",
+            "cat > ~/.codex/auth.json",
+            "cat > ~/.grok/auth.json",
+        ] {
+            assert!(!script.contains(other_seed), "{script}");
+        }
+        assert!(script.contains("echo railway-agent-tui > ~/.railway-code-agent"));
+        assert!(script.contains("if command -v railway-agent-tui"));
+        assert!(script.contains("railway-code agent autostart"));
+        assert!(script.contains("AGENT-READY"));
+    }
+
     /// Harness config on an agent VM belongs to express-agent, which reconciles
     /// it on every boot. The CLI used to copy the laptop's
     /// `~/.claude/settings.json` up; it no longer does, and must not drift back
@@ -2400,7 +2456,7 @@ mod tests {
     /// statusline commands that only resolve on the machine that wrote them.
     #[test]
     fn no_provision_step_writes_harness_config() {
-        for agent in [Agent::Claude, Agent::Codex, Agent::Grok] {
+        for agent in [Agent::Claude, Agent::Codex, Agent::Grok, Agent::Railway] {
             for write_credential in [true, false] {
                 let script = provision_script(agent, write_credential);
                 assert!(!script.contains(".claude/settings.json"), "{script}");
@@ -2561,6 +2617,10 @@ mod tests {
             "a harness flag is not a bare invocation"
         );
 
+        let mut railway = LaunchArgs::default();
+        railway.set_harness("railway");
+        assert!(!railway.is_bare());
+
         let targeted = LaunchArgs::for_target(
             "proj_1".into(),
             "env_1".into(),
@@ -2638,8 +2698,15 @@ mod tests {
     #[test]
     fn agent_slugs_round_trip() {
         for agent in [Agent::Claude, Agent::Codex, Agent::Grok] {
+            assert_eq!(agent.slug(), agent.name());
             assert_eq!(Agent::from_slug(agent.name()), Some(agent));
         }
+        // Railway is the one exception: the slug is "railway", not the
+        // interactive binary's own name — which is what session prefixes,
+        // launch messages, and telemetry should read.
+        assert_eq!(Agent::from_slug("railway"), Some(Agent::Railway));
+        assert_eq!(Agent::Railway.slug(), "railway");
+        assert_eq!(Agent::Railway.name(), "railway-agent-tui");
         assert!(Agent::from_slug("droid").is_none());
         assert!(Agent::from_slug("").is_none());
     }

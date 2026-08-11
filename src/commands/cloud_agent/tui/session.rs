@@ -41,18 +41,27 @@ pub fn durable_name(harness: &str) -> String {
     format!("{harness}-{suffix}")
 }
 
-/// Read the environment back out of a relay target (`agent:<env>:<agent>`).
+/// The reply to a device-status-report cursor-position query (`ESC[6n`),
+/// found anywhere in a chunk of remote output — `Some` iff the query is
+/// there.
 ///
-/// Returns `None` for anything else rather than guessing: the caller uses this
-/// to pick a machine to flush and suspend, and a target shape we don't
-/// recognise is not one to act on.
-fn environment_from_target(target: &str) -> Option<&str> {
-    match *target.split(':').collect::<Vec<_>>().as_slice() {
-        ["agent", environment, agent] if !environment.is_empty() && !agent.is_empty() => {
-            Some(environment)
-        }
-        _ => None,
-    }
+/// The query is how a program without a trustworthy `ioctl` answer (this
+/// pane's remote side is a real pty, but a program can still choose to probe
+/// rather than assume) works out where the cursor already is; some terminal
+/// setup code — `railway-agent-tui`'s among them — sends it and blocks on a
+/// reply before drawing anything. The query lives entirely inside the byte
+/// stream this emulator parses: nothing forwards it to the real terminal this
+/// pane itself is drawn in, so unless the emulator answers on the query's
+/// behalf, the remote program hangs until it gives up. `ESC[row;colR`,
+/// 1-indexed, is what a real terminal would have sent back — read off the
+/// emulator's own idea of the cursor position after this chunk lands, so it
+/// reflects everything the chunk itself just drew.
+fn dsr_reply(chunk: &[u8], screen: &vt100::Screen) -> Option<Vec<u8>> {
+    const QUERY: &[u8] = b"\x1b[6n";
+    chunk.windows(QUERY.len()).any(|w| w == QUERY).then(|| {
+        let (row, col) = screen.cursor_position();
+        format!("\x1b[{};{}R", row + 1, col + 1).into_bytes()
+    })
 }
 
 /// A running `ssh` under a pty, plus the emulator that makes sense of it.
@@ -70,12 +79,23 @@ pub struct Session {
     pub identity: Option<std::path::PathBuf>,
     pub relay_opts: Vec<String>,
     parser: Arc<Mutex<vt100::Parser>>,
-    writer: Box<dyn Write + Send>,
+    /// Shared with the reader thread, which also writes to it — a synthetic
+    /// cursor-position reply (see [`dsr_reply`]) has to go back over the same
+    /// pty the keyboard does, and `take_writer` can only be called once.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     /// Set by the reader thread when ssh's output ends — the session is over
     /// even though the child may take another moment to reap.
     ended: Arc<AtomicBool>,
+    /// This pane attached to a session that already existed, rather than
+    /// starting one. Only an attach can go silent (see [`Self::stalled`]).
+    reattach: bool,
+    /// When the pane connected, for the stall clock.
+    spawned_at: std::time::Instant,
+    /// Set by the reader thread on the first byte. An attach that never sets
+    /// this is talking to a session whose process is gone.
+    got_output: Arc<AtomicBool>,
     /// Last size pushed to the pty, so a redraw at the same size is free.
     size: (u16, u16),
     /// Rows scrolled back from the live view. Typing snaps back to 0 — nobody
@@ -84,11 +104,13 @@ pub struct Session {
 }
 
 impl Session {
-    /// The environment this session's agent lives in. The relay target is the
-    /// only place the pane carries it, and sleeping the agent needs it to flush
-    /// the disk first.
-    pub fn environment_id(&self) -> Option<&str> {
-        environment_from_target(&self.ssh_target)
+    /// Write straight to the pty — keystrokes, pointer reports, and the
+    /// reader thread's own DSR replies all go through this one shared writer.
+    fn write_raw(&self, bytes: &[u8]) {
+        if let Ok(mut writer) = self.writer.lock() {
+            let _ = writer.write_all(bytes);
+            let _ = writer.flush();
+        }
     }
 
     /// Spawn `ssh` under a pty and start reading it.
@@ -171,26 +193,38 @@ impl Session {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 4000)));
         let ended = Arc::new(AtomicBool::new(false));
+        let got_output = Arc::new(AtomicBool::new(false));
         let mut reader = pty
             .master
             .try_clone_reader()
             .context("Failed to read the agent session")?;
-        let writer = pty
-            .master
-            .take_writer()
-            .context("Failed to write to the agent session")?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+            pty.master
+                .take_writer()
+                .context("Failed to write to the agent session")?,
+        ));
 
         {
             let parser = parser.clone();
             let ended = ended.clone();
+            let writer = writer.clone();
+            let got_output = got_output.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            if let Ok(mut parser) = parser.lock() {
+                            got_output.store(true, Ordering::Relaxed);
+                            let reply = parser.lock().ok().and_then(|mut parser| {
                                 parser.process(&buf[..n]);
+                                dsr_reply(&buf[..n], parser.screen())
+                            });
+                            if let Some(reply) = reply {
+                                if let Ok(mut writer) = writer.lock() {
+                                    let _ = writer.write_all(&reply);
+                                    let _ = writer.flush();
+                                }
                             }
                             notify();
                         }
@@ -214,9 +248,39 @@ impl Session {
             child,
             master: pty.master,
             ended,
+            reattach,
+            spawned_at: std::time::Instant::now(),
+            got_output,
             size: (rows, cols),
             scroll: 0,
         })
+    }
+
+    /// How long an attach may stay silent before the pane says so.
+    pub const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// An attach that has produced nothing, for long enough to say so.
+    ///
+    /// Only reattaches count: a fresh launch always prints (provisioning, the
+    /// harness banner), so silence there is just a slow start. An attach is
+    /// silent exactly when the durable session's process is gone — the relay
+    /// resolves the name, streams nothing, and never will. The platform can
+    /// keep reporting such a session as running after its agent slept, so
+    /// this is the pane's own way of noticing.
+    pub fn stalled(&self) -> bool {
+        self.reattach
+            && !self.got_output.load(Ordering::Relaxed)
+            && !self.ended()
+            && self.spawned_at.elapsed() >= Self::STALL_AFTER
+    }
+
+    /// Time until [`Self::stalled`] would first flip, so the event loop can
+    /// schedule one redraw for it. `None` when it can't stall or already has.
+    pub fn stall_remaining(&self) -> Option<std::time::Duration> {
+        if !self.reattach || self.got_output.load(Ordering::Relaxed) || self.ended() {
+            return None;
+        }
+        Self::STALL_AFTER.checked_sub(self.spawned_at.elapsed())
     }
 
     pub fn ended(&self) -> bool {
@@ -362,10 +426,9 @@ impl Session {
         if !wanted {
             return false;
         }
-        // `write_all`, not `send`: this is not typing, and it must not cancel a
+        // Not through `send`: this is not typing, and it must not cancel a
         // scrollback the way a keystroke does.
-        let _ = self.writer.write_all(&pointer_report(kind, at, encoding));
-        let _ = self.writer.flush();
+        self.write_raw(&pointer_report(kind, at, encoding));
         true
     }
 
@@ -430,8 +493,7 @@ impl Session {
             }
             // Not through `send`: this is not typing, and it must not snap the
             // view back to live.
-            let _ = self.writer.write_all(&out);
-            let _ = self.writer.flush();
+            self.write_raw(&out);
             return;
         }
         if alternate {
@@ -467,8 +529,7 @@ impl Session {
     pub fn send(&mut self, bytes: &[u8]) {
         // Typing is a statement of intent to be at the bottom.
         self.scroll_to_live();
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        self.write_raw(bytes);
     }
 
     pub fn send_key(&mut self, key: KeyEvent) {
@@ -538,7 +599,8 @@ impl Session {
         let child = pty.slave.spawn_command(CommandBuilder::new("cat"))?;
         drop(pty.slave);
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 4000)));
-        let writer = pty.master.take_writer()?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(pty.master.take_writer()?));
 
         // The same reader the real session runs. Without it the emulator never
         // sees a byte, and a test against this fixture would be testing
@@ -571,6 +633,9 @@ impl Session {
             child,
             master: pty.master,
             ended: Arc::new(AtomicBool::new(false)),
+            reattach: false,
+            spawned_at: std::time::Instant::now(),
+            got_output: Arc::new(AtomicBool::new(true)),
             size: (24, 80),
             scroll: 0,
         })
@@ -828,10 +893,14 @@ mod tests {
         let mut session = Session::for_test("ca", "test").unwrap();
         session.resize(6, 60);
         session.send(b"open https://railway.com/deploy now\r\n");
+        // Wait for the whole URL, not just the host. A pty delivers the line in
+        // whatever chunks it likes, and "railway.com" is already on screen while
+        // the path is still arriving — which left the assertion below comparing
+        // against a truncated `…/dep` on a loaded runner.
         for _ in 0..40 {
             if session
                 .with_screen(|s| s.contents_between(0, 0, 0, u16::MAX))
-                .is_some_and(|line| line.contains("railway.com"))
+                .is_some_and(|line| line.contains("https://railway.com/deploy"))
             {
                 break;
             }
@@ -1004,6 +1073,26 @@ mod tests {
         assert_eq!(legacy[5], 34);
     }
 
+    /// The reply the emulator would send back for a cursor-position query —
+    /// 1-indexed, and read off wherever the chunk that carried the query
+    /// itself left the cursor.
+    #[test]
+    fn dsr_reply_answers_with_the_current_cursor_position() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"hello\r\n\x1b[6n");
+        let reply = dsr_reply(b"hello\r\n\x1b[6n", parser.screen());
+        assert_eq!(reply, Some(b"\x1b[2;1R".to_vec()));
+    }
+
+    /// Ordinary output — the vast majority of what comes through — is not a
+    /// query, and must not be answered as though it were one.
+    #[test]
+    fn dsr_reply_is_none_without_a_query() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"just some output\r\n");
+        assert_eq!(dsr_reply(b"just some output\r\n", parser.screen()), None);
+    }
+
     /// An application with mouse reporting on gets the wheel; the emulator's
     /// own scrollback stays where it was.
     /// Unix only: this needs a mode-setting escape sequence to survive the trip
@@ -1167,24 +1256,5 @@ mod tests {
         let screen = parser.screen();
         assert_eq!(screen.contents().lines().next().unwrap().trim(), "hello");
         assert!(screen.contents().contains("world"));
-    }
-
-    #[test]
-    fn environment_is_read_out_of_a_relay_target() {
-        assert_eq!(
-            environment_from_target("agent:env-123:agent-456"),
-            Some("env-123")
-        );
-    }
-
-    #[test]
-    fn other_target_shapes_are_not_guessed_at() {
-        // A sandbox target has the same arity, and sleeping a machine picked
-        // out of one would suspend the wrong thing entirely.
-        assert_eq!(environment_from_target("sbx:env-123:sandbox-456"), None);
-        assert_eq!(environment_from_target("agent:env-123"), None);
-        assert_eq!(environment_from_target("agent::agent-456"), None);
-        assert_eq!(environment_from_target("agent:env-123:"), None);
-        assert_eq!(environment_from_target("some-service-instance"), None);
     }
 }
