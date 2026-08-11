@@ -176,7 +176,7 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
         return;
     };
     let theme = app.theme;
-    let area = f.area();
+    let area = page(f);
     // Name and fingerprint on their own lines: together they outrun the card
     // and wrap mid-fingerprint, which reads as garbage. Apart, both fit.
     let lines = vec![
