@@ -27,7 +27,29 @@ pub fn get_oauth_client_id() -> &'static str {
 }
 
 pub(crate) fn get_oauth_base_url(host: &str) -> String {
+    if let Some(url) = oauth_base_url_override_from_env() {
+        return url;
+    }
     format!("https://backboard.{host}/oauth")
+}
+
+/// Debug-build-only escape hatch so a locally-built binary can point the whole
+/// OAuth surface (authorize, device auth, token, refresh) at a scripted or
+/// fault-injecting local server. The OAuth twin of `RAILWAY_BACKBOARD_URL`
+/// (see `Configs::backboard_url_override_from_env`), and compiled out of
+/// release builds for the same reason: an arbitrary URL override in a shipped
+/// binary would let a hostile environment capture tokens.
+fn oauth_base_url_override_from_env() -> Option<String> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("RAILWAY_OAUTH_BASE_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
 }
 
 fn build_http_client() -> Result<reqwest::Client> {
