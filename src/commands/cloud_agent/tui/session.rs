@@ -581,25 +581,7 @@ impl Session {
     }
 
     pub fn send_key(&mut self, key: KeyEvent) {
-        // Modified Enter only exists in the kitty encoding: legacy terminals
-        // send `\r` for every one of them, which is why shift+enter never
-        // made a newline in a harness before. Only sent when the remote side
-        // pushed the protocol — anything else would read CSI-u as typing.
-        if key.code == KeyCode::Enter
-            && key
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL)
-            && self.kitty_keys.load(Ordering::Relaxed)
-        {
-            let m = 1
-                + u8::from(key.modifiers.contains(KeyModifiers::SHIFT))
-                + 2 * u8::from(key.modifiers.contains(KeyModifiers::ALT))
-                + 4 * u8::from(key.modifiers.contains(KeyModifiers::CONTROL));
-            let seq = format!("\x1b[13;{m}u");
-            self.send(seq.as_bytes());
-            return;
-        }
-        if let Some(bytes) = encode_key(key) {
+        if let Some(bytes) = encode_key_for(key, self.kitty_keys.load(Ordering::Relaxed)) {
             self.send(&bytes);
         }
     }
@@ -786,6 +768,36 @@ fn wheel_report(up: bool, at: (u16, u16), encoding: vt100::MouseProtocolEncoding
     }
 }
 
+/// [`encode_key`], plus the encodings that only exist once the remote side
+/// has pushed the kitty keyboard protocol (see [`kitty_scan`]).
+///
+/// Modified Enter is the whole reason this split exists: legacy terminals
+/// send `\r` for shift+enter, ctrl+enter and plain enter alike, which is why
+/// shift+enter never made a newline in a harness. The CSI-u form says which
+/// one it was — but only to a program expecting it, so it is sent only after
+/// the push. Anything else would read the escape sequence as typed text.
+///
+/// Separate from `Session` so the choice is testable without a pty: Windows'
+/// ConPTY interprets escape sequences instead of forwarding them, so a
+/// round-trip test can only run on unix.
+fn encode_key_for(key: KeyEvent, kitty: bool) -> Option<Vec<u8>> {
+    if kitty
+        && key.code == KeyCode::Enter
+        && key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL)
+    {
+        // The kitty modifier field is a 1-based bitfield: shift 1, alt 2,
+        // ctrl 4. 13 is Enter's codepoint.
+        let m = 1
+            + u8::from(key.modifiers.contains(KeyModifiers::SHIFT))
+            + 2 * u8::from(key.modifiers.contains(KeyModifiers::ALT))
+            + 4 * u8::from(key.modifiers.contains(KeyModifiers::CONTROL));
+        return Some(format!("\x1b[13;{m}u").into_bytes());
+    }
+    encode_key(key)
+}
+
 /// Encode a key event as the bytes a terminal would send.
 ///
 /// Enough of xterm's vocabulary for a coding agent: text, the control chords
@@ -897,9 +909,43 @@ mod tests {
     }
 
     /// Shift+enter reaches the harness as a newline only via the kitty
-    /// encoding — legacy \r is exactly the ambiguity being fixed.
+    /// encoding — legacy `\r` for every modified Enter is exactly the
+    /// ambiguity being fixed.
     #[test]
     fn modified_enter_is_csi_u_encoded_once_kitty_is_active() {
+        let enter = |m| KeyEvent::new(KeyCode::Enter, m);
+        let bytes = |key, kitty| encode_key_for(key, kitty).unwrap();
+
+        // Each modifier its own bit, and combinations sum.
+        assert_eq!(bytes(enter(KeyModifiers::SHIFT), true), b"\x1b[13;2u");
+        assert_eq!(bytes(enter(KeyModifiers::ALT), true), b"\x1b[13;3u");
+        assert_eq!(bytes(enter(KeyModifiers::CONTROL), true), b"\x1b[13;5u");
+        assert_eq!(
+            bytes(enter(KeyModifiers::SHIFT | KeyModifiers::CONTROL), true),
+            b"\x1b[13;6u"
+        );
+
+        // Unmodified Enter is `\r` either way: it is not ambiguous, and a
+        // harness reading CSI-u for it would never see a plain submit.
+        assert_eq!(bytes(enter(KeyModifiers::NONE), true), b"\r");
+        assert_eq!(bytes(enter(KeyModifiers::NONE), false), b"\r");
+
+        // No push, no CSI-u: to a legacy program the escape sequence is
+        // typed text, which is worse than the ambiguity it replaces.
+        assert_eq!(bytes(enter(KeyModifiers::SHIFT), false), b"\r");
+
+        // Everything else routes through the legacy encoder untouched.
+        assert_eq!(bytes(key(KeyCode::Char('a')), true), b"a");
+        assert_eq!(bytes(key(KeyCode::Tab), true), b"\t");
+    }
+
+    /// Unix only: this needs an escape sequence to survive the trip through
+    /// the pty, and Windows' ConPTY interprets those for itself instead of
+    /// passing them along, so the emulator never sees what was sent. Plain
+    /// text round-trips fine, which is why the rest of these run everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn the_kitty_encoding_goes_out_on_the_wire() {
         let mut session = Session::for_test("ca", "test").unwrap();
         session.kitty_keys.store(true, Ordering::Relaxed);
         session.send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -913,24 +959,12 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         // `cat` echoes what it was sent, so the emulator shows the sequence
-        // (ESC swallowed) — proof the CSI-u bytes went out, not \r.
+        // (ESC swallowed) — proof the CSI-u bytes went out, not `\r`.
         assert!(
             session
                 .with_screen(|s| s.contents().contains("[13;2u"))
                 .unwrap_or(false),
             "expected the kitty encoding on the wire"
-        );
-
-        // Without the push, plain \r still goes out — CSI-u would be typed
-        // text to a legacy program.
-        let mut legacy = Session::for_test("ca", "test").unwrap();
-        legacy.send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(
-            !legacy
-                .with_screen(|s| s.contents().contains("[13;2u"))
-                .unwrap_or(false),
-            "no kitty push, no kitty encoding"
         );
     }
 

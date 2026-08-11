@@ -1861,7 +1861,12 @@ impl App {
         // Esc must reach its editor, and ⌥/^ chords belong to whatever is
         // running in there. Only one chord is reserved, and it is one no agent
         // binds: ^o hands focus back to the tree.
-        if self.focus == ManageFocus::Session && self.screen != Screen::Menu {
+        //
+        // Only while the session is the frontmost thing, though. A card
+        // floated over it — the ⌥n picker, the ⌥p composer — is what the
+        // keyboard is for while it is up, and focus stays on the session
+        // underneath so closing the card returns to typing in it.
+        if self.focus == ManageFocus::Session && self.screen == Screen::Manage {
             // Three ways out, because terminals disagree about what they will
             // report. `^]` is the classic escape chord and works everywhere;
             // ⌥esc — the ⌥ family's release, matching every other chord here —
@@ -1882,13 +1887,18 @@ impl App {
             }
             // Three chords are taken from the agent, all because the moment
             // you want them is while you are using it: ⌥f for room, ⌥] and ⌥[
-            // to move between panes. ⌥f costs Meta-f (forward-word) in a
-            // shell; readline leaves Meta-] and Meta-[ unbound, and `^]`
-            // (character-search) is untouched because only the Meta forms are
-            // claimed. Nothing else is intercepted — ⌥s still reaches the
-            // agent from here.
+            // to move between panes, ⌥n and ⌥p to start more work — the
+            // thought "this needs its own session" arrives while reading one,
+            // and going out to the tree first to act on it is the friction
+            // they exist to remove. The costs, all in a shell: ⌥f is Meta-f
+            // (forward-word), ⌥n and ⌥p are Meta-n / Meta-p (the
+            // non-incremental history searches, which few people bind and
+            // both harnesses ignore). Readline leaves Meta-] and Meta-[
+            // unbound, and `^]` (character-search) is untouched because only
+            // the Meta forms are claimed. Nothing else is intercepted — ⌥s
+            // still reaches the agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'f' | ']' | '[')
+                && matches!(chord, 'f' | 'n' | 'p' | ']' | '[')
             {
                 return self.alt_action(chord);
             }
@@ -5692,6 +5702,54 @@ mod tests {
         assert_eq!(a.on_key(key(KeyCode::Enter)), None);
         assert_eq!(a.screen, Screen::ManagePrompt, "nothing to send yet");
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.screen, Screen::Manage);
+    }
+
+    /// The launchers work from inside a session, which is where the thought
+    /// "this needs its own session" actually arrives. The card floated over
+    /// it takes the keyboard while it is up — otherwise the draft would be
+    /// typed into the harness — and focus returns to the session on esc.
+    #[test]
+    fn alt_p_and_alt_n_reach_past_a_focused_session() {
+        let mut a = loaded_app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.sessions
+            .push(super::super::session::Session::for_test("ca_1", "builder").unwrap());
+        a.active = Some(0);
+        a.focus = ManageFocus::Session;
+
+        assert_eq!(a.on_key(alt('p')), None);
+        assert_eq!(
+            a.screen,
+            Screen::ManagePrompt,
+            "⌥p is not swallowed by the session"
+        );
+        for c in "ship it".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            a.manage_prompt.as_deref(),
+            Some("ship it"),
+            "the card has the keyboard, not the harness"
+        );
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.screen, Screen::Manage);
+        assert_eq!(
+            a.focus,
+            ManageFocus::Session,
+            "closing the card returns to typing in the session"
+        );
+
+        // Same for the picker.
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        a.on_key(key(KeyCode::Esc));
         assert_eq!(a.screen, Screen::Manage);
     }
 
