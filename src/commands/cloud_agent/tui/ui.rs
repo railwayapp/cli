@@ -134,11 +134,17 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
     };
     let theme = app.theme;
     let area = f.area();
+    // Name and fingerprint on their own lines: together they outrun the card
+    // and wrap mid-fingerprint, which reads as garbage. Apart, both fit.
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            format!("  {} ({})", gate.offer.name, gate.offer.fingerprint),
+            format!("  {}", gate.offer.name),
             Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("  {}", gate.offer.fingerprint),
+            Style::default().fg(theme.dim),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -150,29 +156,23 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
             Style::default().fg(theme.dim),
         )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "  y ",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("register", Style::default().fg(theme.fg)),
-            Span::styled(
-                "    n ",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("not now", Style::default().fg(theme.dim)),
-        ]),
+        // The same badge-and-label chords as the footers, so the card reads
+        // as part of the product rather than its own little dialect.
+        {
+            let mut answers = vec![Span::raw("  ")];
+            answers.extend(chord_spans(
+                theme,
+                &[("y", "Yes — register this key"), ("n", "No, not now")],
+            ));
+            Line::from(answers)
+        },
     ];
     let width = 62.min(area.width.saturating_sub(4));
     let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
     let panel = centered(width, height, area);
     f.render_widget(Clear, panel);
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -3226,5 +3226,37 @@ mod tests {
         app.screen = Screen::Manage;
         let out = draw(&app, 80, 24);
         assert!(out.contains("RAILWAY CLOUD-AGENTS"));
+    }
+
+    /// The gate card: name and fingerprint each on their own line (together
+    /// they outrun the card and wrap mid-fingerprint), and the answers in the
+    /// same badge-and-label chords as the footers.
+    #[test]
+    fn the_ssh_gate_card_lays_out_key_and_answers() {
+        use crate::commands::cloud_agent::tui::app::{SshGate, SshKeyOffer};
+        let mut app = app_with_tree();
+        app.ssh_gate = Some(SshGate {
+            offer: SshKeyOffer {
+                name: "raildesk-deploy".into(),
+                fingerprint: "SHA256:hlDEs7CV5clc1lMfsMxr/CPeuKuJNn9hJxjsy1e9zLc".into(),
+                public_key: "ssh-ed25519 AAAA test".into(),
+            },
+            then: None,
+        });
+        let out = draw(&app, 80, 30);
+        assert!(out.contains("Register your SSH key with Railway?"), "{out}");
+        assert!(out.contains(" y "), "{out}");
+        assert!(out.contains("Yes — register this key"), "{out}");
+        assert!(out.contains("No, not now"), "{out}");
+
+        let name_line = out
+            .lines()
+            .position(|l| l.contains("raildesk-deploy"))
+            .expect("key name shown");
+        let fp_line = out
+            .lines()
+            .position(|l| l.contains("SHA256:hlDEs7CV5clc1lMfsMxr/CPeuKuJNn9hJxjsy1e9zLc"))
+            .expect("full fingerprint shown, unwrapped");
+        assert_eq!(fp_line, name_line + 1, "fingerprint sits under the name");
     }
 }
