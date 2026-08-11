@@ -176,13 +176,18 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
 
-    // Both under one spinner: the flag check is a small query against the same
-    // client, and running it beside the tree load rather than before it keeps
-    // the preflight off the clock for everyone who does have the flag.
+    // All under one spinner: the flag check and the key check are small
+    // queries against the same client, and running them beside the tree load
+    // rather than before it keeps them off the clock.
     let spinner = create_spinner("Loading your projects".to_string());
-    let loaded = tokio::try_join!(
-        access::ensure_enabled(&client, &configs),
-        tui::load_tree(&client, &configs),
+    let (loaded, ssh_key) = tokio::join!(
+        async {
+            tokio::try_join!(
+                access::ensure_enabled(&client, &configs),
+                tui::load_tree(&client, &configs),
+            )
+        },
+        check_ssh_key(&client, &configs),
     );
     spinner.finish_and_clear();
     let (_, tree) = loaded?;
@@ -193,19 +198,6 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
         );
         return Ok(());
     }
-
-    // Settle the SSH key while the real terminal can still host a prompt: the
-    // first-run registration flow asks a question on stdin, and once the TUI
-    // owns the screen no prompt can work (every launch used to hang there).
-    // After this, the launch pipeline's own ensure_ssh_key lookup finds the
-    // registered key and stays silent. Best-effort: the TUI also sleeps and
-    // deletes agents, so a missing key degrades connecting, not managing.
-    let ssh_preflight = crate::commands::ssh::tel::track_for(
-        "cloud_agent_launch",
-        "ssh_key_preflight",
-        crate::commands::ssh::ensure_ssh_key_quiet(&client, &configs).await,
-    )
-    .await;
 
     let home = dirs::home_dir().context("Unable to get home directory")?;
     let stored = AgentPrefs::load_in(&home);
@@ -253,14 +245,9 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
         .map(|(source, _)| source.slug.to_string());
     // Mirrored so the ⌥s settings card opens showing the saved answer.
     app.skills_enabled = saved.skills.enabled;
-    // The preflight's terminal output is gone once the alternate screen opens,
-    // so carry the failure in as a toast. Launch attempts repeat the full
-    // instructions in their own error.
-    if let Err(err) = &ssh_preflight {
-        let reason = err.to_string();
-        let reason = reason.lines().next().unwrap_or("SSH key setup failed");
-        app.toast_error(format!("SSH setup needed before connecting: {reason}"));
-    }
+    // What the key check learned. Connects gate on this in-frame: an
+    // unregistered key raises a register question instead of a hung prompt.
+    app.ssh_key = ssh_key;
     // No preferences yet: ask whether to set them up, rather than dropping
     // someone in front of a prompt whose target, agent and skills are all
     // unanswered. Choosing Setup from the menu skips that question — they have
@@ -323,6 +310,42 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
             }
         }
     }
+}
+
+/// What the TUI needs to know about the user's SSH key, without prompting.
+///
+/// The interactive half of `ensure_ssh_key` — pick a key, confirm, register —
+/// belongs to the TUI now (its gate card), so this only looks. Check failures
+/// come back as `Unknown` rather than an error: the launch pipeline re-checks
+/// and is the better place to fail, with a message instead of a blocked
+/// startup. With several local keys the offer is the first, the same
+/// preferred-key order the non-interactive `ssh keys add` uses.
+async fn check_ssh_key(client: &reqwest::Client, configs: &Configs) -> tui::app::SshKeyState {
+    use crate::controllers::ssh::keys::{find_local_ssh_keys, get_registered_ssh_keys};
+    use tui::app::{SshKeyOffer, SshKeyState};
+
+    let (local, registered) = tokio::join!(
+        find_local_ssh_keys(),
+        get_registered_ssh_keys(client, configs, None),
+    );
+    let (Ok(local), Ok(registered)) = (local, registered) else {
+        return SshKeyState::Unknown;
+    };
+    if local.is_empty() {
+        return SshKeyState::NoLocalKeys;
+    }
+    if local
+        .iter()
+        .any(|l| registered.iter().any(|r| r.fingerprint == l.fingerprint))
+    {
+        return SshKeyState::Ready;
+    }
+    let key = &local[0];
+    SshKeyState::NeedsRegistration(SshKeyOffer {
+        name: key.key_name().to_string(),
+        fingerprint: key.fingerprint.clone(),
+        public_key: key.public_key.to_string(),
+    })
 }
 
 fn persist_theme(home: &std::path::Path, slug: &str) {

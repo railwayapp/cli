@@ -121,7 +121,71 @@ pub fn render_with_layout(app: &App, f: &mut Frame) -> (PaneRects, Option<String
 fn render_inner(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     f.render_widget(Clear, f.area());
     render_screen(app, f, rects);
+    render_ssh_gate(app, f);
     render_toast(app, f);
+}
+
+/// The register-your-SSH-key question, centered over whatever raised it. Up
+/// only while [`App::ssh_gate`] holds a connect (or setup's offer); the next
+/// key answers it — see the gate block at the top of [`App::on_key`].
+fn render_ssh_gate(app: &App, f: &mut Frame) {
+    let Some(gate) = app.ssh_gate.as_ref() else {
+        return;
+    };
+    let theme = app.theme;
+    let area = f.area();
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {} ({})", gate.offer.name, gate.offer.fingerprint),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Agents are reached over SSH, and Railway only answers",
+            Style::default().fg(theme.dim),
+        )),
+        Line::from(Span::styled(
+            "  keys it knows. Registered once, it covers every agent.",
+            Style::default().fg(theme.dim),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  y ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("register", Style::default().fg(theme.fg)),
+            Span::styled(
+                "    n ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("not now", Style::default().fg(theme.dim)),
+        ]),
+    ];
+    let width = 62.min(area.width.saturating_sub(4));
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let panel = centered(width, height, area);
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.accent))
+                .title(Span::styled(
+                    " Register your SSH key with Railway? ",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        ),
+        panel,
+    );
 }
 
 /// The corner confirmation, over whatever is underneath it.

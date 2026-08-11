@@ -42,7 +42,8 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use app::{
-    Agent, AgentOp, ConsoleSession, EnvNode, Load, LoadSessions, ProjectNode, WorkspaceNode,
+    Agent, AgentOp, ConsoleSession, EnvNode, HeldConnect, Load, LoadSessions, ProjectNode,
+    SshKeyOffer, SshKeyState, WorkspaceNode,
 };
 pub use app::{App, Effect, LaunchRequest, Screen, Target};
 
@@ -284,6 +285,12 @@ enum Message {
         error: Option<String>,
     },
     ProjectCreated(Result<wizard::ProjectOption, String>),
+    /// The gate's key registration finished. On success the held connect
+    /// resumes as the effect it was before the gate held it.
+    SshKeyRegistered {
+        result: Result<(), String>,
+        then: Option<HeldConnect>,
+    },
     /// Ask again for one agent's sessions.
     RefreshAgentSessions(String),
     /// The session produced output, so the screen needs redrawing.
@@ -617,6 +624,17 @@ pub async fn run(
                 environment_id,
                 session_name,
             }) => {
+                // Same SSH gate as a launch: reattaching is a fresh ssh, and
+                // a key deregistered since the session opened would otherwise
+                // land on the relay's interactive signup screen.
+                if app.hold_for_ssh_key(HeldConnect::Reattach {
+                    agent_id: agent_id.clone(),
+                    agent_name: agent_name.clone(),
+                    environment_id: environment_id.clone(),
+                    session_name: session_name.clone(),
+                }) {
+                    continue;
+                }
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let message = match code::connect_info(&environment_id, &agent_id).await {
@@ -639,6 +657,22 @@ pub async fn run(
                     let _ = tx.send(message);
                 });
             }
+            Some(Effect::RegisterSshKey { offer, then }) => {
+                let tx = tx.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let result = register_gate_key(&client, &offer).await;
+                    if let Err(message) = &result {
+                        crate::commands::ssh::tel::report_failure_for(
+                            "cloud_agent_launch",
+                            "ssh_key_register",
+                            message,
+                        )
+                        .await;
+                    }
+                    let _ = tx.send(Message::SshKeyRegistered { result, then });
+                });
+            }
             Some(Effect::CreateDefaultProject(workspace_id)) => {
                 let tx = tx.clone();
                 let client = client.clone();
@@ -656,6 +690,10 @@ pub async fn run(
                         tokio::spawn(async move {
                             super::telemetry::track_setup_saved("wizard", &prefs).await;
                         });
+                        // Setup is where the account gets ready to connect, so
+                        // an unregistered key is offered here too — not just
+                        // at the first launch that would trip over it.
+                        app.offer_ssh_key_setup();
                         "Saved — Setup again to change it".into()
                     }
                     Err(err) => {
@@ -785,6 +823,11 @@ pub async fn run(
                 });
             }
             Some(Effect::Launch(req)) => {
+                // Connecting rides SSH, so an unregistered key is settled with
+                // an in-frame question before anything is spent on the launch.
+                if app.hold_for_ssh_key(HeldConnect::Launch(req.clone())) {
+                    continue;
+                }
                 // Minting needs a browser and a paste, neither of which works
                 // underneath a frame. Only a mint that can actually run needs
                 // the step-out: with nothing to mint from, the launch goes
@@ -981,6 +1024,23 @@ fn handle_message(
             }
             None
         }
+        Message::SshKeyRegistered { result, then } => match result {
+            Ok(()) => {
+                app.ssh_key = SshKeyState::Ready;
+                app.toast("SSH key registered");
+                // The held connect resumes as the effect it was; it passes the
+                // now-Ready gate and takes the normal path from there.
+                then.map(HeldConnect::into_effect)
+            }
+            Err(message) => {
+                // Still unregistered: the next connect raises the gate again.
+                // The toast gets the first line; register_ssh_key already maps
+                // the duplicate-fingerprint rejection to something actionable.
+                let first = message.lines().next().unwrap_or("registration failed");
+                app.toast_error(format!("Couldn't register the key: {first}"));
+                None
+            }
+        },
         Message::SessionKilled {
             agent_id,
             session_name,
@@ -1263,6 +1323,23 @@ fn spawn_session_prefetch(
             });
         }
     });
+}
+
+/// Register the gate's key with Railway. String errors because the result
+/// crosses the message channel; `register_ssh_key` has already mapped the
+/// duplicate-fingerprint rejection to a user-facing message.
+async fn register_gate_key(client: &reqwest::Client, offer: &SshKeyOffer) -> Result<(), String> {
+    let configs = Configs::new().map_err(|e| format!("{e:#}"))?;
+    crate::controllers::ssh::keys::register_ssh_key(
+        client,
+        &configs,
+        &offer.name,
+        &offer.public_key,
+        None,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("{e:#}"))
 }
 
 /// Re-ask for an agent's sessions shortly after one is opened.
