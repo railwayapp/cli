@@ -27,12 +27,8 @@ pub struct Theme {
     /// Fill for dialogs, cards and input boxes. Opaque on purpose: an overlay
     /// that lets the screen underneath show through reads as a rendering bug
     /// rather than as something sitting on top of the screen. A step lighter
-    /// than the page it floats over, which is half of what makes it read as
-    /// raised — the drop shadow is the other half.
+    /// than the page it floats over, so it reads as raised.
     pub surface: Color,
-    /// The drop shadow under a dialog. Darker than anything else in the theme:
-    /// its whole job is to read as the screen falling away behind the card.
-    pub shadow: Color,
     /// Row highlight in the tree.
     pub selection: Color,
     pub running: Color,
@@ -51,7 +47,6 @@ pub const THEMES: &[Theme] = &[
         fg: Color::Rgb(0xef, 0xec, 0xf6),
         on_accent: Color::Rgb(0x18, 0x12, 0x28),
         surface: Color::Rgb(0x25, 0x1d, 0x39),
-        shadow: Color::Rgb(0x14, 0x0f, 0x1f),
         selection: Color::Rgb(0x37, 0x2a, 0x50),
         running: Color::Rgb(0x6e, 0xe7, 0xa8),
         sleeping: Color::Rgb(0x7d, 0x77, 0x8f),
@@ -73,7 +68,6 @@ pub const THEMES: &[Theme] = &[
         surface: Color::Black,
         // Nothing darker than black to fall back on, so the shade is a grey
         // one — the only depth cue the sixteen colours can carry.
-        shadow: Color::DarkGray,
         selection: Color::DarkGray,
         running: Color::Green,
         sleeping: Color::Gray,
@@ -89,7 +83,6 @@ pub const THEMES: &[Theme] = &[
         fg: Color::Rgb(0xf6, 0xf1, 0xe8),
         on_accent: Color::Rgb(0x24, 0x18, 0x06),
         surface: Color::Rgb(0x2c, 0x22, 0x14),
-        shadow: Color::Rgb(0x18, 0x11, 0x08),
         selection: Color::Rgb(0x45, 0x2d, 0x10),
         running: Color::Rgb(0x9a, 0xd8, 0x6a),
         sleeping: Color::Rgb(0x86, 0x7c, 0x6e),
@@ -106,7 +99,6 @@ pub const THEMES: &[Theme] = &[
         fg: Color::Rgb(0xf2, 0xf2, 0xf2),
         on_accent: Color::Rgb(0x10, 0x10, 0x10),
         surface: Color::Rgb(0x23, 0x23, 0x23),
-        shadow: Color::Rgb(0x12, 0x12, 0x12),
         selection: Color::Rgb(0x33, 0x33, 0x33),
         running: Color::Rgb(0xe6, 0xe6, 0xe6),
         sleeping: Color::Rgb(0x77, 0x77, 0x77),
@@ -177,8 +169,7 @@ mod tests {
     }
 
     /// A dialog's fill has to differ from everything drawn on top of it, or the
-    /// text disappears into the box — and from its own shadow, or the card has
-    /// no edge to it.
+    /// text disappears into the box.
     #[test]
     fn the_surface_contrasts_with_what_sits_on_it() {
         for theme in THEMES {
@@ -186,7 +177,6 @@ mod tests {
             assert_ne!(theme.surface, theme.dim, "{}", theme.slug);
             assert_ne!(theme.surface, theme.accent, "{}", theme.slug);
             assert_ne!(theme.surface, theme.selection, "{}", theme.slug);
-            assert_ne!(theme.surface, theme.shadow, "{}", theme.slug);
         }
     }
 }
