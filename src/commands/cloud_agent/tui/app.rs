@@ -1646,14 +1646,15 @@ impl App {
                 self.focus = ManageFocus::Tree;
                 return None;
             }
-            // Two chords are taken from the agent, both because the moment you
-            // want them is while you are using it: ⌥f for room, ⌥] to move on
-            // to the next pane. ⌥f costs Meta-f (forward-word) in a shell;
-            // readline leaves Meta-] unbound, and `^]` (character-search) is
-            // untouched because only the Meta form is claimed. Nothing else is
-            // intercepted — ⌥s still reaches the agent from here.
+            // Three chords are taken from the agent, all because the moment
+            // you want them is while you are using it: ⌥f for room, ⌥] and ⌥[
+            // to move between panes. ⌥f costs Meta-f (forward-word) in a
+            // shell; readline leaves Meta-] and Meta-[ unbound, and `^]`
+            // (character-search) is untouched because only the Meta forms are
+            // claimed. Nothing else is intercepted — ⌥s still reaches the
+            // agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'f' | ']')
+                && matches!(chord, 'f' | ']' | '[')
             {
                 return self.alt_action(chord);
             }
@@ -2553,19 +2554,21 @@ impl App {
                 self.toggle_maximized();
                 None
             }
-            ']' => self.cycle_session(),
+            ']' => self.cycle_session(true),
+            '[' => self.cycle_session(false),
             _ => None,
         }
     }
 
-    /// Move the pane to the next open session, wrapping at the end.
+    /// Move the pane to the next or previous open session, wrapping.
     ///
     /// Scoped to panes that are already open rather than every session in the
     /// tree, and that is the whole design: waking a sleeping agent is a cold
     /// boot — seconds of wall clock and a VM that starts billing — so holding
-    /// `⌥]` must never fan out wakes across agents you were only passing
-    /// through. Opening something new stays the deliberate `enter` on a row.
-    fn cycle_session(&mut self) -> Option<Effect> {
+    /// `⌥]` or `⌥[` must never fan out wakes across agents you were only
+    /// passing through. Opening something new stays the deliberate `enter` on
+    /// a row.
+    fn cycle_session(&mut self, forward: bool) -> Option<Effect> {
         match self.sessions.len() {
             0 => {
                 self.status = "No open sessions".to_string();
@@ -2579,7 +2582,13 @@ impl App {
             _ => {}
         }
         let count = self.sessions.len();
-        let next = self.active.map_or(0, |i| (i + 1) % count);
+        let next = match (self.active, forward) {
+            (Some(i), true) => (i + 1) % count,
+            (Some(i), false) => (i + count - 1) % count,
+            // No pane yet: forward starts at the front, back at the end.
+            (None, true) => 0,
+            (None, false) => count - 1,
+        };
         self.active = Some(next);
         self.select_row_for_active();
         if let Some(name) = self.active_session().map(|s| s.agent_name.clone()) {
@@ -3391,13 +3400,18 @@ fn project_count_note(project: &ProjectNode) -> String {
 /// is unreachable without Meta, which is why every card also keeps its bare
 /// letter while the cards have focus.
 ///
-/// `]` is the one non-letter, and it has no `[` twin on purpose: under Meta,
-/// Option+`[` is the two bytes `ESC [` — byte-identical to the CSI prefix that
-/// starts every arrow key and escape sequence — so it can never be told apart
-/// from a cursor key. `ESC ]` is OSC, which terminals effectively never send,
-/// so the forward direction is safe on its own.
+/// The brackets are the non-letters, and they are not equals. `ESC ]` is OSC,
+/// which terminals effectively never send, so under Meta ⌥] is safe
+/// everywhere. ⌥[ under Meta is the two bytes `ESC [` — byte-identical to the
+/// CSI prefix that starts every arrow key — so a legacy terminal can never
+/// deliver it; the parser eats the bytes as an unfinished escape sequence and
+/// no key event exists to match. `[` is still in the table for the terminals
+/// that can say it unambiguously: under the kitty keyboard protocol (pushed at
+/// startup) it arrives as a genuine ALT+`[` event, and composed-mode macOS
+/// sends it as a curly double quote. Everywhere else the reverse chord is
+/// simply absent — it can go dead, but never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['f', 's', ']'];
+    const ACTIONS: &[char] = &['f', 's', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = c.to_ascii_lowercase();
@@ -3409,10 +3423,12 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
-        // Option+] composes to a left curly quote, Option+shift+] to the right
-        // one. Both are the same chord as far as anyone pressing it is
-        // concerned, matching how the letters fold their shifted forms.
+        // Option+] composes to a left curly single quote, Option+shift+] to
+        // the right one; Option+[ does the same with the double quotes. Each
+        // pair is one chord as far as anyone pressing it is concerned,
+        // matching how the letters fold their shifted forms.
         KeyCode::Char('\u{2018}') | KeyCode::Char('\u{2019}') => Some(']'),
+        KeyCode::Char('\u{201C}') | KeyCode::Char('\u{201D}') => Some('['),
         _ => None,
     }
 }
@@ -3971,8 +3987,7 @@ mod tests {
         a
     }
 
-    /// ⌥] walks the open panes and wraps, so a single key reaches every
-    /// session without needing a reverse chord.
+    /// ⌥] walks the open panes and wraps, and ⌥[ walks them the other way.
     #[test]
     fn alt_bracket_cycles_forward_through_open_sessions_and_wraps() {
         let mut a = with_sessions(&["ca_1", "ca_2", "ca_3"]);
@@ -3986,6 +4001,20 @@ mod tests {
         assert_eq!(a.active, Some(2), "back where it started");
     }
 
+    /// The reverse chord retraces the forward one exactly, wrap included.
+    #[test]
+    fn alt_left_bracket_cycles_backward_and_wraps() {
+        let mut a = with_sessions(&["ca_1", "ca_2", "ca_3"]);
+        assert_eq!(a.active, Some(2), "the newest attach is active");
+
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(1));
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(0));
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(2), "wraps past the front");
+    }
+
     /// The chord has to work from inside the pane — that is where you are when
     /// you want the next one. ⌥s must still fall through to the agent.
     #[test]
@@ -3997,7 +4026,13 @@ mod tests {
         assert_eq!(a.active, Some(0));
         assert_eq!(a.focus, ManageFocus::Session, "cycling does not detach");
 
-        // Still only ⌥f and ⌥] are taken from the agent.
+        // ⌥[ is taken from the agent too — going back is the same moment as
+        // going forward.
+        assert_eq!(a.on_key(alt('[')), None);
+        assert_eq!(a.active, Some(1), "retraces the forward step");
+        assert_eq!(a.focus, ManageFocus::Session, "cycling does not detach");
+
+        // Still only ⌥f, ⌥] and ⌥[ are taken from the agent.
         let screen = a.screen;
         a.on_key(alt('s'));
         assert_eq!(a.screen, screen, "⌥s belongs to whatever is running");
@@ -4018,11 +4053,18 @@ mod tests {
         assert!(b.status.contains("Only one session"), "{}", b.status);
     }
 
-    /// Without Option-as-Meta macOS composes ⌥] into a curly quote; both the
-    /// plain and shifted forms are the same chord.
+    /// Without Option-as-Meta macOS composes the bracket chords into curly
+    /// quotes — singles for ⌥], doubles for ⌥[ — and each pair folds its
+    /// shifted form into the same chord.
     #[test]
-    fn option_composed_curly_quotes_are_the_bracket_chord() {
+    fn option_composed_curly_quotes_are_the_bracket_chords() {
         for composed in ['\u{2018}', '\u{2019}'] {
+            let mut a = with_sessions(&["ca_1", "ca_2"]);
+            assert_eq!(a.on_key(key(KeyCode::Char(composed))), None);
+            assert_eq!(a.active, Some(0), "composed {composed:?} should cycle");
+            assert!(a.prompt.is_empty(), "a chord is not text");
+        }
+        for composed in ['\u{201C}', '\u{201D}'] {
             let mut a = with_sessions(&["ca_1", "ca_2"]);
             assert_eq!(a.on_key(key(KeyCode::Char(composed))), None);
             assert_eq!(a.active, Some(0), "composed {composed:?} should cycle");
@@ -4030,16 +4072,17 @@ mod tests {
         }
     }
 
-    /// There is deliberately no ⌥[ twin: under Meta it is the two bytes
-    /// `ESC [`, which is the CSI prefix every arrow key starts with, so it
-    /// cannot be told apart from a cursor key. Guard the omission.
+    /// ⌥[ only exists where the terminal can say it unambiguously — as a real
+    /// ALT event under the kitty protocol, or as macOS's composed quote. In a
+    /// legacy Meta terminal it is the CSI prefix `ESC [` and never reaches the
+    /// key handler at all, so recognizing the clean forms risks nothing.
     #[test]
-    fn there_is_no_alt_left_bracket_chord() {
-        assert_eq!(alt_chord(&alt('[')), None);
+    fn alt_left_bracket_is_the_reverse_chord() {
+        assert_eq!(alt_chord(&alt('[')), Some('['));
         assert_eq!(
             alt_chord(&key(KeyCode::Char('\u{201C}'))),
-            None,
-            "the composed ⌥[ quote is not a chord either"
+            Some('['),
+            "the composed ⌥[ quote is the same chord"
         );
     }
 
