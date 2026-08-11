@@ -32,7 +32,7 @@ use tui::{App, Outcome};
 #[derive(Parser)]
 #[clap(
     args_conflicts_with_subcommands = true,
-    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -48,6 +48,9 @@ pub struct Args {
 enum Command {
     /// Configure how cloud agents are launched (default agent, skills)
     Setup(setup::Args),
+
+    /// Open the TUI directly on the manage screen, skipping the menu
+    Manage,
 
     /// Launch a coding agent on a cloud agent VM, without the TUI
     Start(LaunchArgs),
@@ -102,6 +105,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     match args.command {
         Some(Command::Setup(a)) => setup::command(a).await,
+        Some(Command::Manage) => browse_into(Some(tui::Screen::Manage)).await,
         Some(Command::Start(a)) => crate::commands::code::launch(a).await,
         Some(Command::List(a)) => tracked("list", lifecycle::list(a)).await,
         Some(Command::Create(a)) => tracked("create", lifecycle::create(a)).await,
@@ -159,6 +163,15 @@ async fn ensure_logged_in(interactive: bool) -> Result<()> {
 /// is what makes connecting feel like stepping into a session and back out
 /// rather than restarting the command.
 async fn browse() -> Result<()> {
+    browse_into(None).await
+}
+
+/// Like [`browse`], but opens straight on `initial_screen` instead of the menu
+/// when one is given. `railway ca manage` uses this to land on the manage
+/// screen without a detour through the menu — an explicit ask, so it also
+/// skips the first-run "set up cloud agents?" nudge that a bare `railway ca`
+/// would show.
+async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
@@ -226,8 +239,11 @@ async fn browse() -> Result<()> {
     // No preferences yet: ask whether to set them up, rather than dropping
     // someone in front of a prompt whose target, agent and skills are all
     // unanswered. Choosing Setup from the menu skips that question — they have
-    // already answered it by choosing it.
-    if first_run {
+    // already answered it by choosing it. An explicit initial screen is its
+    // own answer to "what should I see first" and skips the nudge too.
+    if let Some(screen) = initial_screen {
+        app.screen = screen;
+    } else if first_run {
         app.start_wizard(true);
     }
 

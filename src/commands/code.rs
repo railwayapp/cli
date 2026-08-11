@@ -104,7 +104,7 @@ pub async fn command(args: Args) -> Result<()> {
 // renders those as `long_about` and it would show up in `--help`.
 #[derive(Parser, Default)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -144,7 +144,8 @@ pub struct LaunchArgs {
     rm: bool,
 
     /// Re-mint the Claude credential even if the agent already has a working
-    /// one. Use after revoking a token, or when auth fails on an existing agent
+    /// one, clearing our local token cache first. Use after revoking a token,
+    /// or when auth fails on an existing agent
     #[clap(long)]
     refresh_auth: bool,
 
@@ -643,7 +644,7 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
 /// round-trip for a credential the user already has. Caching it is the shape
 /// Anthropic itself recommends — their `claude-code-action` has Pro/Max users
 /// mint locally, store the result as a repository secret, and use it on remote
-/// runners. Cleared by `railway logout`.
+/// runners. Cleared by `railway logout`, or by `--refresh-auth`.
 fn claude_token_cache_path() -> Option<std::path::PathBuf> {
     Some(dirs::home_dir()?.join(".railway").join("claude-code-token"))
 }
@@ -745,7 +746,13 @@ fn claude_sign_in_on_agent() -> PendingAuth {
 /// unless there is nothing here to mint with, in which case the agent's own
 /// sign-in is the flow, and the user finds that out before a VM is spent
 /// rather than through a browser prompt that never arrives.
-fn claude_credentials_cheap() -> Result<PendingAuth> {
+///
+/// `refresh_auth` is the local half of `--refresh-auth`: it drops our cached
+/// setup-token so a stale or revoked one can't be handed to the agent again,
+/// and forces the mint below to run instead of silently reusing it. An
+/// explicit `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` still wins even
+/// then — that is the user naming a credential for this run, not a cache.
+fn claude_credentials_cheap(refresh_auth: bool) -> Result<PendingAuth> {
     for var in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] {
         if let Ok(tok) = std::env::var(var) {
             let tok = tok.trim().to_string();
@@ -758,7 +765,9 @@ fn claude_credentials_cheap() -> Result<PendingAuth> {
             }
         }
     }
-    if let Some(tok) = cached_claude_token() {
+    if refresh_auth {
+        clear_claude_token_cache();
+    } else if let Some(tok) = cached_claude_token() {
         return Ok(PendingAuth::Ready {
             line: format!("CLAUDE_CODE_OAUTH_TOKEN={tok}\n").into_bytes(),
             source: "cached setup-token".to_string(),
@@ -1886,7 +1895,7 @@ async fn prepare_inner(
             ssh_tel::track_for(
                 "cloud_agent_launch",
                 "credential",
-                claude_credentials_cheap(),
+                claude_credentials_cheap(args.refresh_auth),
             )
             .await?
         }
@@ -2254,7 +2263,7 @@ echo "KILLED:$killed""#
 /// of frame where it is readable.
 pub fn claude_needs_local_mint() -> bool {
     !matches!(
-        claude_credentials_cheap(),
+        claude_credentials_cheap(false),
         Ok(PendingAuth::Ready { .. } | PendingAuth::SignInOnAgent { .. })
     )
 }
@@ -2273,7 +2282,7 @@ pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
     if harness != "claude" {
         return Ok(());
     }
-    if let PendingAuth::MintClaude = claude_credentials_cheap()? {
+    if let PendingAuth::MintClaude = claude_credentials_cheap(false)? {
         match mint_claude_credentials()? {
             Some((_line, source)) => {
                 eprintln!("Using your Claude Code credential ({source}) on the agent")
