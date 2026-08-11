@@ -323,13 +323,16 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     let area = page(f);
     let big = area.width >= BANNER_W + 8 && area.height >= 26;
     let banner_h = if big { BANNER_H } else { 1 };
-    // Text rows, plus the border and the padding that frame them.
-    let prompt_h = if area.height >= 30 { 2 } else { 1 } + DIALOG_CHROME_Y;
+    // Text rows plus the border. Twice the writing room of the original two
+    // rows — a prompt is a paragraph these days, not a title.
+    let prompt_h = if area.height >= 30 { 6 } else { 2 } + DIALOG_CHROME_Y;
+    // The room around the prompt lives outside its outline, not inside it.
+    let prompt_gap = if area.height >= 30 { 2 } else { 1 };
     let panel_w = 74.min(area.width.saturating_sub(2)).max(40.min(area.width));
     let cards = app.cards();
     // Descriptions cost rows, and on a short screen those rows come out of the
     // prompt box. Names only, rather than a menu with no prompt on it.
-    let chrome = banner_h + prompt_h + 12;
+    let chrome = banner_h + prompt_h + prompt_gap * 2 + 10;
     let mut block = card_block(&cards, panel_w as usize, true);
     if chrome + block.height(cards.len()) > area.height {
         block = card_block(&cards, panel_w as usize, false);
@@ -340,13 +343,13 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
 
     let rows = Layout::vertical([
         Constraint::Length(banner_h),
-        Constraint::Length(1), // breathing room under the wordmark
-        Constraint::Length(1), // CLOUD AGENTS
-        Constraint::Length(1), // title
-        Constraint::Length(1), // subtitle
-        Constraint::Length(1), // gap
+        Constraint::Length(1),          // breathing room under the wordmark
+        Constraint::Length(1),          // CLOUD AGENTS
+        Constraint::Length(1),          // title
+        Constraint::Length(1),          // subtitle
+        Constraint::Length(prompt_gap), // the prompt's room, outside its outline
         Constraint::Length(prompt_h),
-        Constraint::Length(1), // gap
+        Constraint::Length(prompt_gap), // and the same below
         Constraint::Length(cards_h),
         Constraint::Min(0),
         Constraint::Length(1), // target
@@ -2344,6 +2347,31 @@ mod tests {
             .find(|l| !l.trim().is_empty())
             .unwrap_or_default()
             .to_string()
+    }
+
+    /// The menu prompt holds a paragraph's worth of writing room — six text
+    /// rows inside the outline — and its breathing room sits outside the box:
+    /// blank rows against the border, not padding within it.
+    #[test]
+    fn the_menu_prompt_is_tall_with_its_room_outside() {
+        let app = app_with_tree();
+        let out = draw(&app, 100, 40);
+        let lines: Vec<&str> = out.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.contains(" Prompt "))
+            .expect("the prompt box");
+        let bottom = (top + 1..lines.len())
+            .find(|&y| lines[y].trim_start().starts_with("╰"))
+            .expect("the prompt's bottom border");
+        assert_eq!(bottom - top, 7, "six text rows inside the outline:\n{out}");
+        for y in [top - 1, bottom + 1] {
+            assert!(
+                lines[y].trim().is_empty(),
+                "row {y} should be the prompt's outside gap: {:?}",
+                lines[y]
+            );
+        }
     }
 
     /// The wordmark must be full blocks and spaces only: box-drawing shadow
