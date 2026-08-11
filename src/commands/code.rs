@@ -1332,9 +1332,12 @@ async fn sole_owned_agent_id(
 /// forever, which is worth one extra lookup to avoid.
 /// Where a launch lands, in the order `railway ca` uses.
 ///
-/// The configured default project is the answer to "where do agents go", so it
-/// beats the linked directory — a link is about deploys, and running
-/// `railway code` inside some service's checkout should not put an agent there.
+/// A linked directory beats the configured default: `railway link` (or a
+/// linked service checkout) is an explicit, per-directory statement of "this
+/// is the project I'm working in", and that outranks a person-wide preference
+/// that was chosen once, possibly a long time ago, from wherever the terminal
+/// happened to be. The configured default is still the answer when there is no
+/// link — most `railway code` invocations are not inside a linked directory.
 /// Flags still win over both: they are the caller saying it outright.
 ///
 /// With nothing to go on, this runs `railway ca setup` rather than the
@@ -1416,16 +1419,16 @@ fn choose_target(
     if args.project.is_some() || args.environment.is_some() {
         return TargetSource::Flags;
     }
+    // A linked directory is an explicit, per-directory statement of intent, so
+    // it outranks the person-wide configured default.
+    if let Some((project_id, environment_id)) = linked {
+        return TargetSource::Linked(project_id, environment_id);
+    }
     if let Some(default) = configured {
         return TargetSource::Configured(
             default.project_id.clone(),
             default.environment_id.clone(),
         );
-    }
-    // A linked directory is a worse answer than a configured default but a
-    // better one than a question, and plenty of people rely on it.
-    if let Some((project_id, environment_id)) = linked {
-        return TargetSource::Linked(project_id, environment_id);
     }
     // Only offer setup when there is someone to answer it. The TUI always
     // passes an explicit target, so this cannot fire underneath a frame, and a
@@ -2546,7 +2549,7 @@ mod tests {
     /// The order `railway ca` uses, so a launch lands in the same place from
     /// either command.
     #[test]
-    fn the_configured_default_beats_the_linked_directory() {
+    fn the_linked_directory_beats_the_configured_default() {
         let linked = || Some(("proj_linked".to_string(), "env_linked".to_string()));
 
         // Flags win outright — the caller said it.
@@ -2568,17 +2571,18 @@ mod tests {
             TargetSource::Flags
         );
 
-        // A configured default beats a linked directory: the default answers
-        // "where do agents go", a link answers "what do I deploy".
+        // A linked directory beats a configured default: the link is an
+        // explicit statement of "this is the project I'm working in", a
+        // default is a person-wide preference chosen once.
         assert_eq!(
             choose_target(&LaunchArgs::default(), Some(&default_project()), linked()),
-            TargetSource::Configured("proj_default".into(), "env_default".into())
+            TargetSource::Linked("proj_linked".into(), "env_linked".into())
         );
 
-        // With no default, the link is still better than a question.
+        // With no link, the configured default is still better than a question.
         assert_eq!(
-            choose_target(&LaunchArgs::default(), None, linked()),
-            TargetSource::Linked("proj_linked".into(), "env_linked".into())
+            choose_target(&LaunchArgs::default(), Some(&default_project()), None),
+            TargetSource::Configured("proj_default".into(), "env_default".into())
         );
     }
 
