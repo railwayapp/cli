@@ -6,7 +6,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 
 use super::app::{
@@ -40,6 +40,49 @@ const CARD_GUTTER: usize = 3;
 
 /// Width of the tree column in Manage, borders included.
 const TREE_W: u16 = 32;
+
+/// Columns between a dialog's border and its text.
+const DIALOG_PAD_X: u16 = 4;
+
+/// Rows between a dialog's border and its text. Half the columns, because a
+/// terminal cell is about twice as tall as it is wide — this is the same gap on
+/// screen at the top and bottom as at the sides.
+const DIALOG_PAD_Y: u16 = 2;
+
+/// What a dialog spends on chrome: two borders plus the padding inside them.
+const DIALOG_CHROME_X: u16 = 2 + DIALOG_PAD_X * 2;
+const DIALOG_CHROME_Y: u16 = 2 + DIALOG_PAD_Y * 2;
+
+/// The chrome every floating card shares.
+///
+/// Opaque fill, because these sit *on top of* the screen rather than in it:
+/// with only [`Clear`] underneath, the terminal's own background shows through
+/// and the card reads as a hole punched in the page instead of a dialog above
+/// it. The padding is part of the same idea — text pressed against a border is
+/// what makes a box look like a frame rather than a surface — and it goes on
+/// all four sides, so no edge reads as tighter than another.
+fn dialog_block(theme: &Theme) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.surface).fg(theme.fg))
+        .padding(Padding::new(
+            DIALOG_PAD_X,
+            DIALOG_PAD_X,
+            DIALOG_PAD_Y,
+            DIALOG_PAD_Y,
+        ))
+}
+
+/// The vertical padding a box `height` rows tall can afford around `content`.
+///
+/// The full amount whenever there is room for it, and whatever is left when
+/// there is not: on a short terminal a card that padded itself regardless would
+/// be spending rows of its own content on empty space.
+fn fitted_pad_y(height: u16, content: u16) -> u16 {
+    DIALOG_PAD_Y.min(height.saturating_sub(content + 2) / 2)
+}
 
 /// One inverse-styled key badge, e.g. ` ^t `. The building block of
 /// [`chord_spans`], and also used solo wherever a shortcut sits beside the
@@ -198,9 +241,13 @@ fn render_toast(app: &App, f: &mut Frame) {
     };
     let theme = app.theme;
     let area = f.area();
-    let text = format!(" {}  {}  ", if toast.ok { "✓" } else { "✕" }, toast.text);
-    let w = (text.chars().count() as u16 + 2).min(area.width);
-    let h = 3.min(area.height);
+    let text = format!("{}  {}", if toast.ok { "✓" } else { "✕" }, toast.text);
+    let w = (text.chars().count() as u16 + DIALOG_CHROME_X).min(area.width);
+    // Padded on every side like the dialogs, but at half their vertical scale:
+    // a one-line confirmation framed by two rows top and bottom stops reading
+    // as a chip in the corner and starts reading as a dialog nobody asked for.
+    let pad_y = DIALOG_PAD_Y / 2;
+    let h = (1 + 2 + pad_y * 2).min(area.height);
     // Clear of the key strip on the last row and of the pane border above it,
     // so it floats inside the pane rather than colliding with its corner.
     let rect = Rect {
@@ -217,10 +264,14 @@ fn render_toast(app: &App, f: &mut Frame) {
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(Span::styled(text, Style::default().fg(theme.fg))).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(accent)),
+            dialog_block(theme)
+                .border_style(Style::default().fg(accent))
+                .padding(Padding::new(
+                    DIALOG_PAD_X,
+                    DIALOG_PAD_X,
+                    pad_y.min(h.saturating_sub(3) / 2),
+                    pad_y.min(h.saturating_sub(3) / 2),
+                )),
         ),
         rect,
     );
@@ -293,7 +344,8 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     let area = f.area();
     let big = area.width >= BANNER_W + 8 && area.height >= 26;
     let banner_h = if big { BANNER_H } else { 1 };
-    let prompt_h = if area.height >= 30 { 6 } else { 4 };
+    // Text rows, plus the border and the padding that frame them.
+    let prompt_h = if area.height >= 30 { 2 } else { 1 } + DIALOG_CHROME_Y;
     let panel_w = 74.min(area.width.saturating_sub(2)).max(40.min(area.width));
     let cards = app.cards();
     // Descriptions cost rows, and on a short screen those rows come out of the
@@ -602,9 +654,15 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
         format!(" {} ", app.prompt.chars().count())
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+    // A line to type on comes before the room around it: on a short terminal
+    // the box can be squeezed to a couple of rows, and padding it regardless
+    // would leave nowhere for the draft to go.
+    let pad_y = fitted_pad_y(area.height, 1);
+
+    f.render_widget(Clear, area);
+
+    let block = dialog_block(theme)
+        .padding(Padding::new(DIALOG_PAD_X, DIALOG_PAD_X, pad_y, pad_y))
         .border_style(Style::default().fg(if focused {
             theme.accent
         } else {
@@ -631,9 +689,10 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
 
     // Keep the cursor line in view once the wrapped text outgrows the box.
     // Without this the box simply stops showing what is being typed, which is
-    // the one thing it exists to do.
-    let inner_w = area.width.saturating_sub(2).max(1) as usize;
-    let inner_h = area.height.saturating_sub(2).max(1) as usize;
+    // the one thing it exists to do. The padding is chrome, not writing room,
+    // so the text gets what is left after it.
+    let inner_w = area.width.saturating_sub(DIALOG_CHROME_X).max(1) as usize;
+    let inner_h = area.height.saturating_sub(2 + pad_y * 2).max(1) as usize;
     let scroll_y = wrapped_lines(&text, inner_w).saturating_sub(inner_h) as u16;
 
     f.render_widget(
@@ -1159,21 +1218,17 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         .sum::<usize>() as u16;
     // No progress dots means no row held open for them.
     let dots_h = u16::from(panel.position.is_some());
-    let width = 66.min(area.width.saturating_sub(4));
-    let height = (body_h + dots_h + 7).min(area.height.saturating_sub(2));
+    let width = (62 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
+    let height = (body_h + dots_h + 5 + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
     let outer = centered(width, height, area);
     f.render_widget(Clear, outer);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent))
-        .title(Span::styled(
-            format!(" {} ", panel.title),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let block = dialog_block(theme).title(Span::styled(
+        format!(" {} ", panel.title),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
     let inner = block.inner(outer);
     f.render_widget(block, outer);
 
@@ -1236,7 +1291,7 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         let on = i == panel.cursor;
         let mut spans = vec![
             Span::styled(
-                if on { " ▌ " } else { "   " },
+                if on { "▌ " } else { "  " },
                 Style::default().fg(theme.accent),
             ),
             Span::styled(
@@ -1263,7 +1318,7 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         // a list of names into a list with gaps in it.
         if !row.detail.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("     {}", row.detail),
+                format!("  {}", row.detail),
                 Style::default().fg(theme.dim),
             )));
         }
@@ -1504,13 +1559,15 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
     };
     let theme = app.theme;
     let area = f.area();
-    let outer = centered(66.min(area.width.saturating_sub(4)), 7, area);
+    let outer = centered(
+        (62 + DIALOG_CHROME_X).min(area.width.saturating_sub(4)),
+        // Three rows to type in, plus the border and the padding around them.
+        3 + DIALOG_CHROME_Y,
+        area,
+    );
     f.render_widget(Clear, outer);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent))
+    let block = dialog_block(theme)
         .title(Span::styled(
             " New Session ",
             Style::default()
@@ -1536,9 +1593,10 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
 
     let text = format!("{draft}▏");
     // Keep the cursor line in view once the wrapped text outgrows the box,
-    // same as the menu's prompt.
-    let inner_w = outer.width.saturating_sub(2).max(1) as usize;
-    let inner_h = outer.height.saturating_sub(2).max(1) as usize;
+    // same as the menu's prompt. The padding is chrome, not writing room, so
+    // it comes off the width and the height the text gets.
+    let inner_w = outer.width.saturating_sub(DIALOG_CHROME_X).max(1) as usize;
+    let inner_h = outer.height.saturating_sub(DIALOG_CHROME_Y).max(1) as usize;
     let scroll_y = wrapped_lines(&text, inner_w).saturating_sub(inner_h) as u16;
 
     f.render_widget(
@@ -1611,7 +1669,7 @@ fn render_keys(app: &App, f: &mut Frame) {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(Span::styled(
-            format!(" {group}"),
+            (*group).to_string(),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -1619,7 +1677,7 @@ fn render_keys(app: &App, f: &mut Frame) {
         for (chord, what) in *keys {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  {chord:>chord_w$}  "),
+                    format!("{chord:>chord_w$}  "),
                     Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled((*what).to_string(), Style::default().fg(theme.dim)),
@@ -1627,16 +1685,25 @@ fn render_keys(app: &App, f: &mut Frame) {
         }
     }
 
-    let width = 52.min(area.width.saturating_sub(4));
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let rows = lines.len() as u16;
+    // As wide as the widest line it has to carry, so the padding is room around
+    // the list rather than something the descriptions get truncated to pay for.
+    let content_w = lines
+        .iter()
+        .map(|line| line.width() as u16)
+        .max()
+        .unwrap_or(48);
+    let width = (content_w + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
+    let height = (rows + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
+    // The list is long enough to outgrow a short terminal on its own, and a row
+    // spent on padding there is a key the reader can no longer see.
+    let pad_y = fitted_pad_y(height, rows);
     let panel = centered(width, height, area);
     f.render_widget(Clear, panel);
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.accent))
+            dialog_block(theme)
+                .padding(Padding::new(DIALOG_PAD_X, DIALOG_PAD_X, pad_y, pad_y))
                 .title(Span::styled(
                     " keys ",
                     Style::default()
@@ -2212,6 +2279,99 @@ mod tests {
             .join("\n")
     }
 
+    /// Every cell of a drawn frame, as `(symbol, background)`.
+    fn cells(app: &App, w: u16, h: u16) -> Vec<Vec<(String, Color)>> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                render_with_layout(app, f);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        (cell.symbol().to_string(), cell.bg)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The rows a dialog covers, found by its border corners: the first row
+    /// holding `╭` at or after `title`, through the matching `╰`.
+    fn dialog_rows(grid: &[Vec<(String, Color)>], title: &str) -> (usize, usize, usize, usize) {
+        let top = grid
+            .iter()
+            .position(|row| {
+                let line: String = row.iter().map(|(s, _)| s.as_str()).collect();
+                line.contains('╭') && line.contains(title)
+            })
+            .unwrap_or_else(|| panic!("no dialog titled {title}"));
+        let left = grid[top].iter().position(|(s, _)| s == "╭").unwrap();
+        let right = grid[top].iter().rposition(|(s, _)| s == "╮").unwrap();
+        let bottom = (top + 1..grid.len())
+            .find(|y| grid[*y][left].0 == "╰")
+            .expect("a closed dialog");
+        (top, bottom, left, right)
+    }
+
+    /// A dialog is a surface, not a window onto the screen behind it: every
+    /// cell it covers carries its own background, so nothing underneath and no
+    /// terminal wallpaper shows through.
+    #[test]
+    fn dialogs_are_filled_rather_than_transparent() {
+        let mut app = app_with_tree();
+        app.start_settings();
+        let grid = cells(&app, 100, 40);
+        let (top, bottom, left, right) = dialog_rows(&grid, "settings");
+        let surface = app.theme.surface;
+        for row in &grid[top..=bottom] {
+            for (symbol, bg) in &row[left..=right] {
+                // The key badges in the footer paint their own background;
+                // everything else is the surface.
+                assert!(
+                    *bg == surface || *bg == app.theme.accent_dim,
+                    "transparent cell {symbol:?} in the dialog: {bg:?}"
+                );
+            }
+        }
+    }
+
+    /// And the text inside it keeps clear of its edges — on all four of them,
+    /// by the same amount.
+    #[test]
+    fn dialog_text_is_inset_from_every_border() {
+        let mut app = app_with_tree();
+        app.start_settings();
+        let grid = cells(&app, 100, 40);
+        let (top, bottom, left, right) = dialog_rows(&grid, "settings");
+        let blank = |cells: &[(String, Color)]| cells.iter().all(|(s, _)| s == " ");
+
+        // Top and bottom: DIALOG_PAD_Y clear rows inside each border.
+        for offset in 1..=DIALOG_PAD_Y as usize {
+            for y in [top + offset, bottom - offset] {
+                assert!(
+                    blank(&grid[y][left + 1..right]),
+                    "row {y} is inside the padding and should be clear"
+                );
+            }
+        }
+        // Left and right: DIALOG_PAD_X clear columns, every row of the body.
+        for row in &grid[top + 1..bottom] {
+            assert!(
+                blank(&row[left + 1..=left + DIALOG_PAD_X as usize]),
+                "text runs into the left border"
+            );
+            assert!(
+                blank(&row[right - DIALOG_PAD_X as usize..right]),
+                "text runs into the right border"
+            );
+        }
+    }
+
     /// The wordmark must be full blocks and spaces only: box-drawing shadow
     /// glyphs render at a different weight in some monospace fonts and shear
     /// the whole thing.
@@ -2576,10 +2736,21 @@ mod tests {
             "the key strip is untouched: {}",
             lines[lines.len() - 1]
         );
+        // The toast is a closed box: its bottom border sits under the text
+        // (with the padding between them) and above the key strip.
+        let closed = (row + 1..lines.len())
+            .find(|y| lines[*y].contains("╰"))
+            .expect("the toast's bottom border");
         assert!(
-            lines[row + 1].contains("╰") && !lines[row + 1].contains("Copied"),
-            "the toast is closed above the pane border: {}",
-            lines[row + 1]
+            closed < lines.len() - 1,
+            "the toast should close above the key strip: {}",
+            lines[closed]
+        );
+        assert!(
+            lines[row + 1..=closed]
+                .iter()
+                .all(|l| !l.contains("Copied")),
+            "the text is inside the box only once"
         );
     }
 
@@ -3080,8 +3251,10 @@ mod tests {
             .repeat(3);
         let out = draw(&app, 100, 40);
         // The tail is what matters: the end of the draft has to be on screen.
+        // The last words rather than a whole phrase — the box wraps, and where
+        // a line breaks is the box's business.
         assert!(
-            out.contains("describing what changed"),
+            out.contains("what changed"),
             "the end of the prompt should be visible:\n{out}"
         );
     }

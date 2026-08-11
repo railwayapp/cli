@@ -24,6 +24,11 @@ pub struct Theme {
     pub fg: Color,
     /// Text drawn on top of `accent` — must stay legible there.
     pub on_accent: Color,
+    /// Fill for dialogs, cards and input boxes. Opaque on purpose: an overlay
+    /// that lets the screen underneath show through reads as a rendering bug
+    /// rather than as something sitting on top of the screen. A step lighter
+    /// than the page it floats over, so it reads as raised.
+    pub surface: Color,
     /// Row highlight in the tree.
     pub selection: Color,
     pub running: Color,
@@ -41,6 +46,7 @@ pub const THEMES: &[Theme] = &[
         dim: Color::Rgb(0x8b, 0x84, 0x9c),
         fg: Color::Rgb(0xef, 0xec, 0xf6),
         on_accent: Color::Rgb(0x18, 0x12, 0x28),
+        surface: Color::Rgb(0x25, 0x1d, 0x39),
         selection: Color::Rgb(0x37, 0x2a, 0x50),
         running: Color::Rgb(0x6e, 0xe7, 0xa8),
         sleeping: Color::Rgb(0x7d, 0x77, 0x8f),
@@ -57,6 +63,11 @@ pub const THEMES: &[Theme] = &[
         dim: Color::DarkGray,
         fg: Color::White,
         on_accent: Color::Black,
+        // The theme that defers to the terminal's palette, so a dialog fills
+        // with the terminal's own background rather than a colour of ours.
+        surface: Color::Black,
+        // Nothing darker than black to fall back on, so the shade is a grey
+        // one — the only depth cue the sixteen colours can carry.
         selection: Color::DarkGray,
         running: Color::Green,
         sleeping: Color::Gray,
@@ -71,6 +82,7 @@ pub const THEMES: &[Theme] = &[
         dim: Color::Rgb(0x93, 0x86, 0x76),
         fg: Color::Rgb(0xf6, 0xf1, 0xe8),
         on_accent: Color::Rgb(0x24, 0x18, 0x06),
+        surface: Color::Rgb(0x2c, 0x22, 0x14),
         selection: Color::Rgb(0x45, 0x2d, 0x10),
         running: Color::Rgb(0x9a, 0xd8, 0x6a),
         sleeping: Color::Rgb(0x86, 0x7c, 0x6e),
@@ -86,6 +98,7 @@ pub const THEMES: &[Theme] = &[
         dim: Color::Rgb(0x8a, 0x8a, 0x8a),
         fg: Color::Rgb(0xf2, 0xf2, 0xf2),
         on_accent: Color::Rgb(0x10, 0x10, 0x10),
+        surface: Color::Rgb(0x23, 0x23, 0x23),
         selection: Color::Rgb(0x33, 0x33, 0x33),
         running: Color::Rgb(0xe6, 0xe6, 0xe6),
         sleeping: Color::Rgb(0x77, 0x77, 0x77),
@@ -152,6 +165,18 @@ mod tests {
         for theme in THEMES {
             assert_ne!(theme.on_accent, theme.accent, "{}", theme.slug);
             assert_ne!(theme.fg, theme.selection, "{}", theme.slug);
+        }
+    }
+
+    /// A dialog's fill has to differ from everything drawn on top of it, or the
+    /// text disappears into the box.
+    #[test]
+    fn the_surface_contrasts_with_what_sits_on_it() {
+        for theme in THEMES {
+            assert_ne!(theme.surface, theme.fg, "{}", theme.slug);
+            assert_ne!(theme.surface, theme.dim, "{}", theme.slug);
+            assert_ne!(theme.surface, theme.accent, "{}", theme.slug);
+            assert_ne!(theme.surface, theme.selection, "{}", theme.slug);
         }
     }
 }
