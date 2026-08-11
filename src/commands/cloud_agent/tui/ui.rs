@@ -136,36 +136,36 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
     let area = f.area();
     // Name and fingerprint on their own lines: together they outrun the card
     // and wrap mid-fingerprint, which reads as garbage. Apart, both fit.
+    // Everything reads in the foreground — this card is the only thing asking
+    // for attention while it is up, so nothing on it is background noise.
+    let body = Style::default().fg(theme.fg);
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             format!("  {}", gate.offer.name),
-            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            body.add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            format!("  {}", gate.offer.fingerprint),
-            Style::default().fg(theme.dim),
-        )),
+        Line::from(Span::styled(format!("  {}", gate.offer.fingerprint), body)),
         Line::from(""),
         Line::from(Span::styled(
             "  Agents are reached over SSH, and Railway only answers",
-            Style::default().fg(theme.dim),
+            body,
         )),
         Line::from(Span::styled(
             "  keys it knows. Registered once, it covers every agent.",
-            Style::default().fg(theme.dim),
+            body,
         )),
         Line::from(""),
-        // The same badge-and-label chords as the footers, so the card reads
-        // as part of the product rather than its own little dialect.
-        {
-            let mut answers = vec![Span::raw("  ")];
-            answers.extend(chord_spans(
-                theme,
-                &[("y", "Yes — register this key"), ("n", "No, not now")],
-            ));
-            Line::from(answers)
-        },
+        // The footers' badge chords, centered: the question's answers are the
+        // card's focal point, not another row of copy.
+        Line::from(vec![
+            chord_badge(theme, "y"),
+            Span::styled(" Yes — register this key", body),
+            Span::raw("    "),
+            chord_badge(theme, "n"),
+            Span::styled(" No, not now", body),
+        ])
+        .alignment(Alignment::Center),
     ];
     let width = 62.min(area.width.saturating_sub(4));
     let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
@@ -3258,5 +3258,16 @@ mod tests {
             .position(|l| l.contains("SHA256:hlDEs7CV5clc1lMfsMxr/CPeuKuJNn9hJxjsy1e9zLc"))
             .expect("full fingerprint shown, unwrapped");
         assert_eq!(fp_line, name_line + 1, "fingerprint sits under the name");
+
+        // The answers are centered under the copy, not left-aligned with it.
+        let col = |needle: &str| {
+            out.lines()
+                .find_map(|l| l.find(needle))
+                .unwrap_or_else(|| panic!("{needle} not shown"))
+        };
+        assert!(
+            col("Yes — register this key") > col("raildesk-deploy"),
+            "the answers should sit centered, right of the left-aligned copy"
+        );
     }
 }
