@@ -552,14 +552,28 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
                 dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Unable to get home directory"))?;
             let default =
                 super::prefs::AgentPrefs::load_in(&home).and_then(|prefs| prefs.default_project);
-            // An explicit --environment wins over the saved default.
-            let (environment_id, where_label) = match (&scoped, &default) {
-                (Some(env), _) => (env.clone(), "this environment".to_string()),
-                (None, Some(project)) => (
+            // `railway code`'s order exactly (see its `choose_target`): flags,
+            // then the linked directory, then the configured default. Landing
+            // somewhere else than `railway code` would from the same directory
+            // is the inconsistency that order exists to prevent — so the link
+            // is consulted here even though `scope` deliberately does not.
+            let linked = if scoped.is_none() {
+                configs
+                    .get_linked_project()
+                    .await
+                    .ok()
+                    .and_then(|l| l.environment.clone())
+            } else {
+                None
+            };
+            let (environment_id, where_label) = match (&scoped, linked, &default) {
+                (Some(env), _, _) => (env.clone(), "this environment".to_string()),
+                (None, Some(env), _) => (env, "this linked directory's project".to_string()),
+                (None, None, Some(project)) => (
                     project.environment_id.clone(),
                     format!("{} ({})", project.project_name, project.environment_name),
                 ),
-                (None, None) => bail!(
+                (None, None, None) => bail!(
                     "You have no cloud agents. Create one with `railway ca create`, \
                      or set a default project with `railway ca setup`."
                 ),
