@@ -1395,6 +1395,8 @@ fn render_session(app: &App, session: &super::session::Session, f: &mut Frame, a
         .title_bottom(Line::from(Span::styled(
             if session.ended() {
                 " session ended "
+            } else if session.stalled() {
+                " no response "
             } else if session.scrolled_back() {
                 " scrolled back · type to return "
             } else if !session.scrollable() {
@@ -1409,6 +1411,31 @@ fn render_session(app: &App, session: &super::session::Session, f: &mut Frame, a
 
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    // An attach gone silent has nothing to draw, so say what the silence
+    // means instead of showing an empty screen. The platform can list a
+    // session as running after its agent slept killed the process; attaching
+    // to that name streams nothing, ever.
+    if session.stalled() {
+        let dim = Style::default().fg(theme.dim);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled("Nothing has arrived from this session.", dim)),
+                Line::from(Span::styled(
+                    "It may have ended when the agent last slept —",
+                    dim,
+                )),
+                Line::from(Span::styled(
+                    "x closes this pane, n starts a fresh session.",
+                    dim,
+                )),
+            ])
+            .alignment(ratatui::layout::Alignment::Center),
+            inner,
+        );
+        return;
+    }
 
     let Some(lines) = session.with_screen(|screen| screen_lines(screen, focused)) else {
         return;

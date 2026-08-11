@@ -2555,6 +2555,16 @@ impl App {
             .unwrap_or(TOAST_LIFETIME)
     }
 
+    /// Time until an attached pane would first count as stalled, for the loop
+    /// to wake once and draw the notice. `None` when no pane is waiting on
+    /// its first byte.
+    pub fn stall_check_remaining(&self) -> Option<std::time::Duration> {
+        self.sessions
+            .iter()
+            .filter_map(|session| session.stall_remaining())
+            .min()
+    }
+
     /// Give the session pane the whole screen, or give the tree back.
     ///
     /// Only where there is a session to give it to: on the menu, or with
