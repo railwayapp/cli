@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 use app::{
     Agent, AgentOp, ConsoleSession, EnvNode, Load, LoadSessions, ProjectNode, WorkspaceNode,
 };
-pub use app::{App, Effect, LaunchRequest, Target};
+pub use app::{App, Effect, LaunchRequest, Screen, Target};
 
 use crate::client::post_graphql;
 use crate::commands::code::{self, LaunchArgs, Prepared, Progress};
