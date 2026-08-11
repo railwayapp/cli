@@ -180,52 +180,43 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
     // Name and fingerprint on their own lines: together they outrun the card
     // and wrap mid-fingerprint, which reads as garbage. Apart, both fit.
     let lines = vec![
-        Line::from(""),
         Line::from(Span::styled(
-            format!("  {}", gate.offer.name),
+            gate.offer.name.clone(),
             Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            format!("  {}", gate.offer.fingerprint),
+            gate.offer.fingerprint.clone(),
             Style::default().fg(theme.dim),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  Agents are reached over SSH, and Railway only answers",
+            "Agents are reached over SSH, and Railway only answers",
             Style::default().fg(theme.dim),
         )),
         Line::from(Span::styled(
-            "  keys it knows. Registered once, it covers every agent.",
+            "keys it knows. Registered once, it covers every agent.",
             Style::default().fg(theme.dim),
         )),
         Line::from(""),
         // The same badge-and-label chords as the footers, so the card reads
         // as part of the product rather than its own little dialect.
-        {
-            let mut answers = vec![Span::raw("  ")];
-            answers.extend(chord_spans(
-                theme,
-                &[("y", "Yes — register this key"), ("n", "No, not now")],
-            ));
-            Line::from(answers)
-        },
+        Line::from(chord_spans(
+            theme,
+            &[("y", "Yes — register this key"), ("n", "No, not now")],
+        )),
     ];
-    let width = 62.min(area.width.saturating_sub(4));
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let width = (55 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
+    let height = (lines.len() as u16 + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
     let panel = centered(width, height, area);
     f.render_widget(Clear, panel);
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " Register your SSH key with Railway? ",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )),
+            dialog_block(theme).title(Span::styled(
+                " Register your SSH key with Railway? ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
         ),
         panel,
     );
