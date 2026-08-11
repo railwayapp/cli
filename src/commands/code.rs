@@ -71,8 +71,10 @@ use crate::util::shell::shell_join;
 // cache.
 //
 // Lifecycle: agents are durable and have no idle timeout, so unlike a sandbox
-// nothing eventually reaps one. Disconnecting therefore SLEEPS the agent —
-// disk and work survive, compute stops billing — and the next run wakes it.
+// nothing eventually reaps one. Disconnecting leaves the agent RUNNING —
+// sleeping kills every process on the VM (including durable sessions the
+// platform keeps listing as reattachable), so it is a deliberate act:
+// `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
 /// `railway code` is the launcher on its own: the same flags and the same
@@ -102,7 +104,7 @@ pub async fn command(args: Args) -> Result<()> {
 // renders those as `long_about` and it would show up in `--help`.
 #[derive(Parser, Default)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs: disconnecting sleeps yours, and the next\n`railway code` wakes it with your work still on disk. `--keep-awake` leaves it\nrunning; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` re-mints it.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -130,9 +132,9 @@ pub struct LaunchArgs {
     #[clap(long)]
     pub new: bool,
 
-    /// Leave the agent running on disconnect instead of putting it to sleep.
-    /// A running agent keeps billing for compute
-    #[clap(long)]
+    /// Accepted for compatibility; agents now always stay running on
+    /// disconnect. `railway ca sleep` stops the compute bill
+    #[clap(long, hide = true)]
     keep_awake: bool,
 
     /// Destroy this environment's agent and exit. Its disk goes with it.
@@ -1761,28 +1763,15 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         let _ = out.flush();
     }
 
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    if args.keep_awake {
-        println!(
-            "\nDisconnected — agent {} is still running (--keep-awake).",
-            prepared.agent_name.cyan()
-        );
-    } else {
-        let progress = CliProgress::default();
-        if let Err(e) = sleep_agent(&client, &configs, &prepared, &progress).await {
-            progress.finish();
-            eprintln!(
-                "{}",
-                format!(
-                    "Agent {} is still running and billing compute. Sleep it from the dashboard, or `railway code --rm` to destroy it. ({e})",
-                    prepared.agent_name
-                )
-                .yellow()
-            );
-        }
-        progress.finish();
-    }
+    // Disconnecting no longer sleeps the agent: sleep kills every process on
+    // the VM — including the durable session just detached from — while the
+    // platform keeps listing those sessions as running, so the next reattach
+    // landed on a dead name and a blank screen. Sleeping is deliberate now.
+    println!(
+        "\nDisconnected — agent {} is still running. `railway ca sleep {}` stops the compute bill.",
+        prepared.agent_name.cyan(),
+        prepared.agent_name
+    );
 
     if prepared.created {
         println!("Agents persist between runs — this one is yours until you --rm it.");
@@ -1824,27 +1813,6 @@ pub fn run_session(prepared: &Prepared) -> Result<i32> {
     );
     crate::commands::ssh::native::clear_mouse_tracking();
     code
-}
-
-/// Put the agent back to sleep. Agents have no idle timeout, so nothing else
-/// ever will: leaving one running bills compute until the user remembers it,
-/// and sleeping keeps the disk so the next run wakes into the same work.
-pub async fn sleep_agent(
-    client: &reqwest::Client,
-    configs: &Configs,
-    prepared: &Prepared,
-    progress: &dyn Progress,
-) -> Result<()> {
-    progress.step("Sleeping the agent");
-    crate::controllers::cloud_agent::sleep(
-        client,
-        &configs.get_backboard(),
-        &prepared.environment_id,
-        &prepared.agent_id,
-    )
-    .await?;
-    progress.finish();
-    Ok(())
 }
 
 /// Everything between "the user asked" and "there is a session to open":

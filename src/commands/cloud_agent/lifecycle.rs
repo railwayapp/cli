@@ -123,9 +123,9 @@ pub struct SshArgs {
     #[clap(long, value_name = "NAME")]
     session: Option<String>,
 
-    /// Leave the agent running on disconnect instead of putting it to sleep.
-    /// A running agent keeps billing for compute
-    #[clap(long)]
+    /// Accepted for compatibility; agents now always stay running on
+    /// disconnect. `railway ca sleep` stops the compute bill
+    #[clap(long, hide = true)]
     keep_awake: bool,
 
     #[clap(flatten)]
@@ -555,7 +555,14 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
         telemetry::track_lifecycle("ssh_command", Duration::ZERO, None).await;
         run_command(&agent, &args.command).await
     } else {
-        attach(client, &backboard, &agent, args.session.as_deref()).await
+        attach(
+            client,
+            &backboard,
+            &agent,
+            args.session.as_deref(),
+            was_running,
+        )
+        .await
     };
 
     // A connection that never happened still woke a machine with no idle
@@ -566,35 +573,22 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     let exit_code = match connected {
         Ok(code) => code,
         Err(e) => {
-            if !was_running && !args.keep_awake {
+            if !was_running {
                 let _ = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
             }
             return Err(e);
         }
     };
 
-    if args.keep_awake {
-        println!(
-            "\nDisconnected — agent {} is still running (--keep-awake).",
-            agent.name.cyan()
-        );
-    } else {
-        // Agents have no idle timeout, so nothing else will ever do this.
-        let spinner = create_spinner("Sleeping the agent".to_string());
-        let slept = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
-        spinner.finish_and_clear();
-        match slept {
-            Ok(()) => println!("\nDisconnected — sleeping agent {}.", agent.name.cyan()),
-            Err(e) => eprintln!(
-                "{}",
-                format!(
-                    "Agent {} is still running and billing compute. `railway ca sleep {}` to stop it. ({e})",
-                    agent.name, agent.name
-                )
-                .yellow()
-            ),
-        }
-    }
+    // Disconnecting no longer sleeps the agent: sleep kills every process on
+    // the VM — including the durable session just detached from — while the
+    // platform keeps listing those sessions as running, so the next reattach
+    // landed on a dead name and a blank screen. Sleeping is deliberate now.
+    println!(
+        "\nDisconnected — agent {} is still running. `railway ca sleep {}` stops the compute bill.",
+        agent.name.cyan(),
+        agent.name
+    );
 
     Ok(exit_code)
 }
@@ -630,9 +624,30 @@ async fn attach(
     backboard: &str,
     agent: &ca::Agent,
     requested: Option<&str>,
+    was_running: bool,
 ) -> Result<i32> {
     let sessions = ca::list_sessions(client, backboard, &agent.id).await?;
-    let running: Vec<_> = sessions.into_iter().filter(|s| s.running).collect();
+    let mut running: Vec<_> = sessions.into_iter().filter(|s| s.running).collect();
+
+    // An agent that was asleep a moment ago cannot have a live session:
+    // sleeping stopped every process on the VM, but the platform's session
+    // records can keep saying "running". Believing them attaches to a dead
+    // name — the relay resolves it, streams nothing, and the screen stays
+    // blank. Skip the zombies and start fresh instead.
+    if !was_running && !running.is_empty() {
+        println!(
+            "{}",
+            format!(
+                "Ignoring {} listed session{} on {} — {} ended when the agent last slept.",
+                running.len(),
+                if running.len() == 1 { "" } else { "s" },
+                agent.name,
+                if running.len() == 1 { "it" } else { "they" },
+            )
+            .dimmed()
+        );
+        running.clear();
+    }
 
     let session_name = match requested {
         Some(name) => {

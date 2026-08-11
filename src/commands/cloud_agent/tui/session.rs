@@ -64,20 +64,6 @@ fn dsr_reply(chunk: &[u8], screen: &vt100::Screen) -> Option<Vec<u8>> {
     })
 }
 
-/// Read the environment back out of a relay target (`agent:<env>:<agent>`).
-///
-/// Returns `None` for anything else rather than guessing: the caller uses this
-/// to pick a machine to flush and suspend, and a target shape we don't
-/// recognise is not one to act on.
-fn environment_from_target(target: &str) -> Option<&str> {
-    match *target.split(':').collect::<Vec<_>>().as_slice() {
-        ["agent", environment, agent] if !environment.is_empty() && !agent.is_empty() => {
-            Some(environment)
-        }
-        _ => None,
-    }
-}
-
 /// A running `ssh` under a pty, plus the emulator that makes sense of it.
 pub struct Session {
     pub agent_id: String,
@@ -102,6 +88,14 @@ pub struct Session {
     /// Set by the reader thread when ssh's output ends — the session is over
     /// even though the child may take another moment to reap.
     ended: Arc<AtomicBool>,
+    /// This pane attached to a session that already existed, rather than
+    /// starting one. Only an attach can go silent (see [`Self::stalled`]).
+    reattach: bool,
+    /// When the pane connected, for the stall clock.
+    spawned_at: std::time::Instant,
+    /// Set by the reader thread on the first byte. An attach that never sets
+    /// this is talking to a session whose process is gone.
+    got_output: Arc<AtomicBool>,
     /// Last size pushed to the pty, so a redraw at the same size is free.
     size: (u16, u16),
     /// Rows scrolled back from the live view. Typing snaps back to 0 — nobody
@@ -110,13 +104,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// The environment this session's agent lives in. The relay target is the
-    /// only place the pane carries it, and sleeping the agent needs it to flush
-    /// the disk first.
-    pub fn environment_id(&self) -> Option<&str> {
-        environment_from_target(&self.ssh_target)
-    }
-
     /// Write straight to the pty — keystrokes, pointer reports, and the
     /// reader thread's own DSR replies all go through this one shared writer.
     fn write_raw(&self, bytes: &[u8]) {
@@ -206,6 +193,7 @@ impl Session {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 4000)));
         let ended = Arc::new(AtomicBool::new(false));
+        let got_output = Arc::new(AtomicBool::new(false));
         let mut reader = pty
             .master
             .try_clone_reader()
@@ -220,12 +208,14 @@ impl Session {
             let parser = parser.clone();
             let ended = ended.clone();
             let writer = writer.clone();
+            let got_output = got_output.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            got_output.store(true, Ordering::Relaxed);
                             let reply = parser.lock().ok().and_then(|mut parser| {
                                 parser.process(&buf[..n]);
                                 dsr_reply(&buf[..n], parser.screen())
@@ -258,9 +248,39 @@ impl Session {
             child,
             master: pty.master,
             ended,
+            reattach,
+            spawned_at: std::time::Instant::now(),
+            got_output,
             size: (rows, cols),
             scroll: 0,
         })
+    }
+
+    /// How long an attach may stay silent before the pane says so.
+    pub const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// An attach that has produced nothing, for long enough to say so.
+    ///
+    /// Only reattaches count: a fresh launch always prints (provisioning, the
+    /// harness banner), so silence there is just a slow start. An attach is
+    /// silent exactly when the durable session's process is gone — the relay
+    /// resolves the name, streams nothing, and never will. The platform can
+    /// keep reporting such a session as running after its agent slept, so
+    /// this is the pane's own way of noticing.
+    pub fn stalled(&self) -> bool {
+        self.reattach
+            && !self.got_output.load(Ordering::Relaxed)
+            && !self.ended()
+            && self.spawned_at.elapsed() >= Self::STALL_AFTER
+    }
+
+    /// Time until [`Self::stalled`] would first flip, so the event loop can
+    /// schedule one redraw for it. `None` when it can't stall or already has.
+    pub fn stall_remaining(&self) -> Option<std::time::Duration> {
+        if !self.reattach || self.got_output.load(Ordering::Relaxed) || self.ended() {
+            return None;
+        }
+        Self::STALL_AFTER.checked_sub(self.spawned_at.elapsed())
     }
 
     pub fn ended(&self) -> bool {
@@ -613,6 +633,9 @@ impl Session {
             child,
             master: pty.master,
             ended: Arc::new(AtomicBool::new(false)),
+            reattach: false,
+            spawned_at: std::time::Instant::now(),
+            got_output: Arc::new(AtomicBool::new(true)),
             size: (24, 80),
             scroll: 0,
         })
@@ -1229,24 +1252,5 @@ mod tests {
         let screen = parser.screen();
         assert_eq!(screen.contents().lines().next().unwrap().trim(), "hello");
         assert!(screen.contents().contains("world"));
-    }
-
-    #[test]
-    fn environment_is_read_out_of_a_relay_target() {
-        assert_eq!(
-            environment_from_target("agent:env-123:agent-456"),
-            Some("env-123")
-        );
-    }
-
-    #[test]
-    fn other_target_shapes_are_not_guessed_at() {
-        // A sandbox target has the same arity, and sleeping a machine picked
-        // out of one would suspend the wrong thing entirely.
-        assert_eq!(environment_from_target("sbx:env-123:sandbox-456"), None);
-        assert_eq!(environment_from_target("agent:env-123"), None);
-        assert_eq!(environment_from_target("agent::agent-456"), None);
-        assert_eq!(environment_from_target("agent:env-123:"), None);
-        assert_eq!(environment_from_target("some-service-instance"), None);
     }
 }

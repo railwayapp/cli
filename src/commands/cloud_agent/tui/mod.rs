@@ -486,6 +486,11 @@ pub async fn run(
             _ = tokio::time::sleep(app::WATCH_TICK), if app.watching_agents() => {
                 app.watch_tick()
             }
+            // A reattach that stays silent gets its "no response" notice drawn
+            // once the stall clock runs out; nothing else would redraw, since
+            // a silent pane by definition sends no output to wake the loop.
+            _ = tokio::time::sleep(app.stall_check_remaining().unwrap_or(std::time::Duration::MAX)),
+                if app.stall_check_remaining().is_some() => None,
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Some(Ok(Event::Mouse(mouse))) => {
@@ -515,10 +520,13 @@ pub async fn run(
         match effect {
             None => {}
             Some(Effect::Quit) => {
-                // Every open session sleeps on the way out; leaving one awake
-                // bills compute with nothing attached to it.
-                while !app.sessions.is_empty() {
-                    close_and_sleep(app, 0, &client, &backboard).await;
+                // Panes detach; agents stay running. Sleeping is a deliberate
+                // act (`s` on the tree, `railway ca sleep`) — an automatic
+                // sleep here killed every session's process while the
+                // platform kept listing the sessions as running, and the next
+                // reattach landed on a dead name and a blank pane.
+                while let Some(mut session) = app.take_session(0) {
+                    session.detach();
                 }
                 return Ok(Outcome::Quit);
             }
@@ -1279,48 +1287,11 @@ async fn run_agent_op(
 ///
 /// Detach only. The agent keeps running, because it may well have other
 /// sessions on it and because sleeping is `s` — a deliberate act on the agent,
-/// not a side effect of closing one window onto it. Quitting still sleeps
-/// everything, which is what stops an agent billing forever.
+/// not a side effect of closing one window onto it. Quitting detaches the
+/// same way; `railway ca sleep` (or `s` on the tree) is what stops the bill.
 async fn close_session(app: &mut App, index: usize, _client: &reqwest::Client, _backboard: &str) {
     if let Some(mut session) = app.take_session(index) {
         session.detach();
-    }
-}
-
-/// Detach a session and sleep its agent — the way out, where nothing is left
-/// watching and an awake agent would bill unattended.
-async fn close_and_sleep(app: &mut App, index: usize, client: &reqwest::Client, backboard: &str) {
-    let Some(mut session) = app.take_session(index) else {
-        return;
-    };
-    let agent_id = session.agent_id.clone();
-    let environment_id = session.environment_id().map(str::to_string);
-    session.detach();
-    drop(session);
-
-    // Without the environment there is no relay target, so the disk cannot be
-    // quiesced first. Sleeping anyway is still right: an agent left awake with
-    // nothing watching it bills until someone notices.
-    let result = match environment_id {
-        Some(environment_id) => {
-            crate::controllers::cloud_agent::sleep(client, backboard, &environment_id, &agent_id)
-                .await
-        }
-        None => post_graphql::<mutations::CloudAgentSleep, _>(
-            client,
-            backboard.to_string(),
-            mutations::cloud_agent_sleep::Variables { id: agent_id },
-        )
-        .await
-        .map(|_| ())
-        .map_err(Into::into),
-    };
-    // Worth its own event, not just a silent `let _ =`: a failure here is an
-    // agent left running and billing compute with nothing attached to it —
-    // exactly the case sleep-on-quit exists to prevent.
-    if let Err(err) = result {
-        let message = format!("{err:#}");
-        super::telemetry::track_session_event("quit_sleep_failed", Some(message.as_str())).await;
     }
 }
 
