@@ -117,6 +117,38 @@ pub enum Action {
     Cancel,
 }
 
+/// The projects a card can offer as the default, from the tree the TUI
+/// already loaded. Shared with the settings card, which asks the same
+/// question after the fact.
+pub fn project_options(tree: &[WorkspaceNode]) -> Vec<ProjectOption> {
+    tree.iter()
+        .flat_map(|ws| ws.projects.iter())
+        .filter_map(|project| {
+            let env = project.envs.first()?;
+            Some(ProjectOption {
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                environment_id: env.id.clone(),
+                environment_name: env.name.clone(),
+            })
+        })
+        .collect()
+}
+
+/// What each harness is, for the cards that offer them.
+pub fn harness_blurb(slug: &str) -> &'static str {
+    match slug {
+        "claude" => "Anthropic's Claude Code",
+        "codex" => "OpenAI's Codex",
+        "grok" => "xAI's Grok",
+        "railway" => "Railway's own agent — no sign-in needed",
+        // Named rather than folded into a catch-all: an unknown slug is a
+        // preferences file someone hand-edited, and labelling it as whichever
+        // harness happens to sit in the `_` arm is worse than saying nothing.
+        _ => "",
+    }
+}
+
 impl Wizard {
     /// Build the flow, taking the workspace tree from the loaded tree. The
     /// first workspace opens by default — mirroring the Manage screen, so the
@@ -260,16 +292,7 @@ impl Wizard {
                 .collect(),
             Step::Agent => super::app::HARNESSES
                 .iter()
-                .map(|slug| {
-                    let what = match *slug {
-                        "claude" => "Anthropic's Claude Code",
-                        "codex" => "OpenAI's Codex",
-                        "grok" => "xAI's Grok",
-                        "railway" => "Railway's own agent — no sign-in needed",
-                        _ => "",
-                    };
-                    ((*slug).to_string(), what.to_string())
-                })
+                .map(|slug| ((*slug).to_string(), harness_blurb(slug).to_string()))
                 .collect(),
             Step::Skills => vec![
                 (

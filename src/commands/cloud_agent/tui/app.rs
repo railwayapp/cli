@@ -44,9 +44,9 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("enter", "connect and type in it"),
             ("⌥f", "give it the whole screen · again to restore"),
-            ("shift+enter / f", "leave the TUI and connect full screen"),
+            ("⌥enter / f", "leave the TUI and connect full screen"),
             ("c", "copy an ssh command for it"),
-            ("shift+esc / ^]", "stop typing in it"),
+            ("⌥esc / ^]", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
@@ -96,8 +96,8 @@ pub const CARDS: &[(&str, &str)] = &[
 ];
 
 /// The setup card, offered only until there are preferences to show. After
-/// that it is ⌥s — a thing you go back to occasionally, not a third of the
-/// menu.
+/// that the answers live on the ⌥s settings card — a thing you go back to
+/// occasionally, not a third of the menu.
 pub const SETUP_CARD: (&str, &str) = ("Setup", "Default agent, skills, and theme");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +261,9 @@ pub enum Screen {
     AgentPick,
     /// First-run setup, over the menu.
     Setup,
+    /// The ⌥s settings card, over the menu: every preference setup collects,
+    /// changeable after the fact.
+    Settings,
     /// Choosing where the prompt lands, over the menu. The same card list the
     /// setup flow asks with — picking a target is the same question, so it
     /// should not send anyone through the whole management tree to answer it.
@@ -655,6 +658,9 @@ pub enum Effect {
     CreateDefaultProject(String),
     /// Persist what first-run setup collected.
     SaveSetup(Box<super::wizard::Outcome>),
+    /// Persist a change made on the settings card. The same snapshot shape as
+    /// setup, but merged over the file on disk rather than replacing it.
+    SaveSettings(Box<super::wizard::Outcome>),
     /// Remember the default project chosen from the target card.
     SaveDefaultProject(Box<Target>),
     /// Open a link that was double-clicked in a session.
@@ -707,7 +713,7 @@ pub struct App {
     /// tree and separated from the rest.
     pub default_project: Option<String>,
     /// Whether preferences exist yet. Decides whether the menu carries a Setup
-    /// card or leaves setup to ⌥s.
+    /// card or leaves changing things to the ⌥s settings card.
     pub configured: bool,
     /// Environments this machine has launched an agent in, from the CLI's own
     /// records. Loaded eagerly, because an agent you made is one you expect to
@@ -748,8 +754,13 @@ pub struct App {
     pub ending: std::collections::HashSet<String>,
     /// First-run setup, when there are no preferences yet.
     pub wizard: Option<super::wizard::Wizard>,
+    /// The ⌥s settings card, while it is open.
+    pub settings: Option<super::settings::Settings>,
     /// Which local directory skills would come from, if any.
     pub skills_source: Option<String>,
+    /// Whether the skills preference is on, mirrored from the file so the
+    /// settings card opens showing the truth.
+    pub skills_enabled: bool,
     /// The key overlay is open.
     pub keys_open: bool,
     /// A drag in progress or a completed selection.
@@ -811,7 +822,9 @@ impl App {
             panes: PaneRects::default(),
             ending: std::collections::HashSet::new(),
             wizard: None,
+            settings: None,
             skills_source: None,
+            skills_enabled: false,
             keys_open: false,
             selection: None,
             last_click: None,
@@ -1049,6 +1062,38 @@ impl App {
     /// Close it, whatever the reason.
     pub fn end_wizard(&mut self) {
         self.wizard = None;
+        self.screen = Screen::Menu;
+    }
+
+    /// Open the ⌥s settings card over the menu, seeded with what is saved.
+    ///
+    /// The default project's names come from the target, which holds the
+    /// saved default whenever one exists — the tree would only have the id.
+    pub fn start_settings(&mut self) {
+        let project = self
+            .default_project
+            .as_ref()
+            .and(self.target.as_ref())
+            .map(|t| super::wizard::ProjectOption {
+                project_id: t.project_id.clone(),
+                project_name: t.project_name.clone(),
+                environment_id: t.environment_id.clone(),
+                environment_name: t.environment_name.clone(),
+            });
+        self.settings = Some(super::settings::Settings::new(
+            &self.tree,
+            project,
+            self.harness,
+            self.skills_enabled,
+            self.skills_source.clone(),
+            self.theme,
+        ));
+        self.screen = Screen::Settings;
+    }
+
+    /// Close it; every change was already saved on the way.
+    pub fn end_settings(&mut self) {
+        self.settings = None;
         self.screen = Screen::Menu;
     }
 
@@ -1589,14 +1634,15 @@ impl App {
         if self.focus == ManageFocus::Session && self.screen != Screen::Menu {
             // Three ways out, because terminals disagree about what they will
             // report. `^]` is the classic escape chord and works everywhere;
-            // shift+esc needs the enhanced keyboard protocol, without which it
-            // arrives as a bare Escape meant for the agent; `^o` stays for
-            // anyone who learned it.
+            // ⌥esc — the ⌥ family's release, matching every other chord here —
+            // needs the enhanced keyboard protocol, without which it arrives
+            // as a bare Escape meant for the agent; `^o` stays for anyone who
+            // learned it.
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let shift_esc = key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::SHIFT);
+            let alt_esc = key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::ALT);
             let ctrl_bracket = ctrl && key.code == KeyCode::Char(']');
             let ctrl_o = ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'));
-            if shift_esc || ctrl_bracket || ctrl_o {
+            if alt_esc || ctrl_bracket || ctrl_o {
                 self.focus = ManageFocus::Tree;
                 return None;
             }
@@ -1605,7 +1651,7 @@ impl App {
             // to the next pane. ⌥f costs Meta-f (forward-word) in a shell;
             // readline leaves Meta-] unbound, and `^]` (character-search) is
             // untouched because only the Meta form is claimed. Nothing else is
-            // intercepted — ⌥s and ⌥t still reach the agent from here.
+            // intercepted — ⌥s still reaches the agent from here.
             if let Some(chord) = alt_chord(&key)
                 && matches!(chord, 'f' | ']')
             {
@@ -1656,6 +1702,7 @@ impl App {
         self.status.clear();
         match self.screen {
             Screen::Setup => self.on_key_wizard(key),
+            Screen::Settings => self.on_key_settings(key),
             Screen::TargetPick => self.on_key_target_pick(key),
             Screen::AgentPick => self.on_key_agent_pick(key),
             Screen::Menu => self.on_key_menu(key),
@@ -1698,10 +1745,54 @@ impl App {
             }
             Action::Finish(outcome) => {
                 // There are preferences now, so the menu drops the Setup card
-                // and setup becomes ⌥s.
+                // and the answers move to the ⌥s settings card.
                 self.configured = true;
                 self.end_wizard();
                 Some(Effect::SaveSetup(outcome))
+            }
+        }
+    }
+
+    fn on_key_settings(&mut self, key: KeyEvent) -> Option<Effect> {
+        use super::settings::Action;
+        let settings = self.settings.as_mut()?;
+        // The picker creating a project owns the keyboard until it is done.
+        if settings.busy.is_some() {
+            return None;
+        }
+        let action = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                settings.up();
+                Action::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                settings.down();
+                Action::Redraw
+            }
+            KeyCode::Left | KeyCode::Char('h') => settings.left(),
+            KeyCode::Right | KeyCode::Char('l') => settings.right(),
+            KeyCode::Enter => settings.select(),
+            KeyCode::Esc => settings.back(),
+            _ => Action::None,
+        };
+        // The theme applies as it cycles, so the whole screen follows.
+        self.theme = self
+            .settings
+            .as_ref()
+            .map(|s| s.current_theme())
+            .unwrap_or(self.theme);
+        match action {
+            Action::None | Action::Redraw => None,
+            Action::Save(outcome) => Some(Effect::SaveSettings(outcome)),
+            Action::CreateProject(workspace_id) => Some(Effect::CreateDefaultProject(workspace_id)),
+            Action::RunSetup => {
+                self.settings = None;
+                self.start_wizard(false);
+                None
+            }
+            Action::Close => {
+                self.end_settings();
+                None
             }
         }
     }
@@ -2158,8 +2249,13 @@ impl App {
 
     /// Hand the whole terminal to the session under the cursor.
     ///
-    /// Shift-Enter is the intended chord, but plenty of terminals do not send a
+    /// ⌥enter is the intended chord, but plenty of terminals do not send a
     /// modifier with Enter at all, so `f` does the same thing.
+    ///
+    /// Deliberately not shift+enter: that one belongs to the harness, where it
+    /// is the newline every text field gives you. This binding only ever fires
+    /// with the tree focused, so ⌥enter inside a session still reaches the
+    /// agent as `ESC CR` — which is the other newline chord harnesses take.
     fn full_screen_current(&mut self) -> Option<Effect> {
         // The row under the cursor if it names a session, else whatever the
         // pane is showing.
@@ -2442,19 +2538,15 @@ impl App {
         None
     }
 
-    /// The chords that work everywhere. Only two: a theme is worth a key
-    /// because it is a thing you flick through, and setup is worth one because
-    /// it left the menu once it had been answered.
+    /// The chords that work everywhere. Settings is worth one because it left
+    /// the menu once first-run setup had been answered — and it is where the
+    /// theme now cycles, which is why there is no ⌥t any more: two chords to
+    /// the same preference was how they drifted apart.
     fn alt_action(&mut self, action: char) -> Option<Effect> {
         self.status.clear();
         match action {
-            't' => {
-                self.theme = self.theme.next();
-                self.status = format!("Theme: {}", self.theme.label);
-                None
-            }
             's' => {
-                self.start_wizard(false);
+                self.start_settings();
                 None
             }
             'f' => {
@@ -2711,7 +2803,7 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1),
             // Full screen, before the plain Enter arm below claims the key.
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.full_screen_current()
             }
             KeyCode::Char('f') => self.full_screen_current(),
@@ -3305,7 +3397,7 @@ fn project_count_note(project: &ProjectNode) -> String {
 /// from a cursor key. `ESC ]` is OSC, which terminals effectively never send,
 /// so the forward direction is safe on its own.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['f', 's', 't', ']'];
+    const ACTIONS: &[char] = &['f', 's', ']'];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = c.to_ascii_lowercase();
@@ -3317,7 +3409,6 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
-        KeyCode::Char('†') => Some('t'),
         // Option+] composes to a left curly quote, Option+shift+] to the right
         // one. Both are the same chord as far as anyone pressing it is
         // concerned, matching how the letters fold their shifted forms.
@@ -3864,10 +3955,9 @@ mod tests {
         assert_eq!(a.on_key(alt('f')), None);
         assert!(a.maximized);
 
-        // ⌥t is not intercepted there — it belongs to whatever is running.
-        let theme = a.theme.slug;
-        a.on_key(alt('t'));
-        assert_eq!(a.theme.slug, theme);
+        // ⌥s is not intercepted there — it belongs to whatever is running.
+        a.on_key(alt('s'));
+        assert!(a.settings.is_none());
     }
 
     fn with_sessions(names: &[&str]) -> App {
@@ -4108,50 +4198,48 @@ mod tests {
         a.on_key(key(KeyCode::Char('s')));
         assert_eq!(a.prompt, "s", "a bare letter is still text");
         assert_eq!(a.on_key(alt('s')), None);
-        assert_eq!(a.screen, Screen::Setup, "⌥s opens setup in place");
+        assert_eq!(a.screen, Screen::Settings, "⌥s opens settings in place");
         assert_eq!(a.prompt, "s", "the chord must not touch the draft");
     }
 
     /// Terminals that compose Option+letter instead of sending Meta still get
-    /// the two chords there are.
+    /// the chords there are.
     #[test]
     fn macos_composed_option_characters_are_accepted() {
         let mut a = app();
         assert_eq!(a.on_key(key(KeyCode::Char('ß'))), None);
-        assert_eq!(a.screen, Screen::Setup);
+        assert_eq!(a.screen, Screen::Settings);
         assert!(a.prompt.is_empty(), "a chord is not text");
+    }
 
+    /// ⌥t went with the theme chord: the theme now cycles on the settings
+    /// card, and the key falls through like any other unclaimed letter.
+    #[test]
+    fn alt_t_is_no_longer_a_chord() {
+        let mut a = app();
+        let first = a.theme.slug;
+        assert_eq!(a.on_key(alt('t')), None);
+        assert_eq!(a.theme.slug, first, "the theme is ⌥s territory now");
+        assert_eq!(a.screen, Screen::Menu);
+
+        // And its composed form is plain text again, like any other
+        // Option-composed character the TUI has no claim on.
         let mut b = app();
         let theme = b.theme.slug;
         b.on_key(key(KeyCode::Char('†')));
-        assert_ne!(b.theme.slug, theme);
-        assert!(b.prompt.is_empty(), "a chord is not text");
+        assert_eq!(b.theme.slug, theme);
+        assert_eq!(b.prompt, "†", "unclaimed, the character is text");
     }
 
+    /// ^t keeps the target picker to itself now that ⌥t is gone — the two
+    /// were different chords on the same letter.
     #[test]
-    fn alt_t_cycles_the_theme_without_touching_the_prompt() {
-        let mut a = app();
-        a.prompt = "keep me".into();
-        let first = a.theme.slug;
-        assert_eq!(a.on_key(alt('t')), None);
-        assert_ne!(a.theme.slug, first);
-        assert!(a.status.starts_with("Theme:"));
-        assert_eq!(a.prompt, "keep me");
-    }
-
-    /// ^t and ⌥t are different chords on the same letter — target and theme
-    /// must not be reachable from each other.
-    #[test]
-    fn ctrl_t_and_alt_t_do_different_things() {
+    fn ctrl_t_still_opens_the_target_picker() {
         let mut a = app();
         let theme = a.theme.slug;
         a.on_key(ctrl('t'));
         assert_eq!(a.theme.slug, theme, "^t must not change the theme");
         assert_eq!(a.screen, Screen::TargetPick);
-
-        let mut b = app();
-        b.on_key(alt('t'));
-        assert_eq!(b.screen, Screen::Menu, "⌥t must not open the picker");
     }
 
     /// The two kinds of "new" are different things and say which is which: a
@@ -4214,14 +4302,95 @@ mod tests {
         }
     }
 
-    /// Setup keeps its chord, from either focus and mid-prompt.
+    /// Settings keeps the chord setup had, from either focus and mid-prompt.
     #[test]
-    fn alt_s_opens_setup_from_anywhere() {
+    fn alt_s_opens_settings_from_anywhere() {
         let mut a = app();
         a.prompt = "fix the tests".into();
         assert_eq!(a.on_key(alt('s')), None);
-        assert_eq!(a.screen, Screen::Setup);
+        assert_eq!(a.screen, Screen::Settings);
         assert_eq!(a.prompt, "fix the tests", "the draft survives");
+    }
+
+    /// The settings card edits in place: changing the agent is one keypress
+    /// and one save, not a walk through the flow.
+    #[test]
+    fn settings_cycles_the_agent_and_saves() {
+        let mut a = app();
+        a.on_key(alt('s'));
+        let Some(Effect::SaveSettings(outcome)) = a.on_key(key(KeyCode::Right)) else {
+            panic!("expected a save");
+        };
+        assert_eq!(outcome.agent, "codex");
+        assert_eq!(
+            outcome.theme, a.theme.slug,
+            "the rest rides along unchanged"
+        );
+    }
+
+    /// The theme applies to the whole screen as it cycles — a colour scheme
+    /// is picked by looking at it, exactly like the wizard's theme step.
+    #[test]
+    fn settings_previews_the_theme_live() {
+        let mut a = app();
+        a.on_key(alt('s'));
+        for _ in 0..3 {
+            a.on_key(key(KeyCode::Down)); // down to the theme row
+        }
+        let first = a.theme.slug;
+        let Some(Effect::SaveSettings(outcome)) = a.on_key(key(KeyCode::Right)) else {
+            panic!("expected a save");
+        };
+        assert_ne!(a.theme.slug, first, "the whole screen follows");
+        assert_eq!(outcome.theme, a.theme.slug);
+    }
+
+    /// The card opens showing the saved default project, not a blank.
+    #[test]
+    fn settings_opens_on_the_saved_default_project() {
+        let mut a = app();
+        a.default_project = Some("proj_1".into());
+        a.target = Some(Target {
+            project_id: "proj_1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.on_key(alt('s'));
+        let settings = a.settings.as_ref().unwrap();
+        assert_eq!(
+            settings.project.as_ref().unwrap().project_name,
+            "devtools",
+            "seeded from the target, which holds the saved default"
+        );
+    }
+
+    /// The last row hands over to the wizard, skipping its intro — choosing
+    /// it has already answered "set up?".
+    #[test]
+    fn settings_can_replay_first_run_setup() {
+        let mut a = app();
+        a.on_key(alt('s'));
+        for _ in 0..4 {
+            a.on_key(key(KeyCode::Down)); // down to the last row
+        }
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(a.screen, Screen::Setup);
+        assert!(a.settings.is_none(), "the card handed over");
+        assert_eq!(
+            a.wizard.as_ref().unwrap().step,
+            crate::commands::cloud_agent::tui::wizard::Step::Target
+        );
+    }
+
+    /// Esc closes the card without ceremony: every change already saved.
+    #[test]
+    fn settings_escape_just_closes() {
+        let mut a = app();
+        a.on_key(alt('s'));
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.screen, Screen::Menu);
+        assert!(a.settings.is_none());
     }
 
     #[test]
@@ -5182,12 +5351,12 @@ mod tests {
     }
 
     /// Three ways out of a focused session, because terminals disagree about
-    /// what they report: shift+esc only exists with the enhanced keyboard protocol,
+    /// what they report: ⌥esc only exists with the enhanced keyboard protocol,
     /// so `^]` and `^o` have to work without it.
     #[test]
     fn every_release_chord_works() {
         for release in [
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT),
             KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
         ] {
@@ -5908,7 +6077,7 @@ mod tests {
         assert_eq!(a.refresh_agent_sessions("nope"), None);
     }
 
-    /// Shift-enter hands the whole terminal over; `f` does the same, because
+    /// ⌥enter hands the whole terminal over; `f` does the same, because
     /// plenty of terminals never send a modifier with Enter.
     #[test]
     fn full_screen_has_two_ways_in() {
@@ -5916,12 +6085,12 @@ mod tests {
         a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
         a.focus = ManageFocus::Tree;
 
-        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
         let Some(Effect::FullScreen {
             agent_id,
             session_name,
             ..
-        }) = a.on_key(shift_enter)
+        }) = a.on_key(alt_enter)
         else {
             panic!("expected a full-screen request");
         };
@@ -5932,6 +6101,32 @@ mod tests {
             a.on_key(key(KeyCode::Char('f'))),
             Some(Effect::FullScreen { .. })
         ));
+    }
+
+    /// shift+enter belongs to the harness, which reads it as the newline every
+    /// text field gives you. The TUI must not claim it from either focus.
+    #[test]
+    fn shift_enter_is_the_harnesss_to_keep() {
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+
+        // With the tree focused it is not the full-screen chord any more; the
+        // row under the cursor is a workspace, so a plain Enter would expand
+        // it and a claimed shift+enter would show up as something happening.
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.focus = ManageFocus::Tree;
+        assert!(
+            !matches!(a.on_key(shift_enter), Some(Effect::FullScreen { .. })),
+            "shift+enter must not hand the terminal over"
+        );
+
+        // And with the session focused it falls straight through to the agent,
+        // like every other key the pane does not reserve.
+        let mut b = loaded_app();
+        b.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        b.focus = ManageFocus::Session;
+        assert_eq!(b.on_key(shift_enter), None);
+        assert_eq!(b.focus, ManageFocus::Session, "it must not release either");
     }
 
     /// Rows are named by the session, not by a truncated launch line.
