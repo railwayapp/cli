@@ -125,9 +125,9 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     url: U,
     variables: Q::Variables,
 ) -> Result<Q::ResponseData, RailwayError> {
-    let body = Q::build_query(variables);
-    let response = client.post(url).json(&body).send().await?;
-    parse_graphql_response(response).await
+    let body = serde_json::to_value(Q::build_query(variables))
+        .expect("Failed to serialize GraphQL query body");
+    post_graphql_for_current_session(client, url.into_url()?, &body).await
 }
 
 pub async fn post_graphql_raw<T, U: reqwest::IntoUrl>(
@@ -143,8 +143,112 @@ where
         "query": query,
         "variables": variables,
     });
-    let response = client.post(url).json(&body).send().await?;
-    parse_graphql_response(response).await
+    post_graphql_for_current_session(client, url.into_url()?, &body).await
+}
+
+/// Send a GraphQL request with the disambiguation wired to the current
+/// process's stored session and environment. See [`post_graphql_value`].
+async fn post_graphql_for_current_session<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    body: &serde_json::Value,
+) -> Result<T, RailwayError> {
+    let mut configs = Configs::new().ok();
+    let oauth_base_url = configs
+        .as_ref()
+        .map(|c| oauth::get_oauth_base_url(c.get_host()));
+    post_graphql_value(
+        client,
+        url,
+        body,
+        configs.as_mut().zip(oauth_base_url.as_deref()),
+    )
+    .await
+}
+
+/// What a token-endpoint probe says about the stored session after the API
+/// answered "Not Authorized".
+enum SessionProbe {
+    /// A refresh just succeeded, so the grant is alive: the rejection was
+    /// about the resource, not the session.
+    Alive,
+    /// The grant is dead (`invalid_grant`); the stored credentials have been
+    /// cleared by the refresh policy.
+    Dead,
+    /// Nothing to probe with (token auth, no refresh token) or the probe
+    /// itself failed transiently — nothing can be concluded.
+    Inconclusive,
+}
+
+/// Ask the token endpoint whether the stored session is still alive, under
+/// the config lock (a refresh is a read-modify-write of the credential file).
+async fn probe_session_liveness(configs: &mut Configs, oauth_base_url: &str) -> SessionProbe {
+    if Configs::is_using_token_auth() {
+        // Env-var tokens have no refresh token to probe with.
+        return SessionProbe::Inconclusive;
+    }
+    let _lock = configs.acquire_lock().await;
+    if configs.reload().is_err() {
+        return SessionProbe::Inconclusive;
+    }
+    match refresh_with_policy(configs, oauth_base_url, REFRESH_BACKOFF).await {
+        RefreshOutcome::Refreshed | RefreshOutcome::AlreadyFresh => SessionProbe::Alive,
+        RefreshOutcome::SessionExpired(_) => SessionProbe::Dead,
+        RefreshOutcome::Transient(_) | RefreshOutcome::NoRefreshToken => SessionProbe::Inconclusive,
+    }
+}
+
+/// Send a GraphQL request, disambiguating "Not Authorized".
+///
+/// The server renders two very different failures identically: a dead
+/// session (re-login fixes it) and an authorization denial on the resource —
+/// e.g. an OAuth grant limited to specific workspaces (re-login can NEVER
+/// fix it: consent reuses the same partially-scoped grant). Telling the
+/// second group to "run `railway login` again" wedged them permanently; see
+/// mono's docs/investigations/cli-logout-issue/.
+///
+/// On "Not Authorized" with an OAuth session, probe the token endpoint — a
+/// refresh succeeds only for a live grant — then retry the request once with
+/// the refreshed credentials:
+/// - retry succeeds → the access token had died server-side while looking
+///   fresh locally; the user never sees an error (previously this wedged
+///   every command until local expiry, up to an hour);
+/// - retry still unauthorized → the session is alive and the denial is about
+///   the resource: report [`RailwayError::OAuthInsufficientGrant`] instead
+///   of a re-login prompt;
+/// - probe says the grant is dead → the re-login prompt stands (and the
+///   refresh policy has already cleared the dead credentials).
+pub(crate) async fn post_graphql_value<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    body: &serde_json::Value,
+    session: Option<(&mut Configs, &str)>,
+) -> Result<T, RailwayError> {
+    let response = client.post(url.clone()).json(body).send().await?;
+    let err = match parse_graphql_response(response).await {
+        Err(e @ (RailwayError::Unauthorized | RailwayError::UnauthorizedLogin)) => e,
+        other => return other,
+    };
+
+    let Some((configs, oauth_base_url)) = session else {
+        return Err(err);
+    };
+    match probe_session_liveness(configs, oauth_base_url).await {
+        SessionProbe::Dead | SessionProbe::Inconclusive => Err(err),
+        SessionProbe::Alive => {
+            // Carry the refreshed bearer; the original client's is baked in.
+            let Ok(fresh_client) = GQLClient::new_authorized(configs) else {
+                return Err(err);
+            };
+            let response = fresh_client.post(url).json(body).send().await?;
+            match parse_graphql_response(response).await {
+                Err(RailwayError::Unauthorized | RailwayError::UnauthorizedLogin) => {
+                    Err(RailwayError::OAuthInsufficientGrant)
+                }
+                other => other,
+            }
+        }
+    }
 }
 
 fn get_security_url() -> String {
@@ -328,8 +432,7 @@ pub async fn post_graphql_skip_none<Q: GraphQLQuery, U: reqwest::IntoUrl>(
         }
     }
 
-    let response = client.post(url).json(&body_json).send().await?;
-    parse_graphql_response(response).await
+    post_graphql_for_current_session(client, url.into_url()?, &body_json).await
 }
 
 async fn parse_graphql_response<T>(response: reqwest::Response) -> Result<T, RailwayError>
