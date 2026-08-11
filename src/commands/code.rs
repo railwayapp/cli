@@ -262,10 +262,12 @@ enum Agent {
 }
 
 impl Agent {
-    /// The remote binary name (also what's autostarted on reconnect). The one
-    /// exception to "identical to the slug" below: the interactive frontend
-    /// binary is `railway-agent-tui`, not `railway-agent` (that name is the
-    /// headless `run`/`serve` CLI it drives).
+    /// The remote binary name — what's actually exec'd, and what's
+    /// autostarted on reconnect. Only ever used for that: anywhere this agent
+    /// needs a name a person reads, use [`Self::slug`] instead. The one
+    /// exception to "identical to the slug": the interactive frontend binary
+    /// is `railway-agent-tui`, not `railway-agent` (that name is the headless
+    /// `run`/`serve` CLI it drives).
     fn name(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
@@ -275,11 +277,22 @@ impl Agent {
         }
     }
 
-    /// The slug persisted in `agent-prefs.json` and accepted by
-    /// `RAILWAY_CA_AGENT`. Identical to the remote binary name for every agent
-    /// except Railway's own — "railway" reads better than "railway-agent-tui"
-    /// in a flag or a config file, and there is only the one harness it could
-    /// mean.
+    /// The slug persisted in `agent-prefs.json`, accepted by
+    /// `RAILWAY_CA_AGENT`, and used anywhere this agent needs a short,
+    /// user-facing identifier — session name prefixes, the "get back in"
+    /// hint, launch messages. Identical to [`Self::name`] for every agent
+    /// except Railway's own: "railway" reads better than "railway-agent-tui"
+    /// in a flag, a config file, or a session name, and there is only the one
+    /// harness it could mean.
+    fn slug(self) -> &'static str {
+        match self {
+            Agent::Codex => "codex",
+            Agent::Claude => "claude",
+            Agent::Grok => "grok",
+            Agent::Railway => "railway",
+        }
+    }
+
     fn from_slug(slug: &str) -> Option<Self> {
         match slug {
             "claude" => Some(Agent::Claude),
@@ -1555,7 +1568,10 @@ async fn destroy_agent(
 pub fn default_harness() -> Result<&'static str> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
     let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
-    Ok(resolve_agent_choice(&LaunchArgs::default(), &mut prefs, &home)?.name())
+    // The slug, not the remote binary name: this feeds `LaunchArgs::for_target`,
+    // which matches a harness flag by slug, and it's echoed back to the user
+    // in `start_session`'s "starting {harness}" line.
+    Ok(resolve_agent_choice(&LaunchArgs::default(), &mut prefs, &home)?.slug())
 }
 
 /// Environment override for the saved default — one run, no file write. For
@@ -1866,7 +1882,7 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
 
     let result = prepare_inner(args, progress, agent, prefs, &home).await;
     crate::commands::cloud_agent::telemetry::track_launch_outcome(
-        agent.name(),
+        agent.slug(),
         result.as_ref().ok().map(|p| p.created),
         start.elapsed(),
         result.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
@@ -2126,7 +2142,7 @@ async fn prepare_inner(
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
         environment_id,
-        harness: agent.name(),
+        harness: agent.slug(),
         created,
     })
 }
@@ -2715,11 +2731,14 @@ mod tests {
     #[test]
     fn agent_slugs_round_trip() {
         for agent in [Agent::Claude, Agent::Codex, Agent::Grok] {
+            assert_eq!(agent.slug(), agent.name());
             assert_eq!(Agent::from_slug(agent.name()), Some(agent));
         }
         // Railway is the one exception: the slug is "railway", not the
-        // interactive binary's own name.
+        // interactive binary's own name — which is what session prefixes,
+        // launch messages, and telemetry should read.
         assert_eq!(Agent::from_slug("railway"), Some(Agent::Railway));
+        assert_eq!(Agent::Railway.slug(), "railway");
         assert_eq!(Agent::Railway.name(), "railway-agent-tui");
         assert!(Agent::from_slug("droid").is_none());
         assert!(Agent::from_slug("").is_none());
