@@ -832,6 +832,18 @@ pub async fn run(
                 });
             }
             Some(Effect::Launch(req)) => {
+                // The launch lives on the manage screen — the tree the agent
+                // will land in — so go there first and reveal its environment.
+                // The ssh gate's question then hangs over the place the answer
+                // matters, not over the menu it happened to be asked from.
+                app.screen = Screen::Manage;
+                if let Some(Effect::LoadAgents {
+                    environment_id,
+                    path,
+                }) = app.reveal_environment(&req.environment_id)
+                {
+                    spawn_env_agents_fetch(environment_id, path, &tx, &client, &backboard);
+                }
                 // Connecting rides SSH, so an unregistered key is settled with
                 // an in-frame question before anything is spent on the launch.
                 if app.hold_for_ssh_key(HeldConnect::Launch(req.clone())) {
@@ -867,39 +879,51 @@ pub async fn run(
                 environment_id,
                 path,
             }) => {
-                let tx = tx.clone();
-                let client = client.clone();
-                let backboard = backboard.clone();
-                tokio::spawn(async move {
-                    // A closed receiver just means the TUI already handed back;
-                    // the next entry re-requests, so the drop is harmless.
-                    match fetch_agents(&client, &backboard, &environment_id).await {
-                        Ok(agents) => {
-                            let _ = tx.send(Message::AgentsLoaded {
-                                path,
-                                result: Ok(agents),
-                            });
-                        }
-                        // The same classification the background fetches do:
-                        // a 429 puts the row back to "not loaded" with the
-                        // Retry-After toast, instead of pinning "rate limited"
-                        // to this one environment as if it were its failure.
-                        Err(err) => match rate_limit_from(&err) {
-                            Some(retry_after_secs) => {
-                                let _ = tx.send(Message::RateLimited { retry_after_secs });
-                            }
-                            None => {
-                                let _ = tx.send(Message::AgentsLoaded {
-                                    path,
-                                    result: Err(err.to_string()),
-                                });
-                            }
-                        },
-                    }
-                });
+                spawn_env_agents_fetch(environment_id, path, &tx, &client, &backboard);
             }
         }
     }
+}
+
+/// Fetch one environment's agents in the background, delivering the answer —
+/// or its rate-limit classification — as a message.
+fn spawn_env_agents_fetch(
+    environment_id: String,
+    path: (usize, usize, usize),
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_string();
+    tokio::spawn(async move {
+        // A closed receiver just means the TUI already handed back;
+        // the next entry re-requests, so the drop is harmless.
+        match fetch_agents(&client, &backboard, &environment_id).await {
+            Ok(agents) => {
+                let _ = tx.send(Message::AgentsLoaded {
+                    path,
+                    result: Ok(agents),
+                });
+            }
+            // The same classification the background fetches do:
+            // a 429 puts the row back to "not loaded" with the
+            // Retry-After toast, instead of pinning "rate limited"
+            // to this one environment as if it were its failure.
+            Err(err) => match rate_limit_from(&err) {
+                Some(retry_after_secs) => {
+                    let _ = tx.send(Message::RateLimited { retry_after_secs });
+                }
+                None => {
+                    let _ = tx.send(Message::AgentsLoaded {
+                        path,
+                        result: Err(err.to_string()),
+                    });
+                }
+            },
+        }
+    });
 }
 
 fn handle_message(
