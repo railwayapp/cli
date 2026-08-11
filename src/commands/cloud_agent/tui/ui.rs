@@ -42,14 +42,20 @@ const CARD_GUTTER: usize = 3;
 const TREE_W: u16 = 32;
 
 /// Columns between a dialog's border and its text.
-const DIALOG_PAD_X: u16 = 2;
+const DIALOG_PAD_X: u16 = 4;
 
 /// Rows between a dialog's border and its text.
-const DIALOG_PAD_Y: u16 = 1;
+const DIALOG_PAD_Y: u16 = 2;
 
 /// What a dialog spends on chrome: two borders plus the padding inside them.
 const DIALOG_CHROME_X: u16 = 2 + DIALOG_PAD_X * 2;
 const DIALOG_CHROME_Y: u16 = 2 + DIALOG_PAD_Y * 2;
+
+/// How far the drop shadow is offset from the card that casts it. Two columns
+/// to one row: a terminal cell is about twice as tall as it is wide, so this is
+/// the same distance in both directions on screen.
+const SHADOW_DX: u16 = 2;
+const SHADOW_DY: u16 = 1;
 
 /// The chrome every floating card shares.
 ///
@@ -65,6 +71,37 @@ fn dialog_block(theme: &Theme) -> Block<'static> {
         .border_style(Style::default().fg(theme.accent))
         .style(Style::default().bg(theme.surface).fg(theme.fg))
         .padding(Padding::symmetric(DIALOG_PAD_X, DIALOG_PAD_Y))
+}
+
+/// Lift `outer` off the screen: a shadow down and to the right of it, then the
+/// area itself wiped clean for the card to be drawn into.
+///
+/// The shadow is painted rather than blended — a terminal has no alpha — so the
+/// cells it lands on lose their contents. That is the point: whatever was there
+/// is behind the card now, and a half-lit word poking out from under it reads
+/// as corruption rather than as depth.
+fn raise(f: &mut Frame, theme: &Theme, outer: Rect) {
+    let screen = f.area();
+    let shadow = Rect {
+        x: outer.x + SHADOW_DX,
+        y: outer.y + SHADOW_DY,
+        width: outer.width,
+        height: outer.height,
+    }
+    .intersection(screen);
+    let buffer = f.buffer_mut();
+    for y in shadow.top()..shadow.bottom() {
+        for x in shadow.left()..shadow.right() {
+            // Only the L the shadow sticks out by; the rest is under the card.
+            if outer.contains((x, y).into()) {
+                continue;
+            }
+            buffer[(x, y)]
+                .set_symbol(" ")
+                .set_style(Style::default().bg(theme.shadow));
+        }
+    }
+    f.render_widget(Clear, outer);
 }
 
 /// One inverse-styled key badge, e.g. ` ^t `. The building block of
@@ -177,6 +214,8 @@ fn render_toast(app: &App, f: &mut Frame) {
         theme.pending
     };
     f.render_widget(Clear, rect);
+    // No shadow: the toast already floats clear of everything, and the shade
+    // would fall on the key strip it deliberately sits above.
     f.render_widget(
         Paragraph::new(Span::styled(text, Style::default().fg(theme.fg))).block(
             dialog_block(theme)
@@ -257,7 +296,7 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     let big = area.width >= BANNER_W + 8 && area.height >= 26;
     let banner_h = if big { BANNER_H } else { 1 };
     // Text rows, plus the border and the padding that frame them.
-    let prompt_h = if area.height >= 30 { 4 } else { 2 } + DIALOG_CHROME_Y;
+    let prompt_h = if area.height >= 30 { 2 } else { 1 } + DIALOG_CHROME_Y;
     let panel_w = 74.min(area.width.saturating_sub(2)).max(40.min(area.width));
     let cards = app.cards();
     // Descriptions cost rows, and on a short screen those rows come out of the
@@ -568,7 +607,9 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
 
     // Padding is the first thing to go when the box is short: a line to type on
     // beats room around it.
-    let pad_y = DIALOG_PAD_Y * u16::from(area.height >= 3 + DIALOG_PAD_Y * 2);
+    let pad_y = DIALOG_PAD_Y.min(area.height.saturating_sub(3) / 2);
+
+    raise(f, theme, area);
 
     let block = dialog_block(theme)
         // On a short terminal the box can be squeezed to a couple of rows, and
@@ -1132,7 +1173,7 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
     let width = (62 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
     let height = (body_h + dots_h + 5 + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
     let outer = centered(width, height, area);
-    f.render_widget(Clear, outer);
+    raise(f, theme, outer);
 
     let block = dialog_block(theme).title(Span::styled(
         format!(" {} ", panel.title),
@@ -1476,7 +1517,7 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
         5 + DIALOG_CHROME_Y,
         area,
     );
-    f.render_widget(Clear, outer);
+    raise(f, theme, outer);
 
     let block = dialog_block(theme)
         .title(Span::styled(
@@ -1599,7 +1640,7 @@ fn render_keys(app: &App, f: &mut Frame) {
     let width = (48 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
     let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
     let panel = centered(width, height, area);
-    f.render_widget(Clear, panel);
+    raise(f, theme, panel);
     f.render_widget(
         Paragraph::new(lines).block(
             dialog_block(theme)
@@ -2263,6 +2304,37 @@ mod tests {
                 assert_eq!(row[x].0, " ", "column {x} hugs the border");
             }
         }
+    }
+
+    /// And it casts a shadow, so it reads as sitting above the screen rather
+    /// than being painted into it.
+    #[test]
+    fn a_dialog_casts_a_shadow_down_and_to_the_right() {
+        let mut app = app_with_tree();
+        app.start_settings();
+        let grid = cells(&app, 100, 40);
+        let (top, bottom, left, right) = dialog_rows(&grid, "settings");
+        let shadow = app.theme.shadow;
+        // Under the bottom edge, offset right by the same throw.
+        let under = &grid[bottom + SHADOW_DY as usize];
+        for (x, cell) in under
+            .iter()
+            .enumerate()
+            .take(right + 1)
+            .skip(left + SHADOW_DX as usize)
+        {
+            assert_eq!(cell.1, shadow, "no shadow under the card at column {x}");
+        }
+        // And down the right edge, starting below the top of the card.
+        for row in &grid[top + SHADOW_DY as usize..=bottom] {
+            assert_eq!(
+                row[right + SHADOW_DX as usize].1,
+                shadow,
+                "no shadow beside the card"
+            );
+        }
+        // The card itself is unshaded.
+        assert_ne!(grid[top][left].1, shadow);
     }
 
     /// The wordmark must be full blocks and spaces only: box-drawing shadow
@@ -3133,8 +3205,10 @@ mod tests {
             .repeat(3);
         let out = draw(&app, 100, 40);
         // The tail is what matters: the end of the draft has to be on screen.
+        // The last words rather than a whole phrase — the box wraps, and where
+        // a line breaks is the box's business.
         assert!(
-            out.contains("describing what changed"),
+            out.contains("what changed"),
             "the end of the prompt should be visible:\n{out}"
         );
     }
