@@ -64,6 +64,50 @@ fn dsr_reply(chunk: &[u8], screen: &vt100::Screen) -> Option<Vec<u8>> {
     })
 }
 
+/// The reply to a primary-device-attributes query (`ESC[c`, or `ESC[0c` with
+/// the parameter spelled out), found anywhere in a chunk — `Some` iff the
+/// query is there.
+///
+/// The other query that blocks the program which sent it, and the one that
+/// stopped `railway-agent-tui` drawing at all. crossterm uses DA1 as the
+/// sentinel in `supports_keyboard_enhancement`: it writes the kitty query and
+/// a DA1 immediately after, then reads until one of them comes back, on the
+/// reasoning that a terminal too old to know the kitty query will still answer
+/// DA1. So answering the kitty query while ignoring DA1 is the single worst
+/// combination available — the harness learns the reply it is waiting for will
+/// never arrive, and waits anyway. That is exactly what this pane started
+/// doing when it learned to answer `ESC[?u`: the launch went from drawing
+/// after a two-second timeout to never drawing at all, leaving a pane with
+/// nothing in it but the relay's banner. Answering both retires the timeout
+/// too — startup goes from ~2s to immediate.
+///
+/// `62;22` claims a VT220 that does ANSI colour, which is the least this
+/// emulator is. Secondary DA (`ESC[>c`) is deliberately not answered: nothing
+/// here asks for it, and inventing a version string for a terminal that does
+/// not exist invites feature detection nobody can honour.
+fn da1_reply(chunk: &[u8]) -> Option<Vec<u8>> {
+    const REPLY: &[u8] = b"\x1b[?62;22c";
+    let mut i = 0;
+    while let Some(at) = chunk[i..].windows(2).position(|w| w == b"\x1b[") {
+        let seq = &chunk[i + at + 2..];
+        // A query carries no parameters or the single default `0`. Anything
+        // else ending in `c` is a different sequence — and `ESC[?…c` is a
+        // terminal's own reply, never a request, so a leading `?` is not one.
+        let query = match seq.first() {
+            Some(b'c') => true,
+            Some(b'0') => seq.get(1) == Some(&b'c'),
+            _ => false,
+        };
+        if query {
+            return Some(REPLY.to_vec());
+        }
+        // Step past the introducer only, like `kitty_scan`: a later `c` may
+        // belong to plain text, and skipping to it would jump real sequences.
+        i += at + 2;
+    }
+    None
+}
+
 /// Track and answer the kitty keyboard protocol inside the pane's stream.
 ///
 /// A harness that wants unambiguous keys (shift+enter as a newline, most
@@ -273,6 +317,13 @@ impl Session {
                             got_output.store(true, Ordering::Relaxed);
                             let mut replies =
                                 kitty_scan(&buf[..n], &kitty_keys).unwrap_or_default();
+                            // In the order they were asked: a harness reads the
+                            // replies back as a stream, and DA1 is the sentinel
+                            // that says the kitty answer before it was the whole
+                            // answer.
+                            if let Some(da1) = da1_reply(&buf[..n]) {
+                                replies.extend_from_slice(&da1);
+                            }
                             if let Some(dsr) = parser.lock().ok().and_then(|mut parser| {
                                 parser.process(&buf[..n]);
                                 dsr_reply(&buf[..n], parser.screen())
@@ -795,6 +846,16 @@ fn encode_key_for(key: KeyEvent, kitty: bool) -> Option<Vec<u8>> {
             + 4 * u8::from(key.modifiers.contains(KeyModifiers::CONTROL));
         return Some(format!("\x1b[13;{m}u").into_bytes());
     }
+    // Without the push the CSI-u form would land as typed text, so ⇧enter falls
+    // back to meta+enter — `ESC CR`, the newline chord harnesses have always
+    // taken, and the exact bytes Claude Code's own `/terminal-setup` binds
+    // shift+enter to. A bare `\r` submits the half-written prompt, the one
+    // outcome the chord exists to prevent, so guessing newline is the better
+    // way to be wrong. ⌥enter already encodes this way through `encode_key`'s
+    // Alt prefix; this puts ⇧enter alongside it.
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        return Some(b"\x1b\r".to_vec());
+    }
     encode_key(key)
 }
 
@@ -931,8 +992,12 @@ mod tests {
         assert_eq!(bytes(enter(KeyModifiers::NONE), false), b"\r");
 
         // No push, no CSI-u: to a legacy program the escape sequence is
-        // typed text, which is worse than the ambiguity it replaces.
-        assert_eq!(bytes(enter(KeyModifiers::SHIFT), false), b"\r");
+        // typed text, which is worse than the ambiguity it replaces. ⇧enter
+        // still must not submit, so it falls back to the legacy newline chord.
+        assert_eq!(bytes(enter(KeyModifiers::SHIFT), false), b"\x1b\r");
+        assert_eq!(bytes(enter(KeyModifiers::ALT), false), b"\x1b\r");
+        // Ctrl is not a newline in anyone's legacy vocabulary — leave it alone.
+        assert_eq!(bytes(enter(KeyModifiers::CONTROL), false), b"\r");
 
         // Everything else routes through the legacy encoder untouched.
         assert_eq!(bytes(key(KeyCode::Char('a')), true), b"a");
@@ -1473,6 +1538,48 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 0);
         parser.process(b"just some output\r\n");
         assert_eq!(dsr_reply(b"just some output\r\n", parser.screen()), None);
+    }
+
+    #[test]
+    fn da1_is_answered_in_either_spelling() {
+        let reply = Some(b"\x1b[?62;22c".to_vec());
+        assert_eq!(da1_reply(b"\x1b[c"), reply);
+        assert_eq!(da1_reply(b"\x1b[0c"), reply);
+        // Anywhere in the chunk, including after sequences that are not it.
+        assert_eq!(da1_reply(b"\x1b[?2004h\x1b[?u\x1b[c\x1b[6n"), reply);
+    }
+
+    /// The `c` final byte is common and the introducer is everywhere, so this
+    /// is the scanner most able to answer a question nobody asked.
+    #[test]
+    fn da1_reply_is_none_without_a_query() {
+        assert_eq!(da1_reply(b"just some output\r\n"), None);
+        // A terminal's own DA1 response is not a request for one.
+        assert_eq!(da1_reply(b"\x1b[?62;22c"), None);
+        // Neither is any other sequence that happens to end in `c`, nor a `c`
+        // in plain text after an unrelated escape sequence.
+        assert_eq!(da1_reply(b"\x1b[38;5;2mcyan code\x1b[0m"), None);
+        assert_eq!(da1_reply(b"\x1b[2J\x1b[Hcat"), None);
+    }
+
+    /// The startup burst `railway-agent-tui` actually sends, in a single write:
+    /// two mode sets, the kitty query, DA1, then the cursor query. Answering
+    /// the kitty query and not DA1 is what left the pane empty — crossterm
+    /// waits on DA1 as its sentinel — so all three answers have to come back,
+    /// in the order they were asked.
+    #[test]
+    fn the_harness_startup_burst_gets_every_answer() {
+        const BURST: &[u8] = b"\x1b[?2004h\x1b[?1004h\x1b[?u\x1b[c\x1b[6n";
+        let kitty = AtomicBool::new(false);
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(BURST);
+
+        let mut replies = kitty_scan(BURST, &kitty).expect("the kitty query is answered");
+        replies.extend_from_slice(&da1_reply(BURST).expect("DA1 is answered"));
+        replies.extend_from_slice(
+            &dsr_reply(BURST, parser.screen()).expect("the cursor query is answered"),
+        );
+        assert_eq!(replies, b"\x1b[?0u\x1b[?62;22c\x1b[1;1R");
     }
 
     /// An application with mouse reporting on gets the wheel; the emulator's

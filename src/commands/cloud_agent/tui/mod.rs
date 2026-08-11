@@ -1405,9 +1405,22 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     // TUI implements drag-to-copy itself.
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
     // Ask for the enhanced keyboard protocol, which is what makes a modifier on
-    // Escape reportable at all: a plain terminal sends ⌥esc as a bare Escape,
+    // Escape reportable at all: a plain terminal sends ⇧esc as a bare Escape,
     // indistinguishable from the one meant for the agent. Terminals that do not
     // support it ignore the request, which is why `^]` and `^o` also release.
+    //
+    // Disambiguation is deliberately the only flag, and it is worth knowing what
+    // it does not buy. The kitty protocol exempts Enter, Tab and Backspace from
+    // this mode by design — "they still generate the same bytes as in legacy
+    // mode", so a shell stays usable if a crashed program leaves the mode set —
+    // which means shift+enter reaches us as a bare `\r` with no modifier on it,
+    // and no amount of work in `encode_key_for` can recover what the terminal
+    // never said. REPORT_ALL_KEYS_AS_ESCAPE_CODES would lift the exemption, but
+    // crossterm cannot yet read the associated text those events carry, so
+    // composed input would break: the ⌥-composed characters `alt_chord` leans
+    // on, and every dead key and IME besides. Reporting shift+enter is the
+    // terminal's job to opt into (Claude Code's own `/terminal-setup` binds it
+    // to `ESC CR` for exactly this reason); when it does, the pane forwards it.
     if matches!(
         crossterm::terminal::supports_keyboard_enhancement(),
         Ok(true)

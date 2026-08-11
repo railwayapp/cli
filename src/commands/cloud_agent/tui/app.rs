@@ -46,7 +46,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("⌥f", "give it the whole screen · again to restore"),
             ("⌥enter / f", "leave the TUI and connect full screen"),
             ("c", "copy an ssh command for it"),
-            ("⌥esc / ^]", "stop typing in it"),
+            ("⌥/⇧esc / ^]", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
@@ -1868,17 +1868,26 @@ impl App {
         // keyboard is for while it is up, and focus stays on the session
         // underneath so closing the card returns to typing in it.
         if self.focus == ManageFocus::Session && self.screen == Screen::Manage {
-            // Three ways out, because terminals disagree about what they will
-            // report. `^]` is the classic escape chord and works everywhere;
-            // ⌥esc — the ⌥ family's release, matching every other chord here —
-            // needs the enhanced keyboard protocol, without which it arrives
-            // as a bare Escape meant for the agent; `^o` stays for anyone who
-            // learned it.
+            // Four ways out, because terminals disagree about what they will
+            // report. `^]` is the classic escape chord and works everywhere,
+            // and `^o` stays for anyone who learned it. Both modified Escapes
+            // are taken because only one of them can be typed on a stock macOS
+            // terminal: Option is a compose key there unless it is mapped to
+            // Meta, and every other ⌥ chord survives that by arriving as the
+            // character it composes to (⌥f as `ƒ`, ⌥[ as a curly quote — see
+            // `alt_chord`). Escape composes to nothing, so ⌥esc arrives as a
+            // bare Escape that belongs to the agent, with no modifier left to
+            // tell the two apart. Shift is never composed, and the kitty
+            // protocol reports a shifted Escape as `CSI 27;2u`, so ⇧esc is the
+            // one that survives a terminal nobody has configured.
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            let alt_esc = key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::ALT);
+            let modified_esc = key.code == KeyCode::Esc
+                && key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
             let ctrl_bracket = ctrl && key.code == KeyCode::Char(']');
             let ctrl_o = ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'));
-            if alt_esc || ctrl_bracket || ctrl_o {
+            if modified_esc || ctrl_bracket || ctrl_o {
                 self.focus = ManageFocus::Tree;
                 // Releasing means "show me the tree" — a maximized pane has
                 // it folded away, so give it back rather than handing focus
@@ -5754,7 +5763,7 @@ mod tests {
         assert_eq!(a.screen, Screen::Manage);
     }
 
-    /// Releasing a focused session with ⌥esc also un-maximizes: focus moving
+    /// Releasing a focused session with ⇧esc also un-maximizes: focus moving
     /// to a pane that is folded away would land on something invisible.
     #[test]
     fn releasing_a_maximized_session_restores_the_tree() {
@@ -5765,7 +5774,7 @@ mod tests {
         a.active = Some(0);
         a.focus = ManageFocus::Session;
         a.maximized = true;
-        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT);
         assert_eq!(a.on_key(esc), None);
         assert_eq!(a.focus, ManageFocus::Tree);
         assert!(!a.maximized, "the tree pane comes back with focus");
@@ -5981,13 +5990,16 @@ mod tests {
         assert_eq!(a.focus, ManageFocus::Session);
     }
 
-    /// Three ways out of a focused session, because terminals disagree about
-    /// what they report: ⌥esc only exists with the enhanced keyboard protocol,
-    /// so `^]` and `^o` have to work without it.
+    /// Four ways out of a focused session, because terminals disagree about
+    /// what they report: a modified Escape needs the enhanced keyboard
+    /// protocol, so `^]` and `^o` have to work without it. ⇧esc carries the
+    /// pair, because macOS composes Option into a character and Escape has
+    /// none to compose to, which leaves ⌥esc unsendable on a stock terminal.
     #[test]
     fn every_release_chord_works() {
         for release in [
             KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT),
             KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
         ] {
