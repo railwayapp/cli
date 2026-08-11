@@ -536,12 +536,43 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     let (project, environment) = (args.target.project.clone(), args.target.environment.clone());
 
     let scoped = scope(configs, client, project, environment).await?;
-    let (agent, _) = ca::resolve(configs, client, args.agent.as_deref(), scoped.as_deref()).await?;
     let backboard = configs.get_backboard();
 
-    // Never creates. The caller named a machine — or has exactly one — and
-    // silently minting a second billed VM because a name was mistyped is not a
-    // thing a connect command should be able to do.
+    // A mistyped name still fails — silently minting a second billed VM
+    // because of a typo is not a thing a connect command should be able to
+    // do. But an account with no agents at all has no wrong machine to pick:
+    // asking someone to run `railway ca create` and come back is a hoop, so
+    // the first agent is made here, where setup said new agents live.
+    let resolved =
+        ca::resolve_or_none(configs, client, args.agent.as_deref(), scoped.as_deref()).await?;
+    let (agent, _) = match resolved {
+        Some(found) => found,
+        None => {
+            let home =
+                dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Unable to get home directory"))?;
+            let default =
+                super::prefs::AgentPrefs::load_in(&home).and_then(|prefs| prefs.default_project);
+            // An explicit --environment wins over the saved default.
+            let (environment_id, where_label) = match (&scoped, &default) {
+                (Some(env), _) => (env.clone(), "this environment".to_string()),
+                (None, Some(project)) => (
+                    project.environment_id.clone(),
+                    format!("{} ({})", project.project_name, project.environment_name),
+                ),
+                (None, None) => bail!(
+                    "You have no cloud agents. Create one with `railway ca create`, \
+                     or set a default project with `railway ca setup`."
+                ),
+            };
+            println!(
+                "{}",
+                format!("No cloud agents yet — creating one in {where_label}.").dimmed()
+            );
+            let agent = ca::create(client, &backboard, &environment_id, None, None).await?;
+            (agent, ca::Resolution::Sole)
+        }
+    };
+
     let was_running = matches!(agent.status, ca::Status::Running);
     let spinner = (!was_running).then(|| create_spinner(format!("Waking agent {}", agent.name)));
     let ready = ca::ensure_running(client, &backboard, &agent).await;

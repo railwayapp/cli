@@ -218,7 +218,10 @@ impl Wizard {
             rows.push(TargetRow::CreateProject(w));
             for (p, project) in workspace.projects.iter().enumerate() {
                 rows.push(TargetRow::Project(w, p));
-                if !project.expanded {
+                // A single environment shows inline on the project row and
+                // selecting the project picks it — a one-row expansion would
+                // be a second keypress that adds no information.
+                if !project.expanded || project.envs.len() == 1 {
                     continue;
                 }
                 for e in 0..project.envs.len() {
@@ -253,8 +256,17 @@ impl Wizard {
             ),
             TargetRow::Project(w, p) => {
                 let project = &self.workspaces[w].projects[p];
-                let marker = if project.expanded { "▾" } else { "▸" };
                 let count = project.envs.len();
+                // One environment: name it in place and let enter pick it.
+                // The expand marker would open a one-row list saying the same
+                // thing the parentheses already say.
+                if let [env] = project.envs.as_slice() {
+                    return (
+                        format!("    {} ({})", project.name, env.name),
+                        String::new(),
+                    );
+                }
+                let marker = if project.expanded { "▾" } else { "▸" };
                 (
                     format!("  {marker} {}", project.name),
                     format!("{count} environment{}", if count == 1 { "" } else { "s" }),
@@ -384,6 +396,18 @@ impl Wizard {
                 }
                 Some(TargetRow::Project(w, p)) => {
                     let project = &mut self.workspaces[w].projects[p];
+                    // A single environment is what the row already says;
+                    // enter picks it rather than expanding a one-row list.
+                    if let [env] = project.envs.as_slice() {
+                        self.project = Some(ProjectOption {
+                            project_id: project.id.clone(),
+                            project_name: project.name.clone(),
+                            environment_id: env.id.clone(),
+                            environment_name: env.name.clone(),
+                        });
+                        self.go(Step::Agent);
+                        return Action::Redraw;
+                    }
                     project.expanded = !project.expanded;
                     Action::Redraw
                 }
@@ -520,6 +544,40 @@ mod tests {
         Wizard::new(&tree(), Some("codex"), Theme::default_theme(), None)
     }
 
+    /// More than one environment still expands: the parentheses shortcut is
+    /// only for the project whose environment was never a choice.
+    #[test]
+    fn a_multi_env_project_still_expands() {
+        let mut base = tree();
+        base[0].projects[0].envs.push(EnvNode {
+            id: "e9".into(),
+            name: "staging".into(),
+            expanded: false,
+            agents: Load::NotLoaded,
+        });
+        let mut w = Wizard::new(&base, None, Theme::default_theme(), None);
+        w.skip_intro();
+        let devtools = w
+            .options()
+            .iter()
+            .position(|(label, _)| label.contains("devtools"))
+            .unwrap();
+        assert!(
+            w.options()[devtools].0.contains('▸'),
+            "two environments keep the expand marker"
+        );
+        w.cursor = devtools;
+        assert_eq!(w.select(), Action::Redraw);
+        assert_eq!(w.step, Step::Target, "expanding is not picking");
+        assert!(
+            w.options()
+                .iter()
+                .any(|(label, _)| label.trim_start().starts_with("production")),
+            "{:?}",
+            w.options()
+        );
+    }
+
     #[test]
     fn declining_the_intro_leaves_without_saving() {
         let mut w = wizard();
@@ -535,13 +593,19 @@ mod tests {
         w.skip_intro();
         let options = w.options();
         assert_eq!(options[0].0, "▾ Railway");
-        assert!(options.iter().any(|(label, _)| label.contains("devtools")));
-        assert!(options.iter().any(|(label, _)| label.contains("mono")));
+        // A single environment rides inline on its project's row: there is
+        // nothing an expansion would reveal that the parentheses don't say.
         assert!(
-            !options
+            options
                 .iter()
-                .any(|(label, _)| label.contains("production")),
-            "environments stay hidden until their project is expanded"
+                .any(|(label, _)| label.contains("devtools (production)")),
+            "{options:?}"
+        );
+        assert!(
+            options
+                .iter()
+                .any(|(label, _)| label.contains("mono (staging)")),
+            "{options:?}"
         );
     }
 
@@ -553,12 +617,13 @@ mod tests {
         assert_eq!(w.select(), Action::Redraw); // set up now
         assert_eq!(w.step, Step::Target);
 
-        // Rows: ▾ Railway, + Create a project, ▸ devtools, ▸ mono, Decide later.
+        // Rows: ▾ Railway, + Create a project, devtools (production),
+        // mono (staging), Decide later.
         w.down(); // create a project
         w.down(); // devtools
         w.down(); // mono
-        assert_eq!(w.select(), Action::Redraw); // expand mono
-        w.down(); // staging, just revealed under mono
+        // A single-environment project needs no expansion: enter picks it,
+        // environment and all.
         w.select();
         assert_eq!(w.step, Step::Agent);
         assert_eq!(w.project.as_ref().unwrap().project_name, "mono");
