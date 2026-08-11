@@ -1784,9 +1784,7 @@ impl App {
         match action {
             Action::None | Action::Redraw => None,
             Action::Save(outcome) => Some(Effect::SaveSettings(outcome)),
-            Action::CreateProject(workspace_id) => {
-                Some(Effect::CreateDefaultProject(workspace_id))
-            }
+            Action::CreateProject(workspace_id) => Some(Effect::CreateDefaultProject(workspace_id)),
             Action::RunSetup => {
                 self.settings = None;
                 self.start_wizard(false);
@@ -4381,7 +4379,7 @@ mod tests {
         assert!(a.settings.is_none(), "the card handed over");
         assert_eq!(
             a.wizard.as_ref().unwrap().step,
-            crate::commands::cloud_agent::tui::wizard::Step::Project
+            crate::commands::cloud_agent::tui::wizard::Step::Target
         );
     }
 

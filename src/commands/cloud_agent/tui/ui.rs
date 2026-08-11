@@ -2201,7 +2201,7 @@ mod tests {
 
         let footer = out
             .lines()
-            .rfind(|l| l.contains("theme") || l.contains("setup"))
+            .rfind(|l| l.contains("settings"))
             .expect("the menu footer");
         assert!(
             !footer.contains("^t"),

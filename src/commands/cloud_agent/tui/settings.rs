@@ -359,6 +359,7 @@ mod tests {
 
     fn tree() -> Vec<WorkspaceNode> {
         vec![WorkspaceNode {
+            id: "ws1".into(),
             name: "Railway".into(),
             expanded: true,
             projects: vec![
@@ -416,14 +417,16 @@ mod tests {
     #[test]
     fn cycling_the_agent_saves_a_full_snapshot() {
         let mut s = settings();
+        // The list leads with `railway`, so one step forward from the start
+        // lands on claude.
         let outcome = saved(s.right());
-        assert_eq!(outcome.agent, "codex");
+        assert_eq!(outcome.agent, "claude");
         assert_eq!(outcome.theme, "railway");
         assert!(outcome.skills);
         assert_eq!(outcome.project.unwrap().project_id, "p1");
 
         // And it wraps in both directions.
-        assert_eq!(saved(s.left()).agent, "claude");
+        assert_eq!(saved(s.left()).agent, "railway");
         assert_eq!(saved(s.left()).agent, "grok");
     }
 
@@ -432,7 +435,7 @@ mod tests {
     #[test]
     fn enter_cycles_too() {
         let mut s = settings();
-        assert_eq!(saved(s.select()).agent, "codex");
+        assert_eq!(saved(s.select()).agent, "claude");
     }
 
     /// The theme row cycles and the card previews it immediately.
@@ -503,7 +506,9 @@ mod tests {
         s.cursor = 1;
         s.select();
         s.pick = Some(s.projects.len());
-        assert_eq!(s.select(), Action::CreateProject);
+        // The create row carries the workspace it would create in, so the
+        // project never lands somewhere the card guessed at.
+        assert_eq!(s.select(), Action::CreateProject("ws1".into()));
         assert!(s.busy.is_some());
 
         assert_eq!(s.project_created(Err("no permission".into())), None);
