@@ -873,7 +873,10 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                     } else {
                         theme.accent_dim
                     }))
-                    .title(Span::styled(" projects ", Style::default().fg(theme.dim))),
+                    .title(Span::styled(
+                        " cloud agents ",
+                        Style::default().fg(theme.dim),
+                    )),
             )
             .highlight_style(
                 Style::default()
@@ -1010,6 +1013,13 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                     ("s", "sleep")
                 },
                 ("d", "delete agent"),
+            ],
+            // A group is a place, not a thing to open: the keys that matter
+            // are the ones that act on the environment it stands for.
+            Some(RowKind::Group(..)) => vec![
+                ("n", "new agent here"),
+                ("t", "target"),
+                ("shift+r", "find agents"),
             ],
             _ => vec![
                 ("enter", "open"),
@@ -1697,7 +1707,7 @@ fn tree_line(theme: &Theme, row: &Row) -> Line<'static> {
             "─".repeat(TREE_W.saturating_sub(4) as usize),
             Style::default().fg(theme.accent_dim),
         )),
-        (RowKind::Note(..), _) => spans.push(Span::styled(
+        (RowKind::Note(..) | RowKind::Hint, _) => spans.push(Span::styled(
             row.label.clone(),
             Style::default()
                 .fg(theme.dim)
@@ -1719,6 +1729,9 @@ fn tree_line(theme: &Theme, row: &Row) -> Line<'static> {
                 RowKind::Workspace(_) => Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
+                // A group heads its agents the way a workspace used to head
+                // everything: bold, so the sections read at a glance.
+                RowKind::Group(..) => Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 _ => Style::default().fg(theme.fg),
             };
             spans.push(Span::styled(row.label.clone(), style));
@@ -1849,7 +1862,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             }
             lines
         }
-        RowKind::Environment(w, p, e) => {
+        RowKind::Environment(w, p, e) | RowKind::Group(w, p, e) => {
             let proj = &app.tree[w].projects[p];
             let env = &proj.envs[e];
             let count = match &env.agents {
@@ -1934,7 +1947,20 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             )));
             lines
         }
-        RowKind::Separator | RowKind::Note(..) => vec![Line::from("")],
+        RowKind::OtherProjects => vec![
+            Line::from(Span::styled(
+                " projects without agents",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " open one and press n to start an agent there",
+                Style::default().fg(theme.dim),
+            )),
+        ],
+        RowKind::Separator | RowKind::Note(..) | RowKind::Hint => vec![Line::from("")],
     }
 }
 
@@ -2437,11 +2463,11 @@ mod tests {
             "ca_1".into(),
         );
         let before = draw(&app, 100, 30);
-        assert!(before.contains("projects"), "the tree is there first");
+        assert!(before.contains("cloud agents"), "the tree is there first");
 
         app.maximized = true;
         let out = draw(&app, 100, 30);
-        assert!(!out.contains(" projects "), "the tree is gone:\n{out}");
+        assert!(!out.contains(" cloud agents "), "the tree is gone:\n{out}");
         assert!(!out.contains("devtools"), "no tree rows:\n{out}");
         assert!(out.contains("restore the tree"), "the way back:\n{out}");
 
@@ -2600,7 +2626,8 @@ mod tests {
             .position(|r| r.label == "nimble-otter")
             .unwrap();
         let out = draw(&app, 100, 30);
-        assert!(out.contains("Railway"));
+        // The group header carries the project; the environment shows in the
+        // detail pane rather than as a level of its own.
         assert!(out.contains("devtools"));
         assert!(out.contains("production"));
         assert!(out.contains("nimble-otter"));
