@@ -471,7 +471,9 @@ fn resolve_runner(explicit_runner: Option<&str>, cwd: &std::path::Path) -> Resol
         };
     }
 
-    if let Some(runner) = find_project_runner(cwd) {
+    if let Some(runner) =
+        find_project_runner(cwd).or_else(|| find_project_runner(&cwd.join(".railway")))
+    {
         return ResolvedRunner {
             path: runner.to_string_lossy().to_string(),
             source: RunnerSource::ProjectDependency,
@@ -893,6 +895,20 @@ mod runner_discovery_tests {
         let path = bin_dir.join(binary);
         fs::write(&path, "#!/bin/sh\n").unwrap();
         path
+    }
+
+    #[test]
+    fn resolves_a_runner_installed_beside_the_railway_config() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let railway_dir = root.path().join(".railway");
+        fs::create_dir_all(&railway_dir).unwrap();
+        let expected = make_runner(&railway_dir);
+
+        let resolved = resolve_runner(None, root.path());
+
+        assert_eq!(PathBuf::from(resolved.path), expected);
+        assert!(matches!(resolved.source, RunnerSource::ProjectDependency));
     }
 
     #[test]

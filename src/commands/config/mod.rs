@@ -1510,10 +1510,10 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
-    let railway_file = cwd.join(".railway").join("railway.ts");
-    if railway_file.exists() {
+    if find_railway_file(&cwd).is_some() {
         return Ok(());
     }
+    let railway_file = cwd.join(".railway").join("railway.ts");
 
     println!();
     println!("{}", "Railway configuration is not initialized yet.".bold());
@@ -1540,6 +1540,22 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
     init_config(InitArgs { force: false }).await?;
     println!();
     Ok(())
+}
+
+fn find_railway_file(start: &Path) -> Option<PathBuf> {
+    for directory in start.ancestors() {
+        if directory.file_name().and_then(|name| name.to_str()) == Some(".railway") {
+            let direct = directory.join("railway.ts");
+            if direct.is_file() {
+                return Some(direct);
+            }
+        }
+        let nested = directory.join(".railway").join("railway.ts");
+        if nested.is_file() {
+            return Some(nested);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1617,6 +1633,31 @@ mod tests {
 
         assert!(!remove_generated_legacy_skill(&cwd, &hash).unwrap());
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn config_discovery_works_from_project_root_and_railway_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let railway_dir = root.path().join(".railway");
+        fs::create_dir_all(&railway_dir).unwrap();
+        let config = railway_dir.join("railway.ts");
+        fs::write(&config, "export default {};").unwrap();
+
+        assert_eq!(find_railway_file(root.path()), Some(config.clone()));
+        assert_eq!(find_railway_file(&railway_dir), Some(config));
+    }
+
+    #[test]
+    fn config_discovery_walks_up_from_nested_project_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let railway_dir = root.path().join(".railway");
+        let nested = root.path().join("src").join("Backend.Api");
+        fs::create_dir_all(&railway_dir).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        let config = railway_dir.join("railway.ts");
+        fs::write(&config, "export default {};").unwrap();
+
+        assert_eq!(find_railway_file(&nested), Some(config));
     }
 
     fn service_resource(
