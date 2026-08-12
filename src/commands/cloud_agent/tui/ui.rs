@@ -1064,28 +1064,37 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         // What the right pane shows follows the selection, not merely whether a
         // session happens to be open: standing on an agent should show that
         // agent's cards even while one of its sessions is running in the
-        // background. Typing in a session is the exception — the pane it has
+        // background, and standing on a session that has no pane must not keep
+        // showing whichever pane was connected last — it gets a card saying
+        // so instead. Typing in a session is the exception — the pane it has
         // the keyboard in cannot vanish from under it.
+        let selected_kind = app.selected_row().map(|row| row.kind);
         let show_session = app.focus == ManageFocus::Session
-            || matches!(
-                app.selected_row().map(|row| row.kind),
-                Some(RowKind::Session(..))
-            );
+            || selected_kind.is_some_and(|kind| {
+                matches!(kind, RowKind::Session(..)) && app.pane_for_row(kind).is_some()
+            });
         if app.loading.active {
             render_loading(app, f, panes[1]);
         } else {
             match app.active_session().filter(|_| show_session) {
                 Some(session) => render_session(app, session, f, panes[1]),
-                None => f.render_widget(
-                    Paragraph::new(detail_lines(app)).block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .border_style(Style::default().fg(theme.accent_dim))
-                            .title(Span::styled(" agent ", Style::default().fg(theme.dim))),
-                    ),
-                    panes[1],
-                ),
+                None => {
+                    let title = if matches!(selected_kind, Some(RowKind::Session(..))) {
+                        " session "
+                    } else {
+                        " agent "
+                    };
+                    f.render_widget(
+                        Paragraph::new(detail_lines(app)).block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(theme.accent_dim))
+                                .title(Span::styled(title, Style::default().fg(theme.dim))),
+                        ),
+                        panes[1],
+                    )
+                }
             }
         }
     }
@@ -2204,11 +2213,8 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             ))];
             // The command lives here, not in the row: it is a whole launch
             // line, and this is the pane with room for it.
-            if let Load::Loaded(agents) = &app.tree[w].projects[p].envs[e].agents
-                && let Some(agent) = agents.get(a)
-                && let LoadSessions::Loaded(sessions) = &agent.sessions
-                && let Some(session) = sessions.get(i)
-            {
+            let session = app.console_session(w, p, e, a, i);
+            if let Some(session) = session {
                 lines.push(Line::from(""));
                 lines.push(kv(
                     "state",
@@ -2222,10 +2228,35 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                 )));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " enter reattaches in the pane",
-                Style::default().fg(theme.dim),
-            )));
+            // This card only shows for a session without a pane (one with a
+            // pane shows the pane itself), so say that plainly, and say how
+            // to get the pane back — via a wake first when the agent is
+            // asleep, since a reattach to a sleeping agent is refused.
+            let connected = session
+                .is_some_and(|s| app.sessions.iter().any(|pane| pane.durable_name == s.name));
+            if connected {
+                lines.push(Line::from(Span::styled(
+                    " enter puts the keyboard in its pane",
+                    Style::default().fg(theme.dim),
+                )));
+            } else {
+                let sleeping = app
+                    .selected_agent_status()
+                    .is_some_and(|status| status != "running");
+                lines.push(Line::from(Span::styled(
+                    " not connected — its output isn't shown here",
+                    Style::default().fg(theme.pending),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    if sleeping {
+                        " w wakes the agent, then enter reconnects"
+                    } else {
+                        " enter reconnects · c copies the ssh command"
+                    },
+                    Style::default().fg(theme.dim),
+                )));
+            }
             lines
         }
         RowKind::OtherProjects => vec![
@@ -3469,6 +3500,60 @@ mod tests {
         assert!(
             out.contains("nimble-otter · claude-one"),
             "the session pane's title:\n{out}"
+        );
+    }
+
+    /// Standing on a session that has no pane says so and offers the way
+    /// back, instead of leaving whichever pane was connected last on screen.
+    #[test]
+    fn a_disconnected_session_says_so() {
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        if let Load::Loaded(agents) = &mut app.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = LoadSessions::Loaded(vec![
+                crate::commands::cloud_agent::tui::app::ConsoleSession {
+                    name: "claude-one".into(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: true,
+                    attached: true,
+                },
+                crate::commands::cloud_agent::tui::app::ConsoleSession {
+                    name: "claude-two".into(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: true,
+                    attached: false,
+                },
+            ]);
+        }
+        // One pane is open, for the *other* session.
+        let mut pane =
+            crate::commands::cloud_agent::tui::session::Session::for_test("ca_1", "nimble-otter")
+                .unwrap();
+        pane.durable_name = "claude-one".into();
+        app.sessions = vec![pane];
+        app.active = Some(0);
+        app.focus = ManageFocus::Tree;
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| r.label == "claude-two")
+            .unwrap();
+
+        let out = draw(&app, 110, 30);
+        assert!(
+            !out.contains("nimble-otter · claude-one"),
+            "the other session's pane must not linger:\n{out}"
+        );
+        assert!(
+            out.contains("not connected"),
+            "the card says the session is disconnected:\n{out}"
+        );
+        assert!(
+            out.contains("enter reconnects"),
+            "the card says how to get it back:\n{out}"
         );
     }
 

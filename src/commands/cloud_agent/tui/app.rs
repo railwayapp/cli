@@ -2703,7 +2703,7 @@ impl App {
 
     /// The open pane a row refers to: a session's own, or the first one on an
     /// agent.
-    fn pane_for_row(&self, kind: RowKind) -> Option<usize> {
+    pub fn pane_for_row(&self, kind: RowKind) -> Option<usize> {
         match kind {
             RowKind::Session(w, p, e, a, i) => {
                 let name = self.console_session(w, p, e, a, i)?.name.clone();
