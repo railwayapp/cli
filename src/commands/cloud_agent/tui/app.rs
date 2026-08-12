@@ -321,8 +321,23 @@ pub struct Toast {
 pub const TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_millis(1800);
 
 impl Toast {
+    /// Errors carry things to read — a failure reason, sometimes a recipe —
+    /// and stay up long enough to read them. A confirmation needs a glance.
+    fn lifetime(&self) -> std::time::Duration {
+        if self.ok {
+            TOAST_LIFETIME
+        } else {
+            TOAST_LIFETIME * 5
+        }
+    }
+
     pub fn expired(&self) -> bool {
-        self.at.elapsed() >= TOAST_LIFETIME
+        self.at.elapsed() >= self.lifetime()
+    }
+
+    /// Time until this toast has had its moment.
+    pub fn remaining(&self) -> std::time::Duration {
+        self.lifetime().saturating_sub(self.at.elapsed())
     }
 }
 
@@ -1686,7 +1701,7 @@ impl App {
             };
         }
         if let Some(err) = refresh_failed {
-            self.status = format!("Couldn't refresh: {err}");
+            self.toast_error(format!("Couldn't refresh: {err}"));
         }
         self.collapse_if_empty(w, p);
         self.settle_watched_agents();
@@ -2445,10 +2460,15 @@ impl App {
 
     /// The launch pipeline gave up. Land back in Manage with the reason, so a
     /// missing sign-in or a disabled feature is fixable without losing the tree.
+    ///
+    /// The reason rides an error toast over the pane rather than a header
+    /// annotation: a failure squeezed in beside the wordmark reads as
+    /// furniture, and this one usually carries the fix.
     pub fn launch_failed(&mut self, err: String) {
         self.loading.active = false;
         self.screen = Screen::Manage;
-        self.status = format!("Launch failed: {err}");
+        let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.toast_error(format!("Launch failed: {flat}"));
     }
 
     /// Advance the loading animation.
@@ -3059,7 +3079,7 @@ impl App {
     pub fn toast_remaining(&self) -> std::time::Duration {
         self.toast
             .as_ref()
-            .map(|toast| TOAST_LIFETIME.saturating_sub(toast.at.elapsed()))
+            .map(Toast::remaining)
             .unwrap_or(TOAST_LIFETIME)
     }
 
@@ -5166,7 +5186,10 @@ mod tests {
         let mut a = app();
         a.launch_failed("no codex sign-in".into());
         assert_eq!(a.screen, Screen::Manage);
-        assert!(a.status.contains("no codex sign-in"));
+        // The reason rides an error toast, not the header status line.
+        let toast = a.toast.as_ref().expect("an error toast");
+        assert!(!toast.ok);
+        assert!(toast.text.contains("no codex sign-in"), "{}", toast.text);
     }
 
     /// Revealing an environment expands its ancestors and refetches — the agent
@@ -7322,13 +7345,15 @@ mod tests {
     }
 
     /// A refresh that fails keeps the stale list — stale beats gone — and
-    /// says why in the status line.
+    /// says why in an error toast.
     #[test]
     fn a_failed_refresh_keeps_the_agents_and_reports() {
         let mut a = loaded_app();
         a.agents_loaded((0, 0, 0), Err("502 from backboard".into()));
         assert!(a.rows().iter().any(|r| r.label == "nimble-otter"));
-        assert!(a.status.contains("502 from backboard"), "{}", a.status);
+        let toast = a.toast.as_ref().expect("an error toast");
+        assert!(!toast.ok);
+        assert!(toast.text.contains("502 from backboard"), "{}", toast.text);
     }
 
     /// A project with agents in one environment still shows its empty ones in

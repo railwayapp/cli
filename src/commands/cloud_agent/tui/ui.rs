@@ -41,6 +41,74 @@ const CARD_GUTTER: usize = 3;
 /// Width of the tree column in Manage, borders included.
 const TREE_W: u16 = 32;
 
+/// What a dialog spends on chrome: its two border cells. The breathing room
+/// lives *outside* the boxes — see [`page`] — not between a border and its
+/// text.
+const DIALOG_CHROME_X: u16 = 2;
+const DIALOG_CHROME_Y: u16 = 2;
+
+/// Columns of space between the terminal's edge and the UI.
+const PAGE_MARGIN_X: u16 = 2;
+/// Rows of the same. Half the columns, because a terminal cell is about twice
+/// as tall as it is wide — the same gap on screen on every side.
+const PAGE_MARGIN_Y: u16 = 1;
+
+/// What the page margin leaves of a `width` × `height` terminal. Skipped when
+/// the terminal is too small to spend cells on air — a cramped layout beats a
+/// truncated one.
+///
+/// The single source of that answer: [`page`] shapes what is drawn with it,
+/// and [`session_pane_size`] shapes the PTY with it. They must agree — an
+/// emulator wrapping wider than its pane puts the last columns of every row
+/// somewhere the screen never shows, which shears anything long enough to
+/// wrap (an OAuth URL loses four characters at every fold).
+fn page_size(width: u16, height: u16) -> (u16, u16) {
+    if width < 40 || height < 12 {
+        (width, height)
+    } else {
+        (width - PAGE_MARGIN_X * 2, height - PAGE_MARGIN_Y * 2)
+    }
+}
+
+/// The page: the frame minus a slim outer margin, so boxes never press
+/// against the terminal's edges. Every screen and floating card lays out
+/// against this.
+fn page(f: &Frame) -> Rect {
+    let area = f.area();
+    let (width, height) = page_size(area.width, area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+/// The prompt box's shape — width, and height in rows including borders —
+/// shared by the menu's prompt and the ⌥p composer so the two read as the
+/// same control. Text rows plus the border: twice the writing room of the
+/// original two rows on screens with the height for it — a prompt is a
+/// paragraph these days, not a title — and a compact variant below that.
+fn prompt_box_size(area: Rect) -> (u16, u16) {
+    let height = if area.height >= 30 { 6 } else { 2 } + DIALOG_CHROME_Y;
+    let width = 74.min(area.width.saturating_sub(2)).max(40.min(area.width));
+    (width, height)
+}
+
+/// The chrome every floating card shares.
+///
+/// Opaque fill, because these sit *on top of* the screen rather than in it:
+/// with only [`Clear`] underneath, the terminal's own background shows through
+/// and the card reads as a hole punched in the page instead of a dialog above
+/// it.
+fn dialog_block(theme: &Theme) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.surface).fg(theme.fg))
+}
+
 /// One inverse-styled key badge, e.g. ` ^t `. The building block of
 /// [`chord_spans`], and also used solo wherever a shortcut sits beside the
 /// thing it acts on instead of in the footer's own chord list.
@@ -122,7 +190,7 @@ fn render_inner(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     f.render_widget(Clear, f.area());
     render_screen(app, f, rects);
     render_ssh_gate(app, f);
-    render_toast(app, f);
+    render_toast(app, f, rects);
 }
 
 /// The register-your-SSH-key question, centered over whatever raised it. Up
@@ -133,14 +201,13 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
         return;
     };
     let theme = app.theme;
-    let area = f.area();
+    let area = page(f);
     // Name and fingerprint on their own lines: together they outrun the card
     // and wrap mid-fingerprint, which reads as garbage. Apart, both fit.
     // Everything reads in the foreground — this card is the only thing asking
     // for attention while it is up, so nothing on it is background noise.
     let body = Style::default().fg(theme.fg);
     let lines = vec![
-        Line::from(""),
         Line::from(Span::styled(
             format!("  {}", gate.offer.name),
             body.add_modifier(Modifier::BOLD),
@@ -167,22 +234,18 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
         ])
         .alignment(Alignment::Center),
     ];
-    let width = 62.min(area.width.saturating_sub(4));
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let width = (55 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
+    let height = (lines.len() as u16 + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
     let panel = centered(width, height, area);
     f.render_widget(Clear, panel);
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " Register your SSH key with Railway? ",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )),
+            dialog_block(theme).title(Span::styled(
+                " Register your SSH key with Railway? ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
         ),
         panel,
     );
@@ -190,24 +253,47 @@ fn render_ssh_gate(app: &App, f: &mut Frame) {
 
 /// The corner confirmation, over whatever is underneath it.
 ///
-/// Bottom right, clear of the key strip on the left of the same row and of the
-/// `? keys` badge on its right — it sits a line above both.
-fn render_toast(app: &App, f: &mut Frame) {
+/// A confirmation sits bottom right, clear of the key strip on the left of the
+/// same row and of the `? keys` badge on its right — a glance, out of the way.
+/// An error is the thing that needs reading, so it sits front and center at
+/// the bottom of the session pane (or of the page, when no pane is drawn).
+fn render_toast(app: &App, f: &mut Frame, rects: &PaneRects) {
     let Some(toast) = app.toast.as_ref().filter(|toast| !toast.expired()) else {
         return;
     };
     let theme = app.theme;
-    let area = f.area();
+    let area = page(f);
     let text = format!(" {}  {}  ", if toast.ok { "✓" } else { "✕" }, toast.text);
-    let w = (text.chars().count() as u16 + 2).min(area.width);
+    let w = (text.chars().count() as u16 + DIALOG_CHROME_X).min(area.width);
     let h = 3.min(area.height);
-    // Clear of the key strip on the last row and of the pane border above it,
-    // so it floats inside the pane rather than colliding with its corner.
-    let rect = Rect {
-        x: area.width.saturating_sub(w + 2),
-        y: area.height.saturating_sub(h + 2),
-        width: w,
-        height: h,
+    let rect = if toast.ok {
+        // Clear of the key strip on the last row and of the pane border above
+        // it, so it floats inside the pane rather than colliding with its
+        // corner.
+        Rect {
+            x: area.right().saturating_sub(w + 2),
+            y: area.bottom().saturating_sub(h + 2),
+            width: w,
+            height: h,
+        }
+    } else {
+        let host = if rects.session.w > 0 {
+            Rect {
+                x: rects.session.x,
+                y: rects.session.y,
+                width: rects.session.w,
+                height: rects.session.h,
+            }
+        } else {
+            area
+        };
+        let w = w.min(host.width);
+        Rect {
+            x: host.x + host.width.saturating_sub(w) / 2,
+            y: host.bottom().saturating_sub(h + 1).max(host.y),
+            width: w,
+            height: h,
+        }
     };
     let accent = if toast.ok {
         theme.accent
@@ -216,12 +302,8 @@ fn render_toast(app: &App, f: &mut Frame) {
     };
     f.render_widget(Clear, rect);
     f.render_widget(
-        Paragraph::new(Span::styled(text, Style::default().fg(theme.fg))).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(accent)),
-        ),
+        Paragraph::new(Span::styled(text, Style::default().fg(theme.fg)))
+            .block(dialog_block(theme).border_style(Style::default().fg(accent))),
         rect,
     );
 }
@@ -290,15 +372,16 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 
 fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     let theme = app.theme;
-    let area = f.area();
+    let area = page(f);
     let big = area.width >= BANNER_W + 8 && area.height >= 26;
     let banner_h = if big { BANNER_H } else { 1 };
-    let prompt_h = if area.height >= 30 { 6 } else { 4 };
-    let panel_w = 74.min(area.width.saturating_sub(2)).max(40.min(area.width));
+    let (panel_w, prompt_h) = prompt_box_size(area);
+    // The room around the prompt lives outside its outline, not inside it.
+    let prompt_gap = if area.height >= 30 { 2 } else { 1 };
     let cards = app.cards();
     // Descriptions cost rows, and on a short screen those rows come out of the
     // prompt box. Names only, rather than a menu with no prompt on it.
-    let chrome = banner_h + prompt_h + 12;
+    let chrome = banner_h + prompt_h + prompt_gap * 2 + 10;
     let mut block = card_block(&cards, panel_w as usize, true);
     if chrome + block.height(cards.len()) > area.height {
         block = card_block(&cards, panel_w as usize, false);
@@ -309,13 +392,13 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
 
     let rows = Layout::vertical([
         Constraint::Length(banner_h),
-        Constraint::Length(1), // breathing room under the wordmark
-        Constraint::Length(1), // CLOUD AGENTS
-        Constraint::Length(1), // title
-        Constraint::Length(1), // subtitle
-        Constraint::Length(1), // gap
+        Constraint::Length(1),          // breathing room under the wordmark
+        Constraint::Length(1),          // CLOUD AGENTS
+        Constraint::Length(1),          // title
+        Constraint::Length(1),          // subtitle
+        Constraint::Length(prompt_gap), // the prompt's room, outside its outline
         Constraint::Length(prompt_h),
-        Constraint::Length(1), // gap
+        Constraint::Length(prompt_gap), // and the same below
         Constraint::Length(cards_h),
         Constraint::Min(0),
         Constraint::Length(1), // target
@@ -447,12 +530,12 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     };
 
     const STEP_ROWS: u16 = 9;
-    let task_h = match loading.prompt.as_deref() {
-        // Three lines of task plus its border: a prompt is a sentence, and the
-        // whole point of showing it is not making the user wonder what is
-        // starting.
-        Some(_) => 5,
-        None => 0,
+    // The echoed prompt reuses the main screen's box wholesale — same width,
+    // same height — so the transition reads as the box you typed in coming
+    // along, not a different card summarizing what you wrote.
+    let (task_w, task_h) = match loading.prompt.as_deref() {
+        Some(_) => prompt_box_size(area),
+        None => (0, 0),
     };
     // Size the panel to its content and centre *that*, rather than letting it
     // span the pane: the steps read as a left-aligned block, and a block the
@@ -471,12 +554,20 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
         // A floor only so an empty panel is not a sliver; anything larger pads
         // the panel past its content and the centring visibly drifts left.
         .clamp(20, area.width.max(1) as usize) as u16;
-    let panel = centered(content_w, (STEP_ROWS + task_h + 4).min(area.height), area);
+    // A prompt box brings a row of air below it, so the steps don't sit
+    // against its border.
+    let task_gap = if task_h > 0 { 1 } else { 0 };
+    let panel = centered(
+        content_w,
+        (STEP_ROWS + task_h + task_gap + 4).min(area.height),
+        area,
+    );
     let rows = Layout::vertical([
         Constraint::Length(1), // title
         Constraint::Length(1), // target
         Constraint::Length(1), // gap
         Constraint::Length(task_h),
+        Constraint::Length(task_gap),
         Constraint::Length(STEP_ROWS),
         Constraint::Min(0),
         Constraint::Length(1), // hint
@@ -505,17 +596,20 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     );
 
     if let Some(prompt) = loading.prompt.as_deref() {
-        // A third of the pane, centred: a fixed frame the task wraps inside,
-        // rather than a frame the task drags open.
-        let task_area = centered((area.width / 3).max(24), task_h, rows[3]);
+        // Centered in the pane, not in the (narrower) steps panel: the box is
+        // the pane-wide element the steps sit under.
+        let task_area = Rect {
+            x: area.x + area.width.saturating_sub(task_w) / 2,
+            y: rows[3].y,
+            width: task_w.min(area.width),
+            height: rows[3].height,
+        };
         f.render_widget(
             Paragraph::new(prompt.to_string())
                 .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
+                    dialog_block(theme)
                         .border_style(Style::default().fg(theme.accent_dim))
-                        .title(Span::styled(" Task ", Style::default().fg(theme.dim))),
+                        .title(Span::styled(" Prompt ", Style::default().fg(theme.dim))),
                 )
                 .style(Style::default().fg(theme.fg))
                 .wrap(Wrap { trim: true }),
@@ -524,8 +618,8 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     }
 
     f.render_widget(
-        Paragraph::new(step_lines(app, rows[4].width)).wrap(Wrap { trim: false }),
-        rows[4],
+        Paragraph::new(step_lines(app, rows[5].width)).wrap(Wrap { trim: false }),
+        rows[5],
     );
 }
 
@@ -602,9 +696,9 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
         format!(" {} ", app.prompt.chars().count())
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+    f.render_widget(Clear, area);
+
+    let block = dialog_block(theme)
         .border_style(Style::default().fg(if focused {
             theme.accent
         } else {
@@ -632,8 +726,8 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
     // Keep the cursor line in view once the wrapped text outgrows the box.
     // Without this the box simply stops showing what is being typed, which is
     // the one thing it exists to do.
-    let inner_w = area.width.saturating_sub(2).max(1) as usize;
-    let inner_h = area.height.saturating_sub(2).max(1) as usize;
+    let inner_w = area.width.saturating_sub(DIALOG_CHROME_X).max(1) as usize;
+    let inner_h = area.height.saturating_sub(DIALOG_CHROME_Y).max(1) as usize;
     let scroll_y = wrapped_lines(&text, inner_w).saturating_sub(inner_h) as u16;
 
     f.render_widget(
@@ -849,22 +943,25 @@ pub fn session_pane_size(
     maximized: bool,
 ) -> Option<(u16, u16)> {
     let area = area?;
+    // The same inset the renderer applies — see `page_size` for why the two
+    // must never disagree.
+    let (width, height) = page_size(area.width, area.height);
     // Maximized there is no tree to leave room for, so no minimum width to
     // meet either.
-    if !maximized && area.width < 70 {
+    if !maximized && width < 70 {
         return None;
     }
     // Rows: header, gap, panes, hint. Columns: the tree, then what is left.
     // Both minus the pane's own border.
-    let rows = area.height.saturating_sub(3).saturating_sub(2).max(1);
+    let rows = height.saturating_sub(3).saturating_sub(2).max(1);
     let tree = if maximized { 0 } else { TREE_W };
-    let cols = area.width.saturating_sub(tree).saturating_sub(2).max(1);
+    let cols = width.saturating_sub(tree).saturating_sub(2).max(1);
     Some((rows, cols))
 }
 
 fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     let theme = app.theme;
-    let area = f.area();
+    let area = page(f);
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
         Constraint::Length(1), // gap
@@ -1159,21 +1256,17 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         .sum::<usize>() as u16;
     // No progress dots means no row held open for them.
     let dots_h = u16::from(panel.position.is_some());
-    let width = 66.min(area.width.saturating_sub(4));
-    let height = (body_h + dots_h + 7).min(area.height.saturating_sub(2));
+    let width = (62 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
+    let height = (body_h + dots_h + 5 + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
     let outer = centered(width, height, area);
     f.render_widget(Clear, outer);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent))
-        .title(Span::styled(
-            format!(" {} ", panel.title),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let block = dialog_block(theme).title(Span::styled(
+        format!(" {} ", panel.title),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
     let inner = block.inner(outer);
     f.render_widget(block, outer);
 
@@ -1236,7 +1329,7 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         let on = i == panel.cursor;
         let mut spans = vec![
             Span::styled(
-                if on { " ▌ " } else { "   " },
+                if on { "▌ " } else { "  " },
                 Style::default().fg(theme.accent),
             ),
             Span::styled(
@@ -1263,7 +1356,7 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         // a list of names into a list with gaps in it.
         if !row.detail.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("     {}", row.detail),
+                format!("  {}", row.detail),
                 Style::default().fg(theme.dim),
             )));
         }
@@ -1313,7 +1406,7 @@ fn render_wizard(app: &App, f: &mut Frame) {
     render_panel(
         f,
         theme,
-        f.area(),
+        page(f),
         Panel {
             title: "setup",
             heading: wizard.title(),
@@ -1362,7 +1455,7 @@ fn render_settings(app: &App, f: &mut Frame) {
         render_panel(
             f,
             theme,
-            f.area(),
+            page(f),
             Panel {
                 title: "settings",
                 heading: "Where should agents live?",
@@ -1405,7 +1498,7 @@ fn render_settings(app: &App, f: &mut Frame) {
     render_panel(
         f,
         theme,
-        f.area(),
+        page(f),
         Panel {
             title: "settings",
             heading: "Cloud agent settings",
@@ -1445,7 +1538,7 @@ fn render_agent_pick(app: &App, f: &mut Frame) {
     render_panel(
         f,
         theme,
-        f.area(),
+        page(f),
         Panel {
             title: "new session",
             heading: "Which cloud agent?",
@@ -1484,7 +1577,7 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
     render_panel(
         f,
         theme,
-        f.area(),
+        page(f),
         Panel {
             title: "new session",
             heading: "Which agent should run it?",
@@ -1503,14 +1596,14 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
         return;
     };
     let theme = app.theme;
-    let area = f.area();
-    let outer = centered(66.min(area.width.saturating_sub(4)), 7, area);
+    let area = page(f);
+    // The same box as the main screen's prompt, so composing a session here
+    // feels like the same act there.
+    let (w, h) = prompt_box_size(area);
+    let outer = centered(w, h, area);
     f.render_widget(Clear, outer);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent))
+    let block = dialog_block(theme)
         .title(Span::styled(
             " New Session ",
             Style::default()
@@ -1536,9 +1629,10 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
 
     let text = format!("{draft}▏");
     // Keep the cursor line in view once the wrapped text outgrows the box,
-    // same as the menu's prompt.
-    let inner_w = outer.width.saturating_sub(2).max(1) as usize;
-    let inner_h = outer.height.saturating_sub(2).max(1) as usize;
+    // same as the menu's prompt. The padding is chrome, not writing room, so
+    // it comes off the width and the height the text gets.
+    let inner_w = outer.width.saturating_sub(DIALOG_CHROME_X).max(1) as usize;
+    let inner_h = outer.height.saturating_sub(DIALOG_CHROME_Y).max(1) as usize;
     let scroll_y = wrapped_lines(&text, inner_w).saturating_sub(inner_h) as u16;
 
     f.render_widget(
@@ -1582,7 +1676,7 @@ fn render_target_pick(app: &App, f: &mut Frame) {
     render_panel(
         f,
         theme,
-        f.area(),
+        page(f),
         Panel {
             title: "target",
             heading: "Where should Cloud Agents run?",
@@ -1598,7 +1692,7 @@ fn render_target_pick(app: &App, f: &mut Frame) {
 /// mode: the next keypress dismisses it.
 fn render_keys(app: &App, f: &mut Frame) {
     let theme = app.theme;
-    let area = f.area();
+    let area = page(f);
 
     let chord_w = KEY_HELP
         .iter()
@@ -1611,7 +1705,7 @@ fn render_keys(app: &App, f: &mut Frame) {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(Span::styled(
-            format!(" {group}"),
+            (*group).to_string(),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -1619,7 +1713,7 @@ fn render_keys(app: &App, f: &mut Frame) {
         for (chord, what) in *keys {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  {chord:>chord_w$}  "),
+                    format!("{chord:>chord_w$}  "),
                     Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled((*what).to_string(), Style::default().fg(theme.dim)),
@@ -1627,16 +1721,20 @@ fn render_keys(app: &App, f: &mut Frame) {
         }
     }
 
-    let width = 52.min(area.width.saturating_sub(4));
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let rows = lines.len() as u16;
+    // As wide as the widest line it has to carry, so nothing gets truncated.
+    let content_w = lines
+        .iter()
+        .map(|line| line.width() as u16)
+        .max()
+        .unwrap_or(48);
+    let width = (content_w + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
+    let height = (rows + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
     let panel = centered(width, height, area);
     f.render_widget(Clear, panel);
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.accent))
+            dialog_block(theme)
                 .title(Span::styled(
                     " keys ",
                     Style::default()
@@ -2212,6 +2310,206 @@ mod tests {
             .join("\n")
     }
 
+    /// Every cell of a drawn frame, as `(symbol, background)`.
+    fn cells(app: &App, w: u16, h: u16) -> Vec<Vec<(String, Color)>> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                render_with_layout(app, f);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        (cell.symbol().to_string(), cell.bg)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The rows a dialog covers, found by its border corners: the first row
+    /// holding `╭` at or after `title`, through the matching `╰`.
+    fn dialog_rows(grid: &[Vec<(String, Color)>], title: &str) -> (usize, usize, usize, usize) {
+        let top = grid
+            .iter()
+            .position(|row| {
+                let line: String = row.iter().map(|(s, _)| s.as_str()).collect();
+                line.contains('╭') && line.contains(title)
+            })
+            .unwrap_or_else(|| panic!("no dialog titled {title}"));
+        let left = grid[top].iter().position(|(s, _)| s == "╭").unwrap();
+        let right = grid[top].iter().rposition(|(s, _)| s == "╮").unwrap();
+        let bottom = (top + 1..grid.len())
+            .find(|y| grid[*y][left].0 == "╰")
+            .expect("a closed dialog");
+        (top, bottom, left, right)
+    }
+
+    /// A dialog is a surface, not a window onto the screen behind it: every
+    /// cell it covers carries its own background, so nothing underneath and no
+    /// terminal wallpaper shows through.
+    #[test]
+    fn dialogs_are_filled_rather_than_transparent() {
+        let mut app = app_with_tree();
+        app.start_settings();
+        let grid = cells(&app, 100, 40);
+        let (top, bottom, left, right) = dialog_rows(&grid, "settings");
+        let surface = app.theme.surface;
+        for row in &grid[top..=bottom] {
+            for (symbol, bg) in &row[left..=right] {
+                // The key badges in the footer paint their own background;
+                // everything else is the surface.
+                assert!(
+                    *bg == surface || *bg == app.theme.accent_dim,
+                    "transparent cell {symbol:?} in the dialog: {bg:?}"
+                );
+            }
+        }
+    }
+
+    /// The breathing room lives outside the boxes: a slim margin of untouched
+    /// cells between the terminal's edges and everything the TUI draws, on
+    /// every screen.
+    #[test]
+    fn the_page_keeps_clear_of_the_terminal_edges() {
+        for screen in [Screen::Menu, Screen::Manage] {
+            let mut app = app_with_tree();
+            app.screen = screen;
+            let grid = cells(&app, 100, 40);
+            let blank = |cells: &[(String, Color)]| cells.iter().all(|(s, _)| s == " ");
+            let h = grid.len();
+            for y in 0..PAGE_MARGIN_Y as usize {
+                assert!(blank(&grid[y]), "top margin row {y} has content");
+                assert!(blank(&grid[h - 1 - y]), "bottom margin row has content");
+            }
+            for (y, row) in grid.iter().enumerate() {
+                let w = row.len();
+                assert!(
+                    blank(&row[..PAGE_MARGIN_X as usize]),
+                    "left margin has content at row {y}"
+                );
+                assert!(
+                    blank(&row[w - PAGE_MARGIN_X as usize..]),
+                    "right margin has content at row {y}"
+                );
+            }
+        }
+    }
+
+    /// The last row the TUI actually draws on — the footer/key strip sits
+    /// here, one page margin above the terminal's bottom edge.
+    pub(super) fn last_drawn_line(out: &str) -> String {
+        out.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The menu prompt holds a paragraph's worth of writing room — six text
+    /// rows inside the outline — and its breathing room sits outside the box:
+    /// blank rows against the border, not padding within it.
+    #[test]
+    fn the_menu_prompt_is_tall_with_its_room_outside() {
+        let app = app_with_tree();
+        let out = draw(&app, 100, 40);
+        let lines: Vec<&str> = out.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.contains(" Prompt "))
+            .expect("the prompt box");
+        let bottom = (top + 1..lines.len())
+            .find(|&y| lines[y].trim_start().starts_with("╰"))
+            .expect("the prompt's bottom border");
+        assert_eq!(bottom - top, 7, "six text rows inside the outline:\n{out}");
+        for y in [top - 1, bottom + 1] {
+            assert!(
+                lines[y].trim().is_empty(),
+                "row {y} should be the prompt's outside gap: {:?}",
+                lines[y]
+            );
+        }
+    }
+
+    /// The ⌥p composer is the main screen's prompt box opened elsewhere —
+    /// same width, same height — so it reads as the same control.
+    #[test]
+    fn the_composer_matches_the_menu_prompt_box() {
+        fn box_of(out: &str, title: &str) -> (usize, usize) {
+            let lines: Vec<&str> = out.lines().collect();
+            let top = lines
+                .iter()
+                .position(|l| l.contains(title))
+                .unwrap_or_else(|| panic!("{title} not drawn"));
+            let row: Vec<char> = lines[top].chars().collect();
+            let left = row.iter().position(|&c| c == '╭').expect("a top border");
+            let right = row.iter().rposition(|&c| c == '╮').expect("a top border");
+            // The closing corner is found by column, not line start: the
+            // composer floats over the manage screen, whose pane borders own
+            // the starts of these rows.
+            let bottom = (top + 1..lines.len())
+                .find(|&y| lines[y].chars().nth(left) == Some('╰'))
+                .expect("a closed box");
+            (bottom - top + 1, right - left + 1)
+        }
+        let menu = box_of(&draw(&app_with_tree(), 100, 40), " Prompt ");
+        let mut app = app_with_tree();
+        app.screen = Screen::ManagePrompt;
+        app.manage_prompt = Some(String::new());
+        let composer = box_of(&draw(&app, 100, 40), " New Session ");
+        assert_eq!(menu, composer, "(height, width) of the two prompt boxes");
+    }
+
+    /// Submitting from the main screen carries the prompt box along: the
+    /// loading pane echoes it in the same box (title, dialog surface, shared
+    /// size rule), not a smaller "Task" card.
+    #[test]
+    fn the_loading_screen_echoes_the_prompt_in_its_own_box() {
+        use crate::commands::cloud_agent::tui::app::Loading;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.loading = Loading {
+            active: true,
+            target: "devtools/production".into(),
+            harness: "claude".into(),
+            prompt: Some("ship the release notes".into()),
+            steps: Vec::new(),
+            tick: 0,
+        };
+        let out = draw(&app, 100, 40);
+        assert!(out.contains(" Prompt "), "the box keeps its name:\n{out}");
+        assert!(!out.contains(" Task "), "the old card is gone:\n{out}");
+        assert!(out.contains("ship the release notes"), "{out}");
+
+        // A row of air separates the box from the steps below it.
+        let lines: Vec<&str> = out.lines().collect();
+        let top = lines.iter().position(|l| l.contains(" Prompt ")).unwrap();
+        let col = lines[top].chars().position(|c| c == '╭').unwrap();
+        let bottom = (top + 1..lines.len())
+            .find(|&y| lines[y].chars().nth(col) == Some('╰'))
+            .expect("a closed box");
+        let right = lines[top]
+            .chars()
+            .collect::<Vec<_>>()
+            .iter()
+            .rposition(|&c| c == '╮')
+            .expect("a top border");
+        let below: String = lines[bottom + 1]
+            .chars()
+            .skip(col)
+            .take(right - col + 1)
+            .collect();
+        assert!(
+            below.trim().is_empty(),
+            "the row under the prompt box should be clear: {below:?}"
+        );
+    }
+
     /// The wordmark must be full blocks and spaces only: box-drawing shadow
     /// glyphs render at a different weight in some monospace fonts and shear
     /// the whole thing.
@@ -2541,6 +2839,96 @@ mod tests {
 
     /// A drag that reached the clipboard says so in the corner — the only other
     /// evidence is the clipboard itself, which is not on the screen.
+    /// The PTY and the drawn pane are the same size. An emulator wrapping
+    /// wider than its pane puts the tail of every row somewhere the screen
+    /// never shows — four characters per fold of anything long enough to
+    /// wrap, which sheared OAuth login URLs into invalid links.
+    #[test]
+    fn the_session_pty_matches_the_drawn_pane() {
+        use crate::commands::cloud_agent::tui::session::Session;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut rects = crate::commands::cloud_agent::tui::app::PaneRects::default();
+        terminal
+            .draw(|f| {
+                let (r, _) = render_with_layout(&app, f);
+                rects = r;
+            })
+            .unwrap();
+        let (rows, cols) =
+            session_pane_size(Some(ratatui::layout::Size::new(100, 40)), false).unwrap();
+        assert_eq!(
+            (cols, rows),
+            (rects.session.w, rects.session.h),
+            "the PTY must be exactly the pane the emulator is drawn into"
+        );
+    }
+
+    /// An error toast sits front and center at the bottom of the session
+    /// pane, where it can actually be read — not squeezed in beside the
+    /// wordmark like a piece of header furniture.
+    #[test]
+    fn an_error_toast_centers_over_the_session_pane() {
+        use crate::commands::cloud_agent::tui::session::Session;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        app.toast_error("Launch failed: boom");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut rects = crate::commands::cloud_agent::tui::app::PaneRects::default();
+        terminal
+            .draw(|f| {
+                let (r, _) = render_with_layout(&app, f);
+                rects = r;
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let out = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines: Vec<&str> = out.lines().collect();
+        let row = lines
+            .iter()
+            .position(|l| l.contains("✕"))
+            .expect("the error toast");
+        assert!(row > lines.len() * 2 / 3, "near the bottom: {row}");
+        // Char positions, not byte offsets: the row is full of multi-byte
+        // box-drawing cells, and columns are what centering is measured in.
+        let line: Vec<char> = lines[row].chars().collect();
+        let needle: Vec<char> = "Launch failed: boom".chars().collect();
+        let start = line
+            .windows(needle.len())
+            .position(|w| w == needle.as_slice())
+            .expect("the reason");
+        let end = start + needle.len();
+        // Centered within the session pane the frame actually drew.
+        assert!(
+            start > rects.session.x as usize,
+            "inside the session pane: {start}"
+        );
+        let pane_mid = rects.session.x as usize + rects.session.w as usize / 2;
+        let toast_mid = (start + end) / 2;
+        assert!(
+            toast_mid.abs_diff(pane_mid) <= 3,
+            "centered in the pane: toast mid {toast_mid}, pane mid {pane_mid}\n{out}"
+        );
+    }
+
     #[test]
     fn a_toast_floats_in_the_bottom_corner() {
         use crate::commands::cloud_agent::tui::session::Session;
@@ -2571,15 +2959,26 @@ mod tests {
             .position(|w| w.iter().collect::<String>() == "Copied")
             .expect("the toast text");
         assert!(start > 92 / 2, "on the right: {start}");
+        let strip = last_drawn_line(&out);
         assert!(
-            lines[lines.len() - 1].contains("keys"),
-            "the key strip is untouched: {}",
-            lines[lines.len() - 1]
+            strip.contains("keys"),
+            "the key strip is untouched: {strip}"
+        );
+        // The toast is a closed box: its bottom border sits under the text
+        // (with the padding between them) and above the key strip.
+        let closed = (row + 1..lines.len())
+            .find(|y| lines[*y].contains("╰"))
+            .expect("the toast's bottom border");
+        assert!(
+            closed < lines.len() - 1,
+            "the toast should close above the key strip: {}",
+            lines[closed]
         );
         assert!(
-            lines[row + 1].contains("╰") && !lines[row + 1].contains("Copied"),
-            "the toast is closed above the pane border: {}",
-            lines[row + 1]
+            lines[row + 1..=closed]
+                .iter()
+                .all(|l| !l.contains("Copied")),
+            "the text is inside the box only once"
         );
     }
 
@@ -2625,11 +3024,11 @@ mod tests {
         let out = draw(&app, 92, 20);
         let border = out
             .lines()
-            .find(|l| l.starts_with("╰"))
+            .find(|l| l.trim_start().starts_with("╰"))
             .expect("the pane's bottom border");
         assert!(!border.contains("to leave"), "{border}");
         assert!(
-            out.lines().next_back().unwrap().contains("stop typing"),
+            last_drawn_line(&out).contains("stop typing"),
             "the key strip still has it:\n{out}"
         );
     }
@@ -2662,8 +3061,8 @@ mod tests {
             .expect("the session pane");
         assert_eq!(
             pane.chars().position(|c| c == '╭'),
-            Some(0),
-            "the pane starts at the left edge: {pane}"
+            Some(PAGE_MARGIN_X as usize),
+            "the pane starts at the page's left edge: {pane}"
         );
     }
 
@@ -2677,8 +3076,9 @@ mod tests {
         });
         let (_, split) = session_pane_size(size, false).unwrap();
         let (_, full) = session_pane_size(size, true).unwrap();
-        assert_eq!(split, 100 - TREE_W - 2);
-        assert_eq!(full, 98);
+        // Inside the page margin, like the panes it must agree with.
+        assert_eq!(split, 100 - PAGE_MARGIN_X * 2 - TREE_W - 2);
+        assert_eq!(full, 100 - PAGE_MARGIN_X * 2 - 2);
 
         // And a terminal too narrow for two panes is wide enough for one.
         let narrow = Some(ratatui::layout::Size {
@@ -2951,7 +3351,8 @@ mod tests {
             .unwrap();
 
         let out = draw(&app, 120, 30);
-        let footer = out.lines().last().unwrap();
+        let footer = last_drawn_line(&out);
+        let footer = footer.as_str();
         assert!(footer.contains("connect"), "{footer}");
         assert!(footer.contains("new session"), "{footer}");
         assert!(footer.contains("delete agent"), "{footer}");
@@ -2981,7 +3382,7 @@ mod tests {
             .position(|r| r.label == "nimble-otter")
             .unwrap();
 
-        let footer = draw(&app, 120, 30).lines().last().unwrap().to_string();
+        let footer = last_drawn_line(&draw(&app, 120, 30));
         assert!(footer.contains("wake"), "{footer}");
         assert!(!footer.contains("sleep"), "{footer}");
     }
@@ -2996,7 +3397,7 @@ mod tests {
             .iter()
             .position(|r| r.label == "devtools")
             .unwrap();
-        let footer = draw(&app, 120, 30).lines().last().unwrap().to_string();
+        let footer = last_drawn_line(&draw(&app, 120, 30));
         assert!(footer.contains("new agent"), "{footer}");
         assert!(!footer.contains("delete"), "{footer}");
         assert!(footer.trim_end().ends_with("keys"), "{footer}");
@@ -3008,7 +3409,9 @@ mod tests {
         let mut app = app_with_tree();
         app.screen = Screen::Manage;
         app.keys_open = true;
-        let out = draw(&app, 100, 30);
+        // Two rows taller than before: the page margin trims the overlay's
+        // room, and this list is exactly long enough to notice.
+        let out = draw(&app, 100, 34);
         assert!(out.contains("keys"));
         assert!(out.contains("refresh"), "{out}");
         assert!(out.contains("⌥/⇧esc / ^]"), "{out}");
@@ -3080,8 +3483,10 @@ mod tests {
             .repeat(3);
         let out = draw(&app, 100, 40);
         // The tail is what matters: the end of the draft has to be on screen.
+        // The last words rather than a whole phrase — the box wraps, and where
+        // a line breaks is the box's business.
         assert!(
-            out.contains("describing what changed"),
+            out.contains("what changed"),
             "the end of the prompt should be visible:\n{out}"
         );
     }
