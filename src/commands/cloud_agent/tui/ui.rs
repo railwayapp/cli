@@ -189,7 +189,66 @@ pub fn render_with_layout(app: &App, f: &mut Frame) -> (PaneRects, Option<String
 fn render_inner(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     f.render_widget(Clear, f.area());
     render_screen(app, f, rects);
+    render_ssh_gate(app, f);
     render_toast(app, f, rects);
+}
+
+/// The register-your-SSH-key question, centered over whatever raised it. Up
+/// only while [`App::ssh_gate`] holds a connect (or setup's offer); the next
+/// key answers it — see the gate block at the top of [`App::on_key`].
+fn render_ssh_gate(app: &App, f: &mut Frame) {
+    let Some(gate) = app.ssh_gate.as_ref() else {
+        return;
+    };
+    let theme = app.theme;
+    let area = page(f);
+    // Name and fingerprint on their own lines: together they outrun the card
+    // and wrap mid-fingerprint, which reads as garbage. Apart, both fit.
+    // Everything reads in the foreground — this card is the only thing asking
+    // for attention while it is up, so nothing on it is background noise.
+    let body = Style::default().fg(theme.fg);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  {}", gate.offer.name),
+            body.add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(format!("  {}", gate.offer.fingerprint), body)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Agents are reached over SSH, and Railway only answers",
+            body,
+        )),
+        Line::from(Span::styled(
+            "  keys it knows. Registered once, it covers every agent.",
+            body,
+        )),
+        Line::from(""),
+        // The footers' badge chords, centered: the question's answers are the
+        // card's focal point, not another row of copy.
+        Line::from(vec![
+            chord_badge(theme, "y"),
+            Span::styled(" Yes — register this key", body),
+            Span::raw("    "),
+            chord_badge(theme, "n"),
+            Span::styled(" No, not now", body),
+        ])
+        .alignment(Alignment::Center),
+    ];
+    let width = (55 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
+    let height = (lines.len() as u16 + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
+    let panel = centered(width, height, area);
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            dialog_block(theme).title(Span::styled(
+                " Register your SSH key with Railway? ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ),
+        panel,
+    );
 }
 
 /// The corner confirmation, over whatever is underneath it.
@@ -3515,5 +3574,48 @@ mod tests {
         app.screen = Screen::Manage;
         let out = draw(&app, 80, 24);
         assert!(out.contains("RAILWAY CLOUD-AGENTS"));
+    }
+
+    /// The gate card: name and fingerprint each on their own line (together
+    /// they outrun the card and wrap mid-fingerprint), and the answers in the
+    /// same badge-and-label chords as the footers.
+    #[test]
+    fn the_ssh_gate_card_lays_out_key_and_answers() {
+        use crate::commands::cloud_agent::tui::app::{SshGate, SshKeyOffer};
+        let mut app = app_with_tree();
+        app.ssh_gate = Some(SshGate {
+            offer: SshKeyOffer {
+                name: "raildesk-deploy".into(),
+                fingerprint: "SHA256:hlDEs7CV5clc1lMfsMxr/CPeuKuJNn9hJxjsy1e9zLc".into(),
+                public_key: "ssh-ed25519 AAAA test".into(),
+            },
+            then: None,
+        });
+        let out = draw(&app, 80, 30);
+        assert!(out.contains("Register your SSH key with Railway?"), "{out}");
+        assert!(out.contains(" y "), "{out}");
+        assert!(out.contains("Yes — register this key"), "{out}");
+        assert!(out.contains("No, not now"), "{out}");
+
+        let name_line = out
+            .lines()
+            .position(|l| l.contains("raildesk-deploy"))
+            .expect("key name shown");
+        let fp_line = out
+            .lines()
+            .position(|l| l.contains("SHA256:hlDEs7CV5clc1lMfsMxr/CPeuKuJNn9hJxjsy1e9zLc"))
+            .expect("full fingerprint shown, unwrapped");
+        assert_eq!(fp_line, name_line + 1, "fingerprint sits under the name");
+
+        // The answers are centered under the copy, not left-aligned with it.
+        let col = |needle: &str| {
+            out.lines()
+                .find_map(|l| l.find(needle))
+                .unwrap_or_else(|| panic!("{needle} not shown"))
+        };
+        assert!(
+            col("Yes — register this key") > col("raildesk-deploy"),
+            "the answers should sit centered, right of the left-aligned copy"
+        );
     }
 }

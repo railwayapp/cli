@@ -142,8 +142,13 @@ async fn ensure_ssh_key_impl(
         return Ok(identity_for(key));
     }
 
-    // No local key is registered - need to register one
-    if !std::io::stdin().is_terminal() {
+    // No local key is registered - need to register one. A TUI that owns the
+    // terminal can't host the registration prompt any more than a pipe can —
+    // its event loop consumes the keystrokes and repaints over the output —
+    // so both get the recipe instead. `railway ca` runs this same function as
+    // a preflight before taking the screen, so inside its TUI this path only
+    // fires if the key disappeared mid-session.
+    if !std::io::stdin().is_terminal() || crate::util::prompt::terminal_owned() {
         bail!(
             "No registered SSH keys found. Register one with:\n  railway ssh keys add\n\n\
             Or import from GitHub:\n  railway ssh keys github"

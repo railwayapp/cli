@@ -614,3 +614,166 @@ async fn dead_grant_in_a_long_session_refreshes_once_not_per_tool_call() {
         "a dead grant must be discovered once per session, not once per tool call"
     );
 }
+
+// ---------------------------------------------------------------------------
+// "Not Authorized" disambiguation (client::post_graphql_value)
+//
+// The server renders a dead session and a resource-authorization denial
+// identically. These experiments drive the REAL GraphQL send + probe + retry
+// pipeline against a scripted backboard and a scripted token endpoint, and
+// assert which story the user is told for each underlying truth.
+// ---------------------------------------------------------------------------
+
+/// A config fixture holding a LIVE session: valid access token, refresh token.
+struct LiveFixture {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl LiveFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut configs = Configs::for_test(path.clone());
+        configs
+            .save_oauth_tokens("live-access", Some("live-refresh"), 3600)
+            .unwrap();
+        Self { path, _dir: dir }
+    }
+
+    fn load(&self) -> Configs {
+        let mut configs = Configs::for_test(self.path.clone());
+        configs.reload().unwrap();
+        configs
+    }
+}
+
+fn user_meta_body() -> serde_json::Value {
+    serde_json::json!({
+        "operationName": "UserMeta",
+        "query": "query UserMeta { me { id } }",
+        "variables": {},
+    })
+}
+
+async fn send_user_meta(
+    configs: &mut Configs,
+    backboard: &crate::testkit::MockBackboard,
+    token_url: &str,
+) -> Result<serde_json::Value, crate::errors::RailwayError> {
+    let client = crate::client::GQLClient::new_authorized(configs).unwrap();
+    crate::client::post_graphql_value(
+        &client,
+        reqwest::Url::parse(&backboard.url()).unwrap(),
+        &user_meta_body(),
+        Some((configs, token_url)),
+    )
+    .await
+}
+
+/// The Erik shape: the session is alive (refresh succeeds) but the server
+/// keeps refusing the resource. The user must hear "insufficient access",
+/// not "log in again" — re-login can never fix a partially-scoped grant.
+#[tokio::test]
+async fn live_session_with_persistent_denial_reports_insufficient_grant() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(crate::errors::RailwayError::OAuthInsufficientGrant)
+        ),
+        "expected OAuthInsufficientGrant, got {result:?}"
+    );
+    // Exactly one probe, exactly one retry.
+    assert_eq!(token_endpoint.hits(), 1, "one liveness probe");
+    assert_eq!(backboard.hits(), 2, "original request + one retry");
+    // The live credentials survive; nothing tells the user to relogin.
+    let after = fixture.load();
+    assert!(after.has_oauth_token());
+    assert!(after.get_refresh_token().is_some());
+}
+
+/// A genuinely dead grant: the probe comes back invalid_grant, so the
+/// re-login prompt stands and the dead credentials are cleared — the
+/// pre-existing behavior, now backed by evidence instead of assumption.
+#[tokio::test]
+async fn dead_session_keeps_the_relogin_prompt_and_clears_credentials() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![dead_grant()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(crate::errors::RailwayError::Unauthorized
+                | crate::errors::RailwayError::UnauthorizedLogin)
+        ),
+        "a dead session keeps the relogin story, got {result:?}"
+    );
+    // No retry: a dead session cannot be healed by resending.
+    assert_eq!(backboard.hits(), 1);
+    let after = fixture.load();
+    assert!(!after.has_oauth_token(), "dead credentials are cleared");
+    assert_eq!(after.get_refresh_token(), None);
+}
+
+/// The access token died server-side while still looking fresh locally
+/// (e.g. revoked tokens with a surviving grant). The probe mints a fresh
+/// bearer and the retry succeeds: the user sees nothing at all. Previously
+/// every command failed until the local expiry timestamp passed.
+#[tokio::test]
+async fn server_side_expired_access_token_heals_transparently() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    backboard.stub("UserMeta", serde_json::json!({ "me": { "id": "user-1" } }));
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(result.is_ok(), "the retry should succeed, got {result:?}");
+    assert_eq!(token_endpoint.hits(), 1);
+    assert_eq!(backboard.hits(), 2);
+    // The refreshed credentials were persisted for the next invocation.
+    let after = fixture.load();
+    assert_eq!(after.get_refresh_token(), Some("new-refresh"));
+}
+
+/// Nothing to probe with (legacy token, no refresh token): the original
+/// error stands untouched and the token endpoint is never contacted.
+#[tokio::test]
+async fn no_refresh_token_leaves_the_original_error_untouched() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut configs = Configs::for_test(dir.path().join("config.json"));
+    configs.root_config.user.token = Some("legacy-token".to_string());
+    configs.write_credentials().unwrap();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(crate::errors::RailwayError::Unauthorized
+                | crate::errors::RailwayError::UnauthorizedLogin)
+        ),
+        "got {result:?}"
+    );
+    assert_eq!(token_endpoint.hits(), 0, "nothing to probe with");
+    assert_eq!(backboard.hits(), 1, "no retry without a live probe");
+}

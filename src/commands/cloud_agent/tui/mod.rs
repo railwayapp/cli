@@ -42,7 +42,8 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use app::{
-    Agent, AgentOp, ConsoleSession, EnvNode, Load, LoadSessions, ProjectNode, WorkspaceNode,
+    Agent, AgentOp, ConsoleSession, EnvNode, HeldConnect, Load, LoadSessions, ProjectNode,
+    SshKeyOffer, SshKeyState, WorkspaceNode,
 };
 pub use app::{App, Effect, LaunchRequest, Screen, Target};
 
@@ -284,6 +285,18 @@ enum Message {
         error: Option<String>,
     },
     ProjectCreated(Result<wizard::ProjectOption, String>),
+    /// The gate's key registration finished. On success the held connect
+    /// resumes as the effect it was before the gate held it.
+    SshKeyRegistered {
+        result: Result<(), String>,
+        then: Option<HeldConnect>,
+    },
+    /// The under-frame Claude mint finished: the launch resumes on success,
+    /// and steps out for the manual-paste fallback on failure.
+    ClaudeMintDone {
+        ok: bool,
+        req: Box<LaunchRequest>,
+    },
     /// Ask again for one agent's sessions.
     RefreshAgentSessions(String),
     /// The session produced output, so the screen needs redrawing.
@@ -617,6 +630,17 @@ pub async fn run(
                 environment_id,
                 session_name,
             }) => {
+                // Same SSH gate as a launch: reattaching is a fresh ssh, and
+                // a key deregistered since the session opened would otherwise
+                // land on the relay's interactive signup screen.
+                if app.hold_for_ssh_key(HeldConnect::Reattach {
+                    agent_id: agent_id.clone(),
+                    agent_name: agent_name.clone(),
+                    environment_id: environment_id.clone(),
+                    session_name: session_name.clone(),
+                }) {
+                    continue;
+                }
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let message = match code::connect_info(&environment_id, &agent_id).await {
@@ -639,6 +663,25 @@ pub async fn run(
                     let _ = tx.send(message);
                 });
             }
+            Some(Effect::StepOutForMint(req)) => {
+                return Ok(Outcome::NeedsCredential(req));
+            }
+            Some(Effect::RegisterSshKey { offer, then }) => {
+                let tx = tx.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let result = register_gate_key(&client, &offer).await;
+                    if let Err(message) = &result {
+                        crate::commands::ssh::tel::report_failure_for(
+                            "cloud_agent_launch",
+                            "ssh_key_register",
+                            message,
+                        )
+                        .await;
+                    }
+                    let _ = tx.send(Message::SshKeyRegistered { result, then });
+                });
+            }
             Some(Effect::CreateDefaultProject(workspace_id)) => {
                 let tx = tx.clone();
                 let client = client.clone();
@@ -656,6 +699,10 @@ pub async fn run(
                         tokio::spawn(async move {
                             super::telemetry::track_setup_saved("wizard", &prefs).await;
                         });
+                        // Setup is where the account gets ready to connect, so
+                        // an unregistered key is offered here too — not just
+                        // at the first launch that would trip over it.
+                        app.offer_ssh_key_setup();
                         app.status = "Saved — Setup again to change it".into();
                     }
                     Err(err) => {
@@ -785,12 +832,43 @@ pub async fn run(
                 });
             }
             Some(Effect::Launch(req)) => {
-                // Minting needs a browser and a paste, neither of which works
-                // underneath a frame. Only a mint that can actually run needs
-                // the step-out: with nothing to mint from, the launch goes
-                // ahead and claude signs in on the agent.
+                // The launch lives on the manage screen — the tree the agent
+                // will land in — so go there first and reveal its environment.
+                // The ssh gate's question then hangs over the place the answer
+                // matters, not over the menu it happened to be asked from.
+                app.screen = Screen::Manage;
+                if let Some(Effect::LoadAgents {
+                    environment_id,
+                    path,
+                }) = app.reveal_environment(&req.environment_id)
+                {
+                    spawn_env_agents_fetch(environment_id, path, &tx, &client, &backboard);
+                }
+                // Connecting rides SSH, so an unregistered key is settled with
+                // an in-frame question before anything is spent on the launch.
+                if app.hold_for_ssh_key(HeldConnect::Launch(req.clone())) {
+                    continue;
+                }
+                // The mint's browser round-trip needs no terminal — the
+                // browser does the interacting and the flow runs hidden — so
+                // it runs under the frame with the loading screen narrating.
+                // Only its manual-paste fallback needs the real terminal, and
+                // only that failure steps out (see ClaudeMintDone).
                 if req.harness == "claude" && code::claude_needs_local_mint() {
-                    return Ok(Outcome::NeedsCredential(req));
+                    app.start_loading(&req);
+                    let _ = tx.send(Message::LaunchStep(
+                        "Minting a Claude token — approve the browser prompt if one appears"
+                            .to_string(),
+                    ));
+                    let tx = tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let ok = code::mint_claude_credential_headless().is_ok();
+                        let _ = tx.send(Message::ClaudeMintDone {
+                            ok,
+                            req: Box::new(req),
+                        });
+                    });
+                    continue;
                 }
                 start_launch(app, req, &tx);
             }
@@ -801,39 +879,51 @@ pub async fn run(
                 environment_id,
                 path,
             }) => {
-                let tx = tx.clone();
-                let client = client.clone();
-                let backboard = backboard.clone();
-                tokio::spawn(async move {
-                    // A closed receiver just means the TUI already handed back;
-                    // the next entry re-requests, so the drop is harmless.
-                    match fetch_agents(&client, &backboard, &environment_id).await {
-                        Ok(agents) => {
-                            let _ = tx.send(Message::AgentsLoaded {
-                                path,
-                                result: Ok(agents),
-                            });
-                        }
-                        // The same classification the background fetches do:
-                        // a 429 puts the row back to "not loaded" with the
-                        // Retry-After toast, instead of pinning "rate limited"
-                        // to this one environment as if it were its failure.
-                        Err(err) => match rate_limit_from(&err) {
-                            Some(retry_after_secs) => {
-                                let _ = tx.send(Message::RateLimited { retry_after_secs });
-                            }
-                            None => {
-                                let _ = tx.send(Message::AgentsLoaded {
-                                    path,
-                                    result: Err(err.to_string()),
-                                });
-                            }
-                        },
-                    }
-                });
+                spawn_env_agents_fetch(environment_id, path, &tx, &client, &backboard);
             }
         }
     }
+}
+
+/// Fetch one environment's agents in the background, delivering the answer —
+/// or its rate-limit classification — as a message.
+fn spawn_env_agents_fetch(
+    environment_id: String,
+    path: (usize, usize, usize),
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_string();
+    tokio::spawn(async move {
+        // A closed receiver just means the TUI already handed back;
+        // the next entry re-requests, so the drop is harmless.
+        match fetch_agents(&client, &backboard, &environment_id).await {
+            Ok(agents) => {
+                let _ = tx.send(Message::AgentsLoaded {
+                    path,
+                    result: Ok(agents),
+                });
+            }
+            // The same classification the background fetches do:
+            // a 429 puts the row back to "not loaded" with the
+            // Retry-After toast, instead of pinning "rate limited"
+            // to this one environment as if it were its failure.
+            Err(err) => match rate_limit_from(&err) {
+                Some(retry_after_secs) => {
+                    let _ = tx.send(Message::RateLimited { retry_after_secs });
+                }
+                None => {
+                    let _ = tx.send(Message::AgentsLoaded {
+                        path,
+                        result: Err(err.to_string()),
+                    });
+                }
+            },
+        }
+    });
 }
 
 fn handle_message(
@@ -981,6 +1071,37 @@ fn handle_message(
             }
             None
         }
+        Message::ClaudeMintDone { ok, req } => {
+            if ok {
+                // The cache holds the token now; the pipeline reads it there.
+                start_launch(app, *req, tx);
+            } else {
+                // The manual paste needs the real terminal. Stop the loading
+                // screen and hand the request back through the step-out; the
+                // fallback skips straight to the paste prompt rather than
+                // re-running the automation that just lost.
+                app.loading.active = false;
+                return Some(Effect::StepOutForMint(*req));
+            }
+            None
+        }
+        Message::SshKeyRegistered { result, then } => match result {
+            Ok(()) => {
+                app.ssh_key = SshKeyState::Ready;
+                app.toast("SSH key registered");
+                // The held connect resumes as the effect it was; it passes the
+                // now-Ready gate and takes the normal path from there.
+                then.map(HeldConnect::into_effect)
+            }
+            Err(message) => {
+                // Still unregistered: the next connect raises the gate again.
+                // The toast gets the first line; register_ssh_key already maps
+                // the duplicate-fingerprint rejection to something actionable.
+                let first = message.lines().next().unwrap_or("registration failed");
+                app.toast_error(format!("Couldn't register the key: {first}"));
+                None
+            }
+        },
         Message::SessionKilled {
             agent_id,
             session_name,
@@ -1265,6 +1386,23 @@ fn spawn_session_prefetch(
     });
 }
 
+/// Register the gate's key with Railway. String errors because the result
+/// crosses the message channel; `register_ssh_key` has already mapped the
+/// duplicate-fingerprint rejection to a user-facing message.
+async fn register_gate_key(client: &reqwest::Client, offer: &SshKeyOffer) -> Result<(), String> {
+    let configs = Configs::new().map_err(|e| format!("{e:#}"))?;
+    crate::controllers::ssh::keys::register_ssh_key(
+        client,
+        &configs,
+        &offer.name,
+        &offer.public_key,
+        None,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Re-ask for an agent's sessions shortly after one is opened.
 fn schedule_session_refresh(agent_id: String, tx: &mpsc::UnboundedSender<Message>) {
     let tx = tx.clone();
@@ -1401,6 +1539,11 @@ fn finish_copy(app: &mut App, text: Option<String>) {
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
+    // While the TUI holds the terminal, no inquire prompt can work — the event
+    // loop would eat its keystrokes and the next frame would paint over it.
+    // This flag makes every prompt helper (and ensure_ssh_key's registration
+    // fallback) fail fast instead of deadlocking the caller.
+    crate::util::prompt::set_terminal_owned(true);
     // Mouse capture takes the terminal's own selection away, which is why the
     // TUI implements drag-to-copy itself.
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
@@ -1448,6 +1591,7 @@ fn restore_terminal() {
     // them off on both.
     let _ = execute!(stdout(), DisableMouseCapture);
     let _ = disable_raw_mode();
+    crate::util::prompt::set_terminal_owned(false);
     let _ = stdout().flush();
 }
 

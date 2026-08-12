@@ -626,6 +626,73 @@ impl PendingConfirm {
     }
 }
 
+/// What the startup check learned about the user's SSH key. Connecting to an
+/// agent rides SSH and the relay only answers registered keys, so a connect
+/// while unregistered is held behind [`SshGate`] rather than sent to fail —
+/// or worse, to the relay's interactive signup screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SshKeyState {
+    /// The check hasn't answered, or couldn't. Connects proceed; the launch
+    /// pipeline re-checks and produces the error if there is one.
+    #[default]
+    Unknown,
+    /// A local key is registered with Railway.
+    Ready,
+    /// A local key exists but Railway doesn't know it yet.
+    NeedsRegistration(SshKeyOffer),
+    /// Nothing in the SSH agent or ~/.ssh to register.
+    NoLocalKeys,
+}
+
+/// The local key the gate offers to register.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshKeyOffer {
+    pub name: String,
+    pub fingerprint: String,
+    pub public_key: String,
+}
+
+/// A connect held back until the SSH key question is answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeldConnect {
+    Launch(LaunchRequest),
+    Reattach {
+        agent_id: String,
+        agent_name: String,
+        environment_id: String,
+        session_name: String,
+    },
+}
+
+impl HeldConnect {
+    /// Back into the effect it was before the gate held it.
+    pub fn into_effect(self) -> Effect {
+        match self {
+            HeldConnect::Launch(req) => Effect::Launch(req),
+            HeldConnect::Reattach {
+                agent_id,
+                agent_name,
+                environment_id,
+                session_name,
+            } => Effect::Reattach {
+                agent_id,
+                agent_name,
+                environment_id,
+                session_name,
+            },
+        }
+    }
+}
+
+/// The register-your-key question, floated over whatever raised it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshGate {
+    pub offer: SshKeyOffer,
+    /// Resumed after a successful registration. `None` when the gate came
+    /// from setup rather than a connect: declining just ends the question.
+    pub then: Option<HeldConnect>,
+}
+
 /// What the loading screen is showing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Loading {
@@ -720,6 +787,15 @@ pub enum Effect {
         agent_id: String,
         environment_id: String,
     },
+    /// Register the gate's key with Railway, then resume the held connect.
+    RegisterSshKey {
+        offer: SshKeyOffer,
+        then: Option<HeldConnect>,
+    },
+    /// Leave the TUI for the Claude mint's manual-paste fallback; the caller
+    /// re-enters with the same request. Raised only after the hidden mint
+    /// already ran and failed under the frame.
+    StepOutForMint(LaunchRequest),
     Quit,
 }
 
@@ -812,6 +888,10 @@ pub struct App {
     pub pending_copy: Option<Selection>,
     /// An action waiting on a `y`/`n`.
     pub confirm: Option<PendingConfirm>,
+    /// What the startup check learned about the user's SSH key.
+    pub ssh_key: SshKeyState,
+    /// A register-your-key question holding a connect, when one is up.
+    pub ssh_gate: Option<SshGate>,
     /// Agent id → what is happening to it right now. Shown immediately so a
     /// slow mutation looks like an action rather than a frozen key.
     pub ops: std::collections::HashMap<String, &'static str>,
@@ -875,6 +955,8 @@ impl App {
             last_click: None,
             pending_copy: None,
             confirm: None,
+            ssh_key: SshKeyState::default(),
+            ssh_gate: None,
             ops: std::collections::HashMap::new(),
             watching: std::collections::HashMap::new(),
             menu_focus: MenuFocus::Prompt,
@@ -1873,6 +1955,24 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        // The SSH gate owns the keyboard until its question is answered.
+        // Anything other than yes cancels: a mistyped key must never register
+        // a credential on the account.
+        if let Some(gate) = self.ssh_gate.take() {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(Effect::RegisterSshKey {
+                    offer: gate.offer,
+                    then: gate.then,
+                }),
+                _ => {
+                    if gate.then.is_some() {
+                        self.toast_error("Cancelled — connecting needs a registered SSH key");
+                    }
+                    None
+                }
+            };
+        }
+
         // A focused session owns the keyboard: Ctrl-C must interrupt the agent,
         // Esc must reach its editor, and ⌥/^ chords belong to whatever is
         // running in there. Only one chord is reserved, and it is one no agent
@@ -2913,6 +3013,39 @@ impl App {
                 self.cursor = i;
                 return;
             }
+        }
+    }
+
+    /// Gate a connect on the SSH key. `true` means the effect was consumed
+    /// here — held behind the register question, or refused with the recipe —
+    /// and the caller must not proceed with it.
+    pub fn hold_for_ssh_key(&mut self, held: HeldConnect) -> bool {
+        match &self.ssh_key {
+            SshKeyState::NeedsRegistration(offer) => {
+                self.ssh_gate = Some(SshGate {
+                    offer: offer.clone(),
+                    then: Some(held),
+                });
+                true
+            }
+            SshKeyState::NoLocalKeys => {
+                self.toast_error("No SSH key found — run: ssh-keygen -t ed25519");
+                true
+            }
+            SshKeyState::Ready | SshKeyState::Unknown => false,
+        }
+    }
+
+    /// Offer key registration as part of setup, when the check said one is
+    /// needed. No held connect: declining just ends the question.
+    pub fn offer_ssh_key_setup(&mut self) {
+        if self.ssh_gate.is_none()
+            && let SshKeyState::NeedsRegistration(offer) = &self.ssh_key
+        {
+            self.ssh_gate = Some(SshGate {
+                offer: offer.clone(),
+                then: None,
+            });
         }
     }
 
@@ -7316,5 +7449,115 @@ mod tests {
 
         a.agents_loaded((0, 0, 1), Ok(Vec::new()));
         assert_eq!(hint(&a), "no cloud agents yet — n creates one");
+    }
+
+    fn offer() -> SshKeyOffer {
+        SshKeyOffer {
+            name: "id_ed25519".into(),
+            fingerprint: "SHA256:abc".into(),
+            public_key: "ssh-ed25519 AAAA test".into(),
+        }
+    }
+
+    fn launch_req() -> LaunchRequest {
+        LaunchRequest {
+            project_id: "proj_1".into(),
+            environment_id: "env_prod".into(),
+            agent_id: None,
+            session_name: None,
+            force_new: false,
+            new_session: false,
+            harness: "claude".into(),
+            prompt: None,
+            label: "devtools/production".into(),
+        }
+    }
+
+    /// An unregistered key holds the connect behind the gate; nothing is
+    /// launched until the question is answered.
+    #[test]
+    fn an_unregistered_key_holds_the_connect() {
+        let mut a = app();
+        a.ssh_key = SshKeyState::NeedsRegistration(offer());
+        let held = HeldConnect::Launch(launch_req());
+        assert!(a.hold_for_ssh_key(held.clone()));
+        assert_eq!(
+            a.ssh_gate,
+            Some(SshGate {
+                offer: offer(),
+                then: Some(held),
+            })
+        );
+    }
+
+    /// A registered key, and a check that never answered, both let the
+    /// connect through — the launch pipeline is the better place to fail.
+    #[test]
+    fn ready_and_unknown_keys_proceed() {
+        let mut a = app();
+        a.ssh_key = SshKeyState::Ready;
+        assert!(!a.hold_for_ssh_key(HeldConnect::Launch(launch_req())));
+        a.ssh_key = SshKeyState::Unknown;
+        assert!(!a.hold_for_ssh_key(HeldConnect::Launch(launch_req())));
+        assert!(a.ssh_gate.is_none());
+    }
+
+    /// With nothing local to offer, the connect is refused with the recipe
+    /// rather than held behind a question that has no good answer.
+    #[test]
+    fn no_local_keys_refuses_with_the_recipe() {
+        let mut a = app();
+        a.ssh_key = SshKeyState::NoLocalKeys;
+        assert!(a.hold_for_ssh_key(HeldConnect::Launch(launch_req())));
+        assert!(a.ssh_gate.is_none());
+        assert!(a.toast.as_ref().is_some_and(|t| !t.ok), "{:?}", a.toast);
+    }
+
+    /// `y` answers the gate with the register effect, carrying the held
+    /// connect along to resume after the mutation.
+    #[test]
+    fn yes_registers_and_carries_the_held_connect() {
+        let mut a = app();
+        a.ssh_key = SshKeyState::NeedsRegistration(offer());
+        assert!(a.hold_for_ssh_key(HeldConnect::Launch(launch_req())));
+        let effect = a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(
+            effect,
+            Some(Effect::RegisterSshKey {
+                offer: offer(),
+                then: Some(HeldConnect::Launch(launch_req())),
+            })
+        );
+        assert!(a.ssh_gate.is_none());
+    }
+
+    /// Anything that isn't a yes cancels: a mistyped key must never register
+    /// a credential on the account.
+    #[test]
+    fn anything_else_cancels_the_gate() {
+        let mut a = app();
+        a.ssh_key = SshKeyState::NeedsRegistration(offer());
+        assert!(a.hold_for_ssh_key(HeldConnect::Launch(launch_req())));
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert!(a.ssh_gate.is_none());
+        // The state is untouched, so the next connect asks again.
+        assert_eq!(a.ssh_key, SshKeyState::NeedsRegistration(offer()));
+    }
+
+    /// Setup's offer has no held connect: declining it is not an error and
+    /// says nothing about a cancelled launch.
+    #[test]
+    fn the_setup_offer_declines_quietly() {
+        let mut a = app();
+        a.ssh_key = SshKeyState::NeedsRegistration(offer());
+        a.offer_ssh_key_setup();
+        assert!(a.ssh_gate.is_some());
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert!(a.toast.is_none(), "{:?}", a.toast);
+
+        // With the key already registered, setup offers nothing.
+        a.ssh_key = SshKeyState::Ready;
+        a.offer_ssh_key_setup();
+        assert!(a.ssh_gate.is_none());
     }
 }
