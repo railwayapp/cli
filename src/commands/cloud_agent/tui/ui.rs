@@ -84,6 +84,17 @@ fn page(f: &Frame) -> Rect {
     }
 }
 
+/// The prompt box's shape — width, and height in rows including borders —
+/// shared by the menu's prompt and the ⌥p composer so the two read as the
+/// same control. Text rows plus the border: twice the writing room of the
+/// original two rows on screens with the height for it — a prompt is a
+/// paragraph these days, not a title — and a compact variant below that.
+fn prompt_box_size(area: Rect) -> (u16, u16) {
+    let height = if area.height >= 30 { 6 } else { 2 } + DIALOG_CHROME_Y;
+    let width = 74.min(area.width.saturating_sub(2)).max(40.min(area.width));
+    (width, height)
+}
+
 /// The chrome every floating card shares.
 ///
 /// Opaque fill, because these sit *on top of* the screen rather than in it:
@@ -305,12 +316,9 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     let area = page(f);
     let big = area.width >= BANNER_W + 8 && area.height >= 26;
     let banner_h = if big { BANNER_H } else { 1 };
-    // Text rows plus the border. Twice the writing room of the original two
-    // rows — a prompt is a paragraph these days, not a title.
-    let prompt_h = if area.height >= 30 { 6 } else { 2 } + DIALOG_CHROME_Y;
+    let (panel_w, prompt_h) = prompt_box_size(area);
     // The room around the prompt lives outside its outline, not inside it.
     let prompt_gap = if area.height >= 30 { 2 } else { 1 };
-    let panel_w = 74.min(area.width.saturating_sub(2)).max(40.min(area.width));
     let cards = app.cards();
     // Descriptions cost rows, and on a short screen those rows come out of the
     // prompt box. Names only, rather than a menu with no prompt on it.
@@ -1519,12 +1527,10 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
     };
     let theme = app.theme;
     let area = page(f);
-    let outer = centered(
-        (62 + DIALOG_CHROME_X).min(area.width.saturating_sub(4)),
-        // Three rows to type in, plus the border and the padding around them.
-        3 + DIALOG_CHROME_Y,
-        area,
-    );
+    // The same box as the main screen's prompt, so composing a session here
+    // feels like the same act there.
+    let (w, h) = prompt_box_size(area);
+    let outer = centered(w, h, area);
     f.render_widget(Clear, outer);
 
     let block = dialog_block(theme)
@@ -2357,6 +2363,35 @@ mod tests {
                 lines[y]
             );
         }
+    }
+
+    /// The ⌥p composer is the main screen's prompt box opened elsewhere —
+    /// same width, same height — so it reads as the same control.
+    #[test]
+    fn the_composer_matches_the_menu_prompt_box() {
+        fn box_of(out: &str, title: &str) -> (usize, usize) {
+            let lines: Vec<&str> = out.lines().collect();
+            let top = lines
+                .iter()
+                .position(|l| l.contains(title))
+                .unwrap_or_else(|| panic!("{title} not drawn"));
+            let row: Vec<char> = lines[top].chars().collect();
+            let left = row.iter().position(|&c| c == '╭').expect("a top border");
+            let right = row.iter().rposition(|&c| c == '╮').expect("a top border");
+            // The closing corner is found by column, not line start: the
+            // composer floats over the manage screen, whose pane borders own
+            // the starts of these rows.
+            let bottom = (top + 1..lines.len())
+                .find(|&y| lines[y].chars().nth(left) == Some('╰'))
+                .expect("a closed box");
+            (bottom - top + 1, right - left + 1)
+        }
+        let menu = box_of(&draw(&app_with_tree(), 100, 40), " Prompt ");
+        let mut app = app_with_tree();
+        app.screen = Screen::ManagePrompt;
+        app.manage_prompt = Some(String::new());
+        let composer = box_of(&draw(&app, 100, 40), " New Session ");
+        assert_eq!(menu, composer, "(height, width) of the two prompt boxes");
     }
 
     /// The wordmark must be full blocks and spaces only: box-drawing shadow
