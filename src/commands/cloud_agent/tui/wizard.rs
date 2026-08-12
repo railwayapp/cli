@@ -142,6 +142,7 @@ pub fn harness_blurb(slug: &str) -> &'static str {
         "codex" => "OpenAI's Codex",
         "grok" => "xAI's Grok",
         "railway" => "Railway's own agent — no sign-in needed",
+        "shell" => "No agent — just a shell on the VM",
         // Named rather than folded into a catch-all: an unknown slug is a
         // preferences file someone hand-edited, and labelling it as whichever
         // harness happens to sit in the `_` arm is worse than saying nothing.
@@ -196,7 +197,7 @@ impl Wizard {
             project: None,
             workspaces,
             agent: harness
-                .and_then(|h| super::app::HARNESSES.iter().position(|x| *x == h))
+                .and_then(|h| super::app::default_harnesses().iter().position(|x| *x == h))
                 .unwrap_or(0),
             skills: skills_source.is_some(),
             skills_source,
@@ -302,7 +303,9 @@ impl Wizard {
                 .into_iter()
                 .map(|row| self.target_row_label(row))
                 .collect(),
-            Step::Agent => super::app::HARNESSES
+            // The default-able harnesses only: `shell` is a way to launch a
+            // session, not a default agent to save.
+            Step::Agent => super::app::default_harnesses()
                 .iter()
                 .map(|slug| ((*slug).to_string(), harness_blurb(slug).to_string()))
                 .collect(),
@@ -435,7 +438,7 @@ impl Wizard {
                 }
             },
             Step::Agent => {
-                self.agent = self.cursor.min(super::app::HARNESSES.len() - 1);
+                self.agent = self.cursor.min(super::app::default_harnesses().len() - 1);
                 self.go(Step::Skills);
                 Action::Redraw
             }
@@ -449,7 +452,7 @@ impl Wizard {
                 self.theme = self.cursor.min(THEMES.len() - 1);
                 Action::Finish(Box::new(Outcome {
                     project: self.project.clone(),
-                    agent: super::app::HARNESSES[self.agent].to_string(),
+                    agent: super::app::default_harnesses()[self.agent].to_string(),
                     skills: self.skills,
                     skills_source: self.skills_source.clone(),
                     theme: THEMES[self.theme].slug.to_string(),

@@ -677,7 +677,15 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
     let theme = app.theme;
     let focused = app.menu_focus == MenuFocus::Prompt;
     let empty = app.prompt.is_empty();
-    let (text, fg) = if empty && !focused {
+    // The shell option takes no prompt, so the box explains itself instead of
+    // taking dictation. Any draft stays in `app.prompt`, hidden until the
+    // cycle moves back to a real agent.
+    let (text, fg) = if app.shell_selected() {
+        (
+            "A plain shell on the agent — no prompt, enter to launch".to_string(),
+            theme.dim,
+        )
+    } else if empty && !focused {
         (
             "Fix a bug, scaffold a service, explain a repo…".to_string(),
             theme.dim,
@@ -690,7 +698,7 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
 
     // Only the harness. Where it lands is on its own line under the cards —
     // it changes rarely, and it was crowding the one control being used.
-    let count = if empty {
+    let count = if empty || app.shell_selected() {
         String::new()
     } else {
         format!(" {} ", app.prompt.chars().count())
@@ -1643,13 +1651,26 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
         ]))
         .title_bottom(
             Line::from(Span::styled(
-                " enter send · esc close ",
+                if app.shell_selected() {
+                    " enter launch · esc close "
+                } else {
+                    " enter send · esc close "
+                },
                 Style::default().fg(theme.dim),
             ))
             .right_aligned(),
         );
 
-    let text = format!("{draft}▏");
+    // The menu box's shell contract, here too: the box explains itself
+    // instead of taking dictation, and the draft waits out of sight.
+    let (text, fg) = if app.shell_selected() {
+        (
+            "A plain shell on the agent — no prompt, enter to launch".to_string(),
+            theme.dim,
+        )
+    } else {
+        (format!("{draft}▏"), theme.fg)
+    };
     // Keep the cursor line in view once the wrapped text outgrows the box,
     // same as the menu's prompt. The padding is chrome, not writing room, so
     // it comes off the width and the height the text gets.
@@ -1660,7 +1681,7 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
     f.render_widget(
         Paragraph::new(text)
             .block(block)
-            .style(Style::default().fg(theme.fg))
+            .style(Style::default().fg(fg))
             .wrap(ratatui::widgets::Wrap { trim: false })
             .scroll((scroll_y, 0)),
         outer,
@@ -2718,6 +2739,32 @@ mod tests {
         app.configured = false;
         let out = draw(&app, 100, 40);
         assert!(out.contains("Default agent, skills"), "{out}");
+    }
+
+    /// With shell selected the box stops being a prompt: it says what enter
+    /// does instead of inviting text, and hides a draft typed for a real
+    /// agent rather than showing words that would go nowhere.
+    #[test]
+    fn the_prompt_box_explains_itself_on_shell() {
+        let mut app = app_with_tree();
+        app.prompt = "fix the tests".into();
+        while app.harness_name() != "shell" {
+            app.on_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::BackTab,
+                crossterm::event::KeyModifiers::SHIFT,
+            ));
+        }
+        let out = draw(&app, 100, 40);
+        assert!(out.contains("A plain shell on the agent"), "{out}");
+        assert!(
+            !out.contains("fix the tests"),
+            "the hidden draft must not show through: {out}"
+        );
+        let footer = out
+            .lines()
+            .find(|l| l.contains("shell") && l.contains("shift+tab"))
+            .expect("the prompt box footer names the selection");
+        assert!(footer.contains("shell"), "{footer}");
     }
 
     /// Where the prompt lands is its own line above the keys, not a chip inside
