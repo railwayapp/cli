@@ -1475,7 +1475,15 @@ mod tests {
             let history = session
                 .with_screen(|s| s.scrollback())
                 .expect("the emulator stays lockable");
-            assert_eq!(held, history, "the held offset tracks the emulator");
+            // The reader thread may process this round's echo between the
+            // scroll above and this read, and output arriving while scrolled
+            // back pins the view by pushing the emulator's offset deeper. So
+            // the emulator may run ahead of the held offset here — but it can
+            // never sit above it, which is the wedge this test is for.
+            assert!(
+                history >= held,
+                "the held offset never passes the emulator (held {held}, emulator {history})"
+            );
             assert!(
                 session.with_screen(|s| s.contents()).is_some(),
                 "the view renders mid-churn"
