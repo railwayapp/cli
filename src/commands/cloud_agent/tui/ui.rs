@@ -554,12 +554,20 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
         // A floor only so an empty panel is not a sliver; anything larger pads
         // the panel past its content and the centring visibly drifts left.
         .clamp(20, area.width.max(1) as usize) as u16;
-    let panel = centered(content_w, (STEP_ROWS + task_h + 4).min(area.height), area);
+    // A prompt box brings a row of air below it, so the steps don't sit
+    // against its border.
+    let task_gap = if task_h > 0 { 1 } else { 0 };
+    let panel = centered(
+        content_w,
+        (STEP_ROWS + task_h + task_gap + 4).min(area.height),
+        area,
+    );
     let rows = Layout::vertical([
         Constraint::Length(1), // title
         Constraint::Length(1), // target
         Constraint::Length(1), // gap
         Constraint::Length(task_h),
+        Constraint::Length(task_gap),
         Constraint::Length(STEP_ROWS),
         Constraint::Min(0),
         Constraint::Length(1), // hint
@@ -610,8 +618,8 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     }
 
     f.render_widget(
-        Paragraph::new(step_lines(app, rows[4].width)).wrap(Wrap { trim: false }),
-        rows[4],
+        Paragraph::new(step_lines(app, rows[5].width)).wrap(Wrap { trim: false }),
+        rows[5],
     );
 }
 
@@ -2477,6 +2485,23 @@ mod tests {
         assert!(out.contains(" Prompt "), "the box keeps its name:\n{out}");
         assert!(!out.contains(" Task "), "the old card is gone:\n{out}");
         assert!(out.contains("ship the release notes"), "{out}");
+
+        // A row of air separates the box from the steps below it.
+        let lines: Vec<&str> = out.lines().collect();
+        let top = lines.iter().position(|l| l.contains(" Prompt ")).unwrap();
+        let col = lines[top].chars().position(|c| c == '╭').unwrap();
+        let bottom = (top + 1..lines.len())
+            .find(|&y| lines[y].chars().nth(col) == Some('╰'))
+            .expect("a closed box");
+        let below: String = lines[bottom + 1]
+            .chars()
+            .skip(col)
+            .take(lines[top].chars().count() - col)
+            .collect();
+        assert!(
+            below.trim().is_empty(),
+            "the row under the prompt box should be clear: {below:?}"
+        );
     }
 
     /// The wordmark must be full blocks and spaces only: box-drawing shadow
