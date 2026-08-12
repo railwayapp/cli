@@ -77,10 +77,11 @@ use crate::util::shell::shell_join;
 // `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
-/// `railway code` is the launcher on its own: the same flags and the same
-/// preferences as `railway ca`, minus the TUI. Kept as a distinct command
-/// rather than an alias because the two now differ in exactly one way — one
-/// browses first and one does not — and that is the reason to type either.
+/// `railway code` is the launcher: it answers "where, and which harness"
+/// from flags and preferences, then opens that session. On a terminal it opens
+/// it inside `railway ca`'s manage screen with the tree collapsed, so the
+/// session has the whole window and the rest of the tool is one key away;
+/// everywhere else it hands the terminal straight to ssh.
 pub type Args = LaunchArgs;
 
 pub async fn command(args: Args) -> Result<()> {
@@ -93,18 +94,24 @@ pub async fn command(args: Args) -> Result<()> {
             "`railway code` passes arguments straight to the agent, so this would run `setup` on the VM.\nDid you mean `railway ca setup`?"
         );
     }
-    launch(args).await
+    match args.wants_pane() {
+        true => crate::commands::cloud_agent::launch_in_pane(args).await,
+        false => launch(args).await,
+    }
 }
 
 /// Launch a coding agent on a Railway cloud agent VM
 //
 // `Default` is derived so the TUI can build a launch without going through
 // clap: every field is an Option/Vec/bool, so the derive produces exactly the
-// "nothing was passed" state clap would. Kept out of the doc comment — clap
-// renders those as `long_about` and it would show up in `--help`.
-#[derive(Parser, Default)]
+// "nothing was passed" state clap would. `Clone` is what lets a command-line
+// launch ride into the TUI as the base of a `LaunchRequest`, so flags the TUI
+// has no way to ask for — `--name`, `--variable` — still reach the pipeline.
+// Both kept out of the doc comment — clap renders those as `long_about` and
+// they would show up in `--help`.
+#[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\nOn a terminal the session opens inside `railway ca`'s manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -212,6 +219,30 @@ impl LaunchArgs {
             && self.agent_args.is_empty()
     }
 
+    /// Should this launch open in the TUI's session pane rather than taking
+    /// the terminal for itself?
+    ///
+    /// Yes for the shapes a person types at a prompt, which is nearly all of
+    /// them: the pane gives the session the whole window and leaves the tree,
+    /// the other agents and the lifecycle keys one chord away. No for the
+    /// three that a frame would break or spoil:
+    ///
+    /// - `--rm` destroys an agent and prints; there is no session to show.
+    /// - `-- args` execs the agent and exits with its status, which is a
+    ///   caller asking for an exit code, not for a window.
+    /// - no terminal at all — a TUI in a pipe is gibberish, and scripted
+    ///   callers reasonably expect the launcher.
+    pub fn wants_pane(&self) -> bool {
+        self.pane_shaped() && is_stdout_terminal()
+    }
+
+    /// The flag half of [`Self::wants_pane`], split off the terminal check so
+    /// the rule is checked by tests rather than by reading it — `cargo test`
+    /// captures stdout, so the whole predicate is always false under one.
+    fn pane_shaped(&self) -> bool {
+        !self.rm && self.agent_args.is_empty()
+    }
+
     /// Force one harness, overriding preferences — how the TUI passes the
     /// choice made in its prompt footer.
     pub fn set_harness(&mut self, slug: &str) {
@@ -233,16 +264,41 @@ impl LaunchArgs {
         prompt: Option<String>,
         agent_id: Option<String>,
     ) -> Self {
-        let mut args = Self {
-            project: Some(project_id),
-            environment: Some(environment_id),
-            new: force_new,
-            initial_prompt: prompt,
+        Self::default().retargeted(
+            project_id,
+            environment_id,
+            harness,
+            force_new,
+            prompt,
             agent_id,
-            ..Self::default()
-        };
-        args.set_harness(harness);
-        args
+        )
+    }
+
+    /// [`Self::for_target`] over an existing set of flags instead of an empty
+    /// one — how a `railway code` invocation that opened in the pane gets its
+    /// remaining flags to the pipeline.
+    ///
+    /// Everything the TUI decides is overwritten: it knows the target, the
+    /// harness and the agent better than the command line did, because the
+    /// user may have moved since typing it. Everything else survives, which is
+    /// the point — `railway code --new --name api --variable K=V` creates the
+    /// agent the command line described, even though no card asks for a name.
+    pub fn retargeted(
+        mut self,
+        project_id: String,
+        environment_id: String,
+        harness: &str,
+        force_new: bool,
+        prompt: Option<String>,
+        agent_id: Option<String>,
+    ) -> Self {
+        self.project = Some(project_id);
+        self.environment = Some(environment_id);
+        self.new = force_new;
+        self.initial_prompt = prompt;
+        self.agent_id = agent_id;
+        self.set_harness(harness);
+        self
     }
 }
 
@@ -1547,7 +1603,7 @@ async fn resolve_agent(
         if let Some(ready) =
             ready_existing_agent(client, &backboard, environment_id, agent, progress).await?
         {
-            warn_ignored_variables(args);
+            warn_ignored_variables(args, progress);
             configs.set_code_agent(environment_id, &ready.id);
             configs.write()?;
             return Ok((ready, false));
@@ -1596,13 +1652,17 @@ async fn resolve_agent(
 
 /// `--variable`/`--env-file` only reach the VM spec at create time, so say so
 /// rather than silently dropping them on a reuse.
-fn warn_ignored_variables(args: &LaunchArgs) {
+///
+/// Through the progress sink rather than straight to stderr: these flags can
+/// now arrive on a launch that opens in the TUI's pane, and a stray write there
+/// lands on top of the frame.
+fn warn_ignored_variables(args: &LaunchArgs, progress: &dyn Progress) {
     use colored::Colorize;
     if !args.variables.is_empty() || !args.env_files.is_empty() {
-        eprintln!(
-            "{}",
-            "Note: --variable/--env-file only apply when an agent is created — reusing this environment's. Add --new to create with these variables."
+        progress.note(
+            &"Note: --variable/--env-file only apply when an agent is created — reusing this environment's. Add --new to create with these variables."
                 .yellow()
+                .to_string(),
         );
     }
 }
@@ -1806,6 +1866,42 @@ pub struct Prepared {
     pub harness: &'static str,
     /// True when this run created the agent, which only affects messaging.
     pub created: bool,
+}
+
+/// Where a launch lands and what it runs there, settled before anything is
+/// spent on it.
+pub struct ResolvedLaunch {
+    pub project_id: String,
+    pub environment_id: String,
+    /// The harness slug, matching [`Agent::slug`].
+    pub harness: &'static str,
+}
+
+/// Answer a launch's two unavoidable questions — where, and which harness —
+/// using the same order the direct path uses.
+///
+/// Split out so the pane path can settle both *before* the TUI takes the
+/// screen. Either answer can print, prompt, or run `railway ca setup` inline,
+/// and none of that survives underneath a ratatui frame.
+///
+/// The target goes first because `railway ca setup` is one of its answers, and
+/// setup also writes the default harness — asking for the harness first would
+/// ask a question setup is about to ask again.
+pub async fn resolve_launch(
+    args: &LaunchArgs,
+    configs: &mut Configs,
+    client: &reqwest::Client,
+) -> Result<ResolvedLaunch> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
+    let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
+    let (project_id, environment_id) =
+        resolve_target(configs, client, args, &mut prefs, &home).await?;
+    let harness = resolve_agent_choice(args, &mut prefs, &home)?.slug();
+    Ok(ResolvedLaunch {
+        project_id,
+        environment_id,
+        harness,
+    })
 }
 
 pub async fn launch(args: LaunchArgs) -> Result<()> {
@@ -2377,6 +2473,81 @@ pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// The shapes someone types at a prompt open in the pane. Nothing about a
+    /// target, a harness or a variable changes that — they all describe a
+    /// session, and a session is what the pane holds.
+    #[test]
+    fn an_ordinary_launch_opens_in_the_pane() {
+        for argv in [
+            vec!["code"],
+            vec!["code", "--claude"],
+            vec!["code", "--new", "--name", "api"],
+            vec!["code", "-p", "proj_1", "-e", "env_prod"],
+            vec!["code", "--variable", "K=V", "--refresh-auth"],
+        ] {
+            let args = LaunchArgs::parse_from(&argv);
+            assert!(args.pane_shaped(), "{argv:?} should open in the pane");
+        }
+    }
+
+    /// The two that a frame would break: `--rm` has no session to draw, and
+    /// `-- args` is a caller asking for an exit code rather than a window.
+    #[test]
+    fn destroying_and_exec_take_the_terminal_instead() {
+        assert!(!LaunchArgs::parse_from(["code", "--rm"]).pane_shaped());
+        assert!(
+            !LaunchArgs::parse_from(["code", "--codex", "--", "exec", "explain this"])
+                .pane_shaped()
+        );
+    }
+
+    /// What the TUI knows — where, which harness, which agent — wins, because
+    /// the user may have moved since typing the command.
+    #[test]
+    fn retargeting_overrides_what_the_tui_decides() {
+        let args = LaunchArgs::parse_from(["code", "--codex", "-p", "old_p", "-e", "old_e"])
+            .retargeted(
+                "new_p".into(),
+                "new_e".into(),
+                "claude",
+                true,
+                Some("fix the tests".into()),
+                Some("ca_1".into()),
+            );
+        assert_eq!(args.project.as_deref(), Some("new_p"));
+        assert_eq!(args.environment.as_deref(), Some("new_e"));
+        assert_eq!(args.agent_id.as_deref(), Some("ca_1"));
+        assert_eq!(args.initial_prompt.as_deref(), Some("fix the tests"));
+        assert!(args.new);
+        assert!(args.claude, "the harness the TUI chose");
+        assert!(!args.codex, "and only that one");
+    }
+
+    /// Everything the TUI has no way to ask for survives the trip through it.
+    /// Dropping these would silently ignore what was typed: `railway code
+    /// --new --name api --variable K=V` would create an agent with a generated
+    /// name and none of the variables.
+    #[test]
+    fn retargeting_carries_the_flags_the_tui_cannot_ask_for() {
+        let args = LaunchArgs::parse_from([
+            "code",
+            "--new",
+            "--name",
+            "api",
+            "--variable",
+            "DB=postgres.DATABASE_URL",
+            "--env-file",
+            ".env",
+            "--refresh-auth",
+        ])
+        .retargeted("p".into(), "e".into(), "claude", true, None, None);
+        assert_eq!(args.name.as_deref(), Some("api"));
+        assert_eq!(args.variables, ["DB=postgres.DATABASE_URL"]);
+        assert_eq!(args.env_files, [std::path::PathBuf::from(".env")]);
+        assert!(args.refresh_auth);
+    }
 
     fn note_of(pending: PendingAuth) -> String {
         match pending {

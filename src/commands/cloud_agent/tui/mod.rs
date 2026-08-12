@@ -532,6 +532,16 @@ pub async fn run(
         }
         sync_session_size(app, &terminal);
 
+        // A launch the caller arrived with, started once the first frame is on
+        // screen so the terminal is already in the state the loading pane will
+        // draw into. Routed through the effect handling rather than straight to
+        // `start_launch`, so it meets the ssh-key gate and the Claude mint the
+        // same way a launch someone pressed a key for does.
+        if let Some(req) = app.autostart.take() {
+            dispatch_launch(app, req, &tx, &client, &backboard);
+            continue;
+        }
+
         let effect = tokio::select! {
             // Background work first: draining it keeps the tree and the session
             // honest even while keys arrive faster than frames.
@@ -831,47 +841,7 @@ pub async fn run(
                     });
                 });
             }
-            Some(Effect::Launch(req)) => {
-                // The launch lives on the manage screen — the tree the agent
-                // will land in — so go there first and reveal its environment.
-                // The ssh gate's question then hangs over the place the answer
-                // matters, not over the menu it happened to be asked from.
-                app.screen = Screen::Manage;
-                if let Some(Effect::LoadAgents {
-                    environment_id,
-                    path,
-                }) = app.reveal_environment(&req.environment_id)
-                {
-                    spawn_env_agents_fetch(environment_id, path, &tx, &client, &backboard);
-                }
-                // Connecting rides SSH, so an unregistered key is settled with
-                // an in-frame question before anything is spent on the launch.
-                if app.hold_for_ssh_key(HeldConnect::Launch(req.clone())) {
-                    continue;
-                }
-                // The mint's browser round-trip needs no terminal — the
-                // browser does the interacting and the flow runs hidden — so
-                // it runs under the frame with the loading screen narrating.
-                // Only its manual-paste fallback needs the real terminal, and
-                // only that failure steps out (see ClaudeMintDone).
-                if req.harness == "claude" && code::claude_needs_local_mint() {
-                    app.start_loading(&req);
-                    let _ = tx.send(Message::LaunchStep(
-                        "Minting a Claude token — approve the browser prompt if one appears"
-                            .to_string(),
-                    ));
-                    let tx = tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let ok = code::mint_claude_credential_headless().is_ok();
-                        let _ = tx.send(Message::ClaudeMintDone {
-                            ok,
-                            req: Box::new(req),
-                        });
-                    });
-                    continue;
-                }
-                start_launch(app, req, &tx);
-            }
+            Some(Effect::Launch(req)) => dispatch_launch(app, req, &tx, &client, &backboard),
             Some(Effect::LoadSessions { agent_id, path }) => {
                 spawn_session_fetch(agent_id, path, &tx, &client, &backboard);
             }
@@ -1426,7 +1396,7 @@ fn schedule_session_refresh(agent_id: String, tx: &mpsc::UnboundedSender<Message
 /// dropped it, leaving the pipeline to infer one and create a VM when it could
 /// not. Tested directly, so a dropped field fails here rather than on a bill.
 fn launch_args_for(req: &LaunchRequest) -> LaunchArgs {
-    LaunchArgs::for_target(
+    (*req.base).clone().retargeted(
         req.project_id.clone(),
         req.environment_id.clone(),
         &req.harness,
@@ -1434,6 +1404,61 @@ fn launch_args_for(req: &LaunchRequest) -> LaunchArgs {
         req.prompt.clone(),
         req.agent_id.clone(),
     )
+}
+
+/// Everything a launch has to clear before the pipeline sees it: the screen it
+/// belongs on, the ssh key it will connect with, and the Claude credential it
+/// may need minting.
+///
+/// A function rather than the body of one match arm because two things start
+/// launches — an [`Effect::Launch`] someone pressed a key for, and the
+/// `autostart` a `railway code` invocation arrived with — and the second must
+/// clear exactly the same gates as the first. Each gate that holds the launch
+/// stores it and returns; the loop redraws with whatever question it raised.
+fn dispatch_launch(
+    app: &mut App,
+    req: LaunchRequest,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    // The launch lives on the manage screen — the tree the agent will land in —
+    // so go there first and reveal its environment. The ssh gate's question
+    // then hangs over the place the answer matters, not over the menu it
+    // happened to be asked from.
+    app.screen = Screen::Manage;
+    if let Some(Effect::LoadAgents {
+        environment_id,
+        path,
+    }) = app.reveal_environment(&req.environment_id)
+    {
+        spawn_env_agents_fetch(environment_id, path, tx, client, backboard);
+    }
+    // Connecting rides SSH, so an unregistered key is settled with an in-frame
+    // question before anything is spent on the launch.
+    if app.hold_for_ssh_key(HeldConnect::Launch(req.clone())) {
+        return;
+    }
+    // The mint's browser round-trip needs no terminal — the browser does the
+    // interacting and the flow runs hidden — so it runs under the frame with
+    // the loading screen narrating. Only its manual-paste fallback needs the
+    // real terminal, and only that failure steps out (see ClaudeMintDone).
+    if req.harness == "claude" && code::claude_needs_local_mint() {
+        app.start_loading(&req);
+        let _ = tx.send(Message::LaunchStep(
+            "Minting a Claude token — approve the browser prompt if one appears".to_string(),
+        ));
+        let tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let ok = code::mint_claude_credential_headless().is_ok();
+            let _ = tx.send(Message::ClaudeMintDone {
+                ok,
+                req: Box::new(req),
+            });
+        });
+        return;
+    }
+    start_launch(app, req, tx);
 }
 
 /// Kick off a launch in the background and show the loading screen.
@@ -1507,7 +1532,7 @@ async fn close_session(app: &mut App, index: usize, _client: &reqwest::Client, _
 /// draw, when the layout that produced the pane is known. A mismatch here is
 /// what makes a remote TUI wrap in the wrong place.
 fn sync_session_size(app: &mut App, terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) {
-    let Some((rows, cols)) = ui::session_pane_size(terminal.size().ok(), app.maximized) else {
+    let Some((rows, cols)) = ui::session_pane_size(terminal.size().ok(), app.pane_is_full()) else {
         return;
     };
     // Every session gets the pane's shape, not just the visible one: a
@@ -1610,6 +1635,7 @@ mod tests {
             harness: "claude".into(),
             prompt: None,
             label: "devtools/production".into(),
+            base: Default::default(),
         }
     }
 
@@ -1652,6 +1678,38 @@ mod tests {
         assert!(command.contains("agent:env_1:ca_1@"), "{command}");
         // The target is a username on the relay, not a host of its own.
         assert!(!command.contains(" agent:env_1:ca_1 "), "{command}");
+    }
+
+    /// A `railway code` launch opens in the pane, so its flags reach the
+    /// pipeline through the request rather than straight off the command line.
+    /// The ones no card asks for have nowhere else to travel.
+    /// Compared whole rather than field by field: `--name` and `--variable`
+    /// are private to `code`, and comparing against the retargeted base is the
+    /// stronger claim anyway — nothing was dropped, not just the two we
+    /// thought to name.
+    #[test]
+    fn a_command_line_launch_keeps_the_flags_it_arrived_with() {
+        use clap::Parser;
+
+        let base = LaunchArgs::parse_from(["code", "--new", "--name", "api", "--variable", "K=V"]);
+        let args = launch_args_for(&LaunchRequest {
+            base: Box::new(base.clone()),
+            force_new: true,
+            ..request()
+        });
+        assert_eq!(
+            args,
+            base.retargeted(
+                "proj_1".into(),
+                "env_prod".into(),
+                "claude",
+                true,
+                None,
+                None
+            )
+        );
+        // And the request is what aimed it: the base named no target.
+        assert_eq!(args.environment.as_deref(), Some("env_prod"));
     }
 
     /// A prompt rides through to the session it seeds.

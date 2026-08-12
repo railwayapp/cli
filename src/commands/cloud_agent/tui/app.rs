@@ -801,6 +801,18 @@ pub struct LaunchRequest {
     pub prompt: Option<String>,
     /// Human-facing description of where this is going, for the handoff line.
     pub label: String,
+    /// The command-line flags this launch started from, when a command line
+    /// started it. The fields above overwrite the target, harness, agent and
+    /// prompt; everything else — `--name`, `--variable`, `--env-file`,
+    /// `--refresh-auth` — rides along from here, because nothing in the TUI
+    /// asks for those and dropping them would quietly ignore what was typed.
+    /// Default for launches the TUI starts itself.
+    ///
+    /// Boxed because a `LaunchRequest` is the largest thing several enums
+    /// carry — `Effect`, `HeldConnect`, `Outcome`, `Message` — and inlining
+    /// another 200 bytes of flags widens every one of them for a field only
+    /// the command line ever fills.
+    pub base: Box<crate::commands::code::LaunchArgs>,
 }
 
 pub struct App {
@@ -825,6 +837,14 @@ pub struct App {
     pub agent_pick: Option<AgentPicker>,
     /// The session pane has the whole screen: no tree, no detail column.
     pub maximized: bool,
+    /// A launch to start as soon as the first frame is up, and then forget.
+    ///
+    /// How `railway code` opens: it has already answered where and which
+    /// harness, so there is nothing to browse for — the TUI is here to hold
+    /// the session, not to ask a question. Taken by the loop and fed through
+    /// the same path a keypress would, so the ssh-key gate and the Claude
+    /// mint still get their say.
+    pub autostart: Option<LaunchRequest>,
     /// This gesture belongs to the application in the session, not to us.
     pointer_to_app: bool,
     /// A short confirmation in the corner, and when it was raised.
@@ -918,6 +938,7 @@ impl App {
             manage_prompt: None,
             agent_pick: None,
             maximized: false,
+            autostart: None,
             pointer_to_app: false,
             toast: None,
             theme: Theme::from_slug(theme),
@@ -1076,6 +1097,20 @@ impl App {
         }
     }
 
+    /// Is the right-hand pane taking the whole screen — no tree, no detail
+    /// column?
+    ///
+    /// The layout and the terminal emulator both have to agree on this, or a
+    /// remote TUI wraps at the wrong column, so both ask here rather than
+    /// reading `maximized` and re-deriving the rest. A launch in flight counts:
+    /// `railway code` collapses the tree from the first frame, and the loading
+    /// screen is what stands in for the session until there is one. A
+    /// maximized flag with neither is not a full pane — it is a blank screen,
+    /// which is what happens between a failed launch and the next key.
+    pub fn pane_is_full(&self) -> bool {
+        self.maximized && (self.active.is_some() || self.loading.active)
+    }
+
     /// The agents in the target environment: (id, name, status).
     fn agents_in_target(&self) -> Vec<(String, String, String)> {
         let Some(target) = self.target.as_ref() else {
@@ -1128,6 +1163,7 @@ impl App {
             harness: self.harness_name().to_string(),
             prompt,
             label: format!("{agent_name} · new session"),
+            base: Default::default(),
         }))
     }
 
@@ -1936,6 +1972,7 @@ impl App {
             harness: self.harness_name().to_string(),
             prompt,
             label: target.label(),
+            base: Default::default(),
         }))
     }
 
@@ -3404,6 +3441,7 @@ impl App {
                     harness: self.harness_name().to_string(),
                     prompt,
                     label: format!("{agent_name} · new session"),
+                    base: Default::default(),
                 }))
             }
             Some(RowKind::Environment(w, p, e)) | Some(RowKind::Group(w, p, e)) => {
@@ -4522,6 +4560,25 @@ mod tests {
         assert!(a.settings.is_none());
     }
 
+    /// `railway code` collapses the tree from the first frame, before there is
+    /// a session to collapse it around — the loading pane stands in for one.
+    /// Without this the tree would be drawn for the whole boot and then vanish,
+    /// which is the flicker the collapsed layout exists to avoid.
+    #[test]
+    fn a_launch_in_flight_fills_the_pane_on_its_own() {
+        let mut a = loaded_app();
+        a.maximized = true;
+        assert!(!a.pane_is_full(), "nothing to show yet");
+
+        a.start_loading(&launch_req());
+        assert!(a.pane_is_full(), "the loading pane has the screen");
+
+        // A launch that fails leaves neither: the tree comes back rather than
+        // the screen going blank.
+        a.launch_failed("no".into());
+        assert!(!a.pane_is_full());
+    }
+
     fn with_sessions(names: &[&str]) -> App {
         let mut a = loaded_app();
         for name in names {
@@ -5141,6 +5198,7 @@ mod tests {
             harness: "claude".into(),
             prompt: Some("fix the tests".into()),
             label: "devtools/production".into(),
+            base: Default::default(),
         };
         a.start_loading(&req);
         assert!(a.loading.active, "the pane shows the wait");
@@ -6803,6 +6861,7 @@ mod tests {
             harness: "claude".into(),
             prompt: None,
             label: "p/e".into(),
+            base: Default::default(),
         };
         // A plain connect reuses whatever is open.
         assert!(!base.wants_new_session());
@@ -7445,6 +7504,7 @@ mod tests {
             harness: "claude".into(),
             prompt: None,
             label: "devtools/production".into(),
+            base: Default::default(),
         }
     }
 
