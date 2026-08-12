@@ -1848,6 +1848,15 @@ fn screen_lines(screen: &vt100::Screen, focused: bool) -> Vec<Line<'static>> {
         let mut run_style: Option<Style> = None;
 
         for col in 0..cols {
+            // A wide character's second cell: the glyph already spans both
+            // columns when drawn, so a space here would shift the rest of
+            // the line right by one column per wide character.
+            if screen
+                .cell(row, col)
+                .is_some_and(vt100::Cell::is_wide_continuation)
+            {
+                continue;
+            }
             let (text, mut style) = match screen.cell(row, col) {
                 Some(cell) => (
                     {
@@ -1899,6 +1908,11 @@ fn cell_style(cell: &vt100::Cell) -> Style {
     }
     if cell.bold() {
         style = style.add_modifier(Modifier::BOLD);
+    }
+    // Claude Code's ghost text — the follow-up prompt → fills in — is plain
+    // SGR 2, no colour of its own; dropping dim renders it as ordinary text.
+    if cell.dim() {
+        style = style.add_modifier(Modifier::DIM);
     }
     if cell.italic() {
         style = style.add_modifier(Modifier::ITALIC);
@@ -3574,6 +3588,45 @@ mod tests {
             out.contains("what changed"),
             "the end of the prompt should be visible:\n{out}"
         );
+    }
+
+    /// Every text attribute the emulator tracks survives into the drawn
+    /// pane. Dim is the one that regressed: Claude Code's ghost text is
+    /// plain SGR 2 with no colour of its own, so dropping it rendered the
+    /// suggestion as ordinary text.
+    #[test]
+    fn emulator_attributes_reach_the_pane() {
+        let mut parser = vt100::Parser::new(4, 40, 0);
+        parser.process(b"plain \x1b[2mghost\x1b[22m \x1b[3mslant\x1b[23m \x1b[1mloud\x1b[22m");
+        let lines = screen_lines(parser.screen(), false);
+        let style_of = |word: &str| {
+            lines[0]
+                .spans
+                .iter()
+                .find(|span| span.content.contains(word))
+                .unwrap_or_else(|| panic!("{word} is on screen"))
+                .style
+        };
+        assert!(style_of("ghost").add_modifier.contains(Modifier::DIM));
+        assert!(style_of("slant").add_modifier.contains(Modifier::ITALIC));
+        assert!(style_of("loud").add_modifier.contains(Modifier::BOLD));
+        assert!(style_of("plain").add_modifier.is_empty());
+    }
+
+    /// A wide character owns two columns but is one glyph: its continuation
+    /// cell must not become a phantom space that shifts the rest of the line
+    /// right.
+    #[test]
+    fn wide_characters_keep_their_columns() {
+        let mut parser = vt100::Parser::new(2, 10, 0);
+        parser.process("\u{65e5}x".as_bytes());
+        let lines = screen_lines(parser.screen(), false);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.clone().into_owned())
+            .collect();
+        assert_eq!(text, "\u{65e5}x       ");
     }
 
     /// Wrapping arithmetic the scroll depends on.
