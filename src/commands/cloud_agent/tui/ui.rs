@@ -2493,10 +2493,16 @@ mod tests {
         let bottom = (top + 1..lines.len())
             .find(|&y| lines[y].chars().nth(col) == Some('╰'))
             .expect("a closed box");
+        let right = lines[top]
+            .chars()
+            .collect::<Vec<_>>()
+            .iter()
+            .rposition(|&c| c == '╮')
+            .expect("a top border");
         let below: String = lines[bottom + 1]
             .chars()
             .skip(col)
-            .take(lines[top].chars().count() - col)
+            .take(right - col + 1)
             .collect();
         assert!(
             below.trim().is_empty(),
