@@ -787,18 +787,44 @@ fn claude_sign_in_on_agent() -> PendingAuth {
     }
 }
 
+/// Whether this launch should carry a local Claude credential to the agent
+/// at all.
+///
+/// A `claude setup-token` grant is `user:inference`-only by design
+/// (anthropics/claude-code#22450) — model requests work, but the harness
+/// authenticated with one fetches (and caches) a capped world: fewer models,
+/// no connectors, older feature configs. An interactive session is better
+/// served by one `/login` on the agent — full scopes, and it sticks across
+/// sessions now that a newer login outranks the env token. Exec runs still
+/// carry: inference is exactly what they need, and nobody is at a terminal
+/// to sign in. `--refresh-auth` carries too — it is an explicit request to
+/// mint and place a token.
+fn claude_should_carry(args: &LaunchArgs) -> bool {
+    !args.agent_args.is_empty() || args.refresh_auth
+}
+
+fn claude_full_login_note() -> String {
+    format!(
+        "{} signs in on the agent (a one-time /login there) — a carried setup-token would cap its models and features.",
+        Agent::Claude.display()
+    )
+}
+
 /// Resolve a Claude credential from the sources that cost nothing: this
 /// command's own cache, then the environment. Anything else needs a mint —
 /// unless there is nothing here to mint with, in which case the agent's own
 /// sign-in is the flow, and the user finds that out before a VM is spent
 /// rather than through a browser prompt that never arrives.
 ///
+/// `carry` is [`claude_should_carry`]'s verdict: when false, everything after
+/// the explicit env credentials is skipped in favor of the agent's own
+/// sign-in. The env vars still win — that is the user naming a credential
+/// for this run, and they may know their token's scopes better than we do.
+///
 /// `refresh_auth` is the local half of `--refresh-auth`: it drops our cached
 /// setup-token so a stale or revoked one can't be handed to the agent again,
-/// and forces the mint below to run instead of silently reusing it. An
-/// explicit `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` still wins even
-/// then — that is the user naming a credential for this run, not a cache.
-fn claude_credentials_cheap(refresh_auth: bool) -> Result<PendingAuth> {
+/// and forces the mint below to run instead of silently reusing it.
+fn claude_credentials_cheap(refresh_auth: bool, carry: bool) -> Result<PendingAuth> {
     for var in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] {
         if let Ok(tok) = std::env::var(var) {
             let tok = tok.trim().to_string();
@@ -810,6 +836,11 @@ fn claude_credentials_cheap(refresh_auth: bool) -> Result<PendingAuth> {
                 });
             }
         }
+    }
+    if !carry {
+        return Ok(PendingAuth::SignInOnAgent {
+            note: claude_full_login_note(),
+        });
     }
     if refresh_auth {
         clear_claude_token_cache();
@@ -1976,7 +2007,7 @@ async fn prepare_inner(
             ssh_tel::track_for(
                 "cloud_agent_launch",
                 "credential",
-                claude_credentials_cheap(args.refresh_auth),
+                claude_credentials_cheap(args.refresh_auth, claude_should_carry(args)),
             )
             .await?
         }
@@ -2343,8 +2374,11 @@ echo "KILLED:$killed""#
 /// prompt. An error resolving the credential says yes too, so it surfaces out
 /// of frame where it is readable.
 pub fn claude_needs_local_mint() -> bool {
+    // TUI launches are interactive sessions, which don't carry a credential
+    // (see `claude_should_carry`) — so this only reports a mint when an
+    // explicit env credential failed to parse, which surfaces elsewhere.
     !matches!(
-        claude_credentials_cheap(false),
+        claude_credentials_cheap(false, false),
         Ok(PendingAuth::Ready { .. } | PendingAuth::SignInOnAgent { .. })
     )
 }
@@ -2363,7 +2397,7 @@ pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
     if harness != "claude" {
         return Ok(());
     }
-    if let PendingAuth::MintClaude = claude_credentials_cheap(false)? {
+    if let PendingAuth::MintClaude = claude_credentials_cheap(false, false)? {
         match mint_claude_credentials()? {
             Some((_line, source)) => {
                 eprintln!("Using your Claude Code credential ({source}) on the agent")
@@ -2385,6 +2419,32 @@ mod tests {
             PendingAuth::MintClaude => panic!("expected a fallback, got a mint"),
             PendingAuth::None => panic!("expected a fallback, got a harness needing no credential"),
         }
+    }
+
+    /// Interactive sessions get their scopes from the agent's own /login; a
+    /// setup-token is user:inference-only and would cap the harness. Exec
+    /// runs carry (inference is what they need, and nobody is there to sign
+    /// in), and --refresh-auth carries because it asks for exactly that.
+    #[test]
+    fn only_exec_and_refresh_auth_carry_a_claude_credential() {
+        let interactive = LaunchArgs::default();
+        assert!(!claude_should_carry(&interactive));
+
+        let mut exec = LaunchArgs::default();
+        exec.agent_args = vec!["exec".into(), "explain this".into()];
+        assert!(claude_should_carry(&exec));
+
+        let mut refresh = LaunchArgs::default();
+        refresh.refresh_auth = true;
+        assert!(claude_should_carry(&refresh));
+    }
+
+    /// The no-carry path says why before a VM is spent, and names the flow.
+    #[test]
+    fn the_sign_in_on_agent_note_explains_the_scopes_tradeoff() {
+        let note = note_of(claude_credentials_cheap(false, false).unwrap());
+        assert!(note.contains("/login"), "{note}");
+        assert!(note.contains("cap"), "{note}");
     }
 
     #[test]
