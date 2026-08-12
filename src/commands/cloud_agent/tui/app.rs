@@ -2289,6 +2289,12 @@ impl App {
                 None
             }
             MouseAction::Down => {
+                // A click clears the status line, the same as a keypress
+                // (see on_key): the message answered the previous gesture,
+                // and whatever this click means sets a fresh one — clicking
+                // a disconnected session must not leave "not connected"
+                // standing once the cursor is on a connected one.
+                self.status.clear();
                 let pane = self.pane_at(col, row)?;
                 // An agent with clickable output — "click here to copy", a menu
                 // you can point at — turns mouse reporting on and waits for the
@@ -2703,7 +2709,7 @@ impl App {
 
     /// The open pane a row refers to: a session's own, or the first one on an
     /// agent.
-    fn pane_for_row(&self, kind: RowKind) -> Option<usize> {
+    pub fn pane_for_row(&self, kind: RowKind) -> Option<usize> {
         match kind {
             RowKind::Session(w, p, e, a, i) => {
                 let name = self.console_session(w, p, e, a, i)?.name.clone();
@@ -5757,6 +5763,55 @@ mod tests {
         a.on_mouse(MouseAction::Down, 5, 3 + row as u16);
         assert_eq!(a.focus, ManageFocus::Tree);
         assert!(a.status.contains("enter to reattach"), "{}", a.status);
+    }
+
+    /// The reattach prompt answers the click that raised it: clicking a
+    /// connected session afterwards clears it, the same as a keypress would,
+    /// instead of leaving "not connected" standing over a connected pane.
+    #[test]
+    fn clicking_a_connected_session_clears_the_reattach_prompt() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = LoadSessions::Loaded(vec![
+                ConsoleSession {
+                    name: "claude-one".into(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: true,
+                    attached: true,
+                },
+                ConsoleSession {
+                    name: "claude-two".into(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: true,
+                    attached: false,
+                },
+            ]);
+        }
+        let mut pane = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
+        pane.durable_name = "claude-one".into();
+        a.sessions = vec![pane];
+        a.active = Some(0);
+        a.panes = panes_fixture();
+
+        let two = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "claude-two")
+            .unwrap();
+        a.on_mouse(MouseAction::Down, 5, 3 + two as u16);
+        assert!(a.status.contains("enter to reattach"), "{}", a.status);
+
+        let one = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "claude-one")
+            .unwrap();
+        a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
+        assert!(a.status.is_empty(), "{}", a.status);
+        assert_eq!(a.active, Some(0));
     }
 
     /// Enter on a project toggles it: the first press opens it straight
