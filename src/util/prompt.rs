@@ -16,7 +16,40 @@ use crate::{
 };
 use anyhow::{Context, Result};
 
+/// Set while a full-screen TUI holds the terminal — raw mode, alternate
+/// screen, and its own crossterm event reader. An inquire prompt started then
+/// can never complete: the TUI's event stream consumes the keystrokes while
+/// the prompt blocks forever, and the next frame paints over its output.
+static TERMINAL_OWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark the terminal as owned (or released) by a full-screen TUI. While set,
+/// every prompt in this module fails fast instead of deadlocking.
+pub fn set_terminal_owned(owned: bool) {
+    TERMINAL_OWNED.store(owned, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether a full-screen TUI currently owns the terminal. Code that would
+/// prompt as a fallback should treat this the same as a non-interactive stdin.
+pub fn terminal_owned() -> bool {
+    TERMINAL_OWNED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Refuse to prompt while a TUI owns the terminal: loud in debug builds so
+/// the call site gets fixed, a clean error in release builds so the user gets
+/// a message instead of a hang.
+fn ensure_promptable() -> Result<()> {
+    if terminal_owned() {
+        debug_assert!(
+            false,
+            "interactive prompt attempted while a TUI owns the terminal"
+        );
+        anyhow::bail!("an interactive prompt can't run while the TUI holds the terminal");
+    }
+    Ok(())
+}
+
 pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
+    ensure_promptable()?;
     let select = inquire::Select::new(message, options);
     select
         .with_render_config(Configs::get_render_config())
@@ -25,6 +58,7 @@ pub fn prompt_options<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
 }
 
 pub fn prompt_options_skippable<T: Display>(message: &str, options: Vec<T>) -> Result<Option<T>> {
+    ensure_promptable()?;
     let select = inquire::Select::new(message, options);
     select
         .with_render_config(Configs::get_render_config())
@@ -37,6 +71,7 @@ pub fn prompt_options_skippable_with_default<T: Display>(
     options: Vec<T>,
     default_index: usize,
 ) -> Result<Option<T>> {
+    ensure_promptable()?;
     let select = inquire::Select::new(message, options);
     select
         .with_render_config(Configs::get_render_config())
@@ -46,6 +81,7 @@ pub fn prompt_options_skippable_with_default<T: Display>(
 }
 
 pub fn prompt_text(message: &str) -> Result<String> {
+    ensure_promptable()?;
     let select = inquire::Text::new(message);
     select
         .with_render_config(Configs::get_render_config())
@@ -56,6 +92,7 @@ pub fn prompt_text(message: &str) -> Result<String> {
 /// Prompt for a secret (token, key): input is masked as it's typed and never
 /// echoed back, with no confirmation round-trip.
 pub fn prompt_secret(message: &str) -> Result<String> {
+    ensure_promptable()?;
     inquire::Password::new(message)
         .with_render_config(Configs::get_render_config())
         .with_display_mode(inquire::PasswordDisplayMode::Masked)
@@ -68,6 +105,7 @@ pub fn prompt_u64_with_placeholder_and_validation_and_cancel(
     message: &str,
     placeholder: &str,
 ) -> Result<Option<String>> {
+    ensure_promptable()?;
     let validator = |input: &str| {
         if input.parse::<u64>().is_ok() {
             Ok(Validation::Valid)
@@ -90,6 +128,7 @@ pub fn prompt_text_with_placeholder_if_blank(
     placeholder: &str,
     blank_message: &str,
 ) -> Result<String> {
+    ensure_promptable()?;
     let select = inquire::Text::new(message);
     select
         .with_render_config(Configs::get_render_config())
@@ -106,6 +145,7 @@ pub fn prompt_text_with_placeholder_if_blank(
 }
 
 pub fn prompt_text_with_placeholder_disappear(message: &str, placeholder: &str) -> Result<String> {
+    ensure_promptable()?;
     let select = inquire::Text::new(message);
     select
         .with_render_config(Configs::get_render_config())
@@ -118,6 +158,7 @@ pub fn prompt_text_with_placeholder_disappear_skippable(
     message: &str,
     placeholder: &str,
 ) -> Result<Option<String>> {
+    ensure_promptable()?;
     let select = inquire::Text::new(message);
     select
         .with_render_config(Configs::get_render_config())
@@ -127,6 +168,7 @@ pub fn prompt_text_with_placeholder_disappear_skippable(
 }
 
 pub fn prompt_confirm_with_default(message: &str, default: bool) -> Result<bool> {
+    ensure_promptable()?;
     let confirm = inquire::Confirm::new(message);
     confirm
         .with_default(default)
@@ -139,6 +181,7 @@ pub fn prompt_confirm_with_default_with_cancel(
     message: &str,
     default: bool,
 ) -> Result<Option<bool>> {
+    ensure_promptable()?;
     let confirm = inquire::Confirm::new(message);
     confirm
         .with_default(default)
@@ -148,6 +191,7 @@ pub fn prompt_confirm_with_default_with_cancel(
 }
 
 pub fn prompt_multi_options<T: Display>(message: &str, options: Vec<T>) -> Result<Vec<T>> {
+    ensure_promptable()?;
     let multi_select = inquire::MultiSelect::new(message, options);
     multi_select
         .with_render_config(Configs::get_render_config())
@@ -156,6 +200,7 @@ pub fn prompt_multi_options<T: Display>(message: &str, options: Vec<T>) -> Resul
 }
 
 pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
+    ensure_promptable()?;
     inquire::Select::new(message, options)
         .with_render_config(Configs::get_render_config())
         .prompt()
@@ -163,6 +208,7 @@ pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T> {
 }
 
 pub fn prompt_select_with_cancel<T: Display>(message: &str, options: Vec<T>) -> Result<Option<T>> {
+    ensure_promptable()?;
     inquire::Select::new(message, options)
         .with_render_config(Configs::get_render_config())
         .prompt_skippable()
@@ -333,6 +379,7 @@ impl Autocomplete for PathAutocompleter {
 }
 
 pub fn prompt_path(message: &str) -> Result<PathBuf> {
+    ensure_promptable()?;
     inquire::Text::new(message)
         .with_autocomplete(PathAutocompleter)
         .with_render_config(Configs::get_render_config())
@@ -342,6 +389,7 @@ pub fn prompt_path(message: &str) -> Result<PathBuf> {
 }
 
 pub fn prompt_path_with_default(message: &str, default: &str) -> Result<PathBuf> {
+    ensure_promptable()?;
     inquire::Text::new(message)
         .with_autocomplete(PathAutocompleter)
         .with_render_config(Configs::get_render_config())
@@ -349,4 +397,29 @@ pub fn prompt_path_with_default(message: &str, default: &str) -> Result<PathBuf>
         .prompt()
         .map(PathBuf::from)
         .context("Failed to prompt for path")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The guard is what turns "prompt under the TUI" from a silent deadlock
+    /// (two crossterm readers racing for the same keystrokes) into a loud
+    /// failure: an assert in debug builds, a clean error in release.
+    #[test]
+    fn prompts_refuse_while_a_tui_owns_the_terminal() {
+        set_terminal_owned(true);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(ensure_promptable);
+        std::panic::set_hook(hook);
+        set_terminal_owned(false);
+        match result {
+            // Release builds: the prompt call fails instead of hanging.
+            Ok(outcome) => assert!(outcome.is_err()),
+            // Debug builds: the debug_assert fired, naming the call site.
+            Err(_) => {}
+        }
+        assert!(ensure_promptable().is_ok());
+    }
 }
