@@ -585,6 +585,19 @@ fn relay_ssh() -> Result<RelaySsh> {
             format!("UserKnownHostsFile={}", known_hosts.display()),
             "-o".into(),
             "StrictHostKeyChecking=accept-new".into(),
+            // A session pane sits idle for as long as the user reads, and an
+            // idle TCP path through a NAT or load balancer gets dropped without
+            // either end being told. Without keepalives that shows up as a pane
+            // frozen until the kernel gives up on the connection — tens of
+            // minutes — with no error from anything. Probing every 30s keeps
+            // the idle-timeout clocks at zero and turns a dead path into a
+            // detected disconnect within ~90s, which the TUI can then offer to
+            // reconnect. Same numbers as the port-forward path, for the same
+            // reason.
+            "-o".into(),
+            "ServerAliveInterval=30".into(),
+            "-o".into(),
+            "ServerAliveCountMax=3".into(),
         ],
         known_hosts,
         host_pattern,

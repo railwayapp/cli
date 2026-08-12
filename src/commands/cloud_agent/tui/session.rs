@@ -398,6 +398,20 @@ impl Session {
         self.ended.load(Ordering::Relaxed)
     }
 
+    /// The environment this session's agent lives in, read back out of the
+    /// relay target (`agent:<environment>:<agent>`) it connected with.
+    ///
+    /// Reconnecting after a drop needs it — `connect_info` resolves the relay
+    /// plumbing from environment and agent — and the target is the one place
+    /// the session still carries it.
+    pub fn environment_id(&self) -> Option<String> {
+        let mut parts = self.ssh_target.split(':');
+        match (parts.next()?, parts.next()) {
+            ("agent", Some(env)) if !env.is_empty() => Some(env.to_string()),
+            _ => None,
+        }
+    }
+
     /// Resize both the emulator and the pty. Doing only one leaves the agent
     /// drawing to a screen of a different shape than the one being rendered.
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -686,6 +700,13 @@ fn url_in(line: &str, col: usize) -> Option<String> {
 
 #[cfg(test)]
 impl Session {
+    /// Flip the session to ended without waiting for its process to die —
+    /// the reader thread races a test that killed `cat`, and the state under
+    /// test is "the connection is gone", not how it went.
+    pub fn mark_ended(&self) {
+        self.ended.store(true, Ordering::Relaxed);
+    }
+
     /// A session backed by a local `cat` instead of ssh, so the state machine
     /// around sessions can be tested without a relay or a network.
     pub fn for_test(agent_id: &str, agent_name: &str) -> Result<Self> {
@@ -1031,6 +1052,15 @@ mod tests {
                 .unwrap_or(false),
             "expected the kitty encoding on the wire"
         );
+    }
+
+    /// Reconnecting resolves the relay plumbing from the environment, which
+    /// the session only holds inside its relay target.
+    #[test]
+    fn the_environment_is_read_back_out_of_the_relay_target() {
+        let session = Session::for_test("ca", "test").unwrap();
+        // for_test connects as agent:test:test.
+        assert_eq!(session.environment_id().as_deref(), Some("test"));
     }
 
     #[test]
