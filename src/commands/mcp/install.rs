@@ -16,12 +16,18 @@ pub struct Args {
 
     /// Configure the remote MCP server at mcp.railway.com, bridged through `railway mcp proxy`
     /// so it authenticates with your existing CLI login (no browser OAuth flow).
-    #[clap(long)]
+    /// This is the default; the flag is kept for compatibility.
+    #[clap(long, conflicts_with = "local")]
     remote: bool,
 
-    /// With --remote: write the plain HTTP server URL instead of the CLI proxy, so the
-    /// editor runs its own OAuth (browser consent) flow.
-    #[clap(long, requires = "remote")]
+    /// Configure the local GraphQL-backed MCP server (`railway mcp`) instead of the
+    /// remote CLI proxy default.
+    #[clap(long, conflicts_with_all = ["remote", "oauth"])]
+    local: bool,
+
+    /// Write the plain HTTP server URL instead of the CLI proxy, so the editor runs
+    /// its own OAuth (browser consent) flow.
+    #[clap(long, conflicts_with = "local")]
     oauth: bool,
 }
 
@@ -38,11 +44,16 @@ pub(crate) enum McpTransport {
 }
 
 impl McpTransport {
-    pub(crate) fn from_flags(remote: bool, oauth: bool) -> Self {
-        match (remote, oauth) {
-            (false, _) => Self::Local,
-            (true, false) => Self::RemoteProxy,
-            (true, true) => Self::RemoteOauth,
+    /// Resolve the install transport from CLI flags.
+    ///
+    /// Default is the remote CLI proxy. `--local` selects the in-process server;
+    /// `--oauth` selects plain `https://mcp.railway.com`. `--remote` remains
+    /// accepted as an explicit alias of the default.
+    pub(crate) fn from_flags(remote: bool, oauth: bool, local: bool) -> Self {
+        match (local, oauth, remote) {
+            (true, _, _) => Self::Local,
+            (false, true, _) => Self::RemoteOauth,
+            (false, false, _) => Self::RemoteProxy,
         }
     }
 }
@@ -60,7 +71,7 @@ fn stdio_args(transport: McpTransport) -> Vec<&'static str> {
 pub async fn command(args: Args) -> Result<()> {
     install_mcp(
         &args.agent,
-        McpTransport::from_flags(args.remote, args.oauth),
+        McpTransport::from_flags(args.remote, args.oauth, args.local),
         false,
     )
     .await
@@ -874,5 +885,31 @@ mod tests {
             "factory-droid",
             McpTransport::RemoteOauth
         ));
+    }
+
+    #[test]
+    fn from_flags_defaults_to_remote_proxy() {
+        assert_eq!(
+            McpTransport::from_flags(false, false, false),
+            McpTransport::RemoteProxy
+        );
+        // `--remote` remains an explicit alias of the default.
+        assert_eq!(
+            McpTransport::from_flags(true, false, false),
+            McpTransport::RemoteProxy
+        );
+        assert_eq!(
+            McpTransport::from_flags(false, false, true),
+            McpTransport::Local
+        );
+        assert_eq!(
+            McpTransport::from_flags(false, true, false),
+            McpTransport::RemoteOauth
+        );
+        // `--local` wins over a stale `--remote` if both somehow appear.
+        assert_eq!(
+            McpTransport::from_flags(true, false, true),
+            McpTransport::Local
+        );
     }
 }

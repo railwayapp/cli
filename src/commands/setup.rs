@@ -32,17 +32,24 @@ enum SetupCommand {
 pub struct AgentArgs {
     /// Skip prompts and accept defaults: auto-detect installed editors, skip the login flow.
     /// Also auto-engaged when stdout is not a terminal (e.g. piped or running under CI).
+    /// Non-interactive MCP default is the remote CLI proxy (`railway mcp proxy`).
     #[clap(short = 'y', long)]
     yes: bool,
 
     /// Configure the remote MCP server (mcp.railway.com) via the CLI proxy — it authenticates
-    /// with your existing `railway login`, no browser OAuth flow.
-    #[clap(long)]
+    /// with your existing `railway login`, no browser OAuth flow. This is the default for
+    /// `-y` / non-interactive setup; the flag is kept for compatibility.
+    #[clap(long, conflicts_with = "local")]
     remote: bool,
 
-    /// With --remote: write the plain HTTP server URL instead of the CLI proxy, so the
-    /// editor runs its own OAuth (browser consent) flow.
-    #[clap(long, requires = "remote")]
+    /// Configure the local GraphQL-backed MCP server (`railway mcp`) instead of the
+    /// remote CLI proxy default.
+    #[clap(long, conflicts_with_all = ["remote", "oauth"])]
+    local: bool,
+
+    /// Write the plain HTTP server URL (https://mcp.railway.com) instead of the CLI proxy,
+    /// so the editor runs its own OAuth (browser consent) flow.
+    #[clap(long, conflicts_with = "local")]
     oauth: bool,
 }
 
@@ -69,7 +76,7 @@ impl fmt::Display for ToolChoice {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum McpChoice {
     Local,
     RemoteProxy,
@@ -80,15 +87,15 @@ enum McpChoice {
 impl fmt::Display for McpChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            McpChoice::Local => write!(
-                f,
-                "Local (default)  {}",
-                "— runs `railway mcp` as a stdio server".dimmed()
-            ),
             McpChoice::RemoteProxy => write!(
                 f,
-                "Remote           {}",
+                "Remote (default) {}",
                 "— mcp.railway.com via the CLI proxy (uses your `railway login`)".dimmed()
+            ),
+            McpChoice::Local => write!(
+                f,
+                "Local            {}",
+                "— runs `railway mcp` as a stdio server".dimmed()
             ),
             McpChoice::RemoteOauth => write!(
                 f,
@@ -103,21 +110,22 @@ impl fmt::Display for McpChoice {
 fn pick_mcp_choice(
     remote_flag: bool,
     oauth_flag: bool,
+    local_flag: bool,
     non_interactive: bool,
 ) -> Result<McpChoice> {
-    if remote_flag {
-        return Ok(if oauth_flag {
-            McpChoice::RemoteOauth
-        } else {
-            McpChoice::RemoteProxy
-        });
-    }
-    if non_interactive {
+    if local_flag {
         return Ok(McpChoice::Local);
     }
+    if oauth_flag {
+        return Ok(McpChoice::RemoteOauth);
+    }
+    if remote_flag || non_interactive {
+        // `--remote` is now an explicit no-op alias of the non-interactive default.
+        return Ok(McpChoice::RemoteProxy);
+    }
     let options = vec![
-        McpChoice::Local,
         McpChoice::RemoteProxy,
+        McpChoice::Local,
         McpChoice::RemoteOauth,
         McpChoice::Skip,
     ];
@@ -259,8 +267,8 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
     }
 
     // Step 2: MCP install (skips universal internally — no MCP convention).
-    // `--remote` short-circuits the prompt; `-y`/non-TTY defaults to local.
-    let mcp_choice = pick_mcp_choice(args.remote, args.oauth, non_interactive)?;
+    // Flags short-circuit the prompt; `-y`/non-TTY defaults to the remote CLI proxy.
+    let mcp_choice = pick_mcp_choice(args.remote, args.oauth, args.local, non_interactive)?;
     let mcp_transport = match mcp_choice {
         McpChoice::Local => {
             install_missing_mcp(
@@ -544,4 +552,46 @@ async fn ensure_logged_in_interactive() -> Result<()> {
 
     println!("\n{}", "Logging in to Railway...".bold());
     login::command(login::Args { browserless: false }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_interactive_defaults_to_remote_proxy() {
+        assert_eq!(
+            pick_mcp_choice(false, false, false, true).unwrap(),
+            McpChoice::RemoteProxy
+        );
+    }
+
+    #[test]
+    fn remote_flag_selects_proxy_and_remains_compatible() {
+        assert_eq!(
+            pick_mcp_choice(true, false, false, false).unwrap(),
+            McpChoice::RemoteProxy
+        );
+        assert_eq!(
+            pick_mcp_choice(true, false, false, true).unwrap(),
+            McpChoice::RemoteProxy
+        );
+    }
+
+    #[test]
+    fn local_and_oauth_flags_override_default() {
+        assert_eq!(
+            pick_mcp_choice(false, false, true, true).unwrap(),
+            McpChoice::Local
+        );
+        assert_eq!(
+            pick_mcp_choice(false, true, false, true).unwrap(),
+            McpChoice::RemoteOauth
+        );
+        // `--local` wins if both local and remote somehow appear.
+        assert_eq!(
+            pick_mcp_choice(true, false, true, true).unwrap(),
+            McpChoice::Local
+        );
+    }
 }
