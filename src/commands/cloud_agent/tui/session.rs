@@ -398,6 +398,17 @@ impl Session {
         self.ended.load(Ordering::Relaxed)
     }
 
+    /// Ended after living like a real session: it produced output and lasted
+    /// past the stall window. This is "the harness exited" — the pane can
+    /// close on it. An ssh that dies quickly is a failed connect instead, and
+    /// its pane has to stay up, because whatever ssh printed is the only
+    /// account of what went wrong.
+    pub fn ended_after_working(&self) -> bool {
+        self.ended()
+            && self.got_output.load(Ordering::Relaxed)
+            && self.spawned_at.elapsed() >= Self::STALL_AFTER
+    }
+
     /// Resize both the emulator and the pty. Doing only one leaves the agent
     /// drawing to a screen of a different shape than the one being rendered.
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -686,6 +697,20 @@ fn url_in(line: &str, col: usize) -> Option<String> {
 
 #[cfg(test)]
 impl Session {
+    /// Put the session in the state [`Self::ended_after_working`] looks for:
+    /// output seen, stall window outlived, reader done.
+    pub fn end_for_test(&mut self) {
+        self.ended.store(true, Ordering::Relaxed);
+        self.got_output.store(true, Ordering::Relaxed);
+        self.spawned_at = std::time::Instant::now() - Self::STALL_AFTER;
+    }
+
+    /// Ended inside the stall window — the shape of a connect that failed.
+    pub fn end_young_for_test(&mut self) {
+        self.ended.store(true, Ordering::Relaxed);
+        self.got_output.store(true, Ordering::Relaxed);
+    }
+
     /// A session backed by a local `cat` instead of ssh, so the state machine
     /// around sessions can be tested without a relay or a network.
     pub fn for_test(agent_id: &str, agent_name: &str) -> Result<Self> {

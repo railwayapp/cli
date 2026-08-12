@@ -763,7 +763,7 @@ async fn start_session(agent: &ca::Agent) -> Result<i32> {
         format!("No session on {} yet — starting {harness}.", agent.name).dimmed()
     );
     let progress = code::CliProgress::default();
-    let prepared = code::prepare(&launch, &progress).await?;
+    let prepared = code::prepare(&launch, &progress, code::SessionStyle::FullTerminal).await?;
     progress.finish();
 
     let session_name = session::durable_name(prepared.harness);

@@ -1089,7 +1089,9 @@ fn handle_message(
         }
         Message::RefreshAgentSessions(agent_id) => app.refresh_agent_sessions(&agent_id),
         // The draw at the top of the loop is the response.
-        Message::SessionOutput => None,
+        // Output also carries the end: the reader thread flips `ended` and
+        // sends one last wake, which is when a finished pane gets closed.
+        Message::SessionOutput => app.reap_ended_sessions(),
     }
 }
 
@@ -1469,7 +1471,7 @@ fn start_launch(app: &mut App, req: LaunchRequest, tx: &mpsc::UnboundedSender<Me
         let req = req;
         let args = launch_args_for(&req);
         let progress = ChannelProgress(tx.clone());
-        let message = match code::prepare(&args, &progress).await {
+        let message = match code::prepare(&args, &progress, code::SessionStyle::Pane).await {
             Ok(prepared) => Message::LaunchReady(Box::new(prepared), Box::new(req)),
             Err(err) => Message::LaunchFailed(format!("{err:#}")),
         };

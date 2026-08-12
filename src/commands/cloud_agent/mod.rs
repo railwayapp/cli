@@ -341,6 +341,10 @@ async fn browse_with(opts: BrowseOpts) -> Result<()> {
         app.target = Some(target);
     }
     app.maximized = collapsed;
+    // `railway code` is here for its one session, so the TUI leaves when that
+    // session ends; bare `railway ca` keeps its tree. Held on the app rather
+    // than derived from `autostart`, which the loop consumes on frame one.
+    app.quit_when_done = launch.is_some();
     app.autostart = launch;
 
     let mut pending: Option<tui::LaunchRequest> = None;
@@ -352,6 +356,12 @@ async fn browse_with(opts: BrowseOpts) -> Result<()> {
                 // user set it again next time. Best-effort: failing to save it
                 // is not worth an error on exit.
                 persist_theme(&home, app.theme.slug);
+                // A quit that closed a finished session says so here, on the
+                // restored terminal — the agent is still running (and billing)
+                // even though its session is over.
+                if let Some(note) = app.exit_note.take() {
+                    println!("{}", note.dimmed());
+                }
                 return Ok(());
             }
             Outcome::FullScreen(req) => {

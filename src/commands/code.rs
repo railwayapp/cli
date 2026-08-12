@@ -563,6 +563,22 @@ if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MIS
     )
 }
 
+/// Where a prepared session's output lands, which decides what quitting the
+/// harness should leave behind.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionStyle {
+    /// ssh owns the real terminal (`railway ca start`, piped and `--`
+    /// callers): quitting the agent lands in a shell on the VM, matching the
+    /// `~/.profile` autostart, and `exit` ends the connection.
+    FullTerminal,
+    /// The TUI's session pane: when the harness exits the remote command ends,
+    /// the durable session with it, and the pane closes. A shell fallback here
+    /// would strand the user on a bare VM prompt inside what still looks like
+    /// the TUI — and leave the durable session alive as a shell nobody wants
+    /// to reattach to.
+    Pane,
+}
+
 /// The command the launch session runs on the VM. Three shapes, and the
 /// difference between them is whether you are left in a session afterwards:
 ///
@@ -571,25 +587,32 @@ if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MIS
 /// - `-- args` execs the agent and exits with it, so a pipeline doesn't hang
 ///   waiting on a shell nobody is typing into.
 ///
-/// Neither interactive form uses `exec`: quitting the agent lands in a shell on
-/// the VM, matching the `~/.profile` autostart. `RAILWAY_CODE_AUTOSTARTED`
-/// stops that autostart relaunching the agent on top of the user, and the reset
-/// scrubs terminal state a TUI can leave behind on an unclean exit.
+/// "Keeps the session" is [`SessionStyle`]'s call: a full-terminal caller gets
+/// a VM shell after the agent quits, a pane ends with it. Neither interactive
+/// form uses `exec`, so the reset always runs. `RAILWAY_CODE_AUTOSTARTED`
+/// stops the `~/.profile` autostart relaunching the agent on top of the user,
+/// and the reset scrubs terminal state a TUI can leave behind on an unclean
+/// exit.
 fn remote_command(
     agent: Agent,
     env_prefix: &str,
     initial_prompt: Option<&str>,
     agent_args: &[String],
+    style: SessionStyle,
 ) -> String {
     let name = agent.name();
+    let after = match style {
+        SessionStyle::FullTerminal => "; exec bash -l",
+        SessionStyle::Pane => "",
+    };
     match initial_prompt.map(str::trim).filter(|p| !p.is_empty()) {
         Some(prompt) => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {}; exec bash -l",
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {}{after}",
             shell_join(std::slice::from_ref(&prompt.to_string())),
             terminal_reset_printf()
         ),
         None if agent_args.is_empty() => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {}; exec bash -l",
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {}{after}",
             terminal_reset_printf()
         ),
         None => format!("{env_prefix}exec {name} {}", shell_join(agent_args)),
@@ -1933,7 +1956,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     );
 
     let progress = CliProgress::default();
-    let prepared = prepare(&args, &progress).await?;
+    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
     progress.finish();
 
     println!("Launching {}…", prepared.harness);
@@ -2008,7 +2031,11 @@ pub fn run_session(prepared: &Prepared) -> Result<i32> {
 /// steps itself. The one thing that cannot happen here is an interactive Claude
 /// mint — see [`ensure_claude_credential_cached`], which a TUI caller runs
 /// before it takes the screen.
-pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepared> {
+pub async fn prepare(
+    args: &LaunchArgs,
+    progress: &dyn Progress,
+    style: SessionStyle,
+) -> Result<Prepared> {
     // Timed and reported separately from `prepare_inner` so every caller
     // (`railway code`, `railway ca start`, and the TUI's `start_launch`) gets
     // the same outcome event without duplicating it at each call site — none
@@ -2034,7 +2061,7 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
         }
     };
 
-    let result = prepare_inner(args, progress, agent, prefs, &home).await;
+    let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
     crate::commands::cloud_agent::telemetry::track_launch_outcome(
         agent.slug(),
         result.as_ref().ok().map(|p| p.created),
@@ -2051,6 +2078,7 @@ async fn prepare_inner(
     agent: Agent,
     mut prefs: AgentPrefs,
     home: &Path,
+    style: SessionStyle,
 ) -> Result<Prepared> {
     // --- Resolve the local credential (client-side only, announced).
     //
@@ -2284,6 +2312,7 @@ async fn prepare_inner(
         &env_prefix,
         args.initial_prompt.as_deref(),
         &args.agent_args,
+        style,
     );
 
     Ok(Prepared {
@@ -2788,12 +2817,20 @@ mod tests {
     /// to work in, or hang a script on a shell.
     #[test]
     fn remote_command_shapes() {
-        let seeded = remote_command(Agent::Claude, "P; ", Some("fix the tests"), &[]);
+        use SessionStyle::FullTerminal;
+
+        let seeded = remote_command(
+            Agent::Claude,
+            "P; ",
+            Some("fix the tests"),
+            &[],
+            FullTerminal,
+        );
         assert!(seeded.contains("claude 'fix the tests';"), "{seeded}");
         assert!(seeded.ends_with("exec bash -l"));
         assert!(!seeded.contains("exec claude"));
 
-        let interactive = remote_command(Agent::Claude, "P; ", None, &[]);
+        let interactive = remote_command(Agent::Claude, "P; ", None, &[], FullTerminal);
         assert!(interactive.contains("claude;"), "{interactive}");
         assert!(interactive.ends_with("exec bash -l"));
 
@@ -2802,6 +2839,7 @@ mod tests {
             "P; ",
             None,
             &["exec".into(), "explain this".into()],
+            FullTerminal,
         );
         assert!(
             scripted.contains("exec codex exec 'explain this'"),
@@ -2810,15 +2848,39 @@ mod tests {
         assert!(!scripted.contains("bash -l"));
 
         // A prompt of only whitespace is not a prompt.
-        let blank = remote_command(Agent::Grok, "P; ", Some("   "), &[]);
-        assert_eq!(blank, remote_command(Agent::Grok, "P; ", None, &[]));
+        let blank = remote_command(Agent::Grok, "P; ", Some("   "), &[], FullTerminal);
+        assert_eq!(
+            blank,
+            remote_command(Agent::Grok, "P; ", None, &[], FullTerminal)
+        );
+    }
+
+    /// A pane session must end when the harness does. The shell fallback that
+    /// serves a full-terminal caller strands a pane on a bare VM prompt inside
+    /// what still looks like the TUI — ctrl-c out of the agent read as the CLI
+    /// breaking, with a leftover shell session to reattach to.
+    #[test]
+    fn a_pane_session_ends_with_the_harness() {
+        for prompt in [None, Some("fix the tests")] {
+            let pane = remote_command(Agent::Claude, "P; ", prompt, &[], SessionStyle::Pane);
+            assert!(!pane.contains("bash -l"), "{pane}");
+            // The reset still runs — the pane's emulator swallows it, and a
+            // full-screen takeover of the same session needs it.
+            assert!(pane.ends_with("\\033[?25h'"), "{pane}");
+        }
     }
 
     /// A prompt is user text arriving on a remote shell's command line; it has
     /// to be quoted, not interpolated.
     #[test]
     fn a_prompt_cannot_break_out_of_its_quoting() {
-        let nasty = remote_command(Agent::Claude, "P; ", Some("'; rm -rf / #"), &[]);
+        let nasty = remote_command(
+            Agent::Claude,
+            "P; ",
+            Some("'; rm -rf / #"),
+            &[],
+            SessionStyle::FullTerminal,
+        );
         assert!(!nasty.contains("; rm -rf / #;"), "{nasty}");
         assert!(
             nasty.contains(r"'\''"),

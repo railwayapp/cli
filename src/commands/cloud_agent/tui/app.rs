@@ -845,6 +845,17 @@ pub struct App {
     /// the same path a keypress would, so the ssh-key gate and the Claude
     /// mint still get their say.
     pub autostart: Option<LaunchRequest>,
+    /// Leave the TUI when the last session pane closes on its own.
+    ///
+    /// `railway code` came for one session; when the harness exits (ctrl-c
+    /// included), the person is done, and the right place to land is their
+    /// local prompt — not a browser they never opened. Bare `railway ca`
+    /// keeps its tree instead.
+    pub quit_when_done: bool,
+    /// One line for the caller to print after the terminal is restored — how
+    /// a quit that closed a session says the agent is still running (and
+    /// billing) now that the frame it would have said it in is gone.
+    pub exit_note: Option<String>,
     /// This gesture belongs to the application in the session, not to us.
     pointer_to_app: bool,
     /// A short confirmation in the corner, and when it was raised.
@@ -939,6 +950,8 @@ impl App {
             agent_pick: None,
             maximized: false,
             autostart: None,
+            quit_when_done: false,
+            exit_note: None,
             pointer_to_app: false,
             toast: None,
             theme: Theme::from_slug(theme),
@@ -2639,6 +2652,37 @@ impl App {
         }
         self.unmaximize_without_a_session();
         Some(session)
+    }
+
+    /// Close panes whose ssh has ended because the harness exited.
+    ///
+    /// The reader thread flips `ended` and wakes the loop, which calls this.
+    /// Before it, a finished session sat as a dead pane — and with the pane
+    /// remote command's shell fallback gone, "finished" now includes ctrl-c:
+    /// interrupting the agent out of existence ends the session rather than
+    /// dropping into a VM shell inside the frame. A connect that died young
+    /// stays up instead (see [`Session::ended_after_working`]): whatever ssh
+    /// printed is the only account of what failed. When the last pane closes
+    /// under `railway code`, the TUI leaves with it — see
+    /// [`Self::quit_when_done`].
+    pub fn reap_ended_sessions(&mut self) -> Option<Effect> {
+        let mut closed = None;
+        while let Some(i) = self.sessions.iter().position(|s| s.ended_after_working()) {
+            // Dropping the session detaches its local half; the agent stays
+            // running (sleeping is deliberate, never a side effect).
+            if let Some(session) = self.take_session(i) {
+                closed = Some(session.agent_name.clone());
+            }
+        }
+        let agent_name = closed?;
+        if self.quit_when_done && self.sessions.is_empty() {
+            self.exit_note = Some(format!(
+                "Session ended — agent {agent_name} is still running. `railway ca sleep {agent_name}` stops the compute bill."
+            ));
+            return Some(Effect::Quit);
+        }
+        self.toast(format!("Session on {agent_name} ended"));
+        None
     }
 
     /// Hand the whole terminal to the session under the cursor.
@@ -4558,6 +4602,64 @@ mod tests {
         // ⌥s is not intercepted there — it belongs to whatever is running.
         a.on_key(alt('s'));
         assert!(a.settings.is_none());
+    }
+
+    /// The harness exiting ends its pane. Under `railway code` — one session,
+    /// `quit_when_done` — the TUI leaves with it, back to the local prompt;
+    /// this is what ctrl-c out of the agent lands on now that the pane's
+    /// remote command has no shell fallback to strand you in.
+    #[test]
+    fn an_ended_session_under_railway_code_quits_the_tui() {
+        let mut a = loaded_app();
+        a.quit_when_done = true;
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+
+        // Still running: nothing to reap.
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1);
+
+        a.sessions[0].end_for_test();
+        assert_eq!(a.reap_ended_sessions(), Some(Effect::Quit));
+        assert!(a.sessions.is_empty());
+        let note = a.exit_note.as_deref().expect("says the agent still runs");
+        assert!(note.contains("nimble-otter"), "{note}");
+    }
+
+    /// From bare `railway ca`, an ended pane closes back to the tree — the
+    /// browser was asked for, so it stays.
+    #[test]
+    fn an_ended_session_from_the_tree_closes_back_to_it() {
+        let mut a = loaded_app();
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        a.sessions[0].end_for_test();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert!(a.sessions.is_empty());
+        assert_eq!(a.focus, ManageFocus::Tree);
+        assert!(a.toast.is_some(), "the close is announced, not silent");
+        assert!(a.exit_note.is_none());
+    }
+
+    /// An ssh that dies inside the stall window is a failed connect, and its
+    /// pane is the only place the failure was printed — it stays up.
+    #[test]
+    fn a_connect_that_died_young_keeps_its_pane() {
+        let mut a = loaded_app();
+        a.quit_when_done = true;
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        a.sessions[0].end_young_for_test();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1, "the error stays on screen");
     }
 
     /// `railway code` collapses the tree from the first frame, before there is
