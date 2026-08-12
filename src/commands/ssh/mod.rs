@@ -6,7 +6,9 @@ use clap::Parser;
 use crate::{client::GQLClient, config::Configs};
 
 mod common;
-mod config;
+// `pub(crate)` so `ca desktop` can write an agent's OpenSSH block with the same
+// marker scheme, file locking and permissions as `railway ssh config`.
+pub(crate) mod config;
 mod keys;
 pub(crate) mod native;
 // `pub(crate)` so `sandbox ssh` can emit the same stage-failure telemetry.

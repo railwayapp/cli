@@ -203,6 +203,13 @@ pub struct LaunchArgs {
     /// with it.
     #[clap(skip)]
     pub shell: bool,
+
+    /// Provision for an external app rather than for a session this CLI opens:
+    /// seed the credential and the skills, but leave the login shell alone. Set
+    /// by `railway ca desktop`; there is no flag because on its own it would
+    /// prepare an agent and then do nothing with it.
+    #[clap(skip)]
+    pub app_mode: bool,
 }
 
 impl LaunchArgs {
@@ -308,6 +315,30 @@ impl LaunchArgs {
         self.agent_id = agent_id;
         self.set_harness(harness);
         self
+    }
+
+    /// The provision `railway ca desktop` asks for: seed this harness onto an
+    /// agent and stop, leaving the sessions to an external app.
+    ///
+    /// Project and environment stay optional here, unlike [`for_target`]: the
+    /// TUI always knows which row it was on, while this command is usually run
+    /// from a linked directory and should resolve the target the same way a bare
+    /// `railway code` does.
+    ///
+    /// [`for_target`]: Self::for_target
+    pub fn for_app_mode(
+        harness: &str,
+        project: Option<String>,
+        environment: Option<String>,
+    ) -> Self {
+        let mut args = Self {
+            project,
+            environment,
+            app_mode: true,
+            ..Self::default()
+        };
+        args.set_harness(harness);
+        args
     }
 }
 
@@ -513,17 +544,25 @@ const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:
 ///   keeps scp-style and command sessions out. The trailing printf restores
 ///   terminal state a TUI can leave behind on an unclean exit (kitty keyboard
 ///   mode et al) — see `TERMINAL_RESET`.
-/// The autostart block is versioned: the v2 marker gates the append, and the
+/// The autostart block is versioned: the v3 marker gates the append, and the
 /// sed strips any earlier version first (comment line through the closing
 /// `fi` at column zero), so an agent provisioned before the env-guard change
 /// picks it up on its next provision instead of keeping v1 forever.
+///
+/// v3 adds the `~/.railway-app-mode` guard. `railway ca desktop` hands the agent
+/// to an external app that bootstraps through the login shell, so an autostart
+/// firing there would put a harness where the app expects a shell. The marker
+/// file is what the two provision modes disagree about — see
+/// [`provision_script`] — and it is checked here rather than simply omitted from
+/// `~/.railway-code-agent`, because a later `railway code` on the same agent
+/// would write that file straight back.
 const COMMON_SEED: &str = r#"grep -q "^COLORTERM=" /etc/environment 2>/dev/null || echo "COLORTERM=truecolor" >> /etc/environment 2>/dev/null || true
-if ! grep -q "railway-code agent autostart v2" ~/.profile 2>/dev/null; then
+if ! grep -q "railway-code agent autostart v3" ~/.profile 2>/dev/null; then
 sed -i '/# railway-code agent autostart/,/^fi$/d' ~/.profile 2>/dev/null || true
 cat >> ~/.profile <<'PROFEOF'
 
-# railway-code agent autostart v2 (connecting drops into the agent; exit it for a shell)
-if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ -s "$HOME/.railway-code-agent" ]; then
+# railway-code agent autostart v3 (connecting drops into the agent; exit it for a shell)
+if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ ! -f "$HOME/.railway-app-mode" ] && [ -s "$HOME/.railway-code-agent" ]; then
   agent="$(cat "$HOME/.railway-code-agent")"
   [ -d "$HOME/.grok/bin" ] && export PATH="$HOME/.grok/bin:$PATH"
   if command -v "$agent" >/dev/null 2>&1; then
@@ -564,28 +603,43 @@ const CLAUDE_CREDENTIAL_PROBE: &str =
 /// and we are reusing it. The seed must then be omitted entirely rather than run
 /// with empty stdin: `cat > ~/.claude-code-env` would truncate the very file we
 /// decided to keep.
-fn provision_script(agent: Agent, write_credential: bool) -> String {
+///
+/// `app_mode` is `railway ca desktop`: the agent is being handed to an external
+/// app that opens its own sessions, so the two marker files are written the
+/// other way round. Both modes write both files — one as a marker, one as a
+/// removal — because either can follow the other on the same agent, and a mode
+/// that only ever adds its own marker would inherit the previous one's.
+fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> String {
     let seed = if write_credential {
         agent.credential_seed()
     } else {
         "true"
     };
     let name = agent.name();
-    // A shell launch is "give me the machine", not "retarget this VM": the
-    // recorded autostart agent stays whatever a previous launch made it, so
-    // plain reconnects keep dropping into that agent.
-    let record = match agent {
-        Agent::Shell => "true".to_string(),
-        _ => format!("echo {name} > ~/.railway-code-agent"),
-    };
     let hash_marker = skills_sync::REMOTE_HASH_MARKER;
     let hash_file = skills_sync::REMOTE_HASH_FILE;
+    // The autostart in COMMON_SEED reads both: the sentinel disables it
+    // outright, and `~/.railway-code-agent` is what it would otherwise launch.
+    //
+    // A shell launch is "give me the machine", not "retarget this VM": the
+    // recorded autostart agent stays whatever a previous launch made it, so
+    // plain reconnects keep dropping into that agent. App-mode still wins if
+    // it was asked for — desktop takes the login shell entirely.
+    let mode_seed = if app_mode {
+        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
+    } else {
+        let record = match agent {
+            Agent::Shell => "true".to_string(),
+            _ => format!("echo {name} > ~/.railway-code-agent"),
+        };
+        format!("rm -f ~/.railway-app-mode\n{record}")
+    };
     format!(
         r#"umask 077
 {HARNESS_PATH}
 {seed}
 {COMMON_SEED}
-{record}
+{mode_seed}
 printf '{hash_marker}%s\n' "$(cat "{hash_file}" 2>/dev/null || true)"
 if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi"#
     )
@@ -680,6 +734,16 @@ struct RelaySsh {
     known_hosts: std::path::PathBuf,
     /// known-hosts pattern for ssh-keygen -R: `host` or `[host]:port`.
     host_pattern: String,
+}
+
+/// The known-hosts file the CLI keeps for the relay.
+///
+/// Exposed for `ca desktop`, which writes it into an OpenSSH block so a
+/// third-party client trusts the relay's key the same way this CLI does — and,
+/// more to the point, never lands the relay in the user's `~/.ssh/known_hosts`
+/// or meets a host-key prompt it cannot answer.
+pub fn relay_known_hosts() -> Result<std::path::PathBuf> {
+    Ok(relay_ssh()?.known_hosts)
 }
 
 fn relay_ssh() -> Result<RelaySsh> {
@@ -2295,6 +2359,8 @@ async fn prepare_inner(
         let target = target.clone();
         let identity = identity.clone();
         let relay = relay.clone();
+        // Copied out of `args`, which is a borrow the 'static closure can't take.
+        let app_mode = args.app_mode;
         let skills_note = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let notes = skills_note.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<()> {
@@ -2305,7 +2371,7 @@ async fn prepare_inner(
             };
             let out = ssh_plumbing(
                 &target,
-                &provision_script(agent, auth.is_some()),
+                &provision_script(agent, auth.is_some(), app_mode),
                 identity.as_deref(),
                 auth.as_ref().map(|(line, _)| line.as_slice()),
                 &relay,
@@ -2694,7 +2760,7 @@ mod tests {
         // `cat >` truncating a file we have nothing to write to, and every
         // reconnect seed and readiness marker still there.
         for agent in [Agent::Codex, Agent::Claude, Agent::Grok] {
-            let script = provision_script(agent, false);
+            let script = provision_script(agent, false, false);
             assert!(!script.contains("cat > ~/"), "{script}");
             assert!(script.contains("railway-code agent autostart"));
             assert!(script.contains("AGENT-READY"));
@@ -2711,18 +2777,18 @@ mod tests {
 
     #[test]
     fn provision_script_delivers_credentials_only() {
-        let codex = provision_script(Agent::Codex, true);
+        let codex = provision_script(Agent::Codex, true, false);
         assert!(codex.contains("cat > ~/.codex/auth.json"));
         assert!(codex.contains("echo codex > ~/.railway-code-agent"));
 
-        let claude = provision_script(Agent::Claude, true);
+        let claude = provision_script(Agent::Claude, true, false);
         // Written through a compare: an unchanged token must not touch the
         // file's mtime, or it would outrank an on-agent /login forever.
         assert!(claude.contains("cat > \"$tmp\""));
         assert!(claude.contains("cmp -s \"$tmp\" ~/.claude-code-env"));
         assert!(claude.contains("echo claude > ~/.railway-code-agent"));
 
-        let grok = provision_script(Agent::Grok, true);
+        let grok = provision_script(Agent::Grok, true, false);
         assert!(grok.contains("cat > ~/.grok/auth.json"));
         assert!(grok.contains("echo grok > ~/.railway-code-agent"));
 
@@ -2777,10 +2843,30 @@ mod tests {
                 "{guard}"
             );
         }
-        // The v2 marker gates the append and the strip clears any older block,
+        // The v3 marker gates the append and the strip clears any older block,
         // so agents provisioned before this change converge on their next run.
-        assert!(COMMON_SEED.contains("railway-code agent autostart v2"));
+        assert!(COMMON_SEED.contains("railway-code agent autostart v3"));
         assert!(COMMON_SEED.contains("sed -i '/# railway-code agent autostart/,/^fi$/d'"));
+    }
+
+    /// `railway ca desktop` hands the login shell to an external app, so the
+    /// autostart must be off on those agents — and back on if the same agent is
+    /// later launched with `railway code`. Both directions are asserted because
+    /// only writing one's own marker would inherit the other's.
+    #[test]
+    fn app_mode_and_session_mode_disagree_about_the_autostart() {
+        let app = provision_script(Agent::Claude, false, true);
+        assert!(app.contains("touch ~/.railway-app-mode"));
+        assert!(app.contains("rm -f ~/.railway-code-agent"));
+        assert!(!app.contains("> ~/.railway-code-agent"));
+
+        let session = provision_script(Agent::Claude, false, false);
+        assert!(session.contains("rm -f ~/.railway-app-mode"));
+        assert!(session.contains("echo claude > ~/.railway-code-agent"));
+        assert!(!session.contains("touch ~/.railway-app-mode"));
+
+        // The guard the sentinel exists for.
+        assert!(COMMON_SEED.contains(r#"[ ! -f "$HOME/.railway-app-mode" ]"#));
     }
 
     /// The launch note names the cached token's age once it has one, and only
@@ -2805,7 +2891,7 @@ mod tests {
     // to keep.
     #[test]
     fn provision_script_omits_the_seed_when_reusing_a_credential() {
-        let claude = provision_script(Agent::Claude, false);
+        let claude = provision_script(Agent::Claude, false, false);
         assert!(!claude.contains("cat > \"$tmp\""));
         // Everything else still runs.
         assert!(claude.contains("$HOME/.local/bin"));
@@ -2817,8 +2903,8 @@ mod tests {
             (Agent::Codex, "cat > ~/.codex/auth.json"),
             (Agent::Grok, "cat > ~/.grok/auth.json"),
         ] {
-            assert!(provision_script(agent, true).contains(seed));
-            assert!(!provision_script(agent, false).contains(seed));
+            assert!(provision_script(agent, true, false).contains(seed));
+            assert!(!provision_script(agent, false, false).contains(seed));
         }
     }
 
@@ -2828,7 +2914,7 @@ mod tests {
     /// its own binary name like every other harness.
     #[test]
     fn railway_needs_no_credential_seed() {
-        let script = provision_script(Agent::Railway, false);
+        let script = provision_script(Agent::Railway, false, false);
         for other_seed in [
             "cat > \"$tmp\"",
             "cat > ~/.codex/auth.json",
@@ -2853,11 +2939,17 @@ mod tests {
             (Some("fix the tests"), vec![]),
             (None, vec!["exec".to_string(), "explain this".to_string()]),
         ] {
-            let cmd = remote_command(Agent::Shell, "P; ", prompt, &args);
+            let cmd = remote_command(
+                Agent::Shell,
+                "P; ",
+                prompt,
+                &args,
+                SessionStyle::FullTerminal,
+            );
             assert_eq!(cmd, "P; export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l");
         }
 
-        let script = provision_script(Agent::Shell, false);
+        let script = provision_script(Agent::Shell, false, false);
         assert!(
             !script.contains("~/.railway-code-agent"),
             "a shell launch must not retarget reconnects: {script}"
@@ -2891,7 +2983,7 @@ mod tests {
             Agent::Shell,
         ] {
             for write_credential in [true, false] {
-                let script = provision_script(agent, write_credential);
+                let script = provision_script(agent, write_credential, false);
                 assert!(!script.contains(".claude/settings.json"), "{script}");
                 assert!(!script.contains(".claude.json"), "{script}");
                 assert!(!script.contains("apiKeyHelper"), "{script}");
@@ -2906,7 +2998,7 @@ mod tests {
     /// provision script prints, so the two must agree on its shape.
     #[test]
     fn provision_script_reports_the_agents_skills_hash() {
-        let script = provision_script(Agent::Claude, true);
+        let script = provision_script(Agent::Claude, true, false);
         assert!(script.contains(skills_sync::REMOTE_HASH_MARKER));
         assert!(script.contains(skills_sync::REMOTE_HASH_FILE));
         // An agent that has never synced prints an empty value rather than
