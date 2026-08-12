@@ -77,10 +77,11 @@ use crate::util::shell::shell_join;
 // `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
-/// `railway code` is the launcher on its own: the same flags and the same
-/// preferences as `railway ca`, minus the TUI. Kept as a distinct command
-/// rather than an alias because the two now differ in exactly one way — one
-/// browses first and one does not — and that is the reason to type either.
+/// `railway code` is the launcher: it answers "where, and which harness"
+/// from flags and preferences, then opens that session. On a terminal it opens
+/// it inside `railway ca`'s manage screen with the tree collapsed, so the
+/// session has the whole window and the rest of the tool is one key away;
+/// everywhere else it hands the terminal straight to ssh.
 pub type Args = LaunchArgs;
 
 pub async fn command(args: Args) -> Result<()> {
@@ -93,18 +94,24 @@ pub async fn command(args: Args) -> Result<()> {
             "`railway code` passes arguments straight to the agent, so this would run `setup` on the VM.\nDid you mean `railway ca setup`?"
         );
     }
-    launch(args).await
+    match args.wants_pane() {
+        true => crate::commands::cloud_agent::launch_in_pane(args).await,
+        false => launch(args).await,
+    }
 }
 
 /// Launch a coding agent on a Railway cloud agent VM
 //
 // `Default` is derived so the TUI can build a launch without going through
 // clap: every field is an Option/Vec/bool, so the derive produces exactly the
-// "nothing was passed" state clap would. Kept out of the doc comment — clap
-// renders those as `long_about` and it would show up in `--help`.
-#[derive(Parser, Default)]
+// "nothing was passed" state clap would. `Clone` is what lets a command-line
+// launch ride into the TUI as the base of a `LaunchRequest`, so flags the TUI
+// has no way to ask for — `--name`, `--variable` — still reach the pipeline.
+// Both kept out of the doc comment — clap renders those as `long_about` and
+// they would show up in `--help`.
+#[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run).\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\nOn a terminal the session opens inside `railway ca`'s manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -190,6 +197,13 @@ pub struct LaunchArgs {
     #[clap(skip)]
     pub agent_id: Option<String>,
 
+    /// Launch no harness at all — just the VM's login shell. Set by the TUI's
+    /// shell option, not a flag: the CLI already has a spelling for this
+    /// (`railway ca ssh <agent> -- bash`), and a second one would compete
+    /// with it.
+    #[clap(skip)]
+    pub shell: bool,
+
     /// Provision for an external app rather than for a session this CLI opens:
     /// seed the credential and the skills, but leave the login shell alone. Set
     /// by `railway ca desktop`; there is no flag because on its own it would
@@ -217,6 +231,31 @@ impl LaunchArgs {
             && self.variables.is_empty()
             && self.env_files.is_empty()
             && self.agent_args.is_empty()
+            && !self.shell
+    }
+
+    /// Should this launch open in the TUI's session pane rather than taking
+    /// the terminal for itself?
+    ///
+    /// Yes for the shapes a person types at a prompt, which is nearly all of
+    /// them: the pane gives the session the whole window and leaves the tree,
+    /// the other agents and the lifecycle keys one chord away. No for the
+    /// three that a frame would break or spoil:
+    ///
+    /// - `--rm` destroys an agent and prints; there is no session to show.
+    /// - `-- args` execs the agent and exits with its status, which is a
+    ///   caller asking for an exit code, not for a window.
+    /// - no terminal at all — a TUI in a pipe is gibberish, and scripted
+    ///   callers reasonably expect the launcher.
+    pub fn wants_pane(&self) -> bool {
+        self.pane_shaped() && is_stdout_terminal()
+    }
+
+    /// The flag half of [`Self::wants_pane`], split off the terminal check so
+    /// the rule is checked by tests rather than by reading it — `cargo test`
+    /// captures stdout, so the whole predicate is always false under one.
+    fn pane_shaped(&self) -> bool {
+        !self.rm && self.agent_args.is_empty()
     }
 
     /// Force one harness, overriding preferences — how the TUI passes the
@@ -226,6 +265,7 @@ impl LaunchArgs {
         self.codex = slug == "codex";
         self.grok = slug == "grok";
         self.railway = slug == "railway";
+        self.shell = slug == "shell";
     }
 
     /// The launch the TUI asks for: an explicit project and environment, an
@@ -240,16 +280,41 @@ impl LaunchArgs {
         prompt: Option<String>,
         agent_id: Option<String>,
     ) -> Self {
-        let mut args = Self {
-            project: Some(project_id),
-            environment: Some(environment_id),
-            new: force_new,
-            initial_prompt: prompt,
+        Self::default().retargeted(
+            project_id,
+            environment_id,
+            harness,
+            force_new,
+            prompt,
             agent_id,
-            ..Self::default()
-        };
-        args.set_harness(harness);
-        args
+        )
+    }
+
+    /// [`Self::for_target`] over an existing set of flags instead of an empty
+    /// one — how a `railway code` invocation that opened in the pane gets its
+    /// remaining flags to the pipeline.
+    ///
+    /// Everything the TUI decides is overwritten: it knows the target, the
+    /// harness and the agent better than the command line did, because the
+    /// user may have moved since typing it. Everything else survives, which is
+    /// the point — `railway code --new --name api --variable K=V` creates the
+    /// agent the command line described, even though no card asks for a name.
+    pub fn retargeted(
+        mut self,
+        project_id: String,
+        environment_id: String,
+        harness: &str,
+        force_new: bool,
+        prompt: Option<String>,
+        agent_id: Option<String>,
+    ) -> Self {
+        self.project = Some(project_id);
+        self.environment = Some(environment_id);
+        self.new = force_new;
+        self.initial_prompt = prompt;
+        self.agent_id = agent_id;
+        self.set_harness(harness);
+        self
     }
 
     /// The provision `railway ca desktop` asks for: seed this harness onto an
@@ -287,12 +352,17 @@ impl LaunchArgs {
 /// create time, the same way skills and MCP config are reconciled by
 /// express-agent. There is no local sign-in to copy or mint, so it needs none
 /// of the client-side credential machinery the other three do.
+///
+/// `Shell` is not a harness at all: the session is the VM's login shell and
+/// nothing else starts. No credential, no autostart retarget — just the
+/// machine.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Agent {
     Codex,
     Claude,
     Grok,
     Railway,
+    Shell,
 }
 
 impl Agent {
@@ -308,6 +378,9 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway-agent-tui",
+            // What the session runs and what the readiness probe checks;
+            // never autostarted, because `Shell` skips the autostart record.
+            Agent::Shell => "bash",
         }
     }
 
@@ -324,6 +397,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway",
+            Agent::Shell => "shell",
         }
     }
 
@@ -333,6 +407,7 @@ impl Agent {
             "codex" => Some(Agent::Codex),
             "grok" => Some(Agent::Grok),
             "railway" => Some(Agent::Railway),
+            "shell" => Some(Agent::Shell),
             _ => None,
         }
     }
@@ -344,6 +419,7 @@ impl Agent {
             Agent::Claude => "Claude Code",
             Agent::Grok => "Grok",
             Agent::Railway => "Railway",
+            Agent::Shell => "a plain shell",
         }
     }
 
@@ -355,7 +431,7 @@ impl Agent {
             Agent::Codex => CODEX_SEED,
             Agent::Claude => CLAUDE_SEED,
             Agent::Grok => GROK_SEED,
-            Agent::Railway => "",
+            Agent::Railway | Agent::Shell => "",
         }
     }
 
@@ -368,7 +444,7 @@ impl Agent {
         match self {
             Agent::Codex => Some([".codex", "auth.json"]),
             Agent::Grok => Some([".grok", "auth.json"]),
-            Agent::Claude | Agent::Railway => None,
+            Agent::Claude | Agent::Railway | Agent::Shell => None,
         }
     }
 
@@ -385,6 +461,7 @@ impl Agent {
             Agent::Claude => "sign in there with `/login`",
             Agent::Grok => "sign in there when it asks",
             Agent::Railway => "no sign-in needed — the agent carries its own",
+            Agent::Shell => "no sign-in needed — nothing starts but a shell",
         }
     }
 }
@@ -543,12 +620,20 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
     let hash_file = skills_sync::REMOTE_HASH_FILE;
     // The autostart in COMMON_SEED reads both: the sentinel disables it
     // outright, and `~/.railway-code-agent` is what it would otherwise launch.
+    //
+    // A shell launch is "give me the machine", not "retarget this VM": the
+    // recorded autostart agent stays whatever a previous launch made it, so
+    // plain reconnects keep dropping into that agent. App-mode still wins if
+    // it was asked for — desktop takes the login shell entirely.
     let mode_seed = if app_mode {
-        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent"
+        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
     } else {
-        "rm -f ~/.railway-app-mode\necho AGENT_NAME > ~/.railway-code-agent"
+        let record = match agent {
+            Agent::Shell => "true".to_string(),
+            _ => format!("echo {name} > ~/.railway-code-agent"),
+        };
+        format!("rm -f ~/.railway-app-mode\n{record}")
     };
-    let mode_seed = mode_seed.replace("AGENT_NAME", name);
     format!(
         r#"umask 077
 {HARNESS_PATH}
@@ -560,6 +645,22 @@ if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MIS
     )
 }
 
+/// Where a prepared session's output lands, which decides what quitting the
+/// harness should leave behind.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionStyle {
+    /// ssh owns the real terminal (`railway ca start`, piped and `--`
+    /// callers): quitting the agent lands in a shell on the VM, matching the
+    /// `~/.profile` autostart, and `exit` ends the connection.
+    FullTerminal,
+    /// The TUI's session pane: when the harness exits the remote command ends,
+    /// the durable session with it, and the pane closes. A shell fallback here
+    /// would strand the user on a bare VM prompt inside what still looks like
+    /// the TUI — and leave the durable session alive as a shell nobody wants
+    /// to reattach to.
+    Pane,
+}
+
 /// The command the launch session runs on the VM. Three shapes, and the
 /// difference between them is whether you are left in a session afterwards:
 ///
@@ -568,25 +669,40 @@ if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MIS
 /// - `-- args` execs the agent and exits with it, so a pipeline doesn't hang
 ///   waiting on a shell nobody is typing into.
 ///
-/// Neither interactive form uses `exec`: quitting the agent lands in a shell on
-/// the VM, matching the `~/.profile` autostart. `RAILWAY_CODE_AUTOSTARTED`
-/// stops that autostart relaunching the agent on top of the user, and the reset
-/// scrubs terminal state a TUI can leave behind on an unclean exit.
+/// "Keeps the session" is [`SessionStyle`]'s call: a full-terminal caller gets
+/// a VM shell after the agent quits, a pane ends with it. Neither interactive
+/// form uses `exec`, so the reset always runs. `RAILWAY_CODE_AUTOSTARTED`
+/// stops the `~/.profile` autostart relaunching the agent on top of the user,
+/// and the reset scrubs terminal state a TUI can leave behind on an unclean
+/// exit.
 fn remote_command(
     agent: Agent,
     env_prefix: &str,
     initial_prompt: Option<&str>,
     agent_args: &[String],
+    style: SessionStyle,
 ) -> String {
+    // No harness: the login shell IS the session, so there is nothing to hand
+    // a prompt or args to and both are ignored (the TUI never sends either —
+    // its prompt box goes inert on the shell option). The autostart guard
+    // still matters: `bash -l` sources ~/.profile, which would otherwise
+    // relaunch whatever agent the VM last recorded on top of the user.
+    if agent == Agent::Shell {
+        return format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l");
+    }
     let name = agent.name();
+    let after = match style {
+        SessionStyle::FullTerminal => "; exec bash -l",
+        SessionStyle::Pane => "",
+    };
     match initial_prompt.map(str::trim).filter(|p| !p.is_empty()) {
         Some(prompt) => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {}; exec bash -l",
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {}{after}",
             shell_join(std::slice::from_ref(&prompt.to_string())),
             terminal_reset_printf()
         ),
         None if agent_args.is_empty() => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {}; exec bash -l",
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {}{after}",
             terminal_reset_printf()
         ),
         None => format!("{env_prefix}exec {name} {}", shell_join(agent_args)),
@@ -1623,7 +1739,7 @@ async fn resolve_agent(
         if let Some(ready) =
             ready_existing_agent(client, &backboard, environment_id, agent, progress).await?
         {
-            warn_ignored_variables(args);
+            warn_ignored_variables(args, progress);
             configs.set_code_agent(environment_id, &ready.id);
             configs.write()?;
             return Ok((ready, false));
@@ -1672,13 +1788,17 @@ async fn resolve_agent(
 
 /// `--variable`/`--env-file` only reach the VM spec at create time, so say so
 /// rather than silently dropping them on a reuse.
-fn warn_ignored_variables(args: &LaunchArgs) {
+///
+/// Through the progress sink rather than straight to stderr: these flags can
+/// now arrive on a launch that opens in the TUI's pane, and a stray write there
+/// lands on top of the frame.
+fn warn_ignored_variables(args: &LaunchArgs, progress: &dyn Progress) {
     use colored::Colorize;
     if !args.variables.is_empty() || !args.env_files.is_empty() {
-        eprintln!(
-            "{}",
-            "Note: --variable/--env-file only apply when an agent is created — reusing this environment's. Add --new to create with these variables."
+        progress.note(
+            &"Note: --variable/--env-file only apply when an agent is created — reusing this environment's. Add --new to create with these variables."
                 .yellow()
+                .to_string(),
         );
     }
 }
@@ -1760,6 +1880,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
         (args.claude, Agent::Claude),
         (args.grok, Agent::Grok),
         (args.railway, Agent::Railway),
+        (args.shell, Agent::Shell),
     ]
     .into_iter()
     .filter_map(|(set, agent)| set.then_some(agent))
@@ -1775,7 +1896,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
         if !slug.is_empty() {
             let agent = Agent::from_slug(&slug).ok_or_else(|| {
                 anyhow!(
-                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, grok, or railway)."
+                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, grok, railway, or shell)."
                 )
             })?;
             return Ok(agent);
@@ -1884,6 +2005,42 @@ pub struct Prepared {
     pub created: bool,
 }
 
+/// Where a launch lands and what it runs there, settled before anything is
+/// spent on it.
+pub struct ResolvedLaunch {
+    pub project_id: String,
+    pub environment_id: String,
+    /// The harness slug, matching [`Agent::slug`].
+    pub harness: &'static str,
+}
+
+/// Answer a launch's two unavoidable questions — where, and which harness —
+/// using the same order the direct path uses.
+///
+/// Split out so the pane path can settle both *before* the TUI takes the
+/// screen. Either answer can print, prompt, or run `railway ca setup` inline,
+/// and none of that survives underneath a ratatui frame.
+///
+/// The target goes first because `railway ca setup` is one of its answers, and
+/// setup also writes the default harness — asking for the harness first would
+/// ask a question setup is about to ask again.
+pub async fn resolve_launch(
+    args: &LaunchArgs,
+    configs: &mut Configs,
+    client: &reqwest::Client,
+) -> Result<ResolvedLaunch> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
+    let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
+    let (project_id, environment_id) =
+        resolve_target(configs, client, args, &mut prefs, &home).await?;
+    let harness = resolve_agent_choice(args, &mut prefs, &home)?.slug();
+    Ok(ResolvedLaunch {
+        project_id,
+        environment_id,
+        harness,
+    })
+}
+
 pub async fn launch(args: LaunchArgs) -> Result<()> {
     use colored::Colorize;
 
@@ -1913,7 +2070,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     );
 
     let progress = CliProgress::default();
-    let prepared = prepare(&args, &progress).await?;
+    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
     progress.finish();
 
     println!("Launching {}…", prepared.harness);
@@ -1943,10 +2100,19 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         println!("Agents persist between runs — this one is yours until you --rm it.");
     }
     println!("Get back in:");
-    println!(
-        "  railway code --{}   # wakes it and drops back into {}",
-        prepared.harness, prepared.harness
-    );
+    // There is no --shell flag to point at; the ssh spelling is the way back
+    // into a bare shell.
+    if prepared.harness == "shell" {
+        println!(
+            "  railway ca ssh {} -- bash   # wakes it and opens a plain shell",
+            prepared.agent_name
+        );
+    } else {
+        println!(
+            "  railway code --{}   # wakes it and drops back into {}",
+            prepared.harness, prepared.harness
+        );
+    }
     println!(
         "  railway ca ssh {}   # same, by name — and reattaches your session",
         prepared.agent_name
@@ -1988,7 +2154,11 @@ pub fn run_session(prepared: &Prepared) -> Result<i32> {
 /// steps itself. The one thing that cannot happen here is an interactive Claude
 /// mint — see [`ensure_claude_credential_cached`], which a TUI caller runs
 /// before it takes the screen.
-pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepared> {
+pub async fn prepare(
+    args: &LaunchArgs,
+    progress: &dyn Progress,
+    style: SessionStyle,
+) -> Result<Prepared> {
     // Timed and reported separately from `prepare_inner` so every caller
     // (`railway code`, `railway ca start`, and the TUI's `start_launch`) gets
     // the same outcome event without duplicating it at each call site — none
@@ -2014,7 +2184,7 @@ pub async fn prepare(args: &LaunchArgs, progress: &dyn Progress) -> Result<Prepa
         }
     };
 
-    let result = prepare_inner(args, progress, agent, prefs, &home).await;
+    let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
     crate::commands::cloud_agent::telemetry::track_launch_outcome(
         agent.slug(),
         result.as_ref().ok().map(|p| p.created),
@@ -2031,6 +2201,7 @@ async fn prepare_inner(
     agent: Agent,
     mut prefs: AgentPrefs,
     home: &Path,
+    style: SessionStyle,
 ) -> Result<Prepared> {
     // --- Resolve the local credential (client-side only, announced).
     //
@@ -2056,8 +2227,9 @@ async fn prepare_inner(
             )
             .await?
         }
-        // Nothing to read or mint — the VM already carries its own.
-        Agent::Railway => PendingAuth::None,
+        // Nothing to read or mint — the VM already carries its own, and a
+        // plain shell has nothing to sign in to.
+        Agent::Railway | Agent::Shell => PendingAuth::None,
     };
     match pending {
         PendingAuth::Ready { ref source, .. } => progress.note(&format!(
@@ -2067,6 +2239,9 @@ async fn prepare_inner(
         // Said up front, before the VM: the sign-in is the first thing waiting
         // on the other end, and finding that out on arrival reads as a bug.
         PendingAuth::SignInOnAgent { ref note } => progress.note(note),
+        PendingAuth::None if agent == Agent::Shell => {
+            progress.note("No coding agent — opening a plain shell on the VM")
+        }
         PendingAuth::None => progress.note("Using the agent's own integrated Railway credentials"),
         PendingAuth::MintClaude => {}
     }
@@ -2266,6 +2441,7 @@ async fn prepare_inner(
         &env_prefix,
         args.initial_prompt.as_deref(),
         &args.agent_args,
+        style,
     );
 
     Ok(Prepared {
@@ -2455,6 +2631,81 @@ pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// The shapes someone types at a prompt open in the pane. Nothing about a
+    /// target, a harness or a variable changes that — they all describe a
+    /// session, and a session is what the pane holds.
+    #[test]
+    fn an_ordinary_launch_opens_in_the_pane() {
+        for argv in [
+            vec!["code"],
+            vec!["code", "--claude"],
+            vec!["code", "--new", "--name", "api"],
+            vec!["code", "-p", "proj_1", "-e", "env_prod"],
+            vec!["code", "--variable", "K=V", "--refresh-auth"],
+        ] {
+            let args = LaunchArgs::parse_from(&argv);
+            assert!(args.pane_shaped(), "{argv:?} should open in the pane");
+        }
+    }
+
+    /// The two that a frame would break: `--rm` has no session to draw, and
+    /// `-- args` is a caller asking for an exit code rather than a window.
+    #[test]
+    fn destroying_and_exec_take_the_terminal_instead() {
+        assert!(!LaunchArgs::parse_from(["code", "--rm"]).pane_shaped());
+        assert!(
+            !LaunchArgs::parse_from(["code", "--codex", "--", "exec", "explain this"])
+                .pane_shaped()
+        );
+    }
+
+    /// What the TUI knows — where, which harness, which agent — wins, because
+    /// the user may have moved since typing the command.
+    #[test]
+    fn retargeting_overrides_what_the_tui_decides() {
+        let args = LaunchArgs::parse_from(["code", "--codex", "-p", "old_p", "-e", "old_e"])
+            .retargeted(
+                "new_p".into(),
+                "new_e".into(),
+                "claude",
+                true,
+                Some("fix the tests".into()),
+                Some("ca_1".into()),
+            );
+        assert_eq!(args.project.as_deref(), Some("new_p"));
+        assert_eq!(args.environment.as_deref(), Some("new_e"));
+        assert_eq!(args.agent_id.as_deref(), Some("ca_1"));
+        assert_eq!(args.initial_prompt.as_deref(), Some("fix the tests"));
+        assert!(args.new);
+        assert!(args.claude, "the harness the TUI chose");
+        assert!(!args.codex, "and only that one");
+    }
+
+    /// Everything the TUI has no way to ask for survives the trip through it.
+    /// Dropping these would silently ignore what was typed: `railway code
+    /// --new --name api --variable K=V` would create an agent with a generated
+    /// name and none of the variables.
+    #[test]
+    fn retargeting_carries_the_flags_the_tui_cannot_ask_for() {
+        let args = LaunchArgs::parse_from([
+            "code",
+            "--new",
+            "--name",
+            "api",
+            "--variable",
+            "DB=postgres.DATABASE_URL",
+            "--env-file",
+            ".env",
+            "--refresh-auth",
+        ])
+        .retargeted("p".into(), "e".into(), "claude", true, None, None);
+        assert_eq!(args.name.as_deref(), Some("api"));
+        assert_eq!(args.variables, ["DB=postgres.DATABASE_URL"]);
+        assert_eq!(args.env_files, [std::path::PathBuf::from(".env")]);
+        assert!(args.refresh_auth);
+    }
 
     fn note_of(pending: PendingAuth) -> String {
         match pending {
@@ -2677,6 +2928,46 @@ mod tests {
         assert!(script.contains("AGENT-READY"));
     }
 
+    /// The shell option starts nothing and changes nothing: no credential, no
+    /// autostart retarget — reconnects keep dropping into whatever agent a
+    /// previous launch recorded — and the session is one login shell, with any
+    /// prompt or args ignored rather than handed to a harness that isn't there.
+    #[test]
+    fn a_shell_launch_starts_no_harness_and_retargets_nothing() {
+        for (prompt, args) in [
+            (None, vec![]),
+            (Some("fix the tests"), vec![]),
+            (None, vec!["exec".to_string(), "explain this".to_string()]),
+        ] {
+            let cmd = remote_command(
+                Agent::Shell,
+                "P; ",
+                prompt,
+                &args,
+                SessionStyle::FullTerminal,
+            );
+            assert_eq!(cmd, "P; export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l");
+        }
+
+        let script = provision_script(Agent::Shell, false, false);
+        assert!(
+            !script.contains("~/.railway-code-agent"),
+            "a shell launch must not retarget reconnects: {script}"
+        );
+        for seed in [
+            "cat > \"$tmp\"",
+            "cat > ~/.codex/auth.json",
+            "cat > ~/.grok/auth.json",
+        ] {
+            assert!(!script.contains(seed), "{script}");
+        }
+        // The rest of the provision still runs, and readiness probes the one
+        // binary the session needs.
+        assert!(script.contains("railway-code agent autostart"));
+        assert!(script.contains("if command -v bash"), "{script}");
+        assert!(script.contains("AGENT-READY"));
+    }
+
     /// Harness config on an agent VM belongs to express-agent, which reconciles
     /// it on every boot. The CLI used to copy the laptop's
     /// `~/.claude/settings.json` up; it no longer does, and must not drift back
@@ -2684,7 +2975,13 @@ mod tests {
     /// statusline commands that only resolve on the machine that wrote them.
     #[test]
     fn no_provision_step_writes_harness_config() {
-        for agent in [Agent::Claude, Agent::Codex, Agent::Grok, Agent::Railway] {
+        for agent in [
+            Agent::Claude,
+            Agent::Codex,
+            Agent::Grok,
+            Agent::Railway,
+            Agent::Shell,
+        ] {
             for write_credential in [true, false] {
                 let script = provision_script(agent, write_credential, false);
                 assert!(!script.contains(".claude/settings.json"), "{script}");
@@ -2715,12 +3012,20 @@ mod tests {
     /// to work in, or hang a script on a shell.
     #[test]
     fn remote_command_shapes() {
-        let seeded = remote_command(Agent::Claude, "P; ", Some("fix the tests"), &[]);
+        use SessionStyle::FullTerminal;
+
+        let seeded = remote_command(
+            Agent::Claude,
+            "P; ",
+            Some("fix the tests"),
+            &[],
+            FullTerminal,
+        );
         assert!(seeded.contains("claude 'fix the tests';"), "{seeded}");
         assert!(seeded.ends_with("exec bash -l"));
         assert!(!seeded.contains("exec claude"));
 
-        let interactive = remote_command(Agent::Claude, "P; ", None, &[]);
+        let interactive = remote_command(Agent::Claude, "P; ", None, &[], FullTerminal);
         assert!(interactive.contains("claude;"), "{interactive}");
         assert!(interactive.ends_with("exec bash -l"));
 
@@ -2729,6 +3034,7 @@ mod tests {
             "P; ",
             None,
             &["exec".into(), "explain this".into()],
+            FullTerminal,
         );
         assert!(
             scripted.contains("exec codex exec 'explain this'"),
@@ -2737,15 +3043,39 @@ mod tests {
         assert!(!scripted.contains("bash -l"));
 
         // A prompt of only whitespace is not a prompt.
-        let blank = remote_command(Agent::Grok, "P; ", Some("   "), &[]);
-        assert_eq!(blank, remote_command(Agent::Grok, "P; ", None, &[]));
+        let blank = remote_command(Agent::Grok, "P; ", Some("   "), &[], FullTerminal);
+        assert_eq!(
+            blank,
+            remote_command(Agent::Grok, "P; ", None, &[], FullTerminal)
+        );
+    }
+
+    /// A pane session must end when the harness does. The shell fallback that
+    /// serves a full-terminal caller strands a pane on a bare VM prompt inside
+    /// what still looks like the TUI — ctrl-c out of the agent read as the CLI
+    /// breaking, with a leftover shell session to reattach to.
+    #[test]
+    fn a_pane_session_ends_with_the_harness() {
+        for prompt in [None, Some("fix the tests")] {
+            let pane = remote_command(Agent::Claude, "P; ", prompt, &[], SessionStyle::Pane);
+            assert!(!pane.contains("bash -l"), "{pane}");
+            // The reset still runs — the pane's emulator swallows it, and a
+            // full-screen takeover of the same session needs it.
+            assert!(pane.ends_with("\\033[?25h'"), "{pane}");
+        }
     }
 
     /// A prompt is user text arriving on a remote shell's command line; it has
     /// to be quoted, not interpolated.
     #[test]
     fn a_prompt_cannot_break_out_of_its_quoting() {
-        let nasty = remote_command(Agent::Claude, "P; ", Some("'; rm -rf / #"), &[]);
+        let nasty = remote_command(
+            Agent::Claude,
+            "P; ",
+            Some("'; rm -rf / #"),
+            &[],
+            SessionStyle::FullTerminal,
+        );
         assert!(!nasty.contains("; rm -rf / #;"), "{nasty}");
         assert!(
             nasty.contains(r"'\''"),
@@ -2850,6 +3180,13 @@ mod tests {
         railway.set_harness("railway");
         assert!(!railway.is_bare());
 
+        let mut shell = LaunchArgs::default();
+        shell.set_harness("shell");
+        assert!(shell.shell, "the shell choice must survive the mapping");
+        assert!(!shell.is_bare());
+        shell.set_harness("claude");
+        assert!(!shell.shell, "picking a harness clears it");
+
         let targeted = LaunchArgs::for_target(
             "proj_1".into(),
             "env_1".into(),
@@ -2936,6 +3273,11 @@ mod tests {
         assert_eq!(Agent::from_slug("railway"), Some(Agent::Railway));
         assert_eq!(Agent::Railway.slug(), "railway");
         assert_eq!(Agent::Railway.name(), "railway-agent-tui");
+        // Shell is the other: the slug is the option's name, and what the
+        // session runs (and the readiness probe checks) is bash.
+        assert_eq!(Agent::from_slug("shell"), Some(Agent::Shell));
+        assert_eq!(Agent::Shell.slug(), "shell");
+        assert_eq!(Agent::Shell.name(), "bash");
         assert!(Agent::from_slug("droid").is_none());
         assert!(Agent::from_slug("").is_none());
     }

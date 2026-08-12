@@ -167,7 +167,9 @@ pub async fn command(args: Args) -> Result<()> {
             .as_ref()
             .map(|p| p.agent_id.clone())
             .or_else(|| pinned.as_ref().map(|a| a.id.clone()));
-        let result = code::prepare(&launch, &progress).await;
+        // Desktop never opens the session it provisions — FullTerminal is the
+        // non-pane style; the remote command is unused after prepare returns.
+        let result = code::prepare(&launch, &progress, code::SessionStyle::FullTerminal).await;
         progress.finish();
         prepared = Some(result.with_context(|| format!("Preparing the agent for {}", app.name()))?);
     }

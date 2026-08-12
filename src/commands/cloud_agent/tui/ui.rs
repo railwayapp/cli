@@ -677,7 +677,15 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
     let theme = app.theme;
     let focused = app.menu_focus == MenuFocus::Prompt;
     let empty = app.prompt.is_empty();
-    let (text, fg) = if empty && !focused {
+    // The shell option takes no prompt, so the box explains itself instead of
+    // taking dictation. Any draft stays in `app.prompt`, hidden until the
+    // cycle moves back to a real agent.
+    let (text, fg) = if app.shell_selected() {
+        (
+            "A plain shell on the agent — no prompt, enter to launch".to_string(),
+            theme.dim,
+        )
+    } else if empty && !focused {
         (
             "Fix a bug, scaffold a service, explain a repo…".to_string(),
             theme.dim,
@@ -690,7 +698,7 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
 
     // Only the harness. Where it lands is on its own line under the cards —
     // it changes rarely, and it was crowding the one control being used.
-    let count = if empty {
+    let count = if empty || app.shell_selected() {
         String::new()
     } else {
         format!(" {} ", app.prompt.chars().count())
@@ -998,7 +1006,7 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     // whitespace.
     // ⌥f hands the whole width to the session: the tree is navigation, and
     // once you are working in a session there is nothing to navigate.
-    let full = app.maximized && app.active_session().is_some();
+    let full = app.pane_is_full();
     let two_pane = !full && chunks[2].width >= 70;
     let panes = if two_pane {
         Layout::horizontal([Constraint::Length(TREE_W), Constraint::Min(20)]).split(chunks[2])
@@ -1012,7 +1020,11 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         rects.session_outer = whole(pane);
         rects.tree = PaneBox::default();
         rects.tree_outer = PaneBox::default();
-        if let Some(session) = app.active_session() {
+        // Same order as the two-pane branch: a launch in flight owns the pane
+        // until it produces the session that replaces it.
+        if app.loading.active {
+            render_loading(app, f, pane);
+        } else if let Some(session) = app.active_session() {
             render_session(app, session, f, pane);
         }
         render_manage_footer(app, f, chunks[3], rects);
@@ -1157,7 +1169,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     let sleeping = app
         .selected_agent_status()
         .is_some_and(|status| status != "running");
-    let hint: Vec<(&str, &str)> = if app.maximized {
+    let hint: Vec<(&str, &str)> = if app.pane_is_full() {
         vec![("⌥f", "restore the tree"), ("⌥/⇧esc / ^]", "stop typing")]
     } else if app.focus == ManageFocus::Session {
         // A dead pane's keys are recovery, not typing — the hint has to say
@@ -1643,13 +1655,26 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
         ]))
         .title_bottom(
             Line::from(Span::styled(
-                " enter send · esc close ",
+                if app.shell_selected() {
+                    " enter launch · esc close "
+                } else {
+                    " enter send · esc close "
+                },
                 Style::default().fg(theme.dim),
             ))
             .right_aligned(),
         );
 
-    let text = format!("{draft}▏");
+    // The menu box's shell contract, here too: the box explains itself
+    // instead of taking dictation, and the draft waits out of sight.
+    let (text, fg) = if app.shell_selected() {
+        (
+            "A plain shell on the agent — no prompt, enter to launch".to_string(),
+            theme.dim,
+        )
+    } else {
+        (format!("{draft}▏"), theme.fg)
+    };
     // Keep the cursor line in view once the wrapped text outgrows the box,
     // same as the menu's prompt. The padding is chrome, not writing room, so
     // it comes off the width and the height the text gets.
@@ -1660,7 +1685,7 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
     f.render_widget(
         Paragraph::new(text)
             .block(block)
-            .style(Style::default().fg(theme.fg))
+            .style(Style::default().fg(fg))
             .wrap(ratatui::widgets::Wrap { trim: false })
             .scroll((scroll_y, 0)),
         outer,
@@ -2720,6 +2745,32 @@ mod tests {
         assert!(out.contains("Default agent, skills"), "{out}");
     }
 
+    /// With shell selected the box stops being a prompt: it says what enter
+    /// does instead of inviting text, and hides a draft typed for a real
+    /// agent rather than showing words that would go nowhere.
+    #[test]
+    fn the_prompt_box_explains_itself_on_shell() {
+        let mut app = app_with_tree();
+        app.prompt = "fix the tests".into();
+        while app.harness_name() != "shell" {
+            app.on_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::BackTab,
+                crossterm::event::KeyModifiers::SHIFT,
+            ));
+        }
+        let out = draw(&app, 100, 40);
+        assert!(out.contains("A plain shell on the agent"), "{out}");
+        assert!(
+            !out.contains("fix the tests"),
+            "the hidden draft must not show through: {out}"
+        );
+        let footer = out
+            .lines()
+            .find(|l| l.contains("shell") && l.contains("shift+tab"))
+            .expect("the prompt box footer names the selection");
+        assert!(footer.contains("shell"), "{footer}");
+    }
+
     /// Where the prompt lands is its own line above the keys, not a chip inside
     /// the box being typed in.
     #[test]
@@ -3356,6 +3407,7 @@ mod tests {
             harness: "claude".into(),
             prompt: Some("fix the failing tests".into()),
             label: "devtools/production".into(),
+            base: Default::default(),
         });
         app.loading_step("Creating a cloud agent".into());
 
@@ -3399,6 +3451,39 @@ mod tests {
             gap_left.abs_diff(gap_right) <= 4,
             "left {gap_left} and right {gap_right} gaps should be close:\n{out}"
         );
+    }
+
+    /// …unless the tree was collapsed on the way in. `railway code` has
+    /// already answered where and which harness, so there is nothing to
+    /// navigate: the wait gets the whole window, and the session that replaces
+    /// it inherits the same shape rather than jumping a pane's width sideways
+    /// the moment it connects.
+    #[test]
+    fn a_collapsed_launch_gives_the_wait_the_whole_window() {
+        let mut app = app_with_tree();
+        app.maximized = true;
+        app.start_loading(&crate::commands::cloud_agent::tui::LaunchRequest {
+            project_id: "proj_1".into(),
+            environment_id: "env_prod".into(),
+            agent_id: None,
+            session_name: None,
+            force_new: false,
+            new_session: false,
+            harness: "claude".into(),
+            prompt: None,
+            label: "devtools/production".into(),
+            base: Default::default(),
+        });
+        app.loading_step("Creating a cloud agent".into());
+
+        let out = draw(&app, 100, 30);
+        assert!(out.contains("Creating a cloud agent"), "steps:\n{out}");
+        assert!(
+            !out.contains("cloud agents "),
+            "the tree pane's title should be gone:\n{out}"
+        );
+        // ⌥f is how it comes back, and the footer has to say so.
+        assert!(out.contains("restore the tree"), "footer:\n{out}");
     }
 
     /// The footer carries the actions that apply where the cursor is, with help
@@ -3675,6 +3760,7 @@ mod tests {
                 "fix the failing retry tests in the worker service and update the changelog".into(),
             ),
             label: "devtools/production".into(),
+            base: Default::default(),
         });
         app.loading_step("Creating a cloud agent".into());
 

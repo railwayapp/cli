@@ -23,8 +23,16 @@ use super::theme::Theme;
 /// leads the list — and so is the default pick with nothing configured —
 /// since it is the one exception needing no credential of its own: no
 /// carry-a-local-sign-in step, just the VM's own integrated Railway
-/// credentials.
-pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok"];
+/// credentials. `shell` closes it: not a harness at all, just the VM's login
+/// shell, so it takes no prompt and sits after every real agent.
+pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok", "shell"];
+
+/// The slice of [`HARNESSES`] that can be saved as the default agent —
+/// everything but `shell`, which starts no harness and so makes no sense as
+/// a standing default. What the setup wizard and settings offer.
+pub fn default_harnesses() -> &'static [&'static str] {
+    &HARNESSES[..HARNESSES.len() - 1]
+}
 
 /// Everything the Manage screen responds to, grouped for the `?` overlay. The
 /// footer shows two or three of these; this is where the rest lives, so the
@@ -817,6 +825,18 @@ pub struct LaunchRequest {
     pub prompt: Option<String>,
     /// Human-facing description of where this is going, for the handoff line.
     pub label: String,
+    /// The command-line flags this launch started from, when a command line
+    /// started it. The fields above overwrite the target, harness, agent and
+    /// prompt; everything else — `--name`, `--variable`, `--env-file`,
+    /// `--refresh-auth` — rides along from here, because nothing in the TUI
+    /// asks for those and dropping them would quietly ignore what was typed.
+    /// Default for launches the TUI starts itself.
+    ///
+    /// Boxed because a `LaunchRequest` is the largest thing several enums
+    /// carry — `Effect`, `HeldConnect`, `Outcome`, `Message` — and inlining
+    /// another 200 bytes of flags widens every one of them for a field only
+    /// the command line ever fills.
+    pub base: Box<crate::commands::code::LaunchArgs>,
 }
 
 pub struct App {
@@ -841,6 +861,25 @@ pub struct App {
     pub agent_pick: Option<AgentPicker>,
     /// The session pane has the whole screen: no tree, no detail column.
     pub maximized: bool,
+    /// A launch to start as soon as the first frame is up, and then forget.
+    ///
+    /// How `railway code` opens: it has already answered where and which
+    /// harness, so there is nothing to browse for — the TUI is here to hold
+    /// the session, not to ask a question. Taken by the loop and fed through
+    /// the same path a keypress would, so the ssh-key gate and the Claude
+    /// mint still get their say.
+    pub autostart: Option<LaunchRequest>,
+    /// Leave the TUI when the last session pane closes on its own.
+    ///
+    /// `railway code` came for one session; when the harness exits (ctrl-c
+    /// included), the person is done, and the right place to land is their
+    /// local prompt — not a browser they never opened. Bare `railway ca`
+    /// keeps its tree instead.
+    pub quit_when_done: bool,
+    /// One line for the caller to print after the terminal is restored — how
+    /// a quit that closed a session says the agent is still running (and
+    /// billing) now that the frame it would have said it in is gone.
+    pub exit_note: Option<String>,
     /// This gesture belongs to the application in the session, not to us.
     pointer_to_app: bool,
     /// A short confirmation in the corner, and when it was raised.
@@ -934,6 +973,9 @@ impl App {
             manage_prompt: None,
             agent_pick: None,
             maximized: false,
+            autostart: None,
+            quit_when_done: false,
+            exit_note: None,
             pointer_to_app: false,
             toast: None,
             theme: Theme::from_slug(theme),
@@ -1092,6 +1134,20 @@ impl App {
         }
     }
 
+    /// Is the right-hand pane taking the whole screen — no tree, no detail
+    /// column?
+    ///
+    /// The layout and the terminal emulator both have to agree on this, or a
+    /// remote TUI wraps at the wrong column, so both ask here rather than
+    /// reading `maximized` and re-deriving the rest. A launch in flight counts:
+    /// `railway code` collapses the tree from the first frame, and the loading
+    /// screen is what stands in for the session until there is one. A
+    /// maximized flag with neither is not a full pane — it is a blank screen,
+    /// which is what happens between a failed launch and the next key.
+    pub fn pane_is_full(&self) -> bool {
+        self.maximized && (self.active.is_some() || self.loading.active)
+    }
+
     /// The agents in the target environment: (id, name, status).
     fn agents_in_target(&self) -> Vec<(String, String, String)> {
         let Some(target) = self.target.as_ref() else {
@@ -1133,7 +1189,9 @@ impl App {
 
     fn new_session_on(&self, agent_id: &str, agent_name: &str) -> Option<Effect> {
         let target = self.target.clone()?;
-        let prompt = (!self.prompt.trim().is_empty()).then(|| self.prompt.trim().to_string());
+        // Same contract as `launch`: shell sessions carry no prompt.
+        let prompt = (!self.shell_selected() && !self.prompt.trim().is_empty())
+            .then(|| self.prompt.trim().to_string());
         Some(Effect::Launch(LaunchRequest {
             project_id: target.project_id,
             environment_id: target.environment_id,
@@ -1144,6 +1202,7 @@ impl App {
             harness: self.harness_name().to_string(),
             prompt,
             label: format!("{agent_name} · new session"),
+            base: Default::default(),
         }))
     }
 
@@ -1215,10 +1274,18 @@ impl App {
                 environment_id: t.environment_id.clone(),
                 environment_name: t.environment_name.clone(),
             });
+        // The settings card is over the saved default, whose index space is
+        // `default_harnesses()` — a live shell selection has no row there and
+        // falls back to the first entry rather than clamping onto the last
+        // real agent.
+        let agent = default_harnesses()
+            .iter()
+            .position(|slug| *slug == self.harness_name())
+            .unwrap_or(0);
         self.settings = Some(super::settings::Settings::new(
             &self.tree,
             project,
-            self.harness,
+            agent,
             self.skills_enabled,
             self.skills_source.clone(),
             self.theme,
@@ -1241,6 +1308,12 @@ impl App {
 
     pub fn harness_name(&self) -> &'static str {
         HARNESSES[self.harness.min(HARNESSES.len() - 1)]
+    }
+
+    /// Is the shell option selected? It launches no harness, so the prompt
+    /// boxes go inert while it is: there is nothing to hand a prompt to.
+    pub fn shell_selected(&self) -> bool {
+        self.harness_name() == "shell"
     }
 
     /// The flattened, currently-visible tree: agent groups first, then the
@@ -1929,7 +2002,10 @@ impl App {
     }
 
     fn launch(&self, agent_id: Option<String>, force_new: bool) -> Option<Effect> {
-        let draft = (!self.prompt.trim().is_empty()).then(|| self.prompt.trim().to_string());
+        // A shell session takes no prompt; a draft left over from cycling
+        // through the agents must not ride along.
+        let draft = (!self.shell_selected() && !self.prompt.trim().is_empty())
+            .then(|| self.prompt.trim().to_string());
         self.launch_prompted(agent_id, force_new, draft)
     }
 
@@ -1952,6 +2028,7 @@ impl App {
             harness: self.harness_name().to_string(),
             prompt,
             label: target.label(),
+            base: Default::default(),
         }))
     }
 
@@ -2652,6 +2729,51 @@ impl App {
         Some(session)
     }
 
+    /// Close panes whose ssh finished — the harness exited and the remote
+    /// command ran out.
+    ///
+    /// The reader thread flips `ended` and wakes the loop, which lands here.
+    /// With the pane remote command's shell fallback gone, "finished" now
+    /// includes ctrl-c: interrupting the agent out of existence ends the
+    /// session rather than dropping into a VM shell inside the frame. Only a
+    /// clean exit reaps (see [`Session::finished`]): a dropped connection or
+    /// a failed connect exits nonzero, and that pane stays up — it holds the
+    /// only account of what happened, and the recovery keys can reconnect it.
+    /// When the last pane closes under `railway code`, the TUI leaves with it
+    /// — see [`Self::quit_when_done`].
+    pub fn reap_ended_sessions(&mut self) -> Option<Effect> {
+        let mut closed = None;
+        let mut i = 0;
+        while i < self.sessions.len() {
+            if self.sessions[i].finished() {
+                // Dropping the session detaches its local half; the agent
+                // stays running (sleeping is deliberate, never a side effect).
+                if let Some(session) = self.take_session(i) {
+                    closed = Some(session.agent_name.clone());
+                }
+            } else {
+                i += 1;
+            }
+        }
+        let agent_name = closed?;
+        if self.quit_when_done && self.sessions.is_empty() {
+            self.exit_note = Some(format!(
+                "Session ended — agent {agent_name} is still running. `railway ca sleep {agent_name}` stops the compute bill."
+            ));
+            return Some(Effect::Quit);
+        }
+        self.toast(format!("Session on {agent_name} ended"));
+        None
+    }
+
+    /// Any pane that has ended but whose finished/dropped call is still
+    /// waiting on ssh's exit status. The loop polls briefly while this holds
+    /// — the EOF that woke it can beat waitpid, and nothing else would wake
+    /// the loop again to ask.
+    pub fn awaiting_exit_status(&self) -> bool {
+        self.sessions.iter().any(|s| s.awaiting_exit_status())
+    }
+
     /// Hand the whole terminal to the session under the cursor.
     ///
     /// ⌥enter is the intended chord, but plenty of terminals do not send a
@@ -3201,12 +3323,17 @@ impl App {
 
     fn on_key_menu(&mut self, key: KeyEvent) -> Option<Effect> {
         match self.menu_focus {
+            // Typing is refused while shell is selected — the box says so —
+            // rather than cleared: a draft typed for a real agent survives
+            // cycling past shell.
             MenuFocus::Prompt => match key.code {
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.shell_selected() =>
+                {
                     self.prompt.push(c);
                     None
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace if !self.shell_selected() => {
                     self.prompt.pop();
                     None
                 }
@@ -3507,6 +3634,7 @@ impl App {
                     harness: self.harness_name().to_string(),
                     prompt,
                     label: format!("{agent_name} · new session"),
+                    base: Default::default(),
                 }))
             }
             Some(RowKind::Environment(w, p, e)) | Some(RowKind::Group(w, p, e)) => {
@@ -3570,16 +3698,20 @@ impl App {
     }
 
     /// Keys while the ⌥p composer is up: the menu prompt box's contract —
-    /// type, shift+tab cycles the agent, enter sends, esc closes.
+    /// type, shift+tab cycles the agent, enter sends, esc closes. And the
+    /// menu box's shell contract too: typing goes inert, and enter launches
+    /// the session bare, since a shell has nothing to hand a prompt to.
     fn on_key_manage_prompt(&mut self, key: KeyEvent) -> Option<Effect> {
         let mut draft = self.manage_prompt.take()?;
         match key.code {
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.shell_selected() =>
+            {
                 draft.push(c);
                 self.manage_prompt = Some(draft);
                 None
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if !self.shell_selected() => {
                 draft.pop();
                 self.manage_prompt = Some(draft);
                 None
@@ -3588,6 +3720,10 @@ impl App {
                 self.harness = (self.harness + 1) % HARNESSES.len();
                 self.manage_prompt = Some(draft);
                 None
+            }
+            KeyCode::Enter if self.shell_selected() => {
+                self.screen = Screen::Manage;
+                self.new_here_prompted(None)
             }
             KeyCode::Enter if !draft.trim().is_empty() => {
                 self.screen = Screen::Manage;
@@ -4625,6 +4761,103 @@ mod tests {
         assert!(a.settings.is_none());
     }
 
+    /// The harness exiting ends its pane. Under `railway code` — one session,
+    /// `quit_when_done` — the TUI leaves with it, back to the local prompt;
+    /// this is what ctrl-c out of the agent lands on now that the pane's
+    /// remote command has no shell fallback to strand you in.
+    #[test]
+    fn an_ended_session_under_railway_code_quits_the_tui() {
+        let mut a = loaded_app();
+        a.quit_when_done = true;
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+
+        // Still running: nothing to reap.
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1);
+
+        a.sessions[0].end_for_test();
+        assert_eq!(a.reap_ended_sessions(), Some(Effect::Quit));
+        assert!(a.sessions.is_empty());
+        let note = a.exit_note.as_deref().expect("says the agent still runs");
+        assert!(note.contains("nimble-otter"), "{note}");
+    }
+
+    /// From bare `railway ca`, an ended pane closes back to the tree — the
+    /// browser was asked for, so it stays.
+    #[test]
+    fn an_ended_session_from_the_tree_closes_back_to_it() {
+        let mut a = loaded_app();
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        a.sessions[0].end_for_test();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert!(a.sessions.is_empty());
+        assert_eq!(a.focus, ManageFocus::Tree);
+        assert!(a.toast.is_some(), "the close is announced, not silent");
+        assert!(a.exit_note.is_none());
+    }
+
+    /// An ssh that exits nonzero is a dropped connection or a failed connect,
+    /// not a finished session: its pane holds the only account of what
+    /// happened and the recovery keys can reconnect it, so it stays up — even
+    /// under `railway code`.
+    #[test]
+    fn a_dropped_connection_keeps_its_pane() {
+        let mut a = loaded_app();
+        a.quit_when_done = true;
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        a.sessions[0].end_dropped_for_test();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1, "the pane stays for recovery");
+    }
+
+    /// Ended but with the exit status still on its way: no call is made yet —
+    /// the loop's poll (`awaiting_exit_status`) asks again — and the pane is
+    /// not closed on a guess.
+    #[test]
+    fn a_pane_awaiting_its_exit_status_is_left_alone() {
+        let mut a = loaded_app();
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        // `cat` is still running, so try_wait has nothing yet.
+        a.sessions[0].mark_ended();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1);
+        assert!(a.awaiting_exit_status(), "the loop should keep polling");
+    }
+
+    /// `railway code` collapses the tree from the first frame, before there is
+    /// a session to collapse it around — the loading pane stands in for one.
+    /// Without this the tree would be drawn for the whole boot and then vanish,
+    /// which is the flicker the collapsed layout exists to avoid.
+    #[test]
+    fn a_launch_in_flight_fills_the_pane_on_its_own() {
+        let mut a = loaded_app();
+        a.maximized = true;
+        assert!(!a.pane_is_full(), "nothing to show yet");
+
+        a.start_loading(&launch_req());
+        assert!(a.pane_is_full(), "the loading pane has the screen");
+
+        // A launch that fails leaves neither: the tree comes back rather than
+        // the screen going blank.
+        a.launch_failed("no".into());
+        assert!(!a.pane_is_full());
+    }
+
     fn with_sessions(names: &[&str]) -> App {
         let mut a = loaded_app();
         for name in names {
@@ -4999,9 +5232,55 @@ mod tests {
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "grok");
         a.on_key(key(KeyCode::BackTab));
-        assert_eq!(a.harness_name(), "railway");
+        assert_eq!(a.harness_name(), "shell", "shell closes the cycle");
         a.on_key(key(KeyCode::BackTab));
-        assert_eq!(a.harness_name(), "claude", "cycling wraps");
+        assert_eq!(a.harness_name(), "railway", "cycling wraps");
+    }
+
+    /// The order is a contract: `railway` is the unconfigured default, and
+    /// `shell` sits after every real agent on every surface that lists them.
+    #[test]
+    fn railway_leads_the_harnesses_and_shell_closes_them() {
+        assert_eq!(HARNESSES.first(), Some(&"railway"));
+        assert_eq!(HARNESSES.last(), Some(&"shell"));
+        assert_eq!(default_harnesses(), &HARNESSES[..HARNESSES.len() - 1]);
+        assert!(
+            !default_harnesses().contains(&"shell"),
+            "shell is not a saveable default"
+        );
+    }
+
+    /// The shell option takes no prompt: the menu box refuses keystrokes while
+    /// it is selected, keeps a draft typed for a real agent, and launches
+    /// without one.
+    #[test]
+    fn the_menu_prompt_goes_inert_on_shell() {
+        let mut a = app();
+        a.target = Some(Target {
+            project_id: "p".into(),
+            project_name: "p".into(),
+            environment_id: "e".into(),
+            environment_name: "e".into(),
+        });
+        a.on_key(key(KeyCode::Char('h')));
+        a.on_key(key(KeyCode::Char('i')));
+        assert_eq!(a.prompt, "hi");
+        while a.harness_name() != "shell" {
+            a.on_key(key(KeyCode::BackTab));
+        }
+        a.on_key(key(KeyCode::Char('x')));
+        a.on_key(key(KeyCode::Backspace));
+        assert_eq!(a.prompt, "hi", "typing is refused, the draft survives");
+        let Effect::Launch(req) = a.on_key(key(KeyCode::Enter)).unwrap() else {
+            panic!("expected a launch");
+        };
+        assert_eq!(req.harness, "shell");
+        assert_eq!(req.prompt, None, "a leftover draft must not ride along");
+        while a.harness_name() != "claude" {
+            a.on_key(key(KeyCode::BackTab));
+        }
+        a.on_key(key(KeyCode::Char('!')));
+        assert_eq!(a.prompt, "hi!", "typing resumes on a real agent");
     }
 
     fn alt(c: char) -> KeyEvent {
@@ -5370,6 +5649,7 @@ mod tests {
             harness: "claude".into(),
             prompt: Some("fix the tests".into()),
             label: "devtools/production".into(),
+            base: Default::default(),
         };
         a.start_loading(&req);
         assert!(a.loading.active, "the pane shows the wait");
@@ -6127,6 +6407,70 @@ mod tests {
         assert_eq!(a.screen, Screen::ManagePrompt, "nothing to send yet");
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
         assert_eq!(a.screen, Screen::Manage);
+    }
+
+    /// The ⌥p composer follows the menu box's shell contract: cycling can
+    /// land on shell, typing goes inert there, and enter launches the session
+    /// bare instead of demanding a prompt a shell could never take.
+    #[test]
+    fn alt_p_launches_a_bare_shell_session() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.on_key(alt('p'));
+        for c in "fix it".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        while a.harness_name() != "shell" {
+            a.on_key(key(KeyCode::BackTab));
+        }
+        a.on_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            a.manage_prompt.as_deref(),
+            Some("fix it"),
+            "typing is refused while shell is selected"
+        );
+        let effect = a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::Manage);
+        let Some(Effect::Launch(req)) = effect else {
+            panic!("expected a launch, got {effect:?}");
+        };
+        assert_eq!(req.harness, "shell");
+        assert_eq!(req.prompt, None, "the abandoned draft must not ride along");
+    }
+
+    /// ⌥n's picker offers shell like any agent — last in the list — and
+    /// picking it makes the same promptless session `n` would.
+    #[test]
+    fn alt_n_offers_shell_last() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.on_key(alt('n'));
+        for _ in 0..HARNESSES.len() {
+            a.on_key(key(KeyCode::Down));
+        }
+        assert_eq!(
+            a.harness_pick,
+            Some(HARNESSES.len() - 1),
+            "the cursor bottoms out on shell"
+        );
+        let effect = a.on_key(key(KeyCode::Enter));
+        let Some(Effect::Launch(req)) = effect else {
+            panic!("expected a launch, got {effect:?}");
+        };
+        assert_eq!(req.harness, "shell");
+        assert_eq!(req.prompt, None);
     }
 
     /// The launchers work from inside a session, which is where the thought
@@ -7084,6 +7428,7 @@ mod tests {
             harness: "claude".into(),
             prompt: None,
             label: "p/e".into(),
+            base: Default::default(),
         };
         // A plain connect reuses whatever is open.
         assert!(!base.wants_new_session());
@@ -7728,6 +8073,7 @@ mod tests {
             harness: "claude".into(),
             prompt: None,
             label: "devtools/production".into(),
+            base: Default::default(),
         }
     }
 
