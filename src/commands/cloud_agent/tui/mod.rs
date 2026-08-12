@@ -151,7 +151,7 @@ fn apply_settings(app: &mut App, outcome: &wizard::Outcome) {
     match save_settings(outcome) {
         // There are preferences now, whatever there was before.
         Ok(_) => app.configured = true,
-        Err(err) => app.status = format!("Couldn't save your settings: {err:#}"),
+        Err(err) => app.toast_error(format!("Couldn't save your settings: {err:#}")),
     }
     app.set_harness(Some(&outcome.agent));
     app.set_theme(Some(&outcome.theme));
@@ -574,6 +574,12 @@ pub async fn run(
             // a silent pane by definition sends no output to wake the loop.
             _ = tokio::time::sleep(app.stall_check_remaining().unwrap_or(std::time::Duration::MAX)),
                 if app.stall_check_remaining().is_some() => None,
+            // An ended pane whose finished/dropped call is still waiting on
+            // ssh's exit status: the EOF that woke the loop can beat waitpid,
+            // and the reader sends no further wake — poll until the status
+            // lands and the reap can decide.
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)),
+                if app.awaiting_exit_status() => app.reap_ended_sessions(),
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Some(Ok(Event::Mouse(mouse))) => {
@@ -704,7 +710,7 @@ pub async fn run(
                 });
             }
             Some(Effect::SaveSetup(outcome)) => {
-                app.status = match save_setup(app, &outcome) {
+                match save_setup(app, &outcome) {
                     Ok(prefs) => {
                         tokio::spawn(async move {
                             super::telemetry::track_setup_saved("wizard", &prefs).await;
@@ -713,7 +719,7 @@ pub async fn run(
                         // an unregistered key is offered here too — not just
                         // at the first launch that would trip over it.
                         app.offer_ssh_key_setup();
-                        "Saved — Setup again to change it".into()
+                        app.status = "Saved — Setup again to change it".into();
                     }
                     Err(err) => {
                         let message = format!("{err:#}");
@@ -722,7 +728,7 @@ pub async fn run(
                             super::telemetry::track_setup_failed("wizard", &telemetry_message)
                                 .await;
                         });
-                        format!("Couldn't save your setup: {message}")
+                        app.toast_error(format!("Couldn't save your setup: {message}"));
                     }
                 };
                 // Apply it to the session that just chose it, or the prompt
@@ -947,7 +953,7 @@ fn handle_message(
                     // No target and no default project means nothing loads
                     // lazily either — without this line an expired login
                     // looks like an account with no agents anywhere.
-                    app.status = format!("Couldn't load agents: {err}");
+                    app.toast_error(format!("Couldn't load agents: {err}"));
                 } else {
                     spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
                 }

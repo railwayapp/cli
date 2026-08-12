@@ -182,6 +182,12 @@ pub struct Session {
     /// Set by the reader thread when ssh's output ends — the session is over
     /// even though the child may take another moment to reap.
     ended: Arc<AtomicBool>,
+    /// Whether ssh exited cleanly, once its status has been collected — the
+    /// difference between "the harness finished" (0: the pane can close) and
+    /// "the connection dropped" (anything else: the pane stays for the
+    /// recovery keys). `None` until waitpid has it; see
+    /// [`Self::exit_success`], which fills this exactly once.
+    exit_status: Option<bool>,
     /// This pane attached to a session that already existed, rather than
     /// starting one. Only an attach can go silent (see [`Self::stalled`]).
     reattach: bool,
@@ -358,6 +364,7 @@ impl Session {
             child,
             master: pty.master,
             ended,
+            exit_status: None,
             reattach,
             spawned_at: std::time::Instant::now(),
             got_output,
@@ -398,15 +405,50 @@ impl Session {
         self.ended.load(Ordering::Relaxed)
     }
 
-    /// Ended after living like a real session: it produced output and lasted
-    /// past the stall window. This is "the harness exited" — the pane can
-    /// close on it. An ssh that dies quickly is a failed connect instead, and
-    /// its pane has to stay up, because whatever ssh printed is the only
-    /// account of what went wrong.
-    pub fn ended_after_working(&self) -> bool {
-        self.ended()
-            && self.got_output.load(Ordering::Relaxed)
-            && self.spawned_at.elapsed() >= Self::STALL_AFTER
+    /// The remote command ran to completion: ssh exited 0, which a pane-style
+    /// launch only does once the harness has exited and the reset has run.
+    /// This is "the work here is over" — the pane can close on it. A dropped
+    /// connection — relay death, an idle NAT timeout, a kill — exits nonzero
+    /// instead and is *not* finished: that pane stays up for the recovery
+    /// keys, because the durable session it was showing is still running.
+    pub fn finished(&mut self) -> bool {
+        self.ended() && self.exit_success() == Some(true)
+    }
+
+    /// Ended, but ssh's exit status hasn't been collected yet — the pty's EOF
+    /// can beat waitpid by a beat. The event loop polls briefly while any
+    /// pane is in this state, so the finished/dropped call isn't lost to the
+    /// race.
+    pub fn awaiting_exit_status(&self) -> bool {
+        self.ended() && self.exit_status.is_none()
+    }
+
+    /// ssh's exit, collected once and remembered. `None` while the status
+    /// isn't available yet; a wait that errors counts as "not clean", which
+    /// keeps the pane — the conservative wrong answer.
+    fn exit_success(&mut self) -> Option<bool> {
+        if self.exit_status.is_none() {
+            self.exit_status = match self.child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => Some(status.success()),
+                Err(_) => Some(false),
+            };
+        }
+        self.exit_status
+    }
+
+    /// The environment this session's agent lives in, read back out of the
+    /// relay target (`agent:<environment>:<agent>`) it connected with.
+    ///
+    /// Reconnecting after a drop needs it — `connect_info` resolves the relay
+    /// plumbing from environment and agent — and the target is the one place
+    /// the session still carries it.
+    pub fn environment_id(&self) -> Option<String> {
+        let mut parts = self.ssh_target.split(':');
+        match (parts.next()?, parts.next()) {
+            ("agent", Some(env)) if !env.is_empty() => Some(env.to_string()),
+            _ => None,
+        }
     }
 
     /// Resize both the emulator and the pty. Doing only one leaves the agent
@@ -697,18 +739,24 @@ fn url_in(line: &str, col: usize) -> Option<String> {
 
 #[cfg(test)]
 impl Session {
-    /// Put the session in the state [`Self::ended_after_working`] looks for:
-    /// output seen, stall window outlived, reader done.
+    /// Put the session in the state [`Self::finished`] looks for: reader
+    /// done, ssh exited clean.
     pub fn end_for_test(&mut self) {
         self.ended.store(true, Ordering::Relaxed);
-        self.got_output.store(true, Ordering::Relaxed);
-        self.spawned_at = std::time::Instant::now() - Self::STALL_AFTER;
+        self.exit_status = Some(true);
     }
 
-    /// Ended inside the stall window — the shape of a connect that failed.
-    pub fn end_young_for_test(&mut self) {
+    /// Ended with a nonzero exit — the shape of a dropped connection.
+    pub fn end_dropped_for_test(&mut self) {
         self.ended.store(true, Ordering::Relaxed);
-        self.got_output.store(true, Ordering::Relaxed);
+        self.exit_status = Some(false);
+    }
+
+    /// Flip the session to ended without waiting for its process to die —
+    /// the reader thread races a test that killed `cat`, and the state under
+    /// test is "the connection is gone", not how it went.
+    pub fn mark_ended(&self) {
+        self.ended.store(true, Ordering::Relaxed);
     }
 
     /// A session backed by a local `cat` instead of ssh, so the state machine
@@ -757,6 +805,7 @@ impl Session {
             child,
             master: pty.master,
             ended: Arc::new(AtomicBool::new(false)),
+            exit_status: None,
             reattach: false,
             spawned_at: std::time::Instant::now(),
             got_output: Arc::new(AtomicBool::new(true)),
@@ -1056,6 +1105,15 @@ mod tests {
                 .unwrap_or(false),
             "expected the kitty encoding on the wire"
         );
+    }
+
+    /// Reconnecting resolves the relay plumbing from the environment, which
+    /// the session only holds inside its relay target.
+    #[test]
+    fn the_environment_is_read_back_out_of_the_relay_target() {
+        let session = Session::for_test("ca", "test").unwrap();
+        // for_test connects as agent:test:test.
+        assert_eq!(session.environment_id().as_deref(), Some("test"));
     }
 
     #[test]

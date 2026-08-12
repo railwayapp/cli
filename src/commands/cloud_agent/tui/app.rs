@@ -52,6 +52,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("shift+pgup/pgdn", "scroll without the mouse"),
             ("x", "end the session"),
             ("n", "another session on this agent"),
+            ("r", "reconnect a pane whose connection dropped"),
         ],
     ),
     (
@@ -321,8 +322,23 @@ pub struct Toast {
 pub const TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_millis(1800);
 
 impl Toast {
+    /// Errors carry things to read — a failure reason, sometimes a recipe —
+    /// and stay up long enough to read them. A confirmation needs a glance.
+    fn lifetime(&self) -> std::time::Duration {
+        if self.ok {
+            TOAST_LIFETIME
+        } else {
+            TOAST_LIFETIME * 5
+        }
+    }
+
     pub fn expired(&self) -> bool {
-        self.at.elapsed() >= TOAST_LIFETIME
+        self.at.elapsed() >= self.lifetime()
+    }
+
+    /// Time until this toast has had its moment.
+    pub fn remaining(&self) -> std::time::Duration {
+        self.lifetime().saturating_sub(self.at.elapsed())
     }
 }
 
@@ -1735,7 +1751,7 @@ impl App {
             };
         }
         if let Some(err) = refresh_failed {
-            self.status = format!("Couldn't refresh: {err}");
+            self.toast_error(format!("Couldn't refresh: {err}"));
         }
         self.collapse_if_empty(w, p);
         self.settle_watched_agents();
@@ -2070,14 +2086,26 @@ impl App {
                 KeyCode::PageDown if shift => Some(false),
                 _ => None,
             };
-            if let Some(i) = self.active
-                && let Some(session) = self.sessions.get_mut(i)
-            {
-                match scroll {
-                    // No pointer for a keyboard scroll; report it over the
-                    // middle of the pane.
-                    Some(up) => session.scroll(up, 10, (1, 1)),
-                    None => session.send_key(key),
+            if let Some(i) = self.active {
+                // A pane whose connection is gone answers with recovery
+                // instead of typing: bytes sent to a dead pty vanish, which
+                // used to make "session ended" a wall with no door. Scrollback
+                // stays live — reading what the connection said on its way
+                // out is half the point of keeping the screen.
+                let dead = self
+                    .sessions
+                    .get(i)
+                    .is_some_and(|s| s.ended() || s.stalled());
+                if dead && scroll.is_none() {
+                    return self.dead_pane_key(i, key);
+                }
+                if let Some(session) = self.sessions.get_mut(i) {
+                    match scroll {
+                        // No pointer for a keyboard scroll; report it over the
+                        // middle of the pane.
+                        Some(up) => session.scroll(up, 10, (1, 1)),
+                        None => session.send_key(key),
+                    }
                 }
             }
             return None;
@@ -2324,6 +2352,12 @@ impl App {
                 None
             }
             MouseAction::Down => {
+                // A click clears the status line, the same as a keypress
+                // (see on_key): the message answered the previous gesture,
+                // and whatever this click means sets a fresh one — clicking
+                // a disconnected session must not leave "not connected"
+                // standing once the cursor is on a connected one.
+                self.status.clear();
                 let pane = self.pane_at(col, row)?;
                 // An agent with clickable output — "click here to copy", a menu
                 // you can point at — turns mouse reporting on and waits for the
@@ -2495,10 +2529,15 @@ impl App {
 
     /// The launch pipeline gave up. Land back in Manage with the reason, so a
     /// missing sign-in or a disabled feature is fixable without losing the tree.
+    ///
+    /// The reason rides an error toast over the pane rather than a header
+    /// annotation: a failure squeezed in beside the wordmark reads as
+    /// furniture, and this one usually carries the fix.
     pub fn launch_failed(&mut self, err: String) {
         self.loading.active = false;
         self.screen = Screen::Manage;
-        self.status = format!("Launch failed: {err}");
+        let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.toast_error(format!("Launch failed: {flat}"));
     }
 
     /// Advance the loading animation.
@@ -2517,10 +2556,6 @@ impl App {
 
     pub fn active_session(&self) -> Option<&super::session::Session> {
         self.active.and_then(|i| self.sessions.get(i))
-    }
-
-    fn session_index_for(&self, agent_id: &str) -> Option<usize> {
-        self.sessions.iter().position(|s| s.agent_id == agent_id)
     }
 
     /// Show the pane belonging to the session row under the cursor, if it has
@@ -2594,14 +2629,27 @@ impl App {
     }
 
     /// Show an already-open session. Returns false when there isn't one.
+    ///
+    /// A pane whose connection has ended doesn't count — "connect" must not
+    /// resolve to a corpse — and asking for the agent again is the natural
+    /// moment to clear such panes out of the way of the fresh connection.
     pub fn activate_session(&mut self, agent_id: &str) -> bool {
-        match self.session_index_for(agent_id) {
+        match self
+            .sessions
+            .iter()
+            .position(|s| s.agent_id == agent_id && !s.ended())
+        {
             Some(i) => {
                 self.active = Some(i);
                 self.focus = ManageFocus::Session;
                 true
             }
-            None => false,
+            None => {
+                while let Some(i) = self.sessions.iter().position(|s| s.agent_id == agent_id) {
+                    drop(self.take_session(i));
+                }
+                false
+            }
         }
     }
 
@@ -2654,24 +2702,30 @@ impl App {
         Some(session)
     }
 
-    /// Close panes whose ssh has ended because the harness exited.
+    /// Close panes whose ssh finished — the harness exited and the remote
+    /// command ran out.
     ///
-    /// The reader thread flips `ended` and wakes the loop, which calls this.
-    /// Before it, a finished session sat as a dead pane — and with the pane
-    /// remote command's shell fallback gone, "finished" now includes ctrl-c:
-    /// interrupting the agent out of existence ends the session rather than
-    /// dropping into a VM shell inside the frame. A connect that died young
-    /// stays up instead (see [`Session::ended_after_working`]): whatever ssh
-    /// printed is the only account of what failed. When the last pane closes
-    /// under `railway code`, the TUI leaves with it — see
-    /// [`Self::quit_when_done`].
+    /// The reader thread flips `ended` and wakes the loop, which lands here.
+    /// With the pane remote command's shell fallback gone, "finished" now
+    /// includes ctrl-c: interrupting the agent out of existence ends the
+    /// session rather than dropping into a VM shell inside the frame. Only a
+    /// clean exit reaps (see [`Session::finished`]): a dropped connection or
+    /// a failed connect exits nonzero, and that pane stays up — it holds the
+    /// only account of what happened, and the recovery keys can reconnect it.
+    /// When the last pane closes under `railway code`, the TUI leaves with it
+    /// — see [`Self::quit_when_done`].
     pub fn reap_ended_sessions(&mut self) -> Option<Effect> {
         let mut closed = None;
-        while let Some(i) = self.sessions.iter().position(|s| s.ended_after_working()) {
-            // Dropping the session detaches its local half; the agent stays
-            // running (sleeping is deliberate, never a side effect).
-            if let Some(session) = self.take_session(i) {
-                closed = Some(session.agent_name.clone());
+        let mut i = 0;
+        while i < self.sessions.len() {
+            if self.sessions[i].finished() {
+                // Dropping the session detaches its local half; the agent
+                // stays running (sleeping is deliberate, never a side effect).
+                if let Some(session) = self.take_session(i) {
+                    closed = Some(session.agent_name.clone());
+                }
+            } else {
+                i += 1;
             }
         }
         let agent_name = closed?;
@@ -2683,6 +2737,14 @@ impl App {
         }
         self.toast(format!("Session on {agent_name} ended"));
         None
+    }
+
+    /// Any pane that has ended but whose finished/dropped call is still
+    /// waiting on ssh's exit status. The loop polls briefly while this holds
+    /// — the EOF that woke it can beat waitpid, and nothing else would wake
+    /// the loop again to ask.
+    pub fn awaiting_exit_status(&self) -> bool {
+        self.sessions.iter().any(|s| s.awaiting_exit_status())
     }
 
     /// Hand the whole terminal to the session under the cursor.
@@ -2717,6 +2779,53 @@ impl App {
         })
     }
 
+    /// Keys for a pane whose connection is gone — its ssh exited (ended) or
+    /// its attach is streaming nothing (stalled).
+    ///
+    /// Reconnect, close, or step back out; everything else is swallowed
+    /// rather than written into a pty nothing is reading. Enter is taken as
+    /// reconnect because it is the reflex after "connection closed", and
+    /// reconnecting is the only thing it could mean here.
+    fn dead_pane_key(&mut self, index: usize, key: KeyEvent) -> Option<Effect> {
+        match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Enter => {
+                self.reconnect_session(index)
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => Some(Effect::CloseSession { index }),
+            // Nothing in the pane can receive an Escape any more, so it
+            // releases to the tree — the same place the release chords go.
+            KeyCode::Esc => {
+                self.focus = ManageFocus::Tree;
+                self.maximized = false;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Drop a pane whose connection died and dial its durable session again.
+    ///
+    /// Through [`Effect::Reattach`] rather than respawning ssh from the
+    /// pane's stored plumbing: the reattach path re-resolves the identity and
+    /// passes the ssh-key gate, so a key deregistered mid-session gets the
+    /// gate's question instead of another connection that dies the same way.
+    fn reconnect_session(&mut self, index: usize) -> Option<Effect> {
+        let session = self.take_session(index)?;
+        let Some(environment_id) = session.environment_id() else {
+            // A target that isn't `agent:<env>:<id>` has nothing to resolve;
+            // the session row in the tree still knows how to reach it.
+            self.toast_error("Couldn't resolve this session — reconnect from its row in the tree");
+            return None;
+        };
+        self.status = format!("Reconnecting to {}…", session.durable_name);
+        Some(Effect::Reattach {
+            agent_id: session.agent_id.clone(),
+            agent_name: session.agent_name.clone(),
+            environment_id,
+            session_name: session.durable_name.clone(),
+        })
+    }
+
     /// Connect to a session row: show its pane if we have one, else reattach.
     fn reattach_row(&mut self, kind: RowKind) -> Option<Effect> {
         let RowKind::Session(w, p, e, a, i) = kind else {
@@ -2726,11 +2835,19 @@ impl App {
         let (agent_id, agent_name) = self.agent_at(w, p, e, a)?;
         self.target = self.target_at((w, p, e));
 
-        // Already open: this means "put me in it", not "open another one".
+        // Already open: this means "put me in it", not "open another one" —
+        // unless the pane's connection has died, in which case "connect"
+        // means what it says. Focusing the corpse was a trap: the dead pane
+        // blocked every reattach to its session until someone discovered
+        // that `x` on the *agent* row closes panes.
         if let Some(index) = self.pane_for(&name) {
-            self.active = Some(index);
-            self.focus = ManageFocus::Session;
-            return None;
+            if self.sessions[index].ended() {
+                drop(self.take_session(index));
+            } else {
+                self.active = Some(index);
+                self.focus = ManageFocus::Session;
+                return None;
+            }
         }
         // Not open: reconnect straight to it. Reattaching needs no credential,
         // no skills sync and no provisioning — the agent is already set up,
@@ -2764,7 +2881,7 @@ impl App {
 
     /// The open pane a row refers to: a session's own, or the first one on an
     /// agent.
-    fn pane_for_row(&self, kind: RowKind) -> Option<usize> {
+    pub fn pane_for_row(&self, kind: RowKind) -> Option<usize> {
         match kind {
             RowKind::Session(w, p, e, a, i) => {
                 let name = self.console_session(w, p, e, a, i)?.name.clone();
@@ -3140,7 +3257,7 @@ impl App {
     pub fn toast_remaining(&self) -> std::time::Duration {
         self.toast
             .as_ref()
-            .map(|toast| TOAST_LIFETIME.saturating_sub(toast.at.elapsed()))
+            .map(Toast::remaining)
             .unwrap_or(TOAST_LIFETIME)
     }
 
@@ -4646,20 +4763,40 @@ mod tests {
         assert!(a.exit_note.is_none());
     }
 
-    /// An ssh that dies inside the stall window is a failed connect, and its
-    /// pane is the only place the failure was printed — it stays up.
+    /// An ssh that exits nonzero is a dropped connection or a failed connect,
+    /// not a finished session: its pane holds the only account of what
+    /// happened and the recovery keys can reconnect it, so it stays up — even
+    /// under `railway code`.
     #[test]
-    fn a_connect_that_died_young_keeps_its_pane() {
+    fn a_dropped_connection_keeps_its_pane() {
         let mut a = loaded_app();
         a.quit_when_done = true;
         a.attach_session(
             super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
             "ca_1".into(),
         );
-        a.sessions[0].end_young_for_test();
+        a.sessions[0].end_dropped_for_test();
 
         assert_eq!(a.reap_ended_sessions(), None);
-        assert_eq!(a.sessions.len(), 1, "the error stays on screen");
+        assert_eq!(a.sessions.len(), 1, "the pane stays for recovery");
+    }
+
+    /// Ended but with the exit status still on its way: no call is made yet —
+    /// the loop's poll (`awaiting_exit_status`) asks again — and the pane is
+    /// not closed on a guess.
+    #[test]
+    fn a_pane_awaiting_its_exit_status_is_left_alone() {
+        let mut a = loaded_app();
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        // `cat` is still running, so try_wait has nothing yet.
+        a.sessions[0].mark_ended();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1);
+        assert!(a.awaiting_exit_status(), "the loop should keep polling");
     }
 
     /// `railway code` collapses the tree from the first frame, before there is
@@ -4820,6 +4957,132 @@ mod tests {
         a.take_session(0);
         assert!(!a.maximized);
         assert_eq!(a.focus, ManageFocus::Tree);
+    }
+
+    /// A pane whose ssh has died must offer a way back in: `r` drops the dead
+    /// pane and dials the same durable session again — the whole recovery
+    /// path a dropped connection used to be missing.
+    #[test]
+    fn a_dead_pane_reconnects_with_r() {
+        let mut a = with_sessions(&["ca_1"]);
+        a.focus = ManageFocus::Session;
+        a.sessions[0].mark_ended();
+
+        let effect = a.on_key(key(KeyCode::Char('r')));
+        assert_eq!(
+            effect,
+            Some(Effect::Reattach {
+                agent_id: "ca_1".into(),
+                agent_name: "ca_1".into(),
+                // for_test connects as agent:test:test — the environment is
+                // read back out of the relay target.
+                environment_id: "test".into(),
+                session_name: "test".into(),
+            })
+        );
+        assert!(a.sessions.is_empty(), "the dead pane is gone");
+        assert!(a.status.contains("Reconnecting"), "{}", a.status);
+    }
+
+    /// Keystrokes into a dead pane go nowhere on purpose — a pty nothing
+    /// reads must not eat typing — and the recovery keys do their jobs.
+    #[test]
+    fn a_dead_pane_swallows_typing_and_answers_the_recovery_keys() {
+        let mut a = with_sessions(&["ca_1"]);
+        a.focus = ManageFocus::Session;
+        a.sessions[0].mark_ended();
+
+        assert_eq!(a.on_key(key(KeyCode::Char('h'))), None, "typing vanishes");
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('x'))),
+            Some(Effect::CloseSession { index: 0 })
+        );
+        // Enter means reconnect here — it is the reflex after "connection
+        // closed", and there is nothing else it could mean.
+        assert!(matches!(
+            a.on_key(key(KeyCode::Enter)),
+            Some(Effect::Reattach { .. })
+        ));
+    }
+
+    /// Escape on a dead pane releases to the tree: the agent that would have
+    /// received it is not on the other end any more.
+    #[test]
+    fn escape_on_a_dead_pane_returns_to_the_tree() {
+        let mut a = with_sessions(&["ca_1"]);
+        a.focus = ManageFocus::Session;
+        a.sessions[0].mark_ended();
+
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.focus, ManageFocus::Tree);
+    }
+
+    /// "Connect" must never resolve to a corpse: an agent whose only pane has
+    /// died reads as not connected, and the dead pane is cleared out of the
+    /// way of the fresh connection.
+    #[test]
+    fn a_dead_pane_does_not_count_as_connected() {
+        let mut a = with_sessions(&["ca_1"]);
+        a.sessions[0].mark_ended();
+
+        assert!(!a.activate_session("ca_1"));
+        assert!(a.sessions.is_empty(), "the dead pane was cleared");
+    }
+
+    /// Enter on a session row whose pane has died reconnects instead of
+    /// focusing the corpse. The old behaviour was a trap: the dead pane
+    /// blocked every reattach to its session until it was closed from the
+    /// agent row, which nothing advertised.
+    #[test]
+    fn enter_on_a_session_row_with_a_dead_pane_reattaches() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = LoadSessions::Loaded(vec![ConsoleSession {
+                // The durable name for_test sessions carry.
+                name: "test".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+            }]);
+        }
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        a.sessions[0].mark_ended();
+        a.focus = ManageFocus::Tree;
+        a.cursor = a.rows().iter().position(|r| r.label == "test").unwrap();
+
+        let effect = a.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            effect,
+            Some(Effect::Reattach {
+                agent_id: "ca_1".into(),
+                agent_name: "nimble-otter".into(),
+                environment_id: "env_prod".into(),
+                session_name: "test".into(),
+            })
+        );
+        assert!(a.sessions.is_empty(), "the dead pane went first");
+    }
+
+    /// A live pane keeps its keys: recovery must only take over once the
+    /// connection is actually gone.
+    #[test]
+    fn a_live_pane_still_owns_the_keyboard() {
+        let mut a = with_sessions(&["ca_1"]);
+        a.focus = ManageFocus::Session;
+
+        assert_eq!(a.on_key(key(KeyCode::Char('r'))), None);
+        assert_eq!(a.on_key(key(KeyCode::Char('x'))), None);
+        assert_eq!(
+            a.sessions.len(),
+            1,
+            "r and x were typing, not pane commands"
+        );
+        assert_eq!(a.focus, ManageFocus::Session);
     }
 
     /// So does leaving the screen.
@@ -5326,7 +5589,10 @@ mod tests {
         let mut a = app();
         a.launch_failed("no codex sign-in".into());
         assert_eq!(a.screen, Screen::Manage);
-        assert!(a.status.contains("no codex sign-in"));
+        // The reason rides an error toast, not the header status line.
+        let toast = a.toast.as_ref().expect("an error toast");
+        assert!(!toast.ok);
+        assert!(toast.text.contains("no codex sign-in"), "{}", toast.text);
     }
 
     /// Revealing an environment expands its ancestors and refetches — the agent
@@ -5894,6 +6160,55 @@ mod tests {
         a.on_mouse(MouseAction::Down, 5, 3 + row as u16);
         assert_eq!(a.focus, ManageFocus::Tree);
         assert!(a.status.contains("enter to reattach"), "{}", a.status);
+    }
+
+    /// The reattach prompt answers the click that raised it: clicking a
+    /// connected session afterwards clears it, the same as a keypress would,
+    /// instead of leaving "not connected" standing over a connected pane.
+    #[test]
+    fn clicking_a_connected_session_clears_the_reattach_prompt() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = LoadSessions::Loaded(vec![
+                ConsoleSession {
+                    name: "claude-one".into(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: true,
+                    attached: true,
+                },
+                ConsoleSession {
+                    name: "claude-two".into(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: true,
+                    attached: false,
+                },
+            ]);
+        }
+        let mut pane = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
+        pane.durable_name = "claude-one".into();
+        a.sessions = vec![pane];
+        a.active = Some(0);
+        a.panes = panes_fixture();
+
+        let two = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "claude-two")
+            .unwrap();
+        a.on_mouse(MouseAction::Down, 5, 3 + two as u16);
+        assert!(a.status.contains("enter to reattach"), "{}", a.status);
+
+        let one = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "claude-one")
+            .unwrap();
+        a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
+        assert!(a.status.is_empty(), "{}", a.status);
+        assert_eq!(a.active, Some(0));
     }
 
     /// Enter on a project toggles it: the first press opens it straight
@@ -7483,13 +7798,15 @@ mod tests {
     }
 
     /// A refresh that fails keeps the stale list — stale beats gone — and
-    /// says why in the status line.
+    /// says why in an error toast.
     #[test]
     fn a_failed_refresh_keeps_the_agents_and_reports() {
         let mut a = loaded_app();
         a.agents_loaded((0, 0, 0), Err("502 from backboard".into()));
         assert!(a.rows().iter().any(|r| r.label == "nimble-otter"));
-        assert!(a.status.contains("502 from backboard"), "{}", a.status);
+        let toast = a.toast.as_ref().expect("an error toast");
+        assert!(!toast.ok);
+        assert!(toast.text.contains("502 from backboard"), "{}", toast.text);
     }
 
     /// A project with agents in one environment still shows its empty ones in
