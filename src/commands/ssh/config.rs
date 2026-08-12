@@ -296,6 +296,104 @@ fn render_config_block(
     block
 }
 
+/// What an OpenSSH block for a cloud agent needs to say.
+///
+/// Separate from the service renderer because almost every line differs: the
+/// target grammar is the agent one, the alias is stable across recreations, and
+/// the relay's host key lives in the CLI's own known-hosts file rather than the
+/// user's.
+pub(crate) struct AgentBlock<'a> {
+    pub agent_name: &'a str,
+    pub environment_id: &'a str,
+    pub alias: &'a str,
+    /// `None` for a key that lives only in an ssh-agent — there is no path to
+    /// name, and inventing one would break a connection that works.
+    pub identity_file: Option<&'a Path>,
+    pub known_hosts: &'a Path,
+}
+
+/// The marker that scopes an agent's block, so a rewrite finds it and a removal
+/// takes only it.
+///
+/// Keyed on environment and agent *name*, matching what the block addresses: an
+/// id-keyed marker would orphan the block when an agent of the same name is
+/// recreated, leaving two entries claiming one alias.
+pub(crate) fn agent_marker(environment_id: &str, agent_name: &str) -> String {
+    format!(
+        "agent:{}:{}",
+        marker_name(environment_id),
+        marker_name(agent_name)
+    )
+}
+
+/// The default `Host` alias for an agent.
+pub(crate) fn agent_alias(agent_name: &str) -> String {
+    format!("railway-agent-{}", sanitize_alias(agent_name))
+}
+
+/// Render `block` as an OpenSSH `Host` stanza for a cloud agent.
+///
+/// The relay resolves the agent by name (see `parseCloudAgentTarget` in
+/// backboard), so the block keeps working after a delete-and-recreate — which an
+/// id would not. `StrictHostKeyChecking accept-new` against the CLI's own
+/// known-hosts file is not a convenience: a GUI client that meets an interactive
+/// host-key prompt has nowhere to show it and simply fails.
+pub(crate) fn render_agent_config_block(block: &AgentBlock<'_>) -> String {
+    let marker = agent_marker(block.environment_id, block.agent_name);
+    let (relay_host, relay_port) = native::ssh_relay();
+    let mut out = String::new();
+    let w = |out: &mut String, args: std::fmt::Arguments<'_>| {
+        out.write_fmt(args).expect("writing to String cannot fail");
+    };
+
+    w(&mut out, format_args!("# BEGIN railway:{marker}\n"));
+    w(
+        &mut out,
+        format_args!("# Railway cloud agent: {}\n", marker_name(block.agent_name)),
+    );
+    w(
+        &mut out,
+        format_args!("# Written by `railway ca desktop` — edit with that, not by hand\n"),
+    );
+    w(&mut out, format_args!("Host {}\n", block.alias));
+    w(&mut out, format_args!("    HostName {relay_host}\n"));
+    if let Some(port) = relay_port {
+        w(&mut out, format_args!("    Port {port}\n"));
+    }
+    w(
+        &mut out,
+        format_args!(
+            "    User agent:{}:{}\n",
+            block.environment_id, block.agent_name
+        ),
+    );
+    if let Some(identity_file) = block.identity_file {
+        w(
+            &mut out,
+            format_args!(
+                "    IdentityFile {}\n",
+                quote_ssh_config_value(&identity_file.to_string_lossy())
+            ),
+        );
+    }
+    w(
+        &mut out,
+        format_args!(
+            "    UserKnownHostsFile {}\n",
+            quote_ssh_config_value(&block.known_hosts.to_string_lossy())
+        ),
+    );
+    w(
+        &mut out,
+        format_args!("    StrictHostKeyChecking accept-new\n"),
+    );
+    w(&mut out, format_args!("    ServerAliveInterval 30\n"));
+    w(&mut out, format_args!("    ServerAliveCountMax 3\n"));
+    w(&mut out, format_args!("# END railway:{marker}\n"));
+
+    out
+}
+
 fn upsert_config_block(
     path: &Path,
     config_marker: &str,
@@ -304,20 +402,48 @@ fn upsert_config_block(
 ) -> Result<()> {
     let existing = read_config(path)?;
     let pattern = config_block_regex_with_case(config_marker, false, true)?;
+    if pattern.is_match(&existing) {
+        let updated = pattern.replace(&existing, NoExpand(block)).into_owned();
+        return write_config(path, &updated);
+    }
+    let legacy_pattern = config_block_regex_with_case(service_name, false, true)?;
+    if legacy_pattern.is_match(&existing) {
+        let updated = legacy_pattern
+            .replace(&existing, NoExpand(block))
+            .into_owned();
+        return write_config(path, &updated);
+    }
+    upsert_marked_block(path, config_marker, block)
+}
+
+/// Replace the block carrying `config_marker`, or append it.
+///
+/// [`upsert_config_block`] without the by-service-name fallback, which exists
+/// only to adopt blocks written before markers carried ids. A cloud agent has no
+/// service name to fall back to, and matching one anyway would let an agent
+/// overwrite the block of a service that happens to share its name.
+pub(crate) fn upsert_marked_block(path: &Path, config_marker: &str, block: &str) -> Result<()> {
+    let existing = read_config(path)?;
+    let pattern = config_block_regex_with_case(config_marker, false, true)?;
     let updated = if pattern.is_match(&existing) {
         pattern.replace(&existing, NoExpand(block)).into_owned()
     } else {
-        let legacy_pattern = config_block_regex_with_case(service_name, false, true)?;
-        if legacy_pattern.is_match(&existing) {
-            legacy_pattern
-                .replace(&existing, NoExpand(block))
-                .into_owned()
-        } else {
-            append_config_block(existing, block)
-        }
+        append_config_block(existing, block)
     };
 
     write_config(path, &updated)
+}
+
+/// Remove the block carrying `config_marker`. `false` means there was none.
+pub(crate) fn remove_marked_block(path: &Path, config_marker: &str) -> Result<bool> {
+    let existing = read_config(path)?;
+    let pattern = config_block_regex_with_case(config_marker, true, true)?;
+    if !pattern.is_match(&existing) {
+        return Ok(false);
+    }
+    let updated = pattern.replace(&existing, "").into_owned();
+    write_config(path, &updated)?;
+    Ok(true)
 }
 
 fn remove_config_block_for_target(
@@ -574,7 +700,7 @@ fn quote_ssh_config_value(value: &str) -> String {
     quoted
 }
 
-fn expand_tilde(path: &Path) -> Result<PathBuf> {
+pub(crate) fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let path = path.to_string_lossy();
 
     if path == "~" {
@@ -601,6 +727,97 @@ mod tests {
         assert_eq!(sanitize_alias("API Service"), "api-service");
         assert_eq!(sanitize_alias("railway.API_01"), "railway.api_01");
         assert_eq!(sanitize_alias("!!!"), "service");
+    }
+
+    /// The block a desktop app reads. Asserted whole, because every line of it
+    /// is load-bearing for a client we do not control: the alias it is found by,
+    /// the by-name target that survives a recreate, and the known-hosts pair
+    /// that keeps a GUI off an unanswerable host-key prompt.
+    #[test]
+    fn renders_an_agent_block() {
+        let block = render_agent_config_block(&AgentBlock {
+            agent_name: "my-box",
+            environment_id: "env-id",
+            alias: "railway-agent-my-box",
+            identity_file: Some(Path::new("/home/me/.ssh/id_ed25519")),
+            known_hosts: Path::new("/home/me/.railway/known_hosts_relay"),
+        });
+
+        assert_eq!(
+            block,
+            "\
+# BEGIN railway:agent:env-id:my-box
+# Railway cloud agent: my-box
+# Written by `railway ca desktop` — edit with that, not by hand
+Host railway-agent-my-box
+    HostName ssh.railway.com
+    User agent:env-id:my-box
+    IdentityFile /home/me/.ssh/id_ed25519
+    UserKnownHostsFile /home/me/.railway/known_hosts_relay
+    StrictHostKeyChecking accept-new
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+# END railway:agent:env-id:my-box
+"
+        );
+    }
+
+    /// A key that lives only in an ssh-agent has no path to name. Omitting the
+    /// directive lets the agent answer; inventing a path would break a
+    /// connection that otherwise works.
+    #[test]
+    fn an_agent_block_omits_an_identity_it_does_not_have() {
+        let block = render_agent_config_block(&AgentBlock {
+            agent_name: "my-box",
+            environment_id: "env-id",
+            alias: "railway-agent-my-box",
+            identity_file: None,
+            known_hosts: Path::new("/k"),
+        });
+        assert!(!block.contains("IdentityFile"));
+        assert!(block.contains("UserKnownHostsFile /k\n"));
+    }
+
+    /// An agent block must never be collateral damage of a service removal, and
+    /// vice versa — they share one file and one marker prefix.
+    #[test]
+    fn agent_and_service_blocks_do_not_remove_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+
+        let service = render_config_block("my-box", "p:e:s", "railway-my-box", "instance-id", None);
+        upsert_config_block(&path, "p:e:s", "my-box", &service).unwrap();
+
+        let marker = agent_marker("env-id", "my-box");
+        let agent = render_agent_config_block(&AgentBlock {
+            agent_name: "my-box",
+            environment_id: "env-id",
+            alias: &agent_alias("my-box"),
+            identity_file: None,
+            known_hosts: Path::new("/k"),
+        });
+        upsert_marked_block(&path, &marker, &agent).unwrap();
+
+        // Writing the agent block twice must not add a second copy.
+        upsert_marked_block(&path, &marker, &agent).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.matches("Host railway-agent-my-box").count(), 1);
+
+        // Removing the agent leaves the identically-named service alone.
+        assert!(remove_marked_block(&path, &marker).unwrap());
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("Host railway-agent-my-box"));
+        assert!(contents.contains("Host railway-my-box"));
+        assert!(contents.contains("# Railway service: my-box"));
+
+        // And a second removal is a no-op rather than an error.
+        assert!(!remove_marked_block(&path, &marker).unwrap());
+    }
+
+    #[test]
+    fn agent_aliases_are_sanitized() {
+        assert_eq!(agent_alias("My Box"), "railway-agent-my-box");
+        assert_eq!(agent_marker("env-id", "my-box"), "agent:env-id:my-box");
     }
 
     #[test]

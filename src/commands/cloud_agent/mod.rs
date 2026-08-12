@@ -6,6 +6,7 @@
 //! you want to browse first.
 
 pub mod access;
+pub mod desktop;
 pub mod lifecycle;
 pub mod prefs;
 pub mod setup;
@@ -32,7 +33,7 @@ use tui::{App, Outcome};
 #[derive(Parser)]
 #[clap(
     args_conflicts_with_subcommands = true,
-    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca desktop --claude       # drive an agent from Claude Code Desktop\n  railway ca desktop --codex        # …or from the Codex app\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher on its own — same flags, same preferences, no\nTUI. Preferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -48,6 +49,9 @@ pub struct Args {
 enum Command {
     /// Configure how cloud agents are launched (default agent, skills)
     Setup(setup::Args),
+
+    /// Set up a desktop coding app to work on a cloud agent over SSH
+    Desktop(desktop::Args),
 
     /// Open the TUI directly on the manage screen, skipping the menu
     Manage,
@@ -105,6 +109,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     match args.command {
         Some(Command::Setup(a)) => setup::command(a).await,
+        Some(Command::Desktop(a)) => tracked("desktop", desktop::command(a)).await,
         Some(Command::Manage) => browse_into(Some(tui::Screen::Manage)).await,
         Some(Command::Start(a)) => crate::commands::code::launch(a).await,
         Some(Command::List(a)) => tracked("list", lifecycle::list(a)).await,

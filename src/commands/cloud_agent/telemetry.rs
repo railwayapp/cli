@@ -186,6 +186,23 @@ pub async fn track_access_blocked() {
 /// of `commands/service.rs`'s `track_service_source`, rather than one event
 /// with all four combined: keeps `sub_command` cardinality small and each
 /// fact independently queryable.
+/// A `railway ca desktop` run that wrote its config.
+///
+/// `apps` is the comma-joined harness slugs the run configured — a fixed set,
+/// like every other slug in this module, so nothing user-supplied rides along.
+/// Failures are already reported by the generic dispatch event; this only marks
+/// which apps people actually point at an agent.
+pub async fn track_desktop_configured(apps: &str) {
+    telemetry::send(event(
+        "cloud_agent",
+        format!("desktop_{apps}"),
+        0,
+        true,
+        None,
+    ))
+    .await;
+}
+
 pub async fn track_setup_saved(entry: &str, prefs: &AgentPrefs) {
     let harness = prefs.agent.as_deref().unwrap_or("none");
     telemetry::send(event(
