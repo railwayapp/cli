@@ -817,6 +817,18 @@ pub struct LaunchRequest {
     pub prompt: Option<String>,
     /// Human-facing description of where this is going, for the handoff line.
     pub label: String,
+    /// The command-line flags this launch started from, when a command line
+    /// started it. The fields above overwrite the target, harness, agent and
+    /// prompt; everything else — `--name`, `--variable`, `--env-file`,
+    /// `--refresh-auth` — rides along from here, because nothing in the TUI
+    /// asks for those and dropping them would quietly ignore what was typed.
+    /// Default for launches the TUI starts itself.
+    ///
+    /// Boxed because a `LaunchRequest` is the largest thing several enums
+    /// carry — `Effect`, `HeldConnect`, `Outcome`, `Message` — and inlining
+    /// another 200 bytes of flags widens every one of them for a field only
+    /// the command line ever fills.
+    pub base: Box<crate::commands::code::LaunchArgs>,
 }
 
 pub struct App {
@@ -841,6 +853,25 @@ pub struct App {
     pub agent_pick: Option<AgentPicker>,
     /// The session pane has the whole screen: no tree, no detail column.
     pub maximized: bool,
+    /// A launch to start as soon as the first frame is up, and then forget.
+    ///
+    /// How `railway code` opens: it has already answered where and which
+    /// harness, so there is nothing to browse for — the TUI is here to hold
+    /// the session, not to ask a question. Taken by the loop and fed through
+    /// the same path a keypress would, so the ssh-key gate and the Claude
+    /// mint still get their say.
+    pub autostart: Option<LaunchRequest>,
+    /// Leave the TUI when the last session pane closes on its own.
+    ///
+    /// `railway code` came for one session; when the harness exits (ctrl-c
+    /// included), the person is done, and the right place to land is their
+    /// local prompt — not a browser they never opened. Bare `railway ca`
+    /// keeps its tree instead.
+    pub quit_when_done: bool,
+    /// One line for the caller to print after the terminal is restored — how
+    /// a quit that closed a session says the agent is still running (and
+    /// billing) now that the frame it would have said it in is gone.
+    pub exit_note: Option<String>,
     /// This gesture belongs to the application in the session, not to us.
     pointer_to_app: bool,
     /// A short confirmation in the corner, and when it was raised.
@@ -934,6 +965,9 @@ impl App {
             manage_prompt: None,
             agent_pick: None,
             maximized: false,
+            autostart: None,
+            quit_when_done: false,
+            exit_note: None,
             pointer_to_app: false,
             toast: None,
             theme: Theme::from_slug(theme),
@@ -1092,6 +1126,20 @@ impl App {
         }
     }
 
+    /// Is the right-hand pane taking the whole screen — no tree, no detail
+    /// column?
+    ///
+    /// The layout and the terminal emulator both have to agree on this, or a
+    /// remote TUI wraps at the wrong column, so both ask here rather than
+    /// reading `maximized` and re-deriving the rest. A launch in flight counts:
+    /// `railway code` collapses the tree from the first frame, and the loading
+    /// screen is what stands in for the session until there is one. A
+    /// maximized flag with neither is not a full pane — it is a blank screen,
+    /// which is what happens between a failed launch and the next key.
+    pub fn pane_is_full(&self) -> bool {
+        self.maximized && (self.active.is_some() || self.loading.active)
+    }
+
     /// The agents in the target environment: (id, name, status).
     fn agents_in_target(&self) -> Vec<(String, String, String)> {
         let Some(target) = self.target.as_ref() else {
@@ -1144,6 +1192,7 @@ impl App {
             harness: self.harness_name().to_string(),
             prompt,
             label: format!("{agent_name} · new session"),
+            base: Default::default(),
         }))
     }
 
@@ -1952,6 +2001,7 @@ impl App {
             harness: self.harness_name().to_string(),
             prompt,
             label: target.label(),
+            base: Default::default(),
         }))
     }
 
@@ -2650,6 +2700,51 @@ impl App {
         }
         self.unmaximize_without_a_session();
         Some(session)
+    }
+
+    /// Close panes whose ssh finished — the harness exited and the remote
+    /// command ran out.
+    ///
+    /// The reader thread flips `ended` and wakes the loop, which lands here.
+    /// With the pane remote command's shell fallback gone, "finished" now
+    /// includes ctrl-c: interrupting the agent out of existence ends the
+    /// session rather than dropping into a VM shell inside the frame. Only a
+    /// clean exit reaps (see [`Session::finished`]): a dropped connection or
+    /// a failed connect exits nonzero, and that pane stays up — it holds the
+    /// only account of what happened, and the recovery keys can reconnect it.
+    /// When the last pane closes under `railway code`, the TUI leaves with it
+    /// — see [`Self::quit_when_done`].
+    pub fn reap_ended_sessions(&mut self) -> Option<Effect> {
+        let mut closed = None;
+        let mut i = 0;
+        while i < self.sessions.len() {
+            if self.sessions[i].finished() {
+                // Dropping the session detaches its local half; the agent
+                // stays running (sleeping is deliberate, never a side effect).
+                if let Some(session) = self.take_session(i) {
+                    closed = Some(session.agent_name.clone());
+                }
+            } else {
+                i += 1;
+            }
+        }
+        let agent_name = closed?;
+        if self.quit_when_done && self.sessions.is_empty() {
+            self.exit_note = Some(format!(
+                "Session ended — agent {agent_name} is still running. `railway ca sleep {agent_name}` stops the compute bill."
+            ));
+            return Some(Effect::Quit);
+        }
+        self.toast(format!("Session on {agent_name} ended"));
+        None
+    }
+
+    /// Any pane that has ended but whose finished/dropped call is still
+    /// waiting on ssh's exit status. The loop polls briefly while this holds
+    /// — the EOF that woke it can beat waitpid, and nothing else would wake
+    /// the loop again to ask.
+    pub fn awaiting_exit_status(&self) -> bool {
+        self.sessions.iter().any(|s| s.awaiting_exit_status())
     }
 
     /// Hand the whole terminal to the session under the cursor.
@@ -3507,6 +3602,7 @@ impl App {
                     harness: self.harness_name().to_string(),
                     prompt,
                     label: format!("{agent_name} · new session"),
+                    base: Default::default(),
                 }))
             }
             Some(RowKind::Environment(w, p, e)) | Some(RowKind::Group(w, p, e)) => {
@@ -4625,6 +4721,103 @@ mod tests {
         assert!(a.settings.is_none());
     }
 
+    /// The harness exiting ends its pane. Under `railway code` — one session,
+    /// `quit_when_done` — the TUI leaves with it, back to the local prompt;
+    /// this is what ctrl-c out of the agent lands on now that the pane's
+    /// remote command has no shell fallback to strand you in.
+    #[test]
+    fn an_ended_session_under_railway_code_quits_the_tui() {
+        let mut a = loaded_app();
+        a.quit_when_done = true;
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+
+        // Still running: nothing to reap.
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1);
+
+        a.sessions[0].end_for_test();
+        assert_eq!(a.reap_ended_sessions(), Some(Effect::Quit));
+        assert!(a.sessions.is_empty());
+        let note = a.exit_note.as_deref().expect("says the agent still runs");
+        assert!(note.contains("nimble-otter"), "{note}");
+    }
+
+    /// From bare `railway ca`, an ended pane closes back to the tree — the
+    /// browser was asked for, so it stays.
+    #[test]
+    fn an_ended_session_from_the_tree_closes_back_to_it() {
+        let mut a = loaded_app();
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        a.sessions[0].end_for_test();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert!(a.sessions.is_empty());
+        assert_eq!(a.focus, ManageFocus::Tree);
+        assert!(a.toast.is_some(), "the close is announced, not silent");
+        assert!(a.exit_note.is_none());
+    }
+
+    /// An ssh that exits nonzero is a dropped connection or a failed connect,
+    /// not a finished session: its pane holds the only account of what
+    /// happened and the recovery keys can reconnect it, so it stays up — even
+    /// under `railway code`.
+    #[test]
+    fn a_dropped_connection_keeps_its_pane() {
+        let mut a = loaded_app();
+        a.quit_when_done = true;
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        a.sessions[0].end_dropped_for_test();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1, "the pane stays for recovery");
+    }
+
+    /// Ended but with the exit status still on its way: no call is made yet —
+    /// the loop's poll (`awaiting_exit_status`) asks again — and the pane is
+    /// not closed on a guess.
+    #[test]
+    fn a_pane_awaiting_its_exit_status_is_left_alone() {
+        let mut a = loaded_app();
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        // `cat` is still running, so try_wait has nothing yet.
+        a.sessions[0].mark_ended();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.sessions.len(), 1);
+        assert!(a.awaiting_exit_status(), "the loop should keep polling");
+    }
+
+    /// `railway code` collapses the tree from the first frame, before there is
+    /// a session to collapse it around — the loading pane stands in for one.
+    /// Without this the tree would be drawn for the whole boot and then vanish,
+    /// which is the flicker the collapsed layout exists to avoid.
+    #[test]
+    fn a_launch_in_flight_fills_the_pane_on_its_own() {
+        let mut a = loaded_app();
+        a.maximized = true;
+        assert!(!a.pane_is_full(), "nothing to show yet");
+
+        a.start_loading(&launch_req());
+        assert!(a.pane_is_full(), "the loading pane has the screen");
+
+        // A launch that fails leaves neither: the tree comes back rather than
+        // the screen going blank.
+        a.launch_failed("no".into());
+        assert!(!a.pane_is_full());
+    }
+
     fn with_sessions(names: &[&str]) -> App {
         let mut a = loaded_app();
         for name in names {
@@ -5370,6 +5563,7 @@ mod tests {
             harness: "claude".into(),
             prompt: Some("fix the tests".into()),
             label: "devtools/production".into(),
+            base: Default::default(),
         };
         a.start_loading(&req);
         assert!(a.loading.active, "the pane shows the wait");
@@ -7084,6 +7278,7 @@ mod tests {
             harness: "claude".into(),
             prompt: None,
             label: "p/e".into(),
+            base: Default::default(),
         };
         // A plain connect reuses whatever is open.
         assert!(!base.wants_new_session());
@@ -7728,6 +7923,7 @@ mod tests {
             harness: "claude".into(),
             prompt: None,
             label: "devtools/production".into(),
+            base: Default::default(),
         }
     }
 
