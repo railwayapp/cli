@@ -23,8 +23,16 @@ use super::theme::Theme;
 /// leads the list — and so is the default pick with nothing configured —
 /// since it is the one exception needing no credential of its own: no
 /// carry-a-local-sign-in step, just the VM's own integrated Railway
-/// credentials.
-pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok"];
+/// credentials. `shell` closes it: not a harness at all, just the VM's login
+/// shell, so it takes no prompt and sits after every real agent.
+pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok", "shell"];
+
+/// The slice of [`HARNESSES`] that can be saved as the default agent —
+/// everything but `shell`, which starts no harness and so makes no sense as
+/// a standing default. What the setup wizard and settings offer.
+pub fn default_harnesses() -> &'static [&'static str] {
+    &HARNESSES[..HARNESSES.len() - 1]
+}
 
 /// Everything the Manage screen responds to, grouped for the `?` overlay. The
 /// footer shows two or three of these; this is where the rest lives, so the
@@ -1181,7 +1189,9 @@ impl App {
 
     fn new_session_on(&self, agent_id: &str, agent_name: &str) -> Option<Effect> {
         let target = self.target.clone()?;
-        let prompt = (!self.prompt.trim().is_empty()).then(|| self.prompt.trim().to_string());
+        // Same contract as `launch`: shell sessions carry no prompt.
+        let prompt = (!self.shell_selected() && !self.prompt.trim().is_empty())
+            .then(|| self.prompt.trim().to_string());
         Some(Effect::Launch(LaunchRequest {
             project_id: target.project_id,
             environment_id: target.environment_id,
@@ -1264,10 +1274,18 @@ impl App {
                 environment_id: t.environment_id.clone(),
                 environment_name: t.environment_name.clone(),
             });
+        // The settings card is over the saved default, whose index space is
+        // `default_harnesses()` — a live shell selection has no row there and
+        // falls back to the first entry rather than clamping onto the last
+        // real agent.
+        let agent = default_harnesses()
+            .iter()
+            .position(|slug| *slug == self.harness_name())
+            .unwrap_or(0);
         self.settings = Some(super::settings::Settings::new(
             &self.tree,
             project,
-            self.harness,
+            agent,
             self.skills_enabled,
             self.skills_source.clone(),
             self.theme,
@@ -1290,6 +1308,12 @@ impl App {
 
     pub fn harness_name(&self) -> &'static str {
         HARNESSES[self.harness.min(HARNESSES.len() - 1)]
+    }
+
+    /// Is the shell option selected? It launches no harness, so the prompt
+    /// boxes go inert while it is: there is nothing to hand a prompt to.
+    pub fn shell_selected(&self) -> bool {
+        self.harness_name() == "shell"
     }
 
     /// The flattened, currently-visible tree: agent groups first, then the
@@ -1978,7 +2002,10 @@ impl App {
     }
 
     fn launch(&self, agent_id: Option<String>, force_new: bool) -> Option<Effect> {
-        let draft = (!self.prompt.trim().is_empty()).then(|| self.prompt.trim().to_string());
+        // A shell session takes no prompt; a draft left over from cycling
+        // through the agents must not ride along.
+        let draft = (!self.shell_selected() && !self.prompt.trim().is_empty())
+            .then(|| self.prompt.trim().to_string());
         self.launch_prompted(agent_id, force_new, draft)
     }
 
@@ -3296,12 +3323,17 @@ impl App {
 
     fn on_key_menu(&mut self, key: KeyEvent) -> Option<Effect> {
         match self.menu_focus {
+            // Typing is refused while shell is selected — the box says so —
+            // rather than cleared: a draft typed for a real agent survives
+            // cycling past shell.
             MenuFocus::Prompt => match key.code {
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.shell_selected() =>
+                {
                     self.prompt.push(c);
                     None
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace if !self.shell_selected() => {
                     self.prompt.pop();
                     None
                 }
@@ -3666,16 +3698,20 @@ impl App {
     }
 
     /// Keys while the ⌥p composer is up: the menu prompt box's contract —
-    /// type, shift+tab cycles the agent, enter sends, esc closes.
+    /// type, shift+tab cycles the agent, enter sends, esc closes. And the
+    /// menu box's shell contract too: typing goes inert, and enter launches
+    /// the session bare, since a shell has nothing to hand a prompt to.
     fn on_key_manage_prompt(&mut self, key: KeyEvent) -> Option<Effect> {
         let mut draft = self.manage_prompt.take()?;
         match key.code {
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.shell_selected() =>
+            {
                 draft.push(c);
                 self.manage_prompt = Some(draft);
                 None
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if !self.shell_selected() => {
                 draft.pop();
                 self.manage_prompt = Some(draft);
                 None
@@ -3684,6 +3720,10 @@ impl App {
                 self.harness = (self.harness + 1) % HARNESSES.len();
                 self.manage_prompt = Some(draft);
                 None
+            }
+            KeyCode::Enter if self.shell_selected() => {
+                self.screen = Screen::Manage;
+                self.new_here_prompted(None)
             }
             KeyCode::Enter if !draft.trim().is_empty() => {
                 self.screen = Screen::Manage;
@@ -5192,9 +5232,55 @@ mod tests {
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "grok");
         a.on_key(key(KeyCode::BackTab));
-        assert_eq!(a.harness_name(), "railway");
+        assert_eq!(a.harness_name(), "shell", "shell closes the cycle");
         a.on_key(key(KeyCode::BackTab));
-        assert_eq!(a.harness_name(), "claude", "cycling wraps");
+        assert_eq!(a.harness_name(), "railway", "cycling wraps");
+    }
+
+    /// The order is a contract: `railway` is the unconfigured default, and
+    /// `shell` sits after every real agent on every surface that lists them.
+    #[test]
+    fn railway_leads_the_harnesses_and_shell_closes_them() {
+        assert_eq!(HARNESSES.first(), Some(&"railway"));
+        assert_eq!(HARNESSES.last(), Some(&"shell"));
+        assert_eq!(default_harnesses(), &HARNESSES[..HARNESSES.len() - 1]);
+        assert!(
+            !default_harnesses().contains(&"shell"),
+            "shell is not a saveable default"
+        );
+    }
+
+    /// The shell option takes no prompt: the menu box refuses keystrokes while
+    /// it is selected, keeps a draft typed for a real agent, and launches
+    /// without one.
+    #[test]
+    fn the_menu_prompt_goes_inert_on_shell() {
+        let mut a = app();
+        a.target = Some(Target {
+            project_id: "p".into(),
+            project_name: "p".into(),
+            environment_id: "e".into(),
+            environment_name: "e".into(),
+        });
+        a.on_key(key(KeyCode::Char('h')));
+        a.on_key(key(KeyCode::Char('i')));
+        assert_eq!(a.prompt, "hi");
+        while a.harness_name() != "shell" {
+            a.on_key(key(KeyCode::BackTab));
+        }
+        a.on_key(key(KeyCode::Char('x')));
+        a.on_key(key(KeyCode::Backspace));
+        assert_eq!(a.prompt, "hi", "typing is refused, the draft survives");
+        let Effect::Launch(req) = a.on_key(key(KeyCode::Enter)).unwrap() else {
+            panic!("expected a launch");
+        };
+        assert_eq!(req.harness, "shell");
+        assert_eq!(req.prompt, None, "a leftover draft must not ride along");
+        while a.harness_name() != "claude" {
+            a.on_key(key(KeyCode::BackTab));
+        }
+        a.on_key(key(KeyCode::Char('!')));
+        assert_eq!(a.prompt, "hi!", "typing resumes on a real agent");
     }
 
     fn alt(c: char) -> KeyEvent {
@@ -6321,6 +6407,70 @@ mod tests {
         assert_eq!(a.screen, Screen::ManagePrompt, "nothing to send yet");
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
         assert_eq!(a.screen, Screen::Manage);
+    }
+
+    /// The ⌥p composer follows the menu box's shell contract: cycling can
+    /// land on shell, typing goes inert there, and enter launches the session
+    /// bare instead of demanding a prompt a shell could never take.
+    #[test]
+    fn alt_p_launches_a_bare_shell_session() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.on_key(alt('p'));
+        for c in "fix it".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        while a.harness_name() != "shell" {
+            a.on_key(key(KeyCode::BackTab));
+        }
+        a.on_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            a.manage_prompt.as_deref(),
+            Some("fix it"),
+            "typing is refused while shell is selected"
+        );
+        let effect = a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::Manage);
+        let Some(Effect::Launch(req)) = effect else {
+            panic!("expected a launch, got {effect:?}");
+        };
+        assert_eq!(req.harness, "shell");
+        assert_eq!(req.prompt, None, "the abandoned draft must not ride along");
+    }
+
+    /// ⌥n's picker offers shell like any agent — last in the list — and
+    /// picking it makes the same promptless session `n` would.
+    #[test]
+    fn alt_n_offers_shell_last() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.on_key(alt('n'));
+        for _ in 0..HARNESSES.len() {
+            a.on_key(key(KeyCode::Down));
+        }
+        assert_eq!(
+            a.harness_pick,
+            Some(HARNESSES.len() - 1),
+            "the cursor bottoms out on shell"
+        );
+        let effect = a.on_key(key(KeyCode::Enter));
+        let Some(Effect::Launch(req)) = effect else {
+            panic!("expected a launch, got {effect:?}");
+        };
+        assert_eq!(req.harness, "shell");
+        assert_eq!(req.prompt, None);
     }
 
     /// The launchers work from inside a session, which is where the thought

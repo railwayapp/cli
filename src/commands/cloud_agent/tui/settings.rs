@@ -11,7 +11,7 @@
 //! project list is too long to flick through blind, so its row opens the same
 //! card the wizard's project step uses, and comes straight back here.
 
-use super::app::{HARNESSES, WorkspaceNode};
+use super::app::{WorkspaceNode, default_harnesses};
 use super::theme::{THEMES, Theme};
 use super::wizard::{Outcome, ProjectOption, harness_blurb, project_options};
 
@@ -91,7 +91,7 @@ impl Settings {
                 .map(|ws| (ws.id.clone(), ws.name.clone()))
                 .collect(),
             project,
-            agent: agent.min(HARNESSES.len() - 1),
+            agent: agent.min(default_harnesses().len() - 1),
             // "On" with nothing to sync is not a state; it reads as a promise.
             skills: skills && skills_source.is_some(),
             skills_source,
@@ -120,8 +120,8 @@ impl Settings {
             .map(|row| match row {
                 Row::Agent => (
                     "Coding agent".into(),
-                    HARNESSES[self.agent].to_string(),
-                    harness_blurb(HARNESSES[self.agent]).into(),
+                    default_harnesses()[self.agent].to_string(),
+                    harness_blurb(default_harnesses()[self.agent]).into(),
                 ),
                 Row::Project => (
                     "Default project".into(),
@@ -284,7 +284,9 @@ impl Settings {
         }
         match self.row() {
             Row::Agent => {
-                self.agent = wrap(self.agent, HARNESSES.len(), forward);
+                // Cycles the default-able harnesses only: `shell` is a way
+                // to launch a session, not a default agent to save.
+                self.agent = wrap(self.agent, default_harnesses().len(), forward);
                 self.save()
             }
             Row::Skills if self.skills_source.is_some() => {
@@ -336,7 +338,7 @@ impl Settings {
     fn save(&self) -> Action {
         Action::Save(Box::new(Outcome {
             project: self.project.clone(),
-            agent: HARNESSES[self.agent].to_string(),
+            agent: default_harnesses()[self.agent].to_string(),
             skills: self.skills,
             skills_source: self.skills_source.clone(),
             theme: THEMES[self.theme].slug.to_string(),
