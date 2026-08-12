@@ -487,25 +487,15 @@ cat > ~/.codex/auth.json"#;
 /// ignoring the env token and showing the first-run login picker — is
 /// express-agent's to seed, along with per-project trust for `$HOME` and
 /// `/app`. It runs at boot, before this command can connect.
-///
-/// Written through a compare so an unchanged token leaves the file untouched:
-/// the env-sourcing guards decide between this token and an on-agent `/login`
-/// by mtime (see [`CLAUDE_ENV_GUARD`]), and a rewrite of identical bytes on
-/// every launch would make this file perpetually "newer" and un-outrankable.
-/// The temp file inherits the provision script's `umask 077`.
-const CLAUDE_SEED: &str = r#"tmp="$(mktemp)"
-cat > "$tmp"
-if cmp -s "$tmp" ~/.claude-code-env; then rm -f "$tmp"; else mv "$tmp" ~/.claude-code-env; fi
+const CLAUDE_SEED: &str = r#"cat > ~/.claude-code-env
 chmod 600 ~/.claude-code-env"#;
 
-/// Source the carried Claude token unless a later on-agent `/login` outranks
-/// it. Claude itself prefers `CLAUDE_CODE_OAUTH_TOKEN` over the credentials
-/// file, so exporting the env var unconditionally means a deliberate sign-in
-/// on the agent silently loses on the next session — the classic "my models
-/// came back after /login, then went away again". Newer wins instead: a fresh
-/// `/login` beats an old carried token, and `--refresh-auth` (which rewrites
-/// the env file) beats an old login.
-const CLAUDE_ENV_GUARD: &str = r#"if [ -f "$HOME/.claude-code-env" ] && ! [ "$HOME/.claude/.credentials.json" -nt "$HOME/.claude-code-env" ]; then set -a; . "$HOME/.claude-code-env"; set +a; fi"#;
+/// Always source the carried setup-token. Claude prefers
+/// `CLAUDE_CODE_OAUTH_TOKEN` over `~/.claude/.credentials.json`, so this is
+/// what makes the local cache the session credential. A later `/login` on
+/// the agent cannot outrank it — that path did not work correctly.
+const CLAUDE_ENV_GUARD: &str =
+    r#"[ -f "$HOME/.claude-code-env" ] && set -a && . "$HOME/.claude-code-env" && set +a"#;
 
 /// Grok-specific VM seed: the credential is the user's local
 /// `~/.grok/auth.json`, arriving on stdin into a 0600 file like codex. grok's
@@ -544,33 +534,32 @@ const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:
 ///   keeps scp-style and command sessions out. The trailing printf restores
 ///   terminal state a TUI can leave behind on an unclean exit (kitty keyboard
 ///   mode et al) — see `TERMINAL_RESET`.
-/// The autostart block is versioned: the v3 marker gates the append, and the
+/// The autostart block is versioned: the v4 marker gates the append, and the
 /// sed strips any earlier version first (comment line through the closing
-/// `fi` at column zero), so an agent provisioned before the env-guard change
-/// picks it up on its next provision instead of keeping v1 forever.
+/// `fi` at column zero), so an agent provisioned on v2/v3 (which skipped the
+/// carried token when an on-agent `/login` looked newer) picks the
+/// unconditional export back up on its next provision.
 ///
-/// v3 adds the `~/.railway-app-mode` guard. `railway ca desktop` hands the agent
-/// to an external app that bootstraps through the login shell, so an autostart
-/// firing there would put a harness where the app expects a shell. The marker
-/// file is what the two provision modes disagree about — see
+/// v3 added the `~/.railway-app-mode` guard. `railway ca desktop` hands the
+/// agent to an external app that bootstraps through the login shell, so an
+/// autostart firing there would put a harness where the app expects a shell.
+/// The marker file is what the two provision modes disagree about — see
 /// [`provision_script`] — and it is checked here rather than simply omitted from
 /// `~/.railway-code-agent`, because a later `railway code` on the same agent
 /// would write that file straight back.
 const COMMON_SEED: &str = r#"grep -q "^COLORTERM=" /etc/environment 2>/dev/null || echo "COLORTERM=truecolor" >> /etc/environment 2>/dev/null || true
-if ! grep -q "railway-code agent autostart v3" ~/.profile 2>/dev/null; then
+if ! grep -q "railway-code agent autostart v4" ~/.profile 2>/dev/null; then
 sed -i '/# railway-code agent autostart/,/^fi$/d' ~/.profile 2>/dev/null || true
 cat >> ~/.profile <<'PROFEOF'
 
-# railway-code agent autostart v3 (connecting drops into the agent; exit it for a shell)
+# railway-code agent autostart v4 (connecting drops into the agent; exit it for a shell)
 if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ ! -f "$HOME/.railway-app-mode" ] && [ -s "$HOME/.railway-code-agent" ]; then
   agent="$(cat "$HOME/.railway-code-agent")"
   [ -d "$HOME/.grok/bin" ] && export PATH="$HOME/.grok/bin:$PATH"
   if command -v "$agent" >/dev/null 2>&1; then
     export RAILWAY_CODE_AUTOSTARTED=1
     [ -f "$HOME/.gh-token" ] && export GH_TOKEN="$(cat "$HOME/.gh-token")"
-    if [ -f "$HOME/.claude-code-env" ] && ! [ "$HOME/.claude/.credentials.json" -nt "$HOME/.claude-code-env" ]; then
-      set -a; . "$HOME/.claude-code-env"; set +a
-    fi
+    [ -f "$HOME/.claude-code-env" ] && set -a && . "$HOME/.claude-code-env" && set +a
     "$agent"
     printf '\033[<u\033[<u\033[=0;1u\033[?2004l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?25h'
   fi
@@ -2782,10 +2771,7 @@ mod tests {
         assert!(codex.contains("echo codex > ~/.railway-code-agent"));
 
         let claude = provision_script(Agent::Claude, true, false);
-        // Written through a compare: an unchanged token must not touch the
-        // file's mtime, or it would outrank an on-agent /login forever.
-        assert!(claude.contains("cat > \"$tmp\""));
-        assert!(claude.contains("cmp -s \"$tmp\" ~/.claude-code-env"));
+        assert!(claude.contains("cat > ~/.claude-code-env"));
         assert!(claude.contains("echo claude > ~/.railway-code-agent"));
 
         let grok = provision_script(Agent::Grok, true, false);
@@ -2829,23 +2815,20 @@ mod tests {
         }
     }
 
-    /// A deliberate `/login` on the agent must be able to outrank the carried
-    /// token, and `--refresh-auth` must be able to take it back: both guards
-    /// compare mtimes, so the seed must not rewrite identical bytes, and every
-    /// place the env file is sourced must carry the newer-login check.
+    /// The carried setup-token is the session credential. An on-agent `/login`
+    /// must not hide it — that path did not work correctly — so every source
+    /// site writes the env file unconditionally, and v4 rewrites any v2/v3
+    /// profile that still had the mtime skip.
     #[test]
-    fn a_fresh_on_agent_login_outranks_the_carried_token() {
+    fn the_carried_claude_token_is_always_sourced() {
         for guard in [CLAUDE_ENV_GUARD, COMMON_SEED] {
             assert!(
-                guard.contains(
-                    "! [ \"$HOME/.claude/.credentials.json\" -nt \"$HOME/.claude-code-env\" ]"
-                ),
-                "{guard}"
+                !guard.contains("credentials.json"),
+                "login must not outrank the carried token: {guard}"
             );
+            assert!(guard.contains(".claude-code-env"), "{guard}");
         }
-        // The v3 marker gates the append and the strip clears any older block,
-        // so agents provisioned before this change converge on their next run.
-        assert!(COMMON_SEED.contains("railway-code agent autostart v3"));
+        assert!(COMMON_SEED.contains("railway-code agent autostart v4"));
         assert!(COMMON_SEED.contains("sed -i '/# railway-code agent autostart/,/^fi$/d'"));
     }
 
@@ -2892,7 +2875,7 @@ mod tests {
     #[test]
     fn provision_script_omits_the_seed_when_reusing_a_credential() {
         let claude = provision_script(Agent::Claude, false, false);
-        assert!(!claude.contains("cat > \"$tmp\""));
+        assert!(!claude.contains("cat > ~/.claude-code-env"));
         // Everything else still runs.
         assert!(claude.contains("$HOME/.local/bin"));
         assert!(claude.contains("railway-code agent autostart"));
@@ -2916,7 +2899,7 @@ mod tests {
     fn railway_needs_no_credential_seed() {
         let script = provision_script(Agent::Railway, false, false);
         for other_seed in [
-            "cat > \"$tmp\"",
+            "cat > ~/.claude-code-env",
             "cat > ~/.codex/auth.json",
             "cat > ~/.grok/auth.json",
         ] {
@@ -2955,7 +2938,7 @@ mod tests {
             "a shell launch must not retarget reconnects: {script}"
         );
         for seed in [
-            "cat > \"$tmp\"",
+            "cat > ~/.claude-code-env",
             "cat > ~/.codex/auth.json",
             "cat > ~/.grok/auth.json",
         ] {
