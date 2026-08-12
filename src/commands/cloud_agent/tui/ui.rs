@@ -1160,13 +1160,26 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     let hint: Vec<(&str, &str)> = if app.maximized {
         vec![("⌥f", "restore the tree"), ("⌥/⇧esc / ^]", "stop typing")]
     } else if app.focus == ManageFocus::Session {
-        let mut keys = vec![("⌥/⇧esc / ^]", "stop typing"), ("⌥f", "maximize")];
-        // The agent is taking the clicks, so say how to take one back — this is
-        // the terminal's own convention, but nobody guesses it.
-        if app.active_session().is_some_and(|s| s.wants_mouse()) {
-            keys.push(("shift+drag", "select"));
+        // A dead pane's keys are recovery, not typing — the hint has to say
+        // so, or "stop typing" advertises an input nothing is reading.
+        if app
+            .active_session()
+            .is_some_and(|s| s.ended() || s.stalled())
+        {
+            vec![
+                ("r", "reconnect"),
+                ("x", "close pane"),
+                ("esc", "back to the tree"),
+            ]
+        } else {
+            let mut keys = vec![("⌥/⇧esc / ^]", "stop typing"), ("⌥f", "maximize")];
+            // The agent is taking the clicks, so say how to take one back — this is
+            // the terminal's own convention, but nobody guesses it.
+            if app.active_session().is_some_and(|s| s.wants_mouse()) {
+                keys.push(("shift+drag", "select"));
+            }
+            keys
         }
-        keys
     } else {
         match app.selected_row().map(|r| r.kind) {
             Some(RowKind::Session(..)) => vec![
@@ -1787,7 +1800,15 @@ fn render_session(app: &App, session: &super::session::Session, f: &mut Frame, a
         // strip at the bottom of the screen already has it.
         .title_bottom(Line::from(Span::styled(
             if session.ended() {
-                " session ended "
+                // The keys differ by focus: r/x are the pane's own, enter is
+                // the tree's. Advertising the wrong set would send keystrokes
+                // into the tree — or worse, `x` into a session row, which
+                // kills the session on the agent.
+                if focused {
+                    " connection closed · r reconnects · x closes "
+                } else {
+                    " connection closed · enter on its row reconnects "
+                }
             } else if session.stalled() {
                 " no response "
             } else if session.scrolled_back() {
@@ -1819,10 +1840,7 @@ fn render_session(app: &App, session: &super::session::Session, f: &mut Frame, a
                     "It may have ended when the agent last slept —",
                     dim,
                 )),
-                Line::from(Span::styled(
-                    "x closes this pane, n starts a fresh session.",
-                    dim,
-                )),
+                Line::from(Span::styled("r dials it again, x closes this pane.", dim)),
             ])
             .alignment(ratatui::layout::Alignment::Center),
             inner,
