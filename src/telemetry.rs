@@ -1186,6 +1186,19 @@ fn caller_from_mcp_client_name(name: &str) -> String {
     }
 }
 
+/// Header-safe identity for an MCP client name, used by `railway mcp proxy`
+/// when attributing upstream remote-MCP traffic (`x-railway-mcp-client`).
+///
+/// Returns the same catalog/slug form as local CLI MCP telemetry callers so
+/// warehouse joins stay consistent. Empty/unusable names yield `None` so the
+/// proxy can omit the header entirely.
+pub fn mcp_client_header_value(name: &str) -> Option<String> {
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some(caller_from_mcp_client_name(name))
+}
+
 /// Sanitize a raw MCP client name into the `<name>` part of
 /// `mcp_unknown:<name>`: lowercased, every char outside the telemetry-safe
 /// charset (alnum plus `. _ @ / -`, and notably NOT `:` so the value stays
@@ -2228,8 +2241,8 @@ mod tests {
     use super::{
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
         caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, is_agent_harness,
-        new_session_uuid, parent_kind_from_command, residue_from_command, truncate_message,
-        walk_ancestors,
+        mcp_client_header_value, new_session_uuid, parent_kind_from_command, residue_from_command,
+        truncate_message, walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -2403,6 +2416,19 @@ mod tests {
     fn does_not_detect_short_agent_names_as_substrings() {
         assert_eq!(caller_from_process_name("pilot"), None);
         assert_eq!(caller_from_process_name("example"), None);
+    }
+
+    #[test]
+    fn mcp_client_header_value_omits_blank_names() {
+        assert_eq!(mcp_client_header_value("   "), None);
+        assert_eq!(
+            mcp_client_header_value("claude-code").as_deref(),
+            Some("claude_code")
+        );
+        assert_eq!(
+            mcp_client_header_value("Totally New IDE").as_deref(),
+            Some("mcp_unknown:totally-new-ide")
+        );
     }
 
     #[test]

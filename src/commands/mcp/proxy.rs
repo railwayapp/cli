@@ -32,6 +32,7 @@ use crate::client::ensure_valid_token;
 use crate::commands::Environment;
 use crate::config::Configs;
 use crate::consts;
+use crate::telemetry;
 
 /// JSON-RPC error code for auth failures surfaced by the proxy itself.
 const AUTH_ERROR_CODE: i64 = -32001;
@@ -60,7 +61,16 @@ struct SessionMeta {
     /// an upstream session (expiry, or a degraded logged-out start) without
     /// involving the harness.
     init_request: Option<JsonValue>,
+    /// Header-safe harness identity extracted from `initialize.params.clientInfo.name`
+    /// and attached to every upstream request as `x-railway-mcp-client`.
+    client_name: Option<String>,
 }
+
+/// Marks traffic as coming through `railway mcp proxy` so remote MCP telemetry
+/// can separate it from editor OAuth and other direct clients.
+const MCP_TRANSPORT_HEADER: &str = "x-railway-mcp-transport";
+const MCP_TRANSPORT_VALUE: &str = "cli-proxy";
+const MCP_CLIENT_HEADER: &str = "x-railway-mcp-client";
 
 type Out = mpsc::UnboundedSender<String>;
 
@@ -122,7 +132,9 @@ pub async fn serve_proxy() -> Result<()> {
         };
 
         if method_of(&msg) == Some("initialize") {
-            state.session.lock().await.init_request = Some(msg.clone());
+            let mut session = state.session.lock().await;
+            session.init_request = Some(msg.clone());
+            session.client_name = extract_mcp_client_header(&msg);
         }
 
         if handshake_done {
@@ -321,12 +333,17 @@ async fn post_message(
     token: &str,
     session_id: Option<&str>,
 ) -> Result<reqwest::Response> {
+    let client_name = state.session.lock().await.client_name.clone();
     let mut req = state
         .http
         .post(&state.url)
         .header("authorization", format!("Bearer {token}"))
         .header("accept", "application/json, text/event-stream")
-        .header("x-source", consts::get_user_agent());
+        .header("x-source", consts::get_user_agent())
+        .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE);
+    if let Some(client) = client_name.as_deref() {
+        req = req.header(MCP_CLIENT_HEADER, client);
+    }
     if let Some(sid) = session_id {
         req = req.header("mcp-session-id", sid);
     }
@@ -334,6 +351,14 @@ async fn post_message(
         .send()
         .await
         .context("failed to reach the remote MCP server")
+}
+
+/// Pull a telemetry-safe client identity out of an MCP `initialize` request.
+fn extract_mcp_client_header(msg: &JsonValue) -> Option<String> {
+    let name = msg
+        .pointer("/params/clientInfo/name")
+        .and_then(JsonValue::as_str)?;
+    telemetry::mcp_client_header_value(name)
 }
 
 /// Re-run the MCP handshake upstream using the harness's captured `initialize`
@@ -530,18 +555,24 @@ fn send_error(out: &Out, id: &JsonValue, code: i64, message: &str) {
 
 /// Best-effort session teardown when the harness disconnects.
 async fn end_session(state: &ProxyState) {
-    let session_id = state.session.lock().await.id.clone();
+    let (session_id, client_name) = {
+        let session = state.session.lock().await;
+        (session.id.clone(), session.client_name.clone())
+    };
     let Some(session_id) = session_id else { return };
     let token = { state.configs.lock().await.get_railway_auth_token() };
     let Some(token) = token else { return };
-    let _ = state
+    let mut req = state
         .http
         .delete(&state.url)
         .header("authorization", format!("Bearer {token}"))
         .header("mcp-session-id", session_id)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await;
+        .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE)
+        .timeout(Duration::from_secs(5));
+    if let Some(client) = client_name.as_deref() {
+        req = req.header(MCP_CLIENT_HEADER, client);
+    }
+    let _ = req.send().await;
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -673,6 +704,47 @@ mod tests {
         let msg = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
         respond_unauthenticated(&msg, &ids_of(&msg), &tx);
         assert!(collect(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn extracts_known_mcp_client_from_initialize() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "claude-code", "version": "1.0.0" }
+            }
+        });
+        assert_eq!(
+            extract_mcp_client_header(&msg).as_deref(),
+            Some("claude_code")
+        );
+    }
+
+    #[test]
+    fn extracts_unknown_mcp_client_as_slug() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": { "clientInfo": { "name": "Totally New IDE" } }
+        });
+        assert_eq!(
+            extract_mcp_client_header(&msg).as_deref(),
+            Some("mcp_unknown:totally-new-ide")
+        );
+    }
+
+    #[test]
+    fn missing_client_info_yields_no_header() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-03-26" }
+        });
+        assert_eq!(extract_mcp_client_header(&msg), None);
     }
 
     #[test]
