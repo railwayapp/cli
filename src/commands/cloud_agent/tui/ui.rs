@@ -530,12 +530,12 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     };
 
     const STEP_ROWS: u16 = 9;
-    let task_h = match loading.prompt.as_deref() {
-        // Three lines of task plus its border: a prompt is a sentence, and the
-        // whole point of showing it is not making the user wonder what is
-        // starting.
-        Some(_) => 5,
-        None => 0,
+    // The echoed prompt reuses the main screen's box wholesale — same width,
+    // same height — so the transition reads as the box you typed in coming
+    // along, not a different card summarizing what you wrote.
+    let (task_w, task_h) = match loading.prompt.as_deref() {
+        Some(_) => prompt_box_size(area),
+        None => (0, 0),
     };
     // Size the panel to its content and centre *that*, rather than letting it
     // span the pane: the steps read as a left-aligned block, and a block the
@@ -588,17 +588,20 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     );
 
     if let Some(prompt) = loading.prompt.as_deref() {
-        // A third of the pane, centred: a fixed frame the task wraps inside,
-        // rather than a frame the task drags open.
-        let task_area = centered((area.width / 3).max(24), task_h, rows[3]);
+        // Centered in the pane, not in the (narrower) steps panel: the box is
+        // the pane-wide element the steps sit under.
+        let task_area = Rect {
+            x: area.x + area.width.saturating_sub(task_w) / 2,
+            y: rows[3].y,
+            width: task_w.min(area.width),
+            height: rows[3].height,
+        };
         f.render_widget(
             Paragraph::new(prompt.to_string())
                 .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
+                    dialog_block(theme)
                         .border_style(Style::default().fg(theme.accent_dim))
-                        .title(Span::styled(" Task ", Style::default().fg(theme.dim))),
+                        .title(Span::styled(" Prompt ", Style::default().fg(theme.dim))),
                 )
                 .style(Style::default().fg(theme.fg))
                 .wrap(Wrap { trim: true }),
@@ -2451,6 +2454,29 @@ mod tests {
         app.manage_prompt = Some(String::new());
         let composer = box_of(&draw(&app, 100, 40), " New Session ");
         assert_eq!(menu, composer, "(height, width) of the two prompt boxes");
+    }
+
+    /// Submitting from the main screen carries the prompt box along: the
+    /// loading pane echoes it in the same box (title, dialog surface, shared
+    /// size rule), not a smaller "Task" card.
+    #[test]
+    fn the_loading_screen_echoes_the_prompt_in_its_own_box() {
+        use crate::commands::cloud_agent::tui::app::Loading;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.loading = Loading {
+            active: true,
+            target: "devtools/production".into(),
+            harness: "claude".into(),
+            prompt: Some("ship the release notes".into()),
+            steps: Vec::new(),
+            tick: 0,
+        };
+        let out = draw(&app, 100, 40);
+        assert!(out.contains(" Prompt "), "the box keeps its name:\n{out}");
+        assert!(!out.contains(" Task "), "the old card is gone:\n{out}");
+        assert!(out.contains("ship the release notes"), "{out}");
     }
 
     /// The wordmark must be full blocks and spaces only: box-drawing shadow
