@@ -248,6 +248,10 @@ enum Message {
     /// per-environment path.
     MyAgentsLoaded {
         result: Result<Vec<(String, Agent)>, String>,
+        /// When the request went out, which decides what this snapshot is
+        /// allowed to overwrite: anything the tree has heard since is fresher
+        /// news. See [`App::my_agents_loaded`].
+        asked_at: std::time::Instant,
     },
     /// A background fetch was refused for rate limiting. The rest of its batch
     /// is abandoned; see [`spawn_sweep`].
@@ -420,7 +424,8 @@ async fn fetch_my_agents(
         .collect())
 }
 
-/// Ask for the whole account's agents in the background, once, at startup.
+/// Ask for the whole account's agents in the background: at startup, on ⌥r, and
+/// on every automatic refresh.
 fn spawn_my_agents_fetch(
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
@@ -429,10 +434,17 @@ fn spawn_my_agents_fetch(
     let tx = tx.clone();
     let client = client.clone();
     let backboard = backboard.to_string();
+    // Stamped before the request goes out, not when the reply is applied: the
+    // snapshot describes the account as it was at this moment, and that is what
+    // it may not overwrite anything newer than.
+    let asked_at = std::time::Instant::now();
     tokio::spawn(async move {
         match fetch_my_agents(&client, &backboard).await {
             Ok(agents) => {
-                let _ = tx.send(Message::MyAgentsLoaded { result: Ok(agents) });
+                let _ = tx.send(Message::MyAgentsLoaded {
+                    result: Ok(agents),
+                    asked_at,
+                });
             }
             // A rate limit is worth its own message — the toast with the
             // Retry-After — rather than being folded into the fallback, which
@@ -444,11 +456,51 @@ fn spawn_my_agents_fetch(
                 None => {
                     let _ = tx.send(Message::MyAgentsLoaded {
                         result: Err(err.to_string()),
+                        asked_at,
                     });
                 }
             },
         }
     });
+}
+
+/// Ask the platform for everything again.
+///
+/// One request for the whole account (see [`fetch_my_agents`]), and the sessions
+/// of the agents someone is looking at once it lands — not a sweep. Every
+/// refresh in the TUI comes through here: ⌥r, the automatic tick, the re-entry
+/// after the terminal was handed back, and `shift+r` on an account that is
+/// already fully loaded.
+///
+/// Coalesced on [`App::refreshing`], so holding the chord or having three
+/// actions finish at once cannot stack account-wide queries.
+fn start_refresh(
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    if app.refreshing {
+        return;
+    }
+    app.refresh_started();
+    // Without `myCloudAgents` there is no account-wide question to ask, so the
+    // refresh asks per environment — but only about the ones that already have
+    // an answer or are open, never the whole account. Finding agents in
+    // environments that have never loaded stays `shift+r`, a deliberate act,
+    // because that is the one that costs a request each.
+    if app.account_query_unavailable {
+        let effects = app.environments_to_refresh();
+        // Each environment answers with its own `AgentsLoaded`, so there is no
+        // one reply to close the refresh out on: it is done being started, and
+        // the sweep's own limiter bounds what is in flight from here.
+        app.refresh_finished();
+        if !effects.is_empty() {
+            spawn_sweep(effects, tx, client, backboard, Default::default());
+        }
+        return;
+    }
+    spawn_my_agents_fetch(tx, client, backboard);
 }
 
 /// The reattachable shell and exec sessions on one agent's VM.
@@ -510,13 +562,17 @@ pub async fn run(
 
     // Ask for every agent the caller owns, in one request. If the platform
     // predates `myCloudAgents`, the reply says so and startup degrades to
-    // loading just the environments a keypress would immediately need. On
-    // re-entry after a session the tree has already settled, and the settle
-    // would discard a fresh answer — so don't spend the request.
+    // loading just the environments a keypress would immediately need.
+    //
+    // Every entry, not just the first: this is also how a re-entry catches up.
+    // Coming back from a full-screen session — or from the Claude mint — used to
+    // land on the snapshot taken before leaving, sometimes an hour old, because
+    // the guard here skipped the request whenever the tree had already settled
+    // and the settle would have discarded the answer anyway. A reply that may
+    // overwrite what it is newer than is not discarded, so the request is worth
+    // spending on every entry.
     let stop_fetching: StopFlag = Default::default();
-    if app.has_unloaded_environments() {
-        spawn_my_agents_fetch(&tx, &client, &backboard);
-    }
+    start_refresh(app, &tx, &client, &backboard);
 
     loop {
         let mut rects = app.panes;
@@ -568,6 +624,20 @@ pub async fn run(
             // VM is up, and one refetch just puts "sleeping" back on the row.
             _ = tokio::time::sleep(app::WATCH_TICK), if app.watching_agents() => {
                 app.watch_tick()
+            }
+            // Everything else that changes an agent happens outside this
+            // process: another terminal, the dashboard, a teammate. One
+            // account-wide request every [`app::AUTO_REFRESH_EVERY`] is what
+            // keeps the tree from being a snapshot of when it opened. Armed only
+            // when a refresh would be right — see [`App::auto_refresh_in`] — so
+            // an idle TUI still blocks on the keyboard, and the remainder is
+            // recomputed each pass so an early wake just re-arms.
+            _ = tokio::time::sleep(app.auto_refresh_in().unwrap_or(std::time::Duration::MAX)),
+                if app.auto_refresh_in().is_some() => {
+                if app.auto_refresh_due() {
+                    start_refresh(app, &tx, &client, &backboard);
+                }
+                None
             }
             // A reattach that stays silent gets its "no response" notice drawn
             // once the stall clock runs out; nothing else would redraw, since
@@ -756,7 +826,16 @@ pub async fn run(
                 stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
                 let effects = app.scan_environments();
                 match effects.len() {
-                    0 => app.status = "Every project is already loaded".into(),
+                    // Nothing left to discover — the account-wide query answers
+                    // for every environment at once, so this is the normal case
+                    // rather than an edge one. "Every project is already loaded"
+                    // was a true sentence that did nothing, and it was the reply
+                    // anyone reaching for shift+r to see a new agent got.
+                    0 => {
+                        app.status = "Refreshing…".into();
+                        app.refresh_announce = true;
+                        start_refresh(app, &tx, &client, &backboard);
+                    }
                     n => {
                         app.status =
                             format!("Looking for agents in {n} more environment{}…", plural(n));
@@ -764,6 +843,7 @@ pub async fn run(
                     }
                 }
             }
+            Some(Effect::RefreshAll) => start_refresh(app, &tx, &client, &backboard),
             Some(Effect::OpenUrl(url)) => {
                 // Best-effort: a machine with no browser is a normal way to run
                 // this, and the ssh command in the toast is still copyable.
@@ -929,13 +1009,23 @@ fn handle_message(
             // its row only exists now.
             app.expand_pending()
         }
-        Message::MyAgentsLoaded { result } => match result {
+        Message::MyAgentsLoaded { result, asked_at } => match result {
             Ok(agents) => {
-                app.my_agents_loaded(agents);
+                let count = agents.len();
+                app.refresh_finished();
+                app.my_agents_loaded(agents, asked_at);
                 let prefetch = app.sessions_to_prefetch();
                 if !prefetch.is_empty() {
                     spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
                 }
+                // What someone is looking at, asked about again — the counts and
+                // session rows are as able to go stale as the agents are. Narrow
+                // by design: see [`App::sessions_to_refresh`].
+                let watched = app.sessions_to_refresh();
+                if !watched.is_empty() {
+                    spawn_session_prefetch(watched, tx, client, backboard, stop_fetching.clone());
+                }
+                app.refreshed(count);
                 // Normally redundant — a launch's own refetch answers this —
                 // but it is the safety net when that refetch failed before
                 // this settle arrived.
@@ -946,17 +1036,37 @@ fn handle_message(
             // it loaded before `myCloudAgents`: the environments a keypress
             // would immediately need.
             Err(err) => {
+                app.refresh_finished();
+                // The per-environment fallback below is the answer to whatever
+                // asked, and the rows are its report; a pending "up to date"
+                // line must not be claimed by the next refresh to succeed.
+                app.refresh_announce = false;
+                // Asking again every tick would fail again every tick: a caller
+                // this field refuses — a workspace-scoped token, or a backboard
+                // without it — is refused permanently, so refreshes switch to
+                // the per-environment path from here.
+                let first_failure = !app.account_query_unavailable;
+                app.account_query_unavailable = true;
                 // These are fresh requests; a stop left over from an earlier
                 // 429 would strand them as spinners that never resolve.
                 stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
-                let sweep = app.initial_environments();
+                let mut sweep = app.initial_environments();
                 if sweep.is_empty() {
+                    // Nothing left to load for the first time, so this was a
+                    // refresh rather than startup — and it still has to refresh
+                    // something. Without this, the ⌥r that discovered the field
+                    // was unavailable would change nothing and only the next one
+                    // would work.
+                    sweep = app.environments_to_refresh();
+                }
+                if !sweep.is_empty() {
+                    spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
+                } else if first_failure {
                     // No target and no default project means nothing loads
                     // lazily either — without this line an expired login
-                    // looks like an account with no agents anywhere.
+                    // looks like an account with no agents anywhere. Said once:
+                    // a refresh that keeps failing must not toast on a timer.
                     app.toast_error(format!("Couldn't load agents: {err}"));
-                } else {
-                    spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
                 }
                 None
             }
