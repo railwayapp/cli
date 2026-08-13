@@ -589,11 +589,36 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
 
     let was_running = matches!(agent.status, ca::Status::Running);
     let spinner = (!was_running).then(|| create_spinner(format!("Waking agent {}", agent.name)));
-    let ready = ca::ensure_running(client, &backboard, &agent).await;
+    // Probe the route instead of polling status to RUNNING: the platform
+    // routes a shell as soon as the container exists, several seconds before
+    // the status flips. STARTING means something else is already booting the
+    // box, so this waits rather than issuing a second wake.
+    let ready = match agent.status {
+        ca::Status::Running => Ok(()),
+        ca::Status::Starting => {
+            code::wait_until_connectable(client, &backboard, &agent.environment_id, &agent.id)
+                .await
+                .map(|_| ())
+        }
+        ca::Status::Sleeping => match ca::wake(client, &backboard, &agent.id).await {
+            Ok(()) => {
+                code::wait_until_connectable(client, &backboard, &agent.environment_id, &agent.id)
+                    .await
+                    .map(|_| ())
+            }
+            Err(e) => Err(e),
+        },
+        _ => Err(anyhow::anyhow!(
+            "Agent {} is {} — it cannot be connected to. `railway ca delete {}` and create a new one.",
+            agent.name,
+            agent.status.label(),
+            agent.name
+        )),
+    };
     if let Some(spinner) = spinner {
         spinner.finish_and_clear();
     }
-    let agent = ready?;
+    ready?;
     ca::remember(configs, &agent)?;
 
     let connected = if !args.command.is_empty() {
