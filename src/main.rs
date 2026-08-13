@@ -899,6 +899,10 @@ mod cli_tests {
             assert_parses(&["setup", "agent", "-y"]);
             assert_parses(&["setup", "agent", "--remote"]);
             assert_parses(&["setup", "agent", "--remote", "-y"]);
+            assert_parses(&["setup", "agent", "--local"]);
+            assert_parses(&["setup", "agent", "--local", "-y"]);
+            assert_parses(&["setup", "agent", "--oauth"]);
+            assert_parses(&["setup", "agent", "--oauth", "-y"]);
         }
 
         #[test]
@@ -1042,6 +1046,10 @@ mod cli_tests {
             assert_parses(&["mcp", "install", "--remote"]);
             assert_parses(&["mcp", "install", "--remote", "--agent", "cursor"]);
             assert_parses(&["mcp", "install", "--remote", "--agent", "codex"]);
+            assert_parses(&["mcp", "install", "--local"]);
+            assert_parses(&["mcp", "install", "--local", "--agent", "cursor"]);
+            assert_parses(&["mcp", "install", "--oauth"]);
+            assert_parses(&["mcp", "install", "--oauth", "--agent", "cursor"]);
         }
     }
 }

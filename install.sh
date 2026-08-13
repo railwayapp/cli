@@ -24,11 +24,19 @@ help_text="Options
    Override the base URL used for downloading releases
 
    --agents
-   Install or reuse the Railway CLI, then configure Railway agent support
+   Install or reuse the Railway CLI, then configure Railway agent support.
+   On supported CLI versions this defaults to the remote MCP server via
+   \`railway mcp proxy\` (CLI login auth).
 
    --remote
-   When used with --agents, configure the remote HTTP MCP server at
-   mcp.railway.com instead of the local stdio server
+   When used with --agents, configure the remote MCP server at
+   mcp.railway.com via the CLI proxy (uses \`railway login\`). Compatibility
+   alias of the default on current CLIs; also forces proxy on older CLIs
+   that still default \`setup agent -y\` to local MCP.
+
+   --local
+   When used with --agents, configure the local GraphQL-backed MCP server
+   (\`railway mcp\`) instead of the remote CLI proxy default.
 
    -r, --remove
    Uninstall railway
@@ -438,6 +446,7 @@ UNINSTALL=0
 HELP=0
 AGENTS=0
 REMOTE=0
+LOCAL=0
 RAILWAY_HOME_DIR=""
 RAILWAY_ENV_FILE=""
 RAILWAY_FISH_ENV_FILE=""
@@ -539,6 +548,10 @@ while [ "$#" -gt 0 ]; do
     REMOTE=1
     shift 1
     ;;
+  --local)
+    LOCAL=1
+    shift 1
+    ;;
   -h | --help)
     HELP=1
     shift 1
@@ -582,10 +595,17 @@ else
   VERBOSE=
 fi
 
-# --remote only takes effect alongside --agents (it routes setup agent to the
-# hosted MCP server). Warn loudly rather than silently no-op.
+# --remote / --local only take effect alongside --agents. Warn loudly rather
+# than silently no-op.
 if [ "$REMOTE" = 1 ] && [ "$AGENTS" != 1 ]; then
   warn "--remote has no effect without --agents. Re-run with both flags to configure remote MCP."
+fi
+if [ "$LOCAL" = 1 ] && [ "$AGENTS" != 1 ]; then
+  warn "--local has no effect without --agents. Re-run with both flags to configure local MCP."
+fi
+if [ "$REMOTE" = 1 ] && [ "$LOCAL" = 1 ]; then
+  error "--remote and --local cannot be used together."
+  exit 1
 fi
 
 write_env_files() {
@@ -970,7 +990,7 @@ warn_existing_path_conflict() {
 run_agent_setup() {
   local railway_bin="$1"
   local yes=""
-  local remote=""
+  local mcp_transport=""
 
   if [ -z "${RAILWAY_INSTALL_REQUEST_ID-}" ]; then
     RAILWAY_INSTALL_REQUEST_ID="install_$(od -vAn -N16 -tx1 < /dev/urandom | tr -d ' \n')"
@@ -981,8 +1001,21 @@ run_agent_setup() {
     yes="-y"
   fi
 
-  if [ "$REMOTE" = 1 ]; then
-    remote="--remote"
+  # Transport selection for `setup agent`:
+  # - `--local` opts into the in-process server.
+  # - `--remote` forces the CLI proxy (alias of the current default).
+  # - Non-interactive agents setup also passes `--remote` when the binary
+  #   supports it, so older CLIs that still default `-y` to local MCP land on
+  #   the proxy. Probe `--help` first: pre-proxy binaries must not die on an
+  #   unrecognized flag when we continue with a managed/Homebrew install.
+  if [ "$LOCAL" = 1 ]; then
+    mcp_transport="--local"
+  elif [ "$REMOTE" = 1 ]; then
+    mcp_transport="--remote"
+  elif [ -n "$yes" ]; then
+    if "$railway_bin" setup agent --help 2>&1 | grep -q -- '--remote'; then
+      mcp_transport="--remote"
+    fi
   fi
 
   if [ -t 0 ] && [ -z "${FORCE-}" ]; then
@@ -1002,7 +1035,7 @@ run_agent_setup() {
   # broke, surface the real status, and still point somewhere useful — the old
   # behaviour was to die mid-script with no Railway-branded message at all.
   AGENT_SETUP_RC=0
-  RAILWAY_SETUP_EMBEDDED=1 "$railway_bin" setup agent $yes $remote || AGENT_SETUP_RC=$?
+  RAILWAY_SETUP_EMBEDDED=1 "$railway_bin" setup agent $yes $mcp_transport || AGENT_SETUP_RC=$?
   if [ "$AGENT_SETUP_RC" -ne 0 ]; then
     printf "\n"
     if [ "$AGENT_SETUP_RC" -eq 2 ]; then
@@ -1160,13 +1193,18 @@ if [ "$AGENTS" = 1 ] && has railway; then
   esac
 
   if [ "$BREW_INSTALL" = 1 ]; then
-    if [ "$REMOTE" = 1 ]; then
-      # --remote was added in a newer release. Continuing with an older brewed
-      # CLI would call `setup agent --remote` and fail with an unrecognized-arg
-      # error after we already told the user we were continuing. Refuse early.
+    if [ "$REMOTE" = 1 ] || [ "$LOCAL" = 1 ]; then
+      # Transport flags were added in newer releases. Continuing with an older
+      # brewed CLI would call `setup agent --remote/--local` and fail with an
+      # unrecognized-arg error after we already told the user we were continuing.
+      # Refuse early.
+      flag_name="--remote"
+      if [ "$LOCAL" = 1 ]; then
+        flag_name="--local"
+      fi
       error "Railway CLI was installed via Homebrew (version $CURRENT_VERSION)."
-      error "The --remote flag requires Railway CLI $RAILWAY_VERSION or newer."
-      error "Run 'brew upgrade railway' first, then re-run cli.new --agents --remote."
+      error "The $flag_name flag requires Railway CLI $RAILWAY_VERSION or newer."
+      error "Run 'brew upgrade railway' first, then re-run cli.new --agents $flag_name."
       exit 1
     fi
     warn "Railway CLI was installed via Homebrew."
@@ -1199,10 +1237,14 @@ if [ "$AGENTS" = 1 ] && has railway; then
   fi
 
   if [ "$MANAGED_BIN" = 1 ]; then
-    if [ "$REMOTE" = 1 ]; then
+    if [ "$REMOTE" = 1 ] || [ "$LOCAL" = 1 ]; then
+      flag_name="--remote"
+      if [ "$LOCAL" = 1 ]; then
+        flag_name="--local"
+      fi
       error "Railway CLI on PATH is managed by another tool: $RAILWAY_BIN ($CURRENT_VERSION)."
-      error "The --remote flag requires Railway CLI $RAILWAY_VERSION or newer."
-      error "Update it with that tool first (e.g. 'npm install -g @railway/cli@latest'), then re-run cli.new --agents --remote."
+      error "The $flag_name flag requires Railway CLI $RAILWAY_VERSION or newer."
+      error "Update it with that tool first (e.g. 'npm install -g @railway/cli@latest'), then re-run cli.new --agents $flag_name."
       exit 1
     fi
     warn "Railway CLI on PATH is managed by another tool: $RAILWAY_BIN"
