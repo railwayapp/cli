@@ -2172,6 +2172,53 @@ impl App {
         }
     }
 
+    /// Pasted text — a ⌘v, or a dictation tool like Wispr Flow, which inserts
+    /// into a terminal the same way. It goes where typing would go: a focused
+    /// session gets it as a paste, a prompt box gets it as text. Anywhere
+    /// else it is dropped whole — fed through `on_key` it would spray across
+    /// hotkeys, and a stray paste must never trigger an action.
+    pub fn on_paste(&mut self, text: String) -> Option<Effect> {
+        // The SSH gate is a y/N question; pasted text is not an answer.
+        if self.ssh_gate.is_some() {
+            return None;
+        }
+        if self.focus == ManageFocus::Session && self.screen == Screen::Manage {
+            if let Some(i) = self.active {
+                // A dead pane's keys mean recovery, but a paste is not a
+                // command — bytes to a dead pty vanish, so drop it.
+                let dead = self
+                    .sessions
+                    .get(i)
+                    .is_some_and(|s| s.ended() || s.stalled());
+                if !dead && let Some(session) = self.sessions.get_mut(i) {
+                    session.send_paste(&text);
+                }
+            }
+            return None;
+        }
+        // The prompt boxes are single-line: newlines become spaces rather
+        // than being taken as Enter, and other control characters have no
+        // business in a draft at all.
+        let text: String = text
+            .replace("\r\n", " ")
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .filter(|c| !c.is_control())
+            .collect();
+        match self.screen {
+            Screen::Menu if self.menu_focus == MenuFocus::Prompt && !self.shell_selected() => {
+                self.prompt.push_str(&text);
+            }
+            Screen::ManagePrompt if !self.shell_selected() => {
+                if let Some(draft) = self.manage_prompt.as_mut() {
+                    draft.push_str(&text);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
     fn on_key_wizard(&mut self, key: KeyEvent) -> Option<Effect> {
         use super::wizard::Action;
         let wizard = self.wizard.as_mut()?;
@@ -4396,6 +4443,37 @@ mod tests {
         a.on_key(ctrl('t'));
         assert_eq!(a.screen, Screen::TargetPick);
         assert_eq!(a.prompt, "te", "retargeting must not eat the draft");
+    }
+
+    /// A paste lands in the prompt as text — dictation tools insert whole
+    /// utterances this way — with newlines flattened to spaces: the box is
+    /// one line, and a line break taken as Enter would launch mid-thought.
+    #[test]
+    fn a_paste_lands_in_the_prompt_as_one_line() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('f')));
+        assert_eq!(a.on_paste("ix the login bug\nthen deploy".into()), None);
+        assert_eq!(a.prompt, "fix the login bug then deploy");
+        assert_eq!(a.screen, Screen::Menu, "a pasted newline is not Enter");
+    }
+
+    /// Where typing is refused, pasting is too; and off the prompt a paste
+    /// must not be sprayed across the hotkeys.
+    #[test]
+    fn a_paste_respects_prompt_focus_and_shell() {
+        let mut a = app();
+        a.menu_focus = MenuFocus::Cards;
+        assert_eq!(a.on_paste("stray".into()), None);
+        assert_eq!(a.prompt, "", "cards are not a text box");
+
+        a.menu_focus = MenuFocus::Prompt;
+        a.harness = HARNESSES.len() - 1;
+        assert!(a.shell_selected());
+        assert_eq!(a.on_paste("stray".into()), None);
+        assert_eq!(
+            a.prompt, "",
+            "the box says typing is refused; so is a paste"
+        );
     }
 
     /// The target chooser is the setup flow's project card, not a trip through

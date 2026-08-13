@@ -28,9 +28,9 @@ use std::panic;
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -582,6 +582,7 @@ pub async fn run(
                 if app.awaiting_exit_status() => app.reap_ended_sessions(),
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
+                Some(Ok(Event::Paste(text))) => app.on_paste(text),
                 Some(Ok(Event::Mouse(mouse))) => {
                     let action = match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => Some(app::MouseAction::Down),
@@ -1579,7 +1580,19 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     crate::util::prompt::set_terminal_owned(true);
     // Mouse capture takes the terminal's own selection away, which is why the
     // TUI implements drag-to-copy itself.
-    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
+    //
+    // Bracketed paste is what keeps a paste from arriving as typed keys: text
+    // inserted by the terminal — ⌘v, and dictation tools like Wispr Flow,
+    // which insert into a terminal the same way — comes wrapped in markers
+    // and reaches the loop as one `Event::Paste`, instead of a stream of
+    // keystrokes whose every newline hits Enter in the pane.
+    execute!(
+        stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        Hide
+    )?;
     // Ask for the enhanced keyboard protocol, which is what makes a modifier on
     // Escape reportable at all: a plain terminal sends ⇧esc as a bare Escape,
     // indistinguishable from the one meant for the agent. Terminals that do not
@@ -1616,13 +1629,19 @@ fn restore_terminal() {
     // Popping a protocol that was never pushed is harmless; leaving one pushed
     // would follow the user out of the TUI and into their shell.
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
-    let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, Show);
+    let _ = execute!(
+        stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    );
     // Again, on the main screen. Mouse tracking left on is the one piece of
     // state the user cannot see and cannot clear: every pointer movement
     // becomes `35;21;32M` at their shell prompt. Terminals disagree about
     // whether the modes belong to the screen buffer that set them, so turn
     // them off on both.
-    let _ = execute!(stdout(), DisableMouseCapture);
+    let _ = execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
     let _ = disable_raw_mode();
     crate::util::prompt::set_terminal_owned(false);
     let _ = stdout().flush();
