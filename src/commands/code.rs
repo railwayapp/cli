@@ -14,6 +14,8 @@ use crate::commands::ssh::{
     ensure_ssh_key_quiet, run_native_ssh_captured, run_native_ssh_with_opts,
 };
 use crate::config::Configs;
+use crate::controllers::project::get_project;
+use crate::errors::RailwayError;
 use crate::gql::{mutations, queries};
 use crate::macros::is_stdout_terminal;
 use crate::util::progress::create_shimmer_spinner;
@@ -1596,7 +1598,9 @@ async fn sole_owned_agent_id(
 /// is the project I'm working in", and that outranks a person-wide preference
 /// that was chosen once, possibly a long time ago, from wherever the terminal
 /// happened to be. The configured default is still the answer when there is no
-/// link — most `railway code` invocations are not inside a linked directory.
+/// link — most `railway code` invocations are not inside a linked directory —
+/// or when the link points at a project or environment that no longer exists
+/// (see [`stale_link_reason`]).
 /// Flags still win over both: they are the caller saying it outright.
 ///
 /// With nothing to go on, this runs `railway ca setup` rather than the
@@ -1620,6 +1624,46 @@ async fn resolve_target(
             .and_then(|l| l.environment.clone().map(|env| (l.project, env)))
     } else {
         None
+    };
+
+    // A link is stored intent, and stored intent goes stale: the project it
+    // names can be deleted long after `railway link` wrote it, and links are
+    // never cleaned up. Until now the first thing to notice was a bare
+    // "Project not found. Run `railway link`" from deep inside the launch —
+    // baffling in a directory nobody remembers linking. Probe the link before
+    // it wins, and demote a dead one so the launch lands where a linkless run
+    // would have: the configured default. Only a definite server-side "gone"
+    // demotes — a transient failure keeps the link and lets the launch's own
+    // calls decide, so a network blip cannot reroute a launch to another
+    // project.
+    let linked = match linked {
+        Some((project_id, environment_id)) => {
+            let lookup = get_project(client, configs, project_id.clone()).await;
+            match stale_link_reason(&lookup, &environment_id) {
+                Some(reason) => {
+                    eprintln!(
+                        "{}",
+                        format!(
+                            "This directory is linked to a {reason} — ignoring the link (`railway link` to fix it)."
+                        )
+                        .yellow()
+                    );
+                    if let Some(default) = prefs.default_project.as_ref() {
+                        eprintln!(
+                            "{}",
+                            format!(
+                                "Using your default cloud agents project instead: {} ({}).",
+                                default.project_name, default.environment_name
+                            )
+                            .dimmed()
+                        );
+                    }
+                    None
+                }
+                None => Some((project_id, environment_id)),
+            }
+        }
+        None => None,
     };
 
     match choose_target(args, prefs.default_project.as_ref(), linked) {
@@ -1695,6 +1739,33 @@ fn choose_target(
     match is_stdout_terminal() {
         true => TargetSource::Setup,
         false => TargetSource::Ask,
+    }
+}
+
+/// Why a linked target can no longer be launched into, phrased for the "This
+/// directory is linked to a …" warning — or `None` when the link is usable.
+///
+/// Inconclusive is usable: an error other than "not found" (auth, network)
+/// says nothing about the link itself, and treating it as stale would let a
+/// blip reroute the launch to the configured default — a different project —
+/// instead of failing where the caller can see why. Separated from the I/O so
+/// each verdict is checked by tests rather than by reading it.
+fn stale_link_reason(
+    lookup: &std::result::Result<queries::RailwayProject, RailwayError>,
+    environment_id: &str,
+) -> Option<&'static str> {
+    match lookup {
+        Err(RailwayError::ProjectNotFound) => Some("project that no longer exists"),
+        Err(_) => None,
+        Ok(project) if project.deleted_at.is_some() => Some("project that was deleted"),
+        Ok(project) => {
+            let live = project
+                .environments
+                .edges
+                .iter()
+                .any(|edge| edge.node.id == environment_id && edge.node.deleted_at.is_none());
+            (!live).then_some("environment that no longer exists")
+        }
     }
 }
 
@@ -3112,6 +3183,84 @@ mod tests {
         assert_eq!(
             choose_target(&LaunchArgs::default(), Some(&default_project()), None),
             TargetSource::Configured("proj_default".into(), "env_default".into())
+        );
+    }
+
+    /// A minimal [`queries::RailwayProject`], built the way the API delivers
+    /// one — through serde — because the generated struct tree is not worth
+    /// spelling out by hand. `envs` is `(id, deleted)` per environment.
+    fn project_lookup(deleted: bool, envs: &[(&str, bool)]) -> queries::RailwayProject {
+        let stamp = "2026-01-01T00:00:00Z";
+        serde_json::from_value(serde_json::json!({
+            "id": "proj_linked",
+            "name": "linked",
+            "workspaceId": "ws",
+            "deletedAt": deleted.then_some(stamp),
+            "workspace": { "name": "ws" },
+            "buckets": { "edges": [] },
+            "environments": { "edges": envs.iter().map(|(id, dead)| serde_json::json!({
+                "node": {
+                    "id": id,
+                    "name": id,
+                    "canAccess": true,
+                    "deletedAt": dead.then_some(stamp),
+                    "unmergedChangesCount": 0,
+                }
+            })).collect::<Vec<_>>() },
+            "services": { "edges": [] },
+        }))
+        .expect("a RailwayProject deserializes from the fields the query selects")
+    }
+
+    /// A stale link is demoted; anything short of a definite server-side
+    /// "gone" keeps it, so a transient failure cannot reroute a launch to the
+    /// configured default — a different project.
+    #[test]
+    fn only_a_definitely_dead_link_is_demoted() {
+        // The project the link names was deleted outright.
+        assert_eq!(
+            stale_link_reason(&Err(RailwayError::ProjectNotFound), "env_linked"),
+            Some("project that no longer exists")
+        );
+        // Deleted but still readable — the API sometimes keeps the record.
+        assert_eq!(
+            stale_link_reason(
+                &Ok(project_lookup(true, &[("env_linked", false)])),
+                "env_linked"
+            ),
+            Some("project that was deleted")
+        );
+        // The project survives but the linked environment does not.
+        assert_eq!(
+            stale_link_reason(
+                &Ok(project_lookup(false, &[("env_other", false)])),
+                "env_linked"
+            ),
+            Some("environment that no longer exists")
+        );
+        assert_eq!(
+            stale_link_reason(
+                &Ok(project_lookup(false, &[("env_linked", true)])),
+                "env_linked"
+            ),
+            Some("environment that no longer exists")
+        );
+
+        // A live link is kept.
+        assert_eq!(
+            stale_link_reason(
+                &Ok(project_lookup(false, &[("env_linked", false)])),
+                "env_linked"
+            ),
+            None
+        );
+        // An inconclusive lookup is not evidence of staleness.
+        assert_eq!(
+            stale_link_reason(
+                &Err(RailwayError::GraphQLError("connection reset".into())),
+                "env_linked"
+            ),
+            None
         );
     }
 
