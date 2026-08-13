@@ -454,8 +454,7 @@ pub fn probe_native_ssh(
     ssh_cmd.stdin(Stdio::null());
     ssh_cmd.stderr(Stdio::null());
     let output = ssh_cmd.output().context("Failed to execute ssh command")?;
-    Ok(output.status.success()
-        && String::from_utf8_lossy(&output.stdout).contains(PROBE_MARKER))
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains(PROBE_MARKER))
 }
 
 /// One `-L` style forward: localhost:`local_port` → 127.0.0.1:`remote_port`
