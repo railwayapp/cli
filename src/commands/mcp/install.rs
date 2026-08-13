@@ -14,9 +14,9 @@ pub struct Args {
     #[clap(long)]
     agent: Vec<String>,
 
-    /// Configure the remote MCP server at mcp.railway.com, bridged through `railway mcp proxy`
-    /// so it authenticates with your existing CLI login (no browser OAuth flow).
-    /// This is the default; the flag is kept for compatibility.
+    /// Configure the remote MCP server via the CLI proxy (`railway mcp proxy` →
+    /// mcp.railway.com, auth via `railway login`). This is the default; the flag is
+    /// kept as a compatibility alias. Ignored when `--oauth` is set.
     #[clap(long, conflicts_with = "local")]
     remote: bool,
 
@@ -25,8 +25,8 @@ pub struct Args {
     #[clap(long, conflicts_with_all = ["remote", "oauth"])]
     local: bool,
 
-    /// Write the plain HTTP server URL instead of the CLI proxy, so the editor runs
-    /// its own OAuth (browser consent) flow.
+    /// Use editor OAuth against https://mcp.railway.com directly (not the CLI proxy).
+    /// Takes precedence over `--remote`.
     #[clap(long, conflicts_with = "local")]
     oauth: bool,
 }
@@ -69,6 +69,14 @@ fn stdio_args(transport: McpTransport) -> Vec<&'static str> {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    if args.oauth && args.remote {
+        eprintln!(
+            "{} {}",
+            "!".yellow().bold(),
+            "Using editor OAuth (https://mcp.railway.com); --remote is ignored with --oauth."
+                .yellow()
+        );
+    }
     install_mcp(
         &args.agent,
         McpTransport::from_flags(args.remote, args.oauth, args.local),

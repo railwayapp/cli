@@ -36,9 +36,9 @@ pub struct AgentArgs {
     #[clap(short = 'y', long)]
     yes: bool,
 
-    /// Configure the remote MCP server (mcp.railway.com) via the CLI proxy — it authenticates
-    /// with your existing `railway login`, no browser OAuth flow. This is the default for
-    /// `-y` / non-interactive setup; the flag is kept for compatibility.
+    /// Configure the remote MCP server via the CLI proxy (`railway mcp proxy` →
+    /// mcp.railway.com, auth via `railway login`). Default for `-y` / non-interactive
+    /// setup; kept as a compatibility alias. Ignored when `--oauth` is set.
     #[clap(long, conflicts_with = "local")]
     remote: bool,
 
@@ -47,8 +47,8 @@ pub struct AgentArgs {
     #[clap(long, conflicts_with_all = ["remote", "oauth"])]
     local: bool,
 
-    /// Write the plain HTTP server URL (https://mcp.railway.com) instead of the CLI proxy,
-    /// so the editor runs its own OAuth (browser consent) flow.
+    /// Use editor OAuth against https://mcp.railway.com directly (not the CLI proxy).
+    /// Takes precedence over `--remote`.
     #[clap(long, conflicts_with = "local")]
     oauth: bool,
 }
@@ -117,6 +117,14 @@ fn pick_mcp_choice(
         return Ok(McpChoice::Local);
     }
     if oauth_flag {
+        if remote_flag {
+            eprintln!(
+                "{} {}",
+                "!".yellow().bold(),
+                "Using editor OAuth (https://mcp.railway.com); --remote is ignored with --oauth."
+                    .yellow()
+            );
+        }
         return Ok(McpChoice::RemoteOauth);
     }
     if remote_flag || non_interactive {
@@ -129,7 +137,9 @@ fn pick_mcp_choice(
         McpChoice::RemoteOauth,
         McpChoice::Skip,
     ];
+    // Remote is index 0 and labeled default; start the cursor there so Enter accepts it.
     inquire::Select::new("Configure MCP server:", options)
+        .with_starting_cursor(0)
         .with_render_config(Configs::get_render_config())
         .prompt()
         .context("Failed to prompt for MCP transport")

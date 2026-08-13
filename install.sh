@@ -24,13 +24,15 @@ help_text="Options
    Override the base URL used for downloading releases
 
    --agents
-   Install or reuse the Railway CLI, then configure Railway agent support
-   (defaults to the remote MCP server via \`railway mcp proxy\`)
+   Install or reuse the Railway CLI, then configure Railway agent support.
+   On supported CLI versions this defaults to the remote MCP server via
+   \`railway mcp proxy\` (CLI login auth).
 
    --remote
    When used with --agents, configure the remote MCP server at
-   mcp.railway.com via the CLI proxy (uses \`railway login\`). This is the
-   default for --agents; the flag is kept for compatibility.
+   mcp.railway.com via the CLI proxy (uses \`railway login\`). Compatibility
+   alias of the default on current CLIs; also forces proxy on older CLIs
+   that still default \`setup agent -y\` to local MCP.
 
    --local
    When used with --agents, configure the local GraphQL-backed MCP server
@@ -999,13 +1001,21 @@ run_agent_setup() {
     yes="-y"
   fi
 
-  # Explicit transport overrides only. Non-interactive setup on a current CLI
-  # already defaults to the remote CLI proxy; older CLIs without that default
-  # still accept `--remote`. `--local` opts back into the in-process server.
+  # Transport selection for `setup agent`:
+  # - `--local` opts into the in-process server.
+  # - `--remote` forces the CLI proxy (alias of the current default).
+  # - Non-interactive agents setup also passes `--remote` when the binary
+  #   supports it, so older CLIs that still default `-y` to local MCP land on
+  #   the proxy. Probe `--help` first: pre-proxy binaries must not die on an
+  #   unrecognized flag when we continue with a managed/Homebrew install.
   if [ "$LOCAL" = 1 ]; then
     mcp_transport="--local"
   elif [ "$REMOTE" = 1 ]; then
     mcp_transport="--remote"
+  elif [ -n "$yes" ]; then
+    if "$railway_bin" setup agent --help 2>&1 | grep -q -- '--remote'; then
+      mcp_transport="--remote"
+    fi
   fi
 
   if [ -t 0 ] && [ -z "${FORCE-}" ]; then
