@@ -20,7 +20,11 @@ use crate::gql::{mutations, queries};
 /// routes, a wake restores a checkpoint and is much quicker.
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
-/// Gap between readiness polls.
+/// Gap between readiness polls. A fresh boot reaches running in single-digit
+/// seconds, and every poll-width of delay is pure wait the user sees — so poll
+/// fast while a normal boot is still plausible, then back off for the tail.
+const POLL_INTERVAL_FAST: std::time::Duration = std::time::Duration::from_millis(400);
+const POLL_FAST_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// An agent's lifecycle state, normalised across the four generated enums that
@@ -278,7 +282,8 @@ pub async fn wait_until_running(
     environment_id: &str,
     id: &str,
 ) -> Result<Agent> {
-    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    let started = std::time::Instant::now();
+    let deadline = started + READY_TIMEOUT;
     loop {
         let agent = match get(client, backboard, environment_id, id).await? {
             Some(agent) => agent,
@@ -300,7 +305,12 @@ pub async fn wait_until_running(
                 agent.status.label()
             );
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        let interval = if started.elapsed() < POLL_FAST_WINDOW {
+            POLL_INTERVAL_FAST
+        } else {
+            POLL_INTERVAL
+        };
+        tokio::time::sleep(interval).await;
     }
 }
 
