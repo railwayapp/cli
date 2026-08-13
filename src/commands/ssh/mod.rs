@@ -20,8 +20,8 @@ use common::*;
 // native SSH transport (key registration + `ssh <target>@<env relay host>`).
 pub use native::{
     DurableResume, PortForward, ensure_ssh_key, ensure_ssh_key_quiet, get_service_instance_id,
-    run_native_ssh, run_native_ssh_captured, run_native_ssh_forward, run_native_ssh_with_opts,
-    spawn_native_ssh_forward,
+    probe_native_ssh, run_native_ssh, run_native_ssh_captured, run_native_ssh_forward,
+    run_native_ssh_with_opts, spawn_native_ssh_forward,
 };
 
 /// Connect to a service via SSH or manage SSH keys

@@ -425,6 +425,38 @@ pub fn run_native_ssh_with_opts(
     Ok(status.code().unwrap_or(1))
 }
 
+/// Marker a readiness probe asks the guest to echo back. Success is this
+/// string round-tripping, never the exit code: the relay answers a session
+/// against a target it cannot route yet with a status JSON and a clean exit
+/// 0, so `ssh <target> true` reports success seconds before a command can
+/// actually run (verified against prod, 2026-08-13).
+const PROBE_MARKER: &str = "RAILWAY_CONNECT_PROBE_OK";
+
+/// Silently test whether a target is connectable yet: ask it to echo a
+/// marker, with success defined as the marker coming back. Failure carries no
+/// diagnosis (a booting agent and a typo'd target look the same), so callers
+/// only ever use this inside a loop that also watches status.
+pub fn probe_native_ssh(
+    ssh_target: &str,
+    identity_file: Option<&Path>,
+    extra_opts: &[String],
+) -> Result<bool> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
+    // Bound the probe so one blackholed connection can't eat the caller's
+    // whole readiness budget; the loop retries anyway.
+    ssh_cmd.arg("-o").arg("ConnectTimeout=10");
+    ssh_cmd.arg("-T");
+    ssh_cmd.arg(&target);
+    ssh_cmd.arg(format!("echo {PROBE_MARKER}"));
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stderr(Stdio::null());
+    let output = ssh_cmd.output().context("Failed to execute ssh command")?;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains(PROBE_MARKER))
+}
+
 /// One `-L` style forward: localhost:`local_port` → 127.0.0.1:`remote_port`
 /// inside the target.
 #[derive(Clone)]

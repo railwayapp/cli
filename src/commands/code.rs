@@ -11,7 +11,7 @@ use crate::commands::cloud_agent::skills_sync;
 use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
 use crate::commands::ssh::tel as ssh_tel;
 use crate::commands::ssh::{
-    ensure_ssh_key_quiet, run_native_ssh_captured, run_native_ssh_with_opts,
+    ensure_ssh_key_quiet, probe_native_ssh, run_native_ssh_captured, run_native_ssh_with_opts,
 };
 use crate::config::Configs;
 use crate::controllers::project::get_project;
@@ -1411,9 +1411,10 @@ fn ssh_plumbing(
     bail!("SSH to the agent failed after {attempts} attempts (exit {code}):\n{reason}")
 }
 
-/// One cloud agent, reduced to what this command steers on.
+/// One cloud agent, reduced to what this command steers on. `pub(crate)`
+/// because [`wait_until_connectable`] returns it to the `railway ca` verbs.
 #[derive(Clone)]
-struct CodeAgent {
+pub(crate) struct CodeAgent {
     id: String,
     name: String,
     status: queries::cloud_agent::CloudAgentStatus,
@@ -1449,22 +1450,28 @@ async fn fetch_agent(
     }))
 }
 
-/// Poll until the agent is RUNNING. A terminal state (CRASHED/FAILED/DELETING)
-/// is reported immediately instead of burning the whole timeout on a box that
-/// will never come up.
-async fn wait_until_running(
+/// Wait until the agent is *connectable*, by probing the SSH route itself
+/// rather than polling status up to RUNNING. The platform routes a shell as
+/// soon as the agent's container exists — several seconds before the status
+/// flips, which additionally waits out route publication, the status
+/// projection, and a poll interval. Status is still read each round, but only
+/// to catch terminal states (CRASHED/FAILED/DELETING) early instead of
+/// burning the whole timeout on a box that will never come up.
+pub(crate) async fn wait_until_connectable(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
     id: &str,
 ) -> Result<CodeAgent> {
     use queries::cloud_agent::CloudAgentStatus as S;
+    let info = connect_info(environment_id, id).await?;
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
     loop {
         let agent = fetch_agent(client, backboard, environment_id, id)
             .await?
             .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
         match agent.status {
+            // RUNNING routes by definition; skip the probe round-trip.
             S::RUNNING => return Ok(agent),
             S::STARTING | S::SLEEPING => {}
             S::CRASHED => bail!(
@@ -1478,15 +1485,28 @@ async fn wait_until_running(
             S::DELETING => bail!("Agent {} is being deleted.", agent.name),
             S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
         }
+
+        let target = info.ssh_target.clone();
+        let identity = info.identity.clone();
+        let opts = info.relay_opts.clone();
+        let routed = tokio::task::spawn_blocking(move || {
+            probe_native_ssh(&target, identity.as_deref(), &opts)
+        })
+        .await?
+        .unwrap_or(false);
+        if routed {
+            return Ok(agent);
+        }
+
         if std::time::Instant::now() >= deadline {
             bail!(
-                "Agent {} did not reach RUNNING within {}s (last state: {:?}).",
+                "Agent {} did not become connectable within {}s (last state: {:?}).",
                 agent.name,
                 READY_TIMEOUT.as_secs(),
                 agent.status
             );
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
     }
 }
 
@@ -1527,7 +1547,8 @@ async fn ready_existing_agent(
             {
                 return Err(e.into());
             }
-            let running = wait_until_running(client, backboard, environment_id, &agent.id).await?;
+            let running =
+                wait_until_connectable(client, backboard, environment_id, &agent.id).await?;
             progress.note(&format!(
                 "Woke agent {} — your work is on its disk",
                 running.name
@@ -1834,7 +1855,7 @@ async fn resolve_agent(
     configs.set_code_agent(environment_id, &created.id);
     configs.write()?;
 
-    match wait_until_running(client, &backboard, environment_id, &created.id).await {
+    match wait_until_connectable(client, &backboard, environment_id, &created.id).await {
         Ok(running) => {
             progress.note(&format!("Created agent {}", running.name));
             Ok((running, true))

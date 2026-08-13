@@ -314,38 +314,6 @@ pub async fn wait_until_running(
     }
 }
 
-/// Bring an existing agent up to RUNNING, waking it if it is asleep.
-///
-/// Deliberately unlike the launcher's [`crate::commands::code`] path, which
-/// treats a crashed agent as a cue to create a fresh one. That is a reasonable
-/// answer to "get me coding" and a terrible answer to "wake this agent": the
-/// caller named a machine, and silently handing back a different, empty one
-/// while the original's disk sits there is not a thing to do quietly.
-pub async fn ensure_running(
-    client: &reqwest::Client,
-    backboard: &str,
-    agent: &Agent,
-) -> Result<Agent> {
-    match agent.status {
-        Status::Running => Ok(agent.clone()),
-        // STARTING means something else is already booting it, so this waits
-        // rather than issuing a second wake.
-        Status::Starting => {
-            wait_until_running(client, backboard, &agent.environment_id, &agent.id).await
-        }
-        Status::Sleeping => {
-            wake(client, backboard, &agent.id).await?;
-            wait_until_running(client, backboard, &agent.environment_id, &agent.id).await
-        }
-        _ => bail!(
-            "Agent {} is {} — it cannot be connected to. `railway ca delete {}` and create a new one.",
-            agent.name,
-            agent.status.label(),
-            agent.name
-        ),
-    }
-}
-
 /// A durable console session on an agent.
 ///
 /// Sessions outlive the ssh that started them — that is the point of them — so
