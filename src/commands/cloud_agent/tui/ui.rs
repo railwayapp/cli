@@ -1222,11 +1222,13 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             Some(RowKind::Group(..)) => vec![
                 ("n", "new agent here"),
                 ("t", "target"),
+                ("⌥r", "refresh"),
                 ("shift+r", "find agents"),
             ],
             _ => vec![
                 ("enter", "open"),
                 ("n", "new agent"),
+                ("⌥r", "refresh"),
                 ("shift+r", "find agents"),
             ],
         }

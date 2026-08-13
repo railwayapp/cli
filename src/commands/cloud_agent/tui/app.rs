@@ -72,7 +72,8 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("s", "sleep"),
             ("w", "wake"),
             ("d", "delete, with a confirmation"),
-            ("r", "refresh"),
+            ("⌥r", "refresh everything, from anywhere"),
+            ("r", "refresh this environment"),
             ("shift+r", "look for agents in every project"),
         ],
     ),
@@ -316,6 +317,22 @@ pub const WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(18
 pub const SLEEP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
 /// How often to ask again while waiting.
 pub const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How often the tree asks the platform for everything again on its own.
+///
+/// One `myCloudAgents` request covers the whole account — every workspace,
+/// project and environment — so the cost of this is one request per interval no
+/// matter how large the account is, plus a session query for each agent someone
+/// has open or expanded (usually none or one). For scale: the dashboard polls
+/// `cloudAgents` every 15s *per environment* it is showing, and every 3s while
+/// any agent is in a transient state.
+///
+/// Enough of the same work already happens on demand — a launch refetches its
+/// environment, a wake polls at [`WATCH_TICK`], ⌥r asks immediately — that this
+/// is a safety net for changes made somewhere else entirely: another terminal,
+/// the dashboard, a teammate. 25s is short enough that nobody reaches for ⌥r out
+/// of doubt, and long enough to be invisible in anyone's rate-limit budget.
+pub const AUTO_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(25);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast {
@@ -778,6 +795,11 @@ pub enum Effect {
     /// Look for agents in every project, on request. See
     /// [`App::scan_environments`].
     ScanEverywhere,
+    /// Ask the platform for everything again: one account-wide agent query,
+    /// plus the sessions of the agents someone is actually looking at. Raised
+    /// by ⌥r, by the auto-refresh tick, and on re-entry after the TUI has
+    /// handed the terminal back. See [`super::start_refresh`].
+    RefreshAll,
     /// Put an `ssh` command for one session on the clipboard.
     CopySsh {
         agent_id: String,
@@ -937,6 +959,30 @@ pub struct App {
     pub ops: std::collections::HashMap<String, &'static str>,
     /// Agents whose state is still on its way. See [`AgentWatch`].
     pub watching: std::collections::HashMap<String, AgentWatch>,
+    /// A refresh is in flight. Coalescing: a held ⌥r, or several actions
+    /// finishing at once, must not stack account-wide queries.
+    pub refreshing: bool,
+    /// When the last refresh of any origin started, which is what the automatic
+    /// one measures from — pressing ⌥r pushes the next tick out rather than
+    /// having it arrive a second later.
+    pub last_refresh: Option<std::time::Instant>,
+    /// Refreshing is paused until this passes, because the API said so. A 429
+    /// answered by polling harder is how a rate limit becomes a longer rate
+    /// limit.
+    pub refresh_paused_until: Option<std::time::Instant>,
+    /// Someone pressed a key for the refresh in flight, so its result is worth
+    /// a line when it lands. See [`App::refreshed`].
+    pub refresh_announce: bool,
+    /// Environment id → when its agent list last came back from the platform.
+    /// Keeps a slower account-wide reply from overwriting fresher per-environment
+    /// news; see [`App::my_agents_loaded`].
+    pub answered_at: std::collections::HashMap<String, std::time::Instant>,
+    /// `myCloudAgents` is not available to this caller, so a refresh has to ask
+    /// per environment. True for a workspace-scoped `RAILWAY_TOKEN` — the field
+    /// requires an authenticated user — and for a backboard old enough not to
+    /// have the field at all. Learned from the first failure, so the fallback
+    /// costs one wasted request per run rather than being guessed at.
+    pub account_query_unavailable: bool,
     pub menu_focus: MenuFocus,
     pub card: usize,
     pub prompt: String,
@@ -1002,6 +1048,12 @@ impl App {
             ssh_gate: None,
             ops: std::collections::HashMap::new(),
             watching: std::collections::HashMap::new(),
+            refreshing: false,
+            last_refresh: None,
+            refresh_paused_until: None,
+            refresh_announce: false,
+            answered_at: std::collections::HashMap::new(),
+            account_query_unavailable: false,
             menu_focus: MenuFocus::Prompt,
             card: 0,
             prompt: String::new(),
@@ -1756,6 +1808,7 @@ impl App {
         // left on whatever index it was.
         let anchor = self.selected_row().map(|row| row.kind);
         let mut refresh_failed = None;
+        let mut answered = None;
         if let Some(env) = self
             .tree
             .get_mut(w)
@@ -1764,7 +1817,17 @@ impl App {
         {
             let previous = std::mem::replace(&mut env.agents, Load::NotLoaded);
             env.agents = match (result, previous) {
-                (Ok(agents), _) => Load::Loaded(agents),
+                // Merged, not replaced: a fetch describes the platform's
+                // agents, and whether a row is open and what is running on it
+                // is ours. See [`merge_agents`].
+                (Ok(agents), Load::Loaded(previous)) => {
+                    answered = Some(env.id.clone());
+                    Load::Loaded(merge_agents(previous, agents))
+                }
+                (Ok(agents), _) => {
+                    answered = Some(env.id.clone());
+                    Load::Loaded(agents)
+                }
                 // A refresh that fails must not take the agents with it:
                 // stale beats gone, and the status line carries the reason.
                 (Err(err), Load::Loaded(agents)) => {
@@ -1773,6 +1836,12 @@ impl App {
                 }
                 (Err(err), _) => Load::Failed(err),
             };
+        }
+        // When this environment last heard from the platform, so an
+        // account-wide snapshot taken before it cannot overwrite it. See
+        // [`Self::my_agents_loaded`].
+        if let Some(id) = answered {
+            self.answered_at.insert(id, std::time::Instant::now());
         }
         if let Some(err) = refresh_failed {
             self.toast_error(format!("Couldn't refresh: {err}"));
@@ -1788,43 +1857,58 @@ impl App {
     /// Every unanswered environment becomes loaded: one absent from the
     /// response holds no agents of the caller's, and saying so is what lets
     /// the tree show counts everywhere without a request per environment. An
-    /// environment that has already answered — a launch just filled the
-    /// target — keeps what it has, which is at least as fresh and may carry
-    /// session state. One still loading keeps its spinner too: its request
-    /// went out after this one, so its reply is strictly newer, and settling
-    /// over it could hide an agent created since this snapshot.
-    pub fn my_agents_loaded(&mut self, agents: Vec<(String, Agent)>) {
+    /// environment that already had a list gets the snapshot instead — that is
+    /// what makes this a refresh rather than a first fill, and it is the only
+    /// thing that can tell the tree an agent was created or deleted somewhere
+    /// else. (Skipping environments that already had a list is why `shift+r`
+    /// used to report "already loaded" and change nothing.)
+    ///
+    /// One rule keeps that from undoing fresher news: a snapshot may not
+    /// overwrite an answer that arrived *after* it was asked for. `asked_at` is
+    /// when this request went out, and [`Self::answered_at`] is when each
+    /// environment last heard from the platform. Without the comparison, a
+    /// refresh already in flight when you delete an agent would put the row
+    /// back — the snapshot was taken while the agent still existed — and it
+    /// would stay back until the next refresh. Environments still `Loading` are
+    /// skipped for the same reason, one step earlier: their reply has not landed
+    /// to be compared, and it is newer than this.
+    pub fn my_agents_loaded(&mut self, agents: Vec<(String, Agent)>, asked_at: std::time::Instant) {
         let anchor = self.selected_row().map(|row| row.kind);
         let mut by_env: HashMap<String, Vec<Agent>> = HashMap::new();
         for (environment_id, agent) in agents {
             by_env.entry(environment_id).or_default().push(agent);
         }
+        let mut answered = Vec::new();
         for ws in &mut self.tree {
             for project in &mut ws.projects {
                 for env in &mut project.envs {
-                    if !matches!(env.agents, Load::NotLoaded | Load::Failed(_)) {
+                    if self
+                        .answered_at
+                        .get(&env.id)
+                        .is_some_and(|at| *at > asked_at)
+                    {
                         continue;
                     }
-                    env.agents = Load::Loaded(by_env.remove(&env.id).unwrap_or_default());
+                    let fresh = match &env.agents {
+                        Load::NotLoaded | Load::Failed(_) => by_env.remove(&env.id),
+                        Load::Loaded(previous) => Some(merge_agents(
+                            previous.clone(),
+                            by_env.remove(&env.id).unwrap_or_default(),
+                        )),
+                        Load::Loading => continue,
+                    };
+                    env.agents = Load::Loaded(fresh.unwrap_or_default());
+                    answered.push(env.id.clone());
                 }
             }
+        }
+        let now = std::time::Instant::now();
+        for id in answered {
+            self.answered_at.insert(id, now);
         }
         self.settle_watched_agents();
         self.restore_cursor(anchor);
         self.select_pending();
-    }
-
-    /// Whether any environment still has no answer.
-    ///
-    /// Guards the account-wide fetch on re-entry from a session: a tree that
-    /// has already settled would discard the reply, so the request would be
-    /// spent for nothing.
-    pub fn has_unloaded_environments(&self) -> bool {
-        self.tree.iter().any(|ws| {
-            ws.projects
-                .iter()
-                .any(|project| project.envs.iter().any(|env| env.agents == Load::NotLoaded))
-        })
     }
 
     /// Fold up a project whose last agent has gone.
@@ -1937,6 +2021,7 @@ impl App {
             }
             _ => return,
         };
+        let mut refresh_failed = None;
         if let Some(Load::Loaded(agents)) = self
             .tree
             .get_mut(w)
@@ -1945,10 +2030,23 @@ impl App {
             .map(|env| &mut env.agents)
             && let Some(agent) = agents.get_mut(a)
         {
-            agent.sessions = match result {
-                Ok(sessions) => LoadSessions::Loaded(sessions),
-                Err(err) => LoadSessions::Failed(err),
+            let previous = std::mem::replace(&mut agent.sessions, LoadSessions::NotLoaded);
+            agent.sessions = match (result, previous) {
+                (Ok(sessions), _) => LoadSessions::Loaded(sessions),
+                // The same rule the agent list follows: a refresh that fails
+                // keeps what it had rather than replacing a good list with an
+                // error. The reason goes to the status line, not a toast — a
+                // background refresh must not raise one per tick while the
+                // network is out.
+                (Err(err), LoadSessions::Loaded(sessions)) => {
+                    refresh_failed = Some(err);
+                    LoadSessions::Loaded(sessions)
+                }
+                (Err(err), _) => LoadSessions::Failed(err),
             };
+        }
+        if let Some(err) = refresh_failed {
+            self.status = format!("Couldn't refresh sessions: {err}");
         }
         // Anything we hid that the agent no longer reports has actually gone;
         // stop tracking it. One that is still listed stays hidden until it is.
@@ -2088,20 +2186,23 @@ impl App {
                 self.maximized = false;
                 return None;
             }
-            // Three chords are taken from the agent, all because the moment
+            // A few chords are taken from the agent, all because the moment
             // you want them is while you are using it: ⌥f for room, ⌥] and ⌥[
             // to move between panes, ⌥n and ⌥p to start more work — the
             // thought "this needs its own session" arrives while reading one,
             // and going out to the tree first to act on it is the friction
-            // they exist to remove. The costs, all in a shell: ⌥f is Meta-f
-            // (forward-word), ⌥n and ⌥p are Meta-n / Meta-p (the
-            // non-incremental history searches, which few people bind and
-            // both harnesses ignore). Readline leaves Meta-] and Meta-[
-            // unbound, and `^]` (character-search) is untouched because only
-            // the Meta forms are claimed. Nothing else is intercepted — ⌥s
-            // still reaches the agent from here.
+            // they exist to remove. ⌥r joins them for the same reason: a
+            // refresh that only worked with the tree focused would be a chord
+            // that silently does nothing half the time you press it. The
+            // costs, all in a shell: ⌥f is Meta-f (forward-word), ⌥n and ⌥p
+            // are Meta-n / Meta-p (the non-incremental history searches, which
+            // few people bind and both harnesses ignore), and ⌥r is Meta-r
+            // (revert-line). Readline leaves Meta-] and Meta-[ unbound, and
+            // `^]` (character-search) is untouched because only the Meta forms
+            // are claimed. Nothing else is intercepted — ⌥s still reaches the
+            // agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'f' | 'n' | 'p' | ']' | '[')
+                && matches!(chord, 'f' | 'n' | 'p' | 'r' | ']' | '[')
             {
                 return self.alt_action(chord);
             }
@@ -2733,9 +2834,15 @@ impl App {
         self.take_session(index)
     }
 
-    /// Refetch one agent's sessions, wherever it is in the tree. Only when the
-    /// agent is expanded: nobody is looking otherwise.
+    /// Refetch one agent's sessions, wherever it is in the tree.
+    ///
+    /// Only when someone is looking: the row is expanded, so its session rows
+    /// are on screen, or there is an open pane onto the agent — a session
+    /// started or ended from that pane changes the `(N)` beside a collapsed
+    /// row, and refusing to refetch left that count wrong until the agent was
+    /// expanded again.
     pub fn refresh_agent_sessions(&mut self, agent_id: &str) -> Option<Effect> {
+        let has_pane = self.sessions.iter().any(|s| s.agent_id == agent_id);
         for w in 0..self.tree.len() {
             for p in 0..self.tree[w].projects.len() {
                 for e in 0..self.tree[w].projects[p].envs.len() {
@@ -2745,7 +2852,7 @@ impl App {
                     let Some(a) = agents.iter().position(|agent| agent.id == agent_id) else {
                         continue;
                     };
-                    if !agents[a].expanded {
+                    if !agents[a].expanded && !has_pane {
                         return None;
                     }
                     return Some(Effect::LoadSessions {
@@ -3044,6 +3151,58 @@ impl App {
         out
     }
 
+    /// The agents whose session lists a refresh should ask about again.
+    ///
+    /// Deliberately narrower than [`Self::sessions_to_prefetch`], which fills in
+    /// every running agent's count once. `cloudAgentConsoleSessions` takes one
+    /// agent — `CloudAgent.sessions` in the schema is snapshots, not console
+    /// sessions, so there is no batch form — which makes a full sweep one
+    /// request per agent, every tick. Only what someone is looking at is worth
+    /// that: an expanded row, whose session rows are on screen, or an agent with
+    /// an open pane. In practice nought to two, whatever the size of the
+    /// account.
+    ///
+    /// Unlike the prefetch it does not blank the list on its way out: the rows
+    /// stay put and are replaced when the reply lands, so nothing flickers on a
+    /// timer.
+    pub fn sessions_to_refresh(&self) -> Vec<Effect> {
+        let mut out = Vec::new();
+        for (w, ws) in self.tree.iter().enumerate() {
+            for (p, project) in ws.projects.iter().enumerate() {
+                for (e, env) in project.envs.iter().enumerate() {
+                    let Load::Loaded(agents) = &env.agents else {
+                        continue;
+                    };
+                    for (a, agent) in agents.iter().enumerate() {
+                        // A sleeping box runs nothing, so asking would spend a
+                        // request to learn that.
+                        if agent.status != "running" {
+                            continue;
+                        }
+                        // An agent whose count was never fetched is left to
+                        // [`Self::sessions_to_prefetch`], which the same reply
+                        // runs — and which has already marked what it claimed
+                        // as loading. Asking about those here as well would be
+                        // two requests for one agent.
+                        if agent.sessions == LoadSessions::Loading {
+                            continue;
+                        }
+                        let watched =
+                            agent.expanded || self.sessions.iter().any(|s| s.agent_id == agent.id);
+                        if !watched {
+                            continue;
+                        }
+                        out.push(Effect::LoadSessions {
+                            agent_id: agent.id.clone(),
+                            path: (w, p, e, a),
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The environments to fetch before anyone touches a key, on a backboard
     /// that predates `myCloudAgents`.
     ///
@@ -3189,6 +3348,16 @@ impl App {
             }
             ']' => self.cycle_session(true),
             '[' => self.cycle_session(false),
+            // Everything, everywhere: `r` refreshes the environment under the
+            // cursor, and this is the one that answers "something changed and I
+            // don't know where". It works from the menu too, whose cards read
+            // the same agent lists to decide whether New Session has an agent to
+            // work on.
+            'r' => {
+                self.status = "Refreshing…".into();
+                self.refresh_announce = true;
+                Some(Effect::RefreshAll)
+            }
             // The launchers live on the Manage screen, where the tree the
             // launch aims at is on screen. The menu already has both: its
             // prompt box and its cards.
@@ -3885,6 +4054,32 @@ impl App {
         out
     }
 
+    /// The environments a refresh should ask about again, one request each.
+    ///
+    /// Only for callers that cannot use the account-wide query — see
+    /// [`Self::account_query_unavailable`]. Scoped to environments that already
+    /// have an answer: those are the ones with rows on screen that could now be
+    /// wrong. Environments that have never loaded are left to `shift+r`, since
+    /// asking about all of them is the request-per-environment cost this TUI is
+    /// careful about. One still `Loading` is already on its way.
+    pub fn environments_to_refresh(&self) -> Vec<Effect> {
+        let mut out = Vec::new();
+        for (w, ws) in self.tree.iter().enumerate() {
+            for (p, project) in ws.projects.iter().enumerate() {
+                for (e, env) in project.envs.iter().enumerate() {
+                    if !matches!(env.agents, Load::Loaded(_) | Load::Failed(_)) {
+                        continue;
+                    }
+                    out.push(Effect::LoadAgents {
+                        environment_id: env.id.clone(),
+                        path: (w, p, e),
+                    });
+                }
+            }
+        }
+        out
+    }
+
     /// A background fetch was refused for rate limiting.
     ///
     /// Anything still in flight is put back to "not loaded" rather than left
@@ -3908,6 +4103,19 @@ impl App {
                 }
             }
         }
+        // Hold off the automatic refresh for as long as we were told, or a
+        // minute when we were told nothing: answering a 429 by polling on
+        // schedule is how a rate limit becomes a longer one. A keypress still
+        // asks — that is the user's request to spend, and by then the window may
+        // have passed.
+        self.refresh_paused_until = Some(
+            std::time::Instant::now()
+                + std::time::Duration::from_secs(retry_after_secs.unwrap_or(60)),
+        );
+        self.refreshing = false;
+        // The toast below is the answer to whatever asked; a pending "up to
+        // date" line must not be claimed by the next refresh to succeed.
+        self.refresh_announce = false;
         self.toast_error(match retry_after_secs {
             Some(secs) if secs > 90 => format!(
                 "Rate limited — try again in about {} minutes",
@@ -3969,6 +4177,90 @@ impl App {
         self.give_up_on_stale_watches();
         let environment_id = self.watching.values().next()?.environment_id.clone();
         self.reveal_environment(&environment_id)
+    }
+
+    /// How long until the tree should ask the platform for everything again, or
+    /// `None` while an automatic refresh would be wrong.
+    ///
+    /// The loop arms a timer with this, so `None` means an idle TUI goes back to
+    /// blocking on the keyboard rather than waking on a schedule to decide there
+    /// was nothing to do.
+    ///
+    /// What suppresses it, and why:
+    ///
+    /// - A refresh already in flight, or a rate limit we were told to wait out.
+    /// - A launch: the pipeline is mid-provision and reports its own progress,
+    ///   and its environment gets refetched when the session opens.
+    /// - A wake or a sleep in progress: [`WATCH_TICK`] is already asking that
+    ///   environment every 1.5s, which is both faster and narrower.
+    /// - A card owning the screen — first-run setup, the settings card, the ssh
+    ///   key question, a delete confirmation. None of them show the tree, and
+    ///   rows moving under a `y/N` question is how the wrong thing gets deleted.
+    /// - A maximized pane, where the tree is folded away entirely. It refreshes
+    ///   when it comes back.
+    pub fn auto_refresh_in(&self) -> Option<std::time::Duration> {
+        if self.refreshing
+            || self.loading.active
+            || self.watching_agents()
+            || self.confirm.is_some()
+            || self.ssh_gate.is_some()
+            || self.wizard.is_some()
+            || self.settings.is_some()
+            || self.pane_is_full()
+        {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        if let Some(until) = self.refresh_paused_until {
+            if until > now {
+                return Some(until - now);
+            }
+        }
+        let Some(last) = self.last_refresh else {
+            // Nothing has refreshed yet, which means the startup fetch is still
+            // on its way; give it the interval before asking again.
+            return Some(AUTO_REFRESH_EVERY);
+        };
+        Some(AUTO_REFRESH_EVERY.saturating_sub(now.duration_since(last)))
+    }
+
+    /// Is a refresh due right now? The timer can fire early — it is re-armed
+    /// from a shortened remainder every time round the loop — so the decision is
+    /// made here rather than by the fact of waking up.
+    pub fn auto_refresh_due(&self) -> bool {
+        self.auto_refresh_in() == Some(std::time::Duration::ZERO)
+    }
+
+    /// Note that a refresh has started, so the next automatic one is a full
+    /// interval away and a second one cannot be started on top of it.
+    pub fn refresh_started(&mut self) {
+        self.refreshing = true;
+        self.last_refresh = Some(std::time::Instant::now());
+    }
+
+    /// A refresh finished, whatever it found.
+    pub fn refresh_finished(&mut self) {
+        self.refreshing = false;
+        self.last_refresh = Some(std::time::Instant::now());
+    }
+
+    /// Report a finished account-wide refresh — but only when someone asked for
+    /// one.
+    ///
+    /// A keypress needs an answer: silence after ⌥r is indistinguishable from a
+    /// chord that isn't bound. The automatic refresh needs the opposite, and the
+    /// tree itself is its report — a status line rewritten every 25s would
+    /// scrub whatever was there, and turn an idle screen into something that
+    /// looks busy.
+    pub fn refreshed(&mut self, agents: usize) {
+        if !std::mem::take(&mut self.refresh_announce) {
+            return;
+        }
+        self.status = match agents {
+            0 => "Up to date — no agents on this account".into(),
+            1 => "Up to date — 1 agent".into(),
+            n => format!("Up to date — {n} agents"),
+        };
     }
 
     /// Stop waiting for what is not coming, and put the real status back rather
@@ -4235,7 +4527,7 @@ fn project_agent_count(project: &ProjectNode) -> usize {
 /// sends it as a curly double quote. Everywhere else the reverse chord is
 /// simply absent — it can go dead, but never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['f', 's', 'n', 'p', ']', '['];
+    const ACTIONS: &[char] = &['f', 's', 'n', 'p', 'r', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = c.to_ascii_lowercase();
@@ -4251,6 +4543,10 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
         KeyCode::Char('π') => Some('p'),
+        // Option+r composes to ®, Option+shift+R to ‰ — one chord as far as
+        // anyone pressing it is concerned, the way the bracket pair below folds
+        // its shifted forms and the Meta path folds its capitals.
+        KeyCode::Char('®') | KeyCode::Char('‰') => Some('r'),
         // Option+] composes to a left curly single quote, Option+shift+] to
         // the right one; Option+[ does the same with the double quotes. Each
         // pair is one chord as far as anyone pressing it is concerned,
@@ -4259,6 +4555,36 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
         KeyCode::Char('\u{201C}') | KeyCode::Char('\u{201D}') => Some('['),
         _ => None,
     }
+}
+
+/// Fold a fresh agent list into the one on screen.
+///
+/// The platform owns membership, order and status; the TUI owns whether a row
+/// is open and what its sessions are. Replacing the vector wholesale — which is
+/// what every refresh used to do — threw the second half away, because
+/// `fetch_agents` can only build rows that are collapsed with no sessions. The
+/// visible cost was an expanded agent folding shut on every `r`, and on every
+/// 1.5s poll tick while an agent woke; the invisible one was a session list
+/// dropped and immediately refetched, one request per agent. Carrying it across
+/// is what makes refreshing cheap enough to do on a timer.
+///
+/// Matched by id, so a rename or a status change lands and an agent that has
+/// gone from the fresh list is gone from the tree.
+fn merge_agents(previous: Vec<Agent>, fresh: Vec<Agent>) -> Vec<Agent> {
+    let mut kept: HashMap<String, (bool, LoadSessions)> = previous
+        .into_iter()
+        .map(|agent| (agent.id, (agent.expanded, agent.sessions)))
+        .collect();
+    fresh
+        .into_iter()
+        .map(|mut agent| {
+            if let Some((expanded, sessions)) = kept.remove(&agent.id) {
+                agent.expanded = expanded;
+                agent.sessions = sessions;
+            }
+            agent
+        })
+        .collect()
 }
 
 impl EnvNode {
@@ -5404,6 +5730,64 @@ mod tests {
         b.on_key(key(KeyCode::Char('†')));
         assert_eq!(b.theme.slug, theme);
         assert_eq!(b.prompt, "†", "unclaimed, the character is text");
+    }
+
+    /// ⌥r asks for everything again, from wherever you are: the tree, the menu
+    /// prompt where a bare `r` is text, and its macOS composed form.
+    #[test]
+    fn alt_r_refreshes_from_anywhere() {
+        let mut a = loaded_app();
+        assert_eq!(a.on_key(alt('r')), Some(Effect::RefreshAll));
+        assert!(a.refresh_announce, "a keypress deserves an answer");
+
+        let mut b = app();
+        b.on_key(key(KeyCode::Char('r')));
+        assert_eq!(b.prompt, "r", "a bare letter is still text");
+        assert_eq!(b.on_key(alt('r')), Some(Effect::RefreshAll));
+        assert_eq!(b.prompt, "r", "the chord must not touch the draft");
+
+        // ⌥R, and the characters a stock macOS terminal composes for both.
+        let mut c = app();
+        assert_eq!(
+            c.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::ALT)),
+            Some(Effect::RefreshAll)
+        );
+        let mut d = app();
+        assert_eq!(d.on_key(key(KeyCode::Char('®'))), Some(Effect::RefreshAll));
+        assert!(d.prompt.is_empty(), "a chord is not text");
+        let mut e = app();
+        assert_eq!(e.on_key(key(KeyCode::Char('‰'))), Some(Effect::RefreshAll));
+    }
+
+    /// And from inside a session, where the tree is what you cannot see. A chord
+    /// that silently did nothing half the time you pressed it would be worse
+    /// than one the agent never gets.
+    #[test]
+    fn alt_r_refreshes_from_a_focused_session() {
+        let mut a = with_sessions(&["ca_1"]);
+        a.focus = ManageFocus::Session;
+        assert_eq!(a.on_key(alt('r')), Some(Effect::RefreshAll));
+        // A bare `r` still belongs to whatever is running in there.
+        assert_eq!(a.on_key(key(KeyCode::Char('r'))), None);
+    }
+
+    /// `r` stays the cheap one — the environment under the cursor, one request —
+    /// and the two must not collapse into each other.
+    #[test]
+    fn bare_r_still_refreshes_only_this_environment() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('r'))),
+            Some(Effect::LoadAgents {
+                environment_id: "env_prod".into(),
+                path: (0, 0, 0)
+            })
+        );
     }
 
     /// ^t keeps the target picker to itself now that ⌥t is gone — the two
@@ -7581,6 +7965,193 @@ mod tests {
         assert_eq!(a.refresh_agent_sessions("nope"), None);
     }
 
+    /// An open pane counts as looking too. Sessions started and ended in there
+    /// change the count beside the agent, and refusing to refetch a collapsed
+    /// row left that count wrong until it was expanded again.
+    #[test]
+    fn an_agent_with_an_open_pane_refreshes_while_collapsed() {
+        let mut a = with_sessions(&["ca_1"]);
+        assert!(
+            !a.tree[0].projects[0].envs[0].agents_vec()[0].expanded,
+            "collapsed, on purpose"
+        );
+        assert_eq!(
+            a.refresh_agent_sessions("ca_1"),
+            Some(Effect::LoadSessions {
+                agent_id: "ca_1".into(),
+                path: (0, 0, 0, 0)
+            })
+        );
+    }
+
+    /// A refresh asks about the sessions of what is being looked at, and nothing
+    /// else: `cloudAgentConsoleSessions` takes one agent, so a sweep would be a
+    /// request per agent on every tick.
+    #[test]
+    fn a_refresh_only_asks_about_sessions_someone_can_see() {
+        let mut a = loaded_app();
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![
+                agent("ca_1", "nimble-otter", "running"),
+                agent("ca_2", "quiet-one", "running"),
+                agent("ca_3", "asleep", "sleeping"),
+            ]),
+        );
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            for agent in agents.iter_mut() {
+                agent.sessions = LoadSessions::Loaded(Vec::new());
+            }
+            agents[0].expanded = true;
+        }
+        assert_eq!(
+            a.sessions_to_refresh(),
+            vec![Effect::LoadSessions {
+                agent_id: "ca_1".into(),
+                path: (0, 0, 0, 0)
+            }],
+            "the expanded one, not the collapsed one and not the sleeping one"
+        );
+
+        // The list is not blanked on the way out: a timer must not make the rows
+        // flicker.
+        assert_eq!(
+            a.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(Vec::new())
+        );
+    }
+
+    /// A session refresh that fails keeps the list it had, the same way the
+    /// agent list does — an error where the rows were, once every 25s, would be
+    /// a worse screen than a slightly old list.
+    #[test]
+    fn a_failed_session_refresh_keeps_the_sessions() {
+        let mut a = loaded_app();
+        let sessions = vec![ConsoleSession {
+            name: "sess-7".into(),
+            kind: "SHELL".into(),
+            command: None,
+            running: true,
+            attached: false,
+        }];
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(sessions.clone()));
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Err("502 from backboard".into()));
+
+        assert_eq!(
+            a.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(sessions)
+        );
+        assert!(a.status.contains("502 from backboard"), "{}", a.status);
+        // Quietly: a background refresh must not raise a toast per tick.
+        assert!(a.toast.is_none());
+    }
+
+    /// The automatic refresh stays out of the way of everything that is already
+    /// asking, or that is mid-question.
+    #[test]
+    fn the_auto_refresh_yields_to_everything_that_matters() {
+        let mut a = loaded_app();
+        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
+        assert!(a.auto_refresh_due(), "due, with nothing in the way");
+
+        // One already in flight.
+        a.refreshing = true;
+        assert_eq!(a.auto_refresh_in(), None);
+        a.refreshing = false;
+
+        // A launch, which reports its own progress and refetches when it lands.
+        a.loading.active = true;
+        assert_eq!(a.auto_refresh_in(), None);
+        a.loading.active = false;
+
+        // A wake, which is already polling that environment every 1.5s.
+        a.watching.insert(
+            "ca_1".into(),
+            AgentWatch {
+                want: "running",
+                environment_id: "env_prod".into(),
+                until: std::time::Instant::now() + WAKE_PATIENCE,
+            },
+        );
+        assert_eq!(a.auto_refresh_in(), None);
+        a.watching.clear();
+
+        // A y/N question: rows moving under it is how the wrong thing gets
+        // deleted.
+        a.confirm = Some(PendingConfirm {
+            op: AgentOp::Delete,
+            agent_id: "ca_1".into(),
+            environment_id: "env_prod".into(),
+            agent_name: "nimble-otter".into(),
+        });
+        assert_eq!(a.auto_refresh_in(), None);
+        a.confirm = None;
+
+        assert!(a.auto_refresh_due(), "and back again once they are gone");
+    }
+
+    /// A refresh that just ran is not due again for a full interval, whoever
+    /// started it — pressing ⌥r pushes the automatic one out rather than having
+    /// it arrive a second later.
+    #[test]
+    fn a_refresh_resets_the_clock() {
+        let mut a = loaded_app();
+        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
+        assert!(a.auto_refresh_due());
+
+        a.on_key(alt('r'));
+        a.refresh_started();
+        a.refresh_finished();
+        assert!(!a.auto_refresh_due());
+        let remaining = a.auto_refresh_in().expect("still armed");
+        assert!(
+            remaining > AUTO_REFRESH_EVERY / 2,
+            "nearly a full interval: {remaining:?}"
+        );
+    }
+
+    /// A 429 answered by polling on schedule is how a rate limit becomes a
+    /// longer rate limit: the automatic refresh waits out the Retry-After.
+    #[test]
+    fn a_rate_limit_pauses_the_auto_refresh() {
+        let mut a = loaded_app();
+        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
+        a.rate_limited(Some(90));
+
+        assert!(!a.refreshing, "the refused refresh is over");
+        let waiting = a.auto_refresh_in().expect("still armed, just later");
+        assert!(
+            waiting > std::time::Duration::from_secs(60),
+            "waits out the window: {waiting:?}"
+        );
+
+        // Told nothing, it still waits — the alternative is asking again at once.
+        let mut b = loaded_app();
+        b.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
+        b.rate_limited(None);
+        assert!(!b.auto_refresh_due());
+    }
+
+    /// Without `myCloudAgents` a refresh asks per environment — but only about
+    /// the ones with rows on screen. Sweeping the account is `shift+r`, which is
+    /// a deliberate act because it costs a request each.
+    #[test]
+    fn the_fallback_refresh_asks_only_about_answered_environments() {
+        let mut a = loaded_app();
+        // env_prod is loaded (loaded_app), env_stg has never been asked about.
+        assert_eq!(
+            a.environments_to_refresh(),
+            vec![Effect::LoadAgents {
+                environment_id: "env_prod".into(),
+                path: (0, 0, 0)
+            }]
+        );
+
+        // One still in flight is already on its way.
+        a.tree[0].projects[0].envs[0].agents = Load::Loading;
+        assert!(a.environments_to_refresh().is_empty());
+    }
+
     /// ⌥enter hands the whole terminal over; `f` does the same, because
     /// plenty of terminals never send a modifier with Enter.
     #[test]
@@ -7826,12 +8397,15 @@ mod tests {
     #[test]
     fn my_agents_loaded_settles_every_environment() {
         let mut a = app();
-        a.my_agents_loaded(vec![
-            ("env_stg".into(), agent("ca_1", "fix-login", "running")),
-            ("env_stg".into(), agent("ca_2", "bump-deps", "sleeping")),
-            // An environment the tree doesn't know is ignored, not invented.
-            ("env_gone".into(), agent("ca_3", "orphan", "running")),
-        ]);
+        a.my_agents_loaded(
+            vec![
+                ("env_stg".into(), agent("ca_1", "fix-login", "running")),
+                ("env_stg".into(), agent("ca_2", "bump-deps", "sleeping")),
+                // An environment the tree doesn't know is ignored, not invented.
+                ("env_gone".into(), agent("ca_3", "orphan", "running")),
+            ],
+            std::time::Instant::now(),
+        );
 
         let stg = &a.tree[0].projects[0].envs[1].agents;
         let Load::Loaded(agents) = stg else {
@@ -7848,35 +8422,153 @@ mod tests {
         );
     }
 
-    /// An environment that already answered keeps what it has: a launch may
-    /// have just filled the target, and its rows can carry session state the
-    /// account-wide reply doesn't. One still loading keeps its spinner: its
-    /// request went out after this one, so its reply is strictly newer.
+    /// A snapshot is a refresh, and a refresh has to be able to say that an
+    /// agent is gone. Refusing to touch environments that already had a list is
+    /// what made every full refresh a no-op, leaving relaunching the TUI as the
+    /// only way to see a change made anywhere else.
     #[test]
-    fn my_agents_loaded_keeps_environments_that_already_answered() {
+    fn a_snapshot_replaces_what_the_tree_already_had() {
         let mut a = app();
-        a.tree[0].projects[0].envs[0].agents =
-            Load::Loaded(vec![agent("ca_fresh", "just-launched", "starting")]);
+        a.tree[0].projects[0].envs[0].agents = Load::Loaded(vec![
+            agent("ca_kept", "still-here", "sleeping"),
+            agent("ca_deleted", "gone-elsewhere", "running"),
+        ]);
+        // Still loading: its own reply has not landed to be compared, and it is
+        // newer than this snapshot, so it must survive.
         a.tree[0].projects[0].envs[1].agents = Load::Loading;
 
-        a.my_agents_loaded(vec![
-            (
-                "env_prod".into(),
-                agent("ca_stale", "from-before", "running"),
-            ),
-            ("env_stg".into(), agent("ca_old", "snapshot", "running")),
-        ]);
-
-        let prod = &a.tree[0].projects[0].envs[0].agents;
-        let Load::Loaded(agents) = prod else {
-            panic!("production should stay loaded: {prod:?}");
-        };
-        assert_eq!(agents[0].id, "ca_fresh");
-        assert_eq!(
-            a.tree[0].projects[0].envs[1].agents,
-            Load::Loading,
-            "an in-flight fetch answers with newer data than this snapshot"
+        a.my_agents_loaded(
+            vec![
+                // Woken somewhere else, and `ca_deleted` is absent.
+                ("env_prod".into(), agent("ca_kept", "still-here", "running")),
+                (
+                    "env_prod".into(),
+                    agent("ca_new", "made-elsewhere", "running"),
+                ),
+                ("env_stg".into(), agent("ca_racing", "in-flight", "running")),
+            ],
+            std::time::Instant::now(),
         );
+
+        let Load::Loaded(agents) = &a.tree[0].projects[0].envs[0].agents else {
+            panic!("production should be loaded");
+        };
+        assert_eq!(
+            agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["ca_kept", "ca_new"],
+            "the snapshot decides who is there"
+        );
+        assert_eq!(agents[0].status, "running", "and what state they are in");
+        assert_eq!(a.tree[0].projects[0].envs[1].agents, Load::Loading);
+    }
+
+    /// …but never over fresher news. A refresh in flight while an agent is
+    /// deleted would otherwise put the row back — its snapshot was taken while
+    /// the agent still existed — and leave it there until the next refresh.
+    #[test]
+    fn a_snapshot_does_not_overwrite_a_later_answer() {
+        let mut a = app();
+        let asked_at = std::time::Instant::now();
+        // The environment answers for itself after the account-wide request went
+        // out: `d` on an agent, and the refetch that proves it is gone.
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_kept", "the-survivor", "running")]),
+        );
+
+        a.my_agents_loaded(
+            vec![
+                (
+                    "env_prod".into(),
+                    agent("ca_kept", "the-survivor", "running"),
+                ),
+                (
+                    "env_prod".into(),
+                    agent("ca_deleted", "deleted-just-now", "running"),
+                ),
+            ],
+            asked_at,
+        );
+
+        let Load::Loaded(agents) = &a.tree[0].projects[0].envs[0].agents else {
+            panic!("production should be loaded");
+        };
+        assert_eq!(
+            agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["ca_kept"],
+            "the deleted agent must not come back"
+        );
+        // Environments that had nothing newer still take the snapshot.
+        assert_eq!(a.tree[0].projects[0].envs[1].agents, Load::Loaded(vec![]));
+    }
+
+    /// The one thing a refresh must not touch: what the person looking at it
+    /// has open. Every refresh used to fold expanded agents shut and drop their
+    /// session lists, because the rows are rebuilt from a query that cannot know
+    /// either — which is also why the 1.5s poll during a wake made the tree
+    /// jump.
+    #[test]
+    fn a_refresh_keeps_rows_open_and_their_sessions() {
+        let mut a = loaded_app();
+        let (w, p, e) = (0, 0, 0);
+        let sessions = LoadSessions::Loaded(vec![ConsoleSession {
+            name: "claude-3s9r89".into(),
+            kind: "SHELL".into(),
+            command: Some("claude".into()),
+            running: true,
+            attached: false,
+        }]);
+        if let Load::Loaded(agents) = &mut a.tree[w].projects[p].envs[e].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = sessions.clone();
+        }
+        let id = a.tree[w].projects[p].envs[e].agents_vec()[0].id.clone();
+
+        // The same environment comes back from the platform: same agent, no idea
+        // that anything is open.
+        a.agents_loaded(
+            (w, p, e),
+            Ok(vec![Agent {
+                id: id.clone(),
+                name: "nimble-otter".into(),
+                status: "running".into(),
+                sessions: LoadSessions::NotLoaded,
+                expanded: false,
+            }]),
+        );
+
+        let agents = a.tree[w].projects[p].envs[e].agents_vec();
+        assert!(agents[0].expanded, "the row must stay open");
+        assert_eq!(agents[0].sessions, sessions, "and keep its session rows");
+
+        // An account-wide refresh has to carry it too — that is the one that
+        // runs on a timer.
+        a.my_agents_loaded(
+            vec![("env_prod".into(), agent(&id, "nimble-otter", "running"))],
+            std::time::Instant::now(),
+        );
+        let agents = a.tree[w].projects[p].envs[e].agents_vec();
+        assert!(agents[0].expanded);
+        assert_eq!(agents[0].sessions, sessions);
+    }
+
+    /// A newcomer starts collapsed. Carrying state across ids would put one
+    /// agent's sessions under another's name.
+    #[test]
+    fn a_refresh_does_not_lend_open_state_to_a_new_agent() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = LoadSessions::Loaded(Vec::new());
+        }
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_brand_new", "newcomer", "running")]),
+        );
+        let agents = a.tree[0].projects[0].envs[0].agents_vec();
+        assert_eq!(agents[0].id, "ca_brand_new");
+        assert!(!agents[0].expanded);
+        assert_eq!(agents[0].sessions, LoadSessions::NotLoaded);
     }
 
     /// A sessions reply is applied to the agent it was asked about, not to
@@ -7920,14 +8612,15 @@ mod tests {
         a.sessions_loaded((0, 0, 0, 0), "ca_gone", Ok(Vec::new()));
     }
 
-    /// Re-entry from a session must not respend the account-wide request the
-    /// settled tree would discard.
+    /// One reply answers for every environment, so an account with no agents is
+    /// a tree that has finished loading rather than one still waiting.
     #[test]
-    fn a_settled_tree_reports_no_unloaded_environments() {
+    fn an_empty_reply_still_settles_the_tree() {
         let mut a = app();
-        assert!(a.has_unloaded_environments());
-        a.my_agents_loaded(Vec::new());
-        assert!(!a.has_unloaded_environments());
+        a.my_agents_loaded(Vec::new(), std::time::Instant::now());
+        for env in &a.tree[0].projects[0].envs {
+            assert_eq!(env.agents, Load::Loaded(vec![]));
+        }
     }
 
     /// `shift+r` is how an agent in a project nobody has opened gets found: the
