@@ -1,0 +1,5 @@
+query DeploymentStatus($id: String!) {
+  deployment(id: $id) {
+    status
+  }
+}

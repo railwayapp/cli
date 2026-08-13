@@ -17,9 +17,13 @@ where
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let client = reqwest::Client::default();
+    // This timeout covers the whole upgrade handshake (DNS + TCP + TLS +
+    // 101). On a CPU-starved machine — a CI runner at full load, or a
+    // Railway VM mid-build — 1s is routinely missed even when the network
+    // is fine, and every retry misses it the same way.
     let mut request = client
         .get(format!("wss://backboard.{hostname}/graphql/v2"))
-        .timeout(Duration::from_secs(1));
+        .timeout(Duration::from_secs(10));
 
     if let Some(token) = &Configs::get_railway_token() {
         request = request.header("project-access-token", token);

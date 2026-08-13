@@ -248,6 +248,7 @@ pub async fn command(args: Args) -> Result<()> {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let build_deployment_id = deployment_id.clone();
+    let poll_deployment_id = deployment_id.clone();
     let json_mode = args.json;
     let ci_flag = args.ci;
     let mut tasks = vec![tokio::task::spawn(async move {
@@ -267,8 +268,15 @@ pub async fn command(args: Args) -> Result<()> {
         {
             eprintln!("Failed to stream build logs: {e}");
 
+            // Losing the log stream is not a build failure. In CI mode the
+            // exit code is the deploy verdict, so fall back to polling the
+            // deployment's status over plain HTTP — which works whenever the
+            // upload could happen at all — instead of failing a deploy that
+            // is still running (and, behind a gate like dev.new's, skipping
+            // its post-deploy steps).
             if ci_mode {
-                std::process::exit(1);
+                eprintln!("Waiting on the deployment status instead…");
+                poll_deployment_verdict(poll_deployment_id, json_mode).await;
             }
         }
     })];
@@ -287,11 +295,27 @@ pub async fn command(args: Args) -> Result<()> {
         }));
     }
 
+    // The status subscription rides the same WebSocket path as the log
+    // streams, so when that path is unusable (see above) it fails the same
+    // way. In CI mode the verdict must still arrive: degrade to HTTP polling
+    // rather than erroring out of a deploy that is already running.
     let mut stream =
-        subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
+        match subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
             id: deployment_id.clone(),
         })
-        .await?;
+        .await
+        {
+            Ok(stream) => stream,
+            Err(e) if ci_mode => {
+                eprintln!("Failed to subscribe to the deployment status: {e}");
+                eprintln!("Waiting on the deployment status instead…");
+                // Exits the process with the verdict; the spawned build-log task
+                // keeps printing whatever it can in the meantime.
+                poll_deployment_verdict(deployment_id.clone(), json_mode).await;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
 
     tokio::task::spawn(async move {
         while let Some(Ok(res)) = stream.next().await {
@@ -352,6 +376,62 @@ pub async fn command(args: Args) -> Result<()> {
     futures::future::join_all(tasks).await;
 
     Ok(())
+}
+
+/// HTTP-polling fallback for the deploy verdict, for when the WebSocket
+/// subscriptions can't connect at all. Plain POSTs ride the same path the
+/// upload just used, so they work whenever the deploy could start in the
+/// first place. Exits the process once the deployment reaches a terminal
+/// state — mirroring what the status subscription would have done.
+async fn poll_deployment_verdict(deployment_id: String, json_mode: bool) {
+    use queries::deployment_status::DeploymentStatus as Status;
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let status = async {
+            let configs = Configs::new()?;
+            let client = GQLClient::new_authorized(&configs)?;
+            let data = post_graphql::<queries::DeploymentStatus, _>(
+                &client,
+                configs.get_backboard(),
+                queries::deployment_status::Variables {
+                    id: deployment_id.clone(),
+                },
+            )
+            .await?;
+            Ok::<_, anyhow::Error>(data.deployment.status)
+        }
+        .await;
+        match status {
+            Ok(Status::SUCCESS) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({"status": "success"}));
+                } else {
+                    println!("{}", "Deploy complete".green().bold());
+                }
+                std::process::exit(0);
+            }
+            Ok(Status::FAILED) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({"status": "failed"}));
+                } else {
+                    println!("{}", "Deploy failed".red().bold());
+                }
+                std::process::exit(1);
+            }
+            Ok(Status::CRASHED) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({"status": "crashed"}));
+                } else {
+                    println!("{}", "Deploy crashed".red().bold());
+                }
+                std::process::exit(1);
+            }
+            // Still in flight — or a transient read failure; either way the
+            // next tick answers. A deployment that disappears entirely never
+            // terminates here, but the surrounding CI has its own timeout.
+            Ok(_) | Err(_) => {}
+        }
+    }
 }
 
 struct DeployPaths {
