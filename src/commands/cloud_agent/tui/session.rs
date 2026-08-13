@@ -690,6 +690,17 @@ impl Session {
         }
     }
 
+    /// Forward pasted text as a paste, not as typed keys. When the program in
+    /// the pane has bracketed paste switched on (Claude Code and every modern
+    /// editor do), the text goes wrapped in the paste markers and lands as one
+    /// atomic paste — a newline stays a newline instead of hitting Enter. A
+    /// program that never asked for the mode (a plain shell) gets the bare
+    /// text, exactly what a real terminal would send it.
+    pub fn send_paste(&mut self, text: &str) {
+        let bracketed = self.with_screen(|s| s.bracketed_paste()).unwrap_or(false);
+        self.send(&encode_paste(text, bracketed));
+    }
+
     /// Stop the local half. The agent and whatever it is running stay up on the
     /// VM — killing ssh detaches, it does not tidy up.
     pub fn detach(&mut self) {
@@ -1004,6 +1015,29 @@ pub fn encode_key(key: KeyEvent) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Encode pasted text as the bytes a terminal would send — wrapped in the
+/// bracketed-paste markers when the program on the pty has the mode on, bare
+/// otherwise.
+pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    // A paste containing the end marker would terminate the paste early and
+    // feed the remainder through as keystrokes — the classic bracketed-paste
+    // injection. Real terminals strip it; so does this pane. It is stripped
+    // from an unbracketed paste too: that path is keystrokes, and no keyboard
+    // produces the sequence.
+    let text = text.replace("\x1b[201~", "");
+    // Enter arrives from a keyboard as CR, and programs reading a pty expect
+    // the same from a paste; LF-only text would land as ^J.
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    if !bracketed {
+        return text.into_bytes();
+    }
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1159,6 +1193,28 @@ mod tests {
     fn keys_a_terminal_would_not_send_produce_nothing() {
         assert!(encode_key(key(KeyCode::Null)).is_none());
         assert!(encode_key(KeyEvent::new(KeyCode::CapsLock, KeyModifiers::NONE)).is_none());
+    }
+
+    /// A paste reaches the pty the way a real terminal would send it: marker-
+    /// wrapped when the program switched bracketed paste on, bare when it
+    /// never did, and newlines as CR either way — dictated text with a line
+    /// break must not hit Enter mid-thought.
+    #[test]
+    fn paste_encodes_for_the_mode_the_program_asked_for() {
+        assert_eq!(encode_paste("ship it", true), b"\x1b[200~ship it\x1b[201~");
+        assert_eq!(encode_paste("ship it", false), b"ship it");
+        assert_eq!(encode_paste("a\r\nb\nc", false), b"a\rb\rc");
+        assert_eq!(encode_paste("a\nb", true), b"\x1b[200~a\rb\x1b[201~");
+    }
+
+    /// The end marker cannot ride a paste out of its brackets and turn the
+    /// rest of the clipboard into live keystrokes.
+    #[test]
+    fn paste_cannot_smuggle_its_own_end_marker() {
+        assert_eq!(
+            encode_paste("safe\x1b[201~rm -rf /\r", true),
+            b"\x1b[200~saferm -rf /\r\x1b[201~"
+        );
     }
 
     #[test]
