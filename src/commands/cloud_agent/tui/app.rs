@@ -1434,22 +1434,20 @@ impl App {
     fn push_agent_rows(&self, rows: &mut Vec<Row>, w: usize, p: usize, e: usize) {
         let env = &self.tree[w].projects[p].envs[e];
         let agents = env.agents_vec();
-        for a in sorted_agents(agents) {
+        let attached = self.agents_with_live_panes();
+        for a in sorted_agents(agents, &attached) {
             let agent = &agents[a];
             let pending = self.ops.get(agent.id.as_str()).copied();
+            let status = displayed_status(agent, &attached);
             rows.push(Row {
                 depth: 1,
                 kind: RowKind::Agent(w, p, e, a),
                 label: agent.name.clone(),
                 note: match pending {
                     Some(op) => op.to_string(),
-                    None => agent_note(agent, &self.ending),
+                    None => agent_note(status, agent, &self.ending),
                 },
-                status: Some(
-                    pending
-                        .map(str::to_string)
-                        .unwrap_or_else(|| agent.status.clone()),
-                ),
+                status: Some(pending.unwrap_or(status).to_string()),
                 expanded: Some(agent.expanded),
                 dimmed: false,
             });
@@ -2783,6 +2781,23 @@ impl App {
     /// and closing one because another opened would throw away a running task.
     pub fn attach_session(&mut self, session: super::session::Session, agent_id: String) {
         self.loading.active = false;
+        // A pane just opened on this agent, so a wake we were waiting for has
+        // demonstrably landed — whatever the status projection still says. Left
+        // alone, `waking…` would sit on the row until a poll happened to catch
+        // `running`, and the 1.5s watch tick would keep asking the environment
+        // for up to WAKE_PATIENCE about an agent already taking keystrokes.
+        // Sleep and delete are not settled by this: neither is proven by a pane
+        // opening, and a delete is about to take the row away regardless.
+        if self.ops.get(agent_id.as_str()) == Some(&AgentOp::Wake.pending_label()) {
+            self.ops.remove(agent_id.as_str());
+        }
+        if self
+            .watching
+            .get(agent_id.as_str())
+            .is_some_and(|w| w.want == "running")
+        {
+            self.watching.remove(agent_id.as_str());
+        }
         // The session is what was opened, so that is what the cursor should be
         // on. The agent is only a fallback for a session whose row does not
         // exist yet — a fresh launch, whose session list has not come back.
@@ -4171,6 +4186,18 @@ impl App {
         !self.watching.is_empty()
     }
 
+    /// Agents this TUI currently holds an open, unfinished pane on.
+    ///
+    /// An ended pane does not count: the connection is gone, so it is no longer
+    /// evidence of anything. See [`displayed_status`].
+    fn agents_with_live_panes(&self) -> std::collections::HashSet<&str> {
+        self.sessions
+            .iter()
+            .filter(|session| !session.ended())
+            .map(|session| session.agent_id.as_str())
+            .collect()
+    }
+
     /// Ask again. One environment per tick — in practice there is one agent
     /// waking at a time, and the loop comes back here in a moment anyway.
     pub fn watch_tick(&mut self) -> Option<Effect> {
@@ -4438,8 +4465,11 @@ fn group_label(project: &ProjectNode, e: usize) -> String {
 
 /// Display order for a group's agents: running first, waking next, sleeping
 /// last, then by name. Indices for the same reason as [`App::agent_groups`].
-fn sorted_agents(agents: &[Agent]) -> Vec<usize> {
-    let rank = |agent: &Agent| match agent.status.as_str() {
+///
+/// Ranks on [`displayed_status`], not the raw one, so an agent with a pane open
+/// does not sit in the waking band while its row reads `running`.
+fn sorted_agents(agents: &[Agent], attached: &std::collections::HashSet<&str>) -> Vec<usize> {
+    let rank = |agent: &Agent| match displayed_status(agent, attached) {
         "running" => 0,
         "starting" => 1,
         _ => 2,
@@ -4460,7 +4490,7 @@ fn sorted_agents(agents: &[Agent]) -> Vec<usize> {
 /// running on it once that is known — the same `(N)` a project carries, for the
 /// same reason. Sessions are prefetched for running agents, so the number is
 /// usually there before the row is ever expanded.
-fn agent_note(agent: &Agent, ending: &std::collections::HashSet<String>) -> String {
+fn agent_note(status: &str, agent: &Agent, ending: &std::collections::HashSet<String>) -> String {
     let sessions = match &agent.sessions {
         LoadSessions::Loaded(sessions) => sessions
             .iter()
@@ -4469,9 +4499,31 @@ fn agent_note(agent: &Agent, ending: &std::collections::HashSet<String>) -> Stri
         _ => 0,
     };
     if sessions == 0 {
-        return agent.status.clone();
+        return status.to_string();
     }
-    format!("{} ({sessions})", agent.status)
+    format!("{status} ({sessions})")
+}
+
+/// The status to show for an agent, which is not always the one the platform
+/// last reported.
+///
+/// A pane we are attached to and that has not ended is direct evidence the
+/// agent is up — there is a shell running on it. The platform's status lags
+/// that: a shell routes as soon as the container exists, while `RUNNING`
+/// additionally waits on route publication, a projection hop, and a poll
+/// interval, which is exactly why the launcher stopped gating attach on it
+/// (#1098). So a freshly created agent spends its first seconds reported as
+/// `starting` while its session is already open and taking keystrokes, and the
+/// tree calls that "waking" — about an agent the user is typing into.
+///
+/// Only `starting` is overridden. A pane can outlive the thing it is attached
+/// to, and `sleeping`, `crashed`, `failed` or `deleting` alongside a live pane
+/// is news the user needs rather than a lag to paper over.
+fn displayed_status<'a>(agent: &'a Agent, attached: &std::collections::HashSet<&str>) -> &'a str {
+    if agent.status == "starting" && attached.contains(agent.id.as_str()) {
+        return "running";
+    }
+    &agent.status
 }
 
 /// Display order for a workspace's projects: the ones with agents first, then
@@ -6385,6 +6437,120 @@ mod tests {
     }
 
     /// An agent as the loader builds one: no sessions fetched, collapsed.
+    /// The reported bug: create a new agent, land in its session, and the tree
+    /// still calls it "waking" while you are typing into it.
+    ///
+    /// The launcher attaches as soon as the SSH route answers, which is several
+    /// seconds before the status projection reaches RUNNING (#1098). Nothing
+    /// was wrong with the pane — the row was reporting a status the CLI itself
+    /// had already decided not to wait for.
+    #[test]
+    fn an_agent_with_a_pane_open_is_not_still_waking() {
+        let mut a = loaded_app();
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_new", "just-created", "starting")]),
+        );
+
+        let note_for = |a: &App| {
+            a.rows()
+                .into_iter()
+                .find(|r| r.label == "just-created")
+                .unwrap()
+                .note
+        };
+        assert_eq!(note_for(&a), "starting", "no pane yet: report what we know");
+
+        a.attach_session(
+            super::super::session::Session::for_test("ca_new", "just-created").unwrap(),
+            "ca_new".to_string(),
+        );
+
+        assert_eq!(
+            note_for(&a),
+            "running",
+            "a live pane is proof the agent is up, whatever the projection says"
+        );
+    }
+
+    /// The override is scoped to the lag it exists for. A pane can outlive what
+    /// it is attached to, and every other status alongside a live pane is news
+    /// rather than latency.
+    #[test]
+    fn only_starting_is_overridden_by_a_live_pane() {
+        let mut a = loaded_app();
+        let attached: std::collections::HashSet<&str> = std::iter::once("ca_1").collect();
+
+        for status in ["sleeping", "crashed", "failed", "deleting"] {
+            let agent = agent("ca_1", "nimble-otter", status);
+            assert_eq!(
+                displayed_status(&agent, &attached),
+                status,
+                "{status} must survive an attached pane"
+            );
+        }
+
+        // And an ended pane stops being evidence of anything.
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "starting")]),
+        );
+        let session = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
+        session.mark_ended();
+        a.attach_session(session, "ca_1".to_string());
+        assert_eq!(
+            a.rows()
+                .into_iter()
+                .find(|r| r.label == "nimble-otter")
+                .unwrap()
+                .note,
+            "starting"
+        );
+    }
+
+    /// A pane opening settles the wake it was waiting on, rather than leaving
+    /// `waking…` up and the 1.5s watch tick asking about an agent that is
+    /// already taking keystrokes.
+    #[test]
+    fn attaching_settles_the_wake_it_was_waiting_for() {
+        let mut a = loaded_app();
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "starting")]),
+        );
+        a.ops.insert("ca_1".into(), AgentOp::Wake.pending_label());
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        assert!(a.watching_agents());
+
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".to_string(),
+        );
+
+        assert!(a.ops.is_empty(), "the wake landed");
+        assert!(
+            !a.watching_agents(),
+            "and there is nothing left to poll for"
+        );
+    }
+
+    /// A sleep is not settled by a pane opening — nothing about an attach says
+    /// the agent went to sleep, and dropping the label would strand the poll.
+    #[test]
+    fn attaching_does_not_settle_an_unrelated_op() {
+        let mut a = loaded_app();
+        a.ops.insert("ca_1".into(), AgentOp::Sleep.pending_label());
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Sleep, None);
+
+        a.attach_session(
+            super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".to_string(),
+        );
+
+        assert_eq!(a.ops.get("ca_1").copied(), Some("sleeping…"));
+        assert!(a.watching_agents());
+    }
+
     fn agent(id: &str, name: &str, status: &str) -> Agent {
         Agent {
             id: id.into(),
