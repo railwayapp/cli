@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
-use colored::Colorize;
 use graphql_client::GraphQLQuery;
 use reqwest::{
     Client,
@@ -106,14 +108,14 @@ fn parse_timeout_secs(raw: Option<&str>) -> u64 {
     match raw.trim().parse::<u64>() {
         Ok(secs) if secs > 0 => secs,
         _ => {
-            eprintln!(
-                "{}",
+            crate::util::reporter::warn(
+                "INVALID_HTTP_TIMEOUT",
                 format!(
-                    "Warning: ignoring invalid {}={raw:?}; expected a positive number of seconds, using {}s",
+                    "ignoring invalid {}={raw:?}; expected a positive number of seconds, using {}s",
                     consts::RAILWAY_HTTP_TIMEOUT_ENV,
                     consts::DEFAULT_HTTP_TIMEOUT_SECS
-                )
-                .yellow()
+                ),
+                None,
             );
             consts::DEFAULT_HTTP_TIMEOUT_SECS
         }
@@ -128,6 +130,25 @@ pub async fn post_graphql<Q: GraphQLQuery, U: reqwest::IntoUrl>(
     let body = serde_json::to_value(Q::build_query(variables))
         .expect("Failed to serialize GraphQL query body");
     post_graphql_for_current_session(client, url.into_url()?, &body).await
+}
+
+/// Send a GraphQL request that must go out unauthenticated, for the queries
+/// backboard answers for anyone (template lookup and search).
+///
+/// Deliberately separate from [`post_graphql`] rather than a property of the
+/// client: [`post_graphql`] keeps the caller's bearer current by setting it per
+/// request (see [`current_bearer`]), and a `reqwest::Client` cannot be asked
+/// whether it was built with one. So the two paths are told apart here, at the
+/// call site that knows — which also keeps a logged-out user's template search
+/// on exactly the same code path as a logged-in user's.
+pub async fn post_graphql_public<Q: GraphQLQuery, U: reqwest::IntoUrl>(
+    client: &reqwest::Client,
+    url: U,
+    variables: Q::Variables,
+) -> Result<Q::ResponseData, RailwayError> {
+    let body = serde_json::to_value(Q::build_query(variables))
+        .expect("Failed to serialize GraphQL query body");
+    post_graphql_value(client, url.into_url()?, &body, None).await
 }
 
 pub async fn post_graphql_raw<T, U: reqwest::IntoUrl>(
@@ -157,6 +178,15 @@ async fn post_graphql_for_current_session<T: DeserializeOwned>(
     let oauth_base_url = configs
         .as_ref()
         .map(|c| oauth::get_oauth_base_url(c.get_host()));
+    // Refresh before sending rather than after being refused. The fast path is
+    // a timestamp comparison on the config this function already read, so it
+    // costs nothing while the token is good; when it is not, one refresh here
+    // replaces a 401 round-trip plus a probe plus a retry. A failure is not
+    // fatal — the request still goes out and the "Not Authorized" handling
+    // below produces the same story it always did.
+    if let Some(configs) = configs.as_mut() {
+        let _ = ensure_valid_token(configs).await;
+    }
     post_graphql_value(
         client,
         url,
@@ -164,6 +194,28 @@ async fn post_graphql_for_current_session<T: DeserializeOwned>(
         configs.as_mut().zip(oauth_base_url.as_deref()),
     )
     .await
+}
+
+/// The `authorization` header the stored session would present right now, or
+/// `None` when this process authenticates some other way.
+///
+/// Callers build a client once and keep it: `railway ca`'s TUI holds a single
+/// one for its entire run, cloned into every sweep and prefetch. The bearer
+/// baked into that client's default headers is the one that existed at
+/// startup, so an hour later — once the access token expires — every request
+/// it sends carries a dead token, 401s, and pays for a probe and a retry that
+/// leave the client just as stale for the next one. Setting the header per
+/// request instead lets a long-lived client pick up refreshes: reqwest applies
+/// a default header only when the request has not already set that key.
+///
+/// `RAILWAY_TOKEN` authenticates with `project-access-token` and no bearer at
+/// all, so that case is left entirely alone.
+fn current_bearer(configs: &Configs) -> Option<HeaderValue> {
+    if Configs::get_railway_token().is_some() {
+        return None;
+    }
+    let token = configs.get_railway_auth_token()?;
+    HeaderValue::from_str(&format!("Bearer {token}")).ok()
 }
 
 /// What a token-endpoint probe says about the stored session after the API
@@ -187,11 +239,7 @@ async fn probe_session_liveness(configs: &mut Configs, oauth_base_url: &str) -> 
         // Env-var tokens have no refresh token to probe with.
         return SessionProbe::Inconclusive;
     }
-    let _lock = configs.acquire_lock().await;
-    if configs.reload().is_err() {
-        return SessionProbe::Inconclusive;
-    }
-    match refresh_with_policy(configs, oauth_base_url, REFRESH_BACKOFF).await {
+    match refresh_locked_at(configs, oauth_base_url, true).await {
         RefreshOutcome::Refreshed | RefreshOutcome::AlreadyFresh => SessionProbe::Alive,
         RefreshOutcome::SessionExpired(_) => SessionProbe::Dead,
         RefreshOutcome::Transient(_) | RefreshOutcome::NoRefreshToken => SessionProbe::Inconclusive,
@@ -224,7 +272,14 @@ pub(crate) async fn post_graphql_value<T: DeserializeOwned>(
     body: &serde_json::Value,
     session: Option<(&mut Configs, &str)>,
 ) -> Result<T, RailwayError> {
-    let response = client.post(url.clone()).json(body).send().await?;
+    let mut request = client.post(url.clone()).json(body);
+    // Override whatever bearer the client was built with; see [`current_bearer`].
+    if let Some((configs, _)) = &session {
+        if let Some(bearer) = current_bearer(configs) {
+            request = request.header(reqwest::header::AUTHORIZATION, bearer);
+        }
+    }
+    let response = request.send().await?;
     let err = match parse_graphql_response(response).await {
         Err(e @ (RailwayError::Unauthorized | RailwayError::UnauthorizedLogin)) => e,
         other => return other,
@@ -327,6 +382,56 @@ pub(crate) enum RefreshOutcome {
 /// Backoff between transient refresh attempts.
 const REFRESH_BACKOFF: Duration = Duration::from_millis(250);
 
+/// Serialises refreshes within this process, ahead of the cross-process file
+/// lock.
+///
+/// The file lock alone does not do this. `fs2` locks are per open file
+/// description, so two tasks in one process contend exactly as two processes
+/// would — and a long-lived TUI is far more concurrent than a one-shot command:
+/// `railway ca` runs an account-wide refresh on a timer, watch ticks at 1.5s,
+/// and sweeps that fan out per environment. Let those all queue on the file
+/// lock and each waiter sits through every earlier waiter's token round-trip,
+/// blows the lock's timeout, and prints a warning — for a refresh the first one
+/// already performed. Taking this gate first means at most one task in the
+/// process ever waits on the file lock, and the rest arrive after the config
+/// has been rewritten and find nothing left to do.
+static REFRESH_GATE: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
+
+/// When this process last minted tokens for a given config file. Keyed by path
+/// rather than kept as a single global so tests, which each drive their own
+/// temporary config, cannot see one another's refreshes.
+static LAST_REFRESH: LazyLock<std::sync::Mutex<HashMap<PathBuf, Instant>>> =
+    LazyLock::new(Default::default);
+
+/// How recently a refresh has to have happened for a *forced* one to stand
+/// down. Long enough to absorb a burst of simultaneous 401s, short enough that
+/// a grant revoked moments after a refresh is still discovered promptly.
+const RECENT_REFRESH_WINDOW: Duration = Duration::from_secs(10);
+
+/// How long to wait for [`REFRESH_GATE`] before proceeding without it.
+///
+/// A refresh normally takes well under a second, but a hung token endpoint can
+/// hold the gate for the full retry budget — three attempts against a 30s HTTP
+/// timeout, plus backoff, so about 90s. Waiting that out would make one stuck
+/// refresh stall every other request in the process, which is what the old
+/// unbounded file-lock wait did. Waiters give up here instead and use whatever
+/// credentials are on disk; they do NOT refresh on their own, since two
+/// concurrent rotations are exactly the hard-logout this gate exists to avoid.
+const REFRESH_GATE_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn refreshed_recently(path: &std::path::Path) -> bool {
+    LAST_REFRESH.lock().is_ok_and(|seen| {
+        seen.get(path)
+            .is_some_and(|at| at.elapsed() < RECENT_REFRESH_WINDOW)
+    })
+}
+
+fn mark_refreshed(path: &std::path::Path) {
+    if let Ok(mut seen) = LAST_REFRESH.lock() {
+        seen.insert(path.to_path_buf(), Instant::now());
+    }
+}
+
 /// Take the config lock, re-read credentials, and refresh.
 ///
 /// The lock matters because the refresh is a read-modify-write of the on-disk
@@ -339,6 +444,24 @@ const REFRESH_BACKOFF: Duration = Duration::from_millis(250);
 /// `force` skips the "someone else already did it" short-circuit, for callers
 /// reacting to an actual authorization failure rather than to local expiry.
 async fn refresh_locked(configs: &mut Configs, force: bool) -> RefreshOutcome {
+    let base_url = oauth::get_oauth_base_url(configs.get_host());
+    refresh_locked_at(configs, &base_url, force).await
+}
+
+/// [`refresh_locked`] against an explicit token endpoint, so the probe path can
+/// pass the base URL it already resolved (and tests can point at a scripted
+/// one) instead of re-deriving it.
+async fn refresh_locked_at(configs: &mut Configs, base_url: &str, force: bool) -> RefreshOutcome {
+    let Ok(_gate) = tokio::time::timeout(REFRESH_GATE_TIMEOUT, REFRESH_GATE.lock()).await else {
+        // Someone else's refresh is wedged. Adopt whatever it has written so
+        // far and report a transient failure: the caller proceeds with the
+        // stored credentials, and a request that still comes back unauthorized
+        // says so plainly instead of being explained away as a grant problem.
+        let _ = configs.reload();
+        return RefreshOutcome::Transient(RailwayError::OAuthRefreshFailed(
+            "timed out waiting for an in-flight token refresh".to_string(),
+        ));
+    };
     let _lock = configs.acquire_lock().await;
 
     if configs.reload().is_err() {
@@ -347,9 +470,20 @@ async fn refresh_locked(configs: &mut Configs, force: bool) -> RefreshOutcome {
     if !force && (!configs.has_oauth_token() || !configs.is_token_expired()) {
         return RefreshOutcome::AlreadyFresh;
     }
+    // A forced refresh answers an actual 401, and concurrent requests all get
+    // refused at the same moment. The first through the gate rotates the
+    // token; the rest have just reloaded its result and would otherwise spend a
+    // rotation each — every one of them a chance for backboard's reuse
+    // detection to see a consumed token and revoke the grant.
+    if force && refreshed_recently(configs.config_path()) {
+        return RefreshOutcome::AlreadyFresh;
+    }
 
-    let base_url = oauth::get_oauth_base_url(configs.get_host());
-    refresh_with_policy(configs, &base_url, REFRESH_BACKOFF).await
+    let outcome = refresh_with_policy(configs, base_url, REFRESH_BACKOFF).await;
+    if matches!(outcome, RefreshOutcome::Refreshed) {
+        mark_refreshed(configs.config_path());
+    }
+    outcome
 }
 
 /// Refresh unconditionally, ignoring the local expiry timestamp.
@@ -397,9 +531,10 @@ pub(crate) async fn refresh_with_policy(
         // into a fleet-wide forced logout.
         Err(oauth::RefreshFailure::Terminal(err)) => {
             if let Err(clear_err) = configs.clear_oauth_tokens() {
-                eprintln!(
-                    "{}: {clear_err}",
-                    "Warning: could not clear the expired login from disk".yellow()
+                crate::util::reporter::warn(
+                    "CREDENTIAL_CLEAR_FAILED",
+                    format!("could not clear the expired login from disk: {clear_err}"),
+                    None,
                 );
             }
             RefreshOutcome::SessionExpired(err)
@@ -581,7 +716,7 @@ mod tests {
         });
 
         let client = GQLClient::new_public().unwrap();
-        let response = post_graphql::<queries::TemplateDetail, _>(
+        let response = post_graphql_public::<queries::TemplateDetail, _>(
             &client,
             server_url,
             queries::template_detail::Variables {

@@ -26,6 +26,12 @@ use super::LogLine;
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
+    // Raw mode plus the alternate screen means stderr writes land wherever
+    // the cursor is and stay there until a full repaint, and an inquire
+    // prompt can never complete. The flag makes `reporter::warn` hold its
+    // tongue and every prompt helper fail fast for as long as this screen
+    // is up.
+    crate::util::prompt::set_terminal_owned(true);
     execute!(stdout(), EnterAlternateScreen, Hide, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -36,6 +42,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
 fn restore_terminal() {
     let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, Show);
     let _ = disable_raw_mode();
+    crate::util::prompt::set_terminal_owned(false);
 }
 
 pub async fn run(

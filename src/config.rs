@@ -6,7 +6,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
 use serde::{Deserialize, Serialize};
 
@@ -139,7 +138,11 @@ impl Configs {
 
             let root_config: RailwayConfig = serde_json::from_slice(&serialized_config)
                 .unwrap_or_else(|_| {
-                    eprintln!("{}", "Unable to parse config file, regenerating".yellow());
+                    crate::util::reporter::warn(
+                        "CONFIG_UNPARSEABLE",
+                        "Unable to parse config file, regenerating",
+                        None,
+                    );
                     RailwayConfig::default()
                 });
 
@@ -354,6 +357,13 @@ impl Configs {
             root_config_path,
             backboard_url_override: Self::backboard_url_override_from_env(),
         }
+    }
+
+    /// The config file this instance reads and writes. Identifies the
+    /// credentials being operated on, which the refresh path uses to keep its
+    /// per-config bookkeeping from colliding across configs.
+    pub(crate) fn config_path(&self) -> &std::path::Path {
+        &self.root_config_path
     }
 
     /// Take the exclusive config lock covering this config file, without
@@ -1070,9 +1080,10 @@ impl ConfigLock {
                 return Self { file: Some(file) };
             }
             if std::time::Instant::now() >= deadline {
-                eprintln!(
-                    "{}",
-                    "Warning: timed out waiting for config lock; proceeding without it".yellow()
+                crate::util::reporter::warn(
+                    "CONFIG_LOCK_TIMEOUT",
+                    "timed out waiting for config lock; proceeding without it",
+                    None,
                 );
                 return Self { file: None };
             }

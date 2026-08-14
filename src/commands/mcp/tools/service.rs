@@ -283,7 +283,7 @@ impl RailwayMcp {
             code: params.template_code,
         };
 
-        let template_resp = post_graphql::<queries::TemplateDetail, _>(
+        let template_resp = crate::client::post_graphql_public::<queries::TemplateDetail, _>(
             &public_client,
             self.configs.get_backboard(),
             template_vars,
@@ -335,7 +335,7 @@ impl RailwayMcp {
             category: params.category,
         };
 
-        let resp = post_graphql::<queries::TemplateSearch, _>(
+        let resp = crate::client::post_graphql_public::<queries::TemplateSearch, _>(
             &public_client,
             self.configs.get_backboard(),
             vars,

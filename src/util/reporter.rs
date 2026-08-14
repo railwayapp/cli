@@ -58,11 +58,50 @@ pub fn emit_json<T: Serialize>(value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Warnings raised while a TUI owned the terminal, waiting for it to give the
+/// terminal back. Deduplicated by rendered text and kept in first-seen order,
+/// so a condition that recurs on a timer surfaces once with a count instead of
+/// as a wall of identical lines.
+static DEFERRED: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// Cap on distinct deferred warnings. A TUI session runs for hours; without a
+/// bound, a warning raised from a loop would hold unbounded memory for all of
+/// it. Past the cap, further *distinct* warnings are dropped — repeats of ones
+/// already held still count up, which is the case that actually matters.
+const MAX_DEFERRED: usize = 20;
+
 /// Emit a non-fatal warning. Always goes to stderr so it never pollutes
 /// a result on stdout: a yellow line in human mode, a structured object
 /// in JSON mode.
+///
+/// Held back while a full-screen TUI owns the terminal, and released by
+/// [`flush_deferred`] when it exits. Nothing reads stderr while a TUI is up —
+/// ratatui owns the alternate screen and paints from its own buffer — so a
+/// warning written then does not inform anyone, it corrupts the frame: the
+/// text lands wherever the cursor happens to be and survives until something
+/// forces a full repaint. A long-lived `railway ca` session could accumulate
+/// hundreds of them across the whole screen. Deferring rather than discarding
+/// keeps the diagnostic; it just arrives when there is a terminal to read it
+/// on.
 pub fn warn(code: &str, message: impl std::fmt::Display, hint: Option<&str>) {
-    match mode() {
+    let rendered = render_warning(code, message, hint, mode());
+    if crate::util::prompt::terminal_owned() {
+        defer(rendered);
+        return;
+    }
+    eprint!("{rendered}");
+}
+
+/// The exact bytes a warning writes to stderr, including the trailing newline.
+/// Rendering up front is what lets the deferred path dedupe on the final text
+/// and replay it verbatim later.
+fn render_warning(
+    code: &str,
+    message: impl std::fmt::Display,
+    hint: Option<&str>,
+    mode: OutputMode,
+) -> String {
+    match mode {
         OutputMode::Json => {
             let obj = serde_json::json!({
                 "level": "warning",
@@ -70,13 +109,43 @@ pub fn warn(code: &str, message: impl std::fmt::Display, hint: Option<&str>) {
                 "message": message.to_string(),
                 "hint": hint,
             });
-            eprintln!("{obj}");
+            format!("{obj}\n")
         }
         OutputMode::Human => {
-            eprintln!("{} {message}", "warning:".yellow().bold());
+            let mut out = format!("{} {message}\n", "warning:".yellow().bold());
             if let Some(hint) = hint {
-                eprintln!("  {} {hint}", "→".cyan());
+                out.push_str(&format!("  {} {hint}\n", "→".cyan()));
             }
+            out
+        }
+    }
+}
+
+fn defer(rendered: String) {
+    let Ok(mut held) = DEFERRED.lock() else {
+        return;
+    };
+    if let Some(entry) = held.iter_mut().find(|(text, _)| *text == rendered) {
+        entry.1 += 1;
+    } else if held.len() < MAX_DEFERRED {
+        held.push((rendered, 1));
+    }
+}
+
+/// Write out everything [`warn`] held back while a TUI owned the terminal, and
+/// forget it. Called from `prompt::set_terminal_owned(false)`, so every TUI's
+/// `restore_terminal` releases them without needing to know they exist.
+pub fn flush_deferred() {
+    let Ok(mut held) = DEFERRED.lock() else {
+        return;
+    };
+    for (rendered, count) in held.drain(..) {
+        eprint!("{rendered}");
+        if count > 1 {
+            eprintln!(
+                "  {}",
+                format!("(repeated {count} times while the screen was open)").dimmed()
+            );
         }
     }
 }
@@ -135,6 +204,66 @@ pub fn render_error(err: &anyhow::Error) {
 mod tests {
     use super::*;
     use crate::errors::RailwayError;
+
+    /// `DEFERRED` is process-global, so the tests that drive it directly have
+    /// to run one at a time or they consume each other's entries.
+    static DEFERRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A warning raised under a TUI must survive to be read, not vanish — and a
+    /// condition that recurs on a timer (the config-lock timeout fired every
+    /// few seconds in a long `railway ca` session) must come back as one line
+    /// with a count, which is the whole reason it is deduplicated rather than
+    /// queued.
+    #[test]
+    fn deferred_warnings_are_deduplicated_and_counted() {
+        let _guard = DEFERRED_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        flush_deferred(); // start from a clean slate
+
+        defer("lock timed out\n".to_string());
+        defer("lock timed out\n".to_string());
+        defer("lock timed out\n".to_string());
+        defer("something else\n".to_string());
+
+        let held = DEFERRED.lock().unwrap().clone();
+        assert_eq!(
+            held,
+            vec![
+                ("lock timed out\n".to_string(), 3),
+                ("something else\n".to_string(), 1),
+            ],
+            "repeats collapse into a count, and first-seen order is kept"
+        );
+
+        flush_deferred();
+        assert!(
+            DEFERRED.lock().unwrap().is_empty(),
+            "flushing must drain, or the next TUI exit replays them"
+        );
+    }
+
+    /// An unbounded buffer would be a slow leak across an hours-long session.
+    #[test]
+    fn deferred_warnings_are_capped() {
+        let _guard = DEFERRED_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        flush_deferred();
+
+        for i in 0..(MAX_DEFERRED + 10) {
+            defer(format!("distinct warning {i}\n"));
+        }
+        // The cap bounds distinct entries, but a repeat of one already held
+        // still counts up — that is the case worth keeping.
+        defer("distinct warning 0\n".to_string());
+
+        let held = DEFERRED.lock().unwrap().clone();
+        assert_eq!(held.len(), MAX_DEFERRED);
+        assert_eq!(held[0].1, 2);
+
+        flush_deferred();
+    }
 
     #[test]
     fn human_error_surfaces_railway_hint() {
