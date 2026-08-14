@@ -1763,7 +1763,12 @@ async fn fetch_template_search(
         category: request.category.clone(),
     };
 
-    Ok(post_graphql::<queries::TemplateSearch, _>(client, backboard, vars).await?)
+    // Template search is answered for anyone, and its only caller holds a
+    // `new_public` client; sending it unauthenticated keeps that explicit.
+    Ok(
+        crate::client::post_graphql_public::<queries::TemplateSearch, _>(client, backboard, vars)
+            .await?,
+    )
 }
 
 fn spawn_search(
@@ -2013,6 +2018,12 @@ fn maybe_load_more(
 
 fn setup_terminal() -> Result<(Terminal<CrosstermBackend<std::io::Stdout>>, TerminalTheme)> {
     enable_raw_mode()?;
+    // Raw mode plus the alternate screen means stderr writes land wherever
+    // the cursor is and stay there until a full repaint, and an inquire
+    // prompt can never complete. The flag makes `reporter::warn` hold its
+    // tongue and every prompt helper fail fast for as long as this screen
+    // is up.
+    crate::util::prompt::set_terminal_owned(true);
     execute!(stdout(), EnterAlternateScreen, Hide)?;
     let theme = detect_terminal_theme();
     let backend = CrosstermBackend::new(stdout());
@@ -2024,6 +2035,7 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<std::io::Stdout>>, Term
 fn restore_terminal() {
     let _ = execute!(stdout(), LeaveAlternateScreen, Show);
     let _ = disable_raw_mode();
+    crate::util::prompt::set_terminal_owned(false);
 }
 
 fn render_picker(app: &PickerApp, frame: &mut Frame) {

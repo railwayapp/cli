@@ -30,6 +30,10 @@ type ResponseTable = Arc<Mutex<HashMap<String, ResponseQueue>>>;
 pub struct MockBackboard {
     base_url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    /// The `authorization` header of each request, in the same order as
+    /// `requests` — so a test can assert which credential went out, not just
+    /// which operation did.
+    auth_headers: Arc<Mutex<Vec<Option<String>>>>,
     responses: ResponseTable,
 }
 
@@ -38,16 +42,18 @@ impl MockBackboard {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let auth_headers: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
         let responses: ResponseTable = Arc::new(Mutex::new(HashMap::new()));
 
         let requests_for_thread = Arc::clone(&requests);
+        let auth_for_thread = Arc::clone(&auth_headers);
         let responses_for_thread = Arc::clone(&responses);
 
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
 
-                let Some(body) = read_http_body(&mut stream) else {
+                let Some((headers, body)) = read_http_request(&mut stream) else {
                     continue;
                 };
                 let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -56,6 +62,12 @@ impl MockBackboard {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                // Recorded before the body so the two vectors stay index-aligned
+                // even if a test reads them mid-flight.
+                auth_for_thread
+                    .lock()
+                    .unwrap()
+                    .push(authorization_of(&headers));
                 requests_for_thread.lock().unwrap().push(parsed);
 
                 let (status, response_body) = {
@@ -105,6 +117,7 @@ impl MockBackboard {
         Self {
             base_url: format!("http://127.0.0.1:{port}/graphql/v2"),
             requests,
+            auth_headers,
             responses,
         }
     }
@@ -176,14 +189,21 @@ impl MockBackboard {
             .collect()
     }
 
+    /// The `authorization` header each received request carried, in arrival
+    /// order. `None` for a request that sent none.
+    pub fn auth_headers(&self) -> Vec<Option<String>> {
+        self.auth_headers.lock().unwrap().clone()
+    }
+
     pub fn hits(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
 }
 
-/// Reads one HTTP request off `stream` and returns its body. `None` when the
-/// stream closes before a full request arrives.
-fn read_http_body(stream: &mut std::net::TcpStream) -> Option<Vec<u8>> {
+/// Reads one HTTP request off `stream` and returns its header block (verbatim,
+/// so values keep their case) and its body. `None` when the stream closes
+/// before a full request arrives.
+fn read_http_request(stream: &mut std::net::TcpStream) -> Option<(String, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 1024];
     let mut content_length = 0usize;
@@ -194,18 +214,30 @@ fn read_http_body(stream: &mut std::net::TcpStream) -> Option<Vec<u8>> {
         }
         buf.extend_from_slice(&tmp[..read]);
         if let Some(pos) = find_headers_end(&buf) {
-            let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+            let headers = String::from_utf8_lossy(&buf[..pos]).to_string();
             for line in headers.lines() {
-                if let Some(v) = line.strip_prefix("content-length:") {
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                     content_length = v.trim().parse().unwrap_or(0);
                 }
             }
             if buf.len() >= pos + 4 + content_length {
                 let body_start = pos + 4;
-                return Some(buf[body_start..body_start + content_length].to_vec());
+                return Some((
+                    headers,
+                    buf[body_start..body_start + content_length].to_vec(),
+                ));
             }
         }
     }
+}
+
+/// The value of the `authorization` header in a request's header block, if it
+/// carried one.
+fn authorization_of(headers: &str) -> Option<String> {
+    headers
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+        .map(|line| line["authorization:".len()..].trim().to_string())
 }
 
 fn find_headers_end(buf: &[u8]) -> Option<usize> {

@@ -23,9 +23,16 @@ use anyhow::{Context, Result};
 static TERMINAL_OWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Mark the terminal as owned (or released) by a full-screen TUI. While set,
-/// every prompt in this module fails fast instead of deadlocking.
+/// every prompt in this module fails fast instead of deadlocking, and
+/// `reporter::warn` holds its output back rather than painting over the frame.
+///
+/// Releasing flushes those held-back warnings, so a TUI gets that for free from
+/// its existing `restore_terminal` and cannot forget to ask for it.
 pub fn set_terminal_owned(owned: bool) {
     TERMINAL_OWNED.store(owned, std::sync::atomic::Ordering::SeqCst);
+    if !owned {
+        crate::util::reporter::flush_deferred();
+    }
 }
 
 /// Whether a full-screen TUI currently owns the terminal. Code that would

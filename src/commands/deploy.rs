@@ -111,7 +111,7 @@ pub async fn fetch_and_create(
         eprintln!("fetching details for template")
     }
     let public_client = GQLClient::new_public()?;
-    let details = post_graphql::<queries::TemplateDetail, _>(
+    let details = crate::client::post_graphql_public::<queries::TemplateDetail, _>(
         &public_client,
         configs.get_backboard(),
         queries::template_detail::Variables {
