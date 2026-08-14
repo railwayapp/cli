@@ -401,6 +401,13 @@ impl Session {
         Self::STALL_AFTER.checked_sub(self.spawned_at.elapsed())
     }
 
+    /// How long this pane has been open. The tree uses it to tell the status
+    /// projection's normal lag apart from an agent that is genuinely stuck —
+    /// see `displayed_status`.
+    pub fn open_for(&self) -> std::time::Duration {
+        self.spawned_at.elapsed()
+    }
+
     pub fn ended(&self) -> bool {
         self.ended.load(Ordering::Relaxed)
     }

@@ -4186,16 +4186,26 @@ impl App {
         !self.watching.is_empty()
     }
 
-    /// Agents this TUI currently holds an open, unfinished pane on.
+    /// Agents this TUI holds an open, unfinished pane on, and how long the
+    /// youngest such pane has been open.
     ///
     /// An ended pane does not count: the connection is gone, so it is no longer
-    /// evidence of anything. See [`displayed_status`].
-    fn agents_with_live_panes(&self) -> std::collections::HashSet<&str> {
-        self.sessions
-            .iter()
-            .filter(|session| !session.ended())
-            .map(|session| session.agent_id.as_str())
-            .collect()
+    /// evidence of anything. The age is what lets [`displayed_status`] tell the
+    /// projection's normal lag apart from an agent that is stuck.
+    fn agents_with_live_panes(&self) -> std::collections::HashMap<&str, std::time::Duration> {
+        let mut open: std::collections::HashMap<&str, std::time::Duration> =
+            std::collections::HashMap::new();
+        for session in self.sessions.iter().filter(|s| !s.ended()) {
+            let age = session.open_for();
+            open.entry(session.agent_id.as_str())
+                .and_modify(|held| {
+                    if age < *held {
+                        *held = age;
+                    }
+                })
+                .or_insert(age);
+        }
+        open
     }
 
     /// Ask again. One environment per tick — in practice there is one agent
@@ -4468,7 +4478,10 @@ fn group_label(project: &ProjectNode, e: usize) -> String {
 ///
 /// Ranks on [`displayed_status`], not the raw one, so an agent with a pane open
 /// does not sit in the waking band while its row reads `running`.
-fn sorted_agents(agents: &[Agent], attached: &std::collections::HashSet<&str>) -> Vec<usize> {
+fn sorted_agents(
+    agents: &[Agent],
+    attached: &std::collections::HashMap<&str, std::time::Duration>,
+) -> Vec<usize> {
     let rank = |agent: &Agent| match displayed_status(agent, attached) {
         "running" => 0,
         "starting" => 1,
@@ -4516,15 +4529,37 @@ fn agent_note(status: &str, agent: &Agent, ending: &std::collections::HashSet<St
 /// `starting` while its session is already open and taking keystrokes, and the
 /// tree calls that "waking" — about an agent the user is typing into.
 ///
-/// Only `starting` is overridden. A pane can outlive the thing it is attached
-/// to, and `sleeping`, `crashed`, `failed` or `deleting` alongside a live pane
-/// is news the user needs rather than a lag to paper over.
-fn displayed_status<'a>(agent: &'a Agent, attached: &std::collections::HashSet<&str>) -> &'a str {
-    if agent.status == "starting" && attached.contains(agent.id.as_str()) {
-        return "running";
+/// Only `starting` is overridden, and only for [`STARTING_GRACE`] after the
+/// pane opened. Two reasons for the bound:
+///
+/// - A pane can outlive the thing it is attached to, so `sleeping`, `crashed`,
+///   `failed` or `deleting` alongside a live pane is news the user needs
+///   rather than a lag to paper over.
+/// - The lag is small. Measured over ten `railway code --claude --new` runs,
+///   status reached RUNNING 5.3–14.2s after create — before the harness
+///   answered, every time. An agent still `starting` well past that is not
+///   lagging, it is stuck, and the row saying `running` would hide the only
+///   signal the user has. That case is real: it is what prompted this fix.
+///
+/// So the override covers the window the lag actually lives in, and past it
+/// the platform's own answer stands.
+fn displayed_status<'a>(
+    agent: &'a Agent,
+    attached: &std::collections::HashMap<&str, std::time::Duration>,
+) -> &'a str {
+    let open_for = attached.get(agent.id.as_str());
+    match open_for {
+        Some(open_for) if agent.status == "starting" && *open_for < STARTING_GRACE => "running",
+        _ => &agent.status,
     }
-    &agent.status
 }
+
+/// How long after a pane opens a `starting` status is still treated as the
+/// projection catching up. Generously past the measured lag (worst observed
+/// 14.2s from create, and a pane opens partway into that), so a normal boot is
+/// never shown as stuck — but bounded, so a stuck one stops being shown as
+/// healthy.
+const STARTING_GRACE: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Display order for a workspace's projects: the ones with agents first, then
 /// alphabetically within each group.
@@ -6479,7 +6514,8 @@ mod tests {
     #[test]
     fn only_starting_is_overridden_by_a_live_pane() {
         let mut a = loaded_app();
-        let attached: std::collections::HashSet<&str> = std::iter::once("ca_1").collect();
+        let attached: std::collections::HashMap<&str, std::time::Duration> =
+            std::iter::once(("ca_1", std::time::Duration::from_secs(1))).collect();
 
         for status in ["sleeping", "crashed", "failed", "deleting"] {
             let agent = agent("ca_1", "nimble-otter", status);
@@ -6549,6 +6585,50 @@ mod tests {
 
         assert_eq!(a.ops.get("ca_1").copied(), Some("sleeping…"));
         assert!(a.watching_agents());
+    }
+
+    /// The bound that keeps the override honest. A pane that has been open
+    /// well past the measured lag is no longer evidence the agent is merely
+    /// catching up — it is evidence it is stuck, and that is exactly the case
+    /// the user hit. The row must go back to reporting what the platform says.
+    #[test]
+    fn a_long_open_pane_stops_excusing_a_starting_agent() {
+        let agent = agent("ca_1", "nimble-otter", "starting");
+        let attached = |secs| -> std::collections::HashMap<&str, std::time::Duration> {
+            std::iter::once(("ca_1", std::time::Duration::from_secs(secs))).collect()
+        };
+
+        assert_eq!(
+            displayed_status(&agent, &attached(1)),
+            "running",
+            "just attached: the projection is still catching up"
+        );
+        assert_eq!(
+            displayed_status(&agent, &attached(STARTING_GRACE.as_secs() - 1)),
+            "running",
+            "inside the grace window"
+        );
+        assert_eq!(
+            displayed_status(&agent, &attached(STARTING_GRACE.as_secs())),
+            "starting",
+            "past it, the platform's answer stands — a stuck agent must not read as running"
+        );
+        assert_eq!(
+            displayed_status(&agent, &attached(600)),
+            "starting",
+            "and it stays that way"
+        );
+    }
+
+    /// The grace window has to cover a real boot with room to spare, or a
+    /// normal launch would flicker into looking stuck. Worst observed was
+    /// 14.2s from create across ten runs, and the pane opens partway into that.
+    #[test]
+    fn the_grace_window_clears_a_measured_boot() {
+        assert!(
+            STARTING_GRACE >= std::time::Duration::from_secs(30),
+            "too tight for a slow-but-healthy boot"
+        );
     }
 
     fn agent(id: &str, name: &str, status: &str) -> Agent {
