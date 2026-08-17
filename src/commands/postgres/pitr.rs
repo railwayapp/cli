@@ -1728,7 +1728,11 @@ async fn schedule_list(
 /// Total time budget for `status`'s live coverage/archiver probe. Kept short
 /// -- this is a best-effort addition to `status`, never worth making the
 /// whole command feel slow (or hang) when the service isn't reachable.
-const LIVE_PROBE_TIMEOUT_SECS: u64 = 5;
+/// 10s (up from 5s): the coverage half now actually reads backup.info from
+/// the S3 archive bucket (it previously failed before ever reaching S3), and
+/// a slow endpoint inside a 5s joint budget would time out the archiver half
+/// along with it.
+const LIVE_PROBE_TIMEOUT_SECS: u64 = 10;
 
 async fn probe_pitr_live(ctx: &ServiceContext, root_service_id: &str) -> PitrLiveProbe {
     let attempt = async {
@@ -1742,7 +1746,7 @@ async fn probe_pitr_live(ctx: &ServiceContext, root_service_id: &str) -> PitrLiv
         .context("No live deployment found for this service")?;
 
         let (pgbackrest_result, archiver_result) = tokio::join!(
-            exec_in_container(&instance_id, "pgbackrest info --output=json"),
+            exec_in_container(&instance_id, PGBACKREST_INFO_PROBE),
             exec_in_container(&instance_id, ARCHIVER_PROBE_QUERY),
         );
 
@@ -1834,6 +1838,51 @@ fn apply_pgbackrest_info(probe: &mut PitrLiveProbe, output: &str) {
             .map(String::from);
     }
 }
+
+/// Coverage probe: `pgbackrest info` against the service's archive bucket.
+/// Mirrors the backend monitor's proven setup rather than a bare invocation,
+/// which failed on every PITR service in two ways:
+///
+/// - The SSH session lands as root, and pgbackrest refuses `info` as root
+///   (`ERROR: [031]: the 'info' command must not be run as the root user`) --
+///   hence `gosu postgres`. The refusal is printed to STDOUT (the image sets
+///   `log-level-console=info`), which is why the old failure surfaced as
+///   `backupCoverageError: "SSH command failed (exit code: 31): "` with an
+///   empty message.
+/// - The image's rendered `/etc/pgbackrest/pgbackrest.conf` carries the bare
+///   `repo1-path` (e.g. `/pgbackrest`), but the archive-push wrapper actually
+///   pushes under a per-cluster `cluster-<system id>` sub-prefix. Resolve the
+///   real path the same way the wrapper does: the `.pgbackrest_repo_path`
+///   marker in PGDATA when present (written by the wrapper on the node that
+///   archives), else `pg_control_system()`'s system identifier, else the bare
+///   `WAL_ARCHIVE_PATH` (pgbackrest then reports stanza-not-found, which is
+///   loud and diagnosable rather than silently reading the wrong prefix).
+///
+/// The `WAL_ARCHIVE_*` -> `PGBACKREST_REPO1_*` exports are a no-op on
+/// postgres-ssl (the conf already carries the same values; env wins) but are
+/// required on the HA image, whose patroni-runner sets them only inside
+/// `archive_command`, never at the container level.
+///
+/// Runs via `sh -s` over native SSH -- multi-line is fine on this transport.
+const PGBACKREST_INFO_PROBE: &str = r#"
+export PGBACKREST_REPO1_TYPE=s3 \
+  PGBACKREST_REPO1_S3_BUCKET="${WAL_ARCHIVE_BUCKET:-}" \
+  PGBACKREST_REPO1_S3_KEY="${WAL_ARCHIVE_KEY:-}" \
+  PGBACKREST_REPO1_S3_KEY_SECRET="${WAL_ARCHIVE_SECRET:-}" \
+  PGBACKREST_REPO1_S3_REGION="${WAL_ARCHIVE_REGION:-}" \
+  PGBACKREST_REPO1_S3_ENDPOINT="${WAL_ARCHIVE_ENDPOINT:-}"
+if [ -n "${PGDATA:-}" ] && [ -f "${PGDATA}/.pgbackrest_repo_path" ]; then
+  export PGBACKREST_REPO1_PATH="$(cat "${PGDATA}/.pgbackrest_repo_path")"
+elif [ -n "${WAL_ARCHIVE_PATH:-}" ]; then
+  _sysid=$(PSQL_PAGER='' PAGER='' PGOPTIONS='-c client_min_messages=error' PGHOST=127.0.0.1 PGPORT=5432 timeout 5 gosu postgres psql -U "${PGUSER:-postgres}" -w -P pager=off -tAXq -c 'SELECT system_identifier FROM pg_control_system()' 2>/dev/null | tr -d '[:space:]')
+  if [ -n "${_sysid}" ]; then
+    export PGBACKREST_REPO1_PATH="${WAL_ARCHIVE_PATH}/cluster-${_sysid}"
+  else
+    export PGBACKREST_REPO1_PATH="${WAL_ARCHIVE_PATH}"
+  fi
+fi
+exec gosu postgres pgbackrest --stanza=main info --output=json
+"#;
 
 const ARCHIVER_PROBE_QUERY: &str = concat!(
     "PGHOST=localhost PGPORT=5432 PGSSLMODE=disable psql -t -A -F',' -q -c \"",
@@ -2174,6 +2223,25 @@ mod tests {
         apply_archiver_output(&mut probe, "garbage-with-no-commas");
         assert!(probe.archiver_error.is_some());
         assert!(probe.archiver_healthy.is_none());
+    }
+
+    // The coverage probe's load-bearing pieces: pgbackrest must run as the
+    // postgres user (it refuses `info` as root, error [031]), and the repo
+    // path must resolve through the archive wrapper's marker/system-id
+    // ladder — the rendered conf's bare repo1-path is not where the wrapper
+    // actually pushes WAL.
+    #[test]
+    fn pgbackrest_info_probe_runs_as_postgres_with_repo_path_resolution() {
+        assert!(
+            PGBACKREST_INFO_PROBE
+                .contains("gosu postgres pgbackrest --stanza=main info --output=json")
+        );
+        assert!(PGBACKREST_INFO_PROBE.contains(".pgbackrest_repo_path"));
+        assert!(PGBACKREST_INFO_PROBE.contains("cluster-${_sysid}"));
+        assert!(
+            PGBACKREST_INFO_PROBE
+                .contains("PGBACKREST_REPO1_S3_BUCKET=\"${WAL_ARCHIVE_BUCKET:-}\"")
+        );
     }
 
     fn progress_fixture(
