@@ -19,6 +19,7 @@
 //! stream) are not proxied; nothing in the current tool surface relies on
 //! them.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,6 +53,9 @@ struct ProxyState {
     url: String,
     configs: Mutex<Configs>,
     session: Mutex<SessionMeta>,
+    /// Resolved once at startup: the proxy's working directory is fixed for
+    /// the life of the process, so the link cannot change under it.
+    link: LinkContext,
 }
 
 #[derive(Default)]
@@ -64,7 +68,44 @@ struct SessionMeta {
     /// Header-safe harness identity extracted from `initialize.params.clientInfo.name`
     /// and attached to every upstream request as `x-railway-mcp-client`.
     client_name: Option<String>,
+    /// Which context parameters each remote tool declares, learned from the
+    /// `tools/list` result. Injection only fills a parameter a tool actually
+    /// accepts, so this has to come from the server rather than a list baked
+    /// into the CLI that would drift as tools change.
+    tool_params: HashMap<String, HashSet<String>>,
 }
+
+/// The project/environment/service the working directory is linked to.
+///
+/// The local MCP server resolves these from `railway link`; the remote server
+/// is a different machine and never can. Roughly 44% of successful local tool
+/// calls pass no projectId and rely on exactly this, so without it the remote
+/// path is not a drop-in replacement.
+#[derive(Clone, Default)]
+struct LinkContext {
+    project_id: Option<String>,
+    environment_id: Option<String>,
+    service_id: Option<String>,
+}
+
+impl LinkContext {
+    fn value_for(&self, param: &str) -> Option<&str> {
+        match param {
+            "projectId" => self.project_id.as_deref(),
+            "environmentId" => self.environment_id.as_deref(),
+            "serviceId" => self.service_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.project_id.is_none() && self.environment_id.is_none() && self.service_id.is_none()
+    }
+}
+
+/// Context parameters the proxy will fill in. Ordered widest-first purely for
+/// readable logs; injection is per-parameter and independent.
+const INJECTABLE_PARAMS: [&str; 3] = ["projectId", "environmentId", "serviceId"];
 
 /// Marks traffic as coming through `railway mcp proxy` so remote MCP telemetry
 /// can separate it from editor OAuth and other direct clients.
@@ -93,11 +134,13 @@ pub async fn serve_proxy() -> Result<()> {
         .build()
         .context("Failed to build HTTP client")?;
 
+    let link = read_link_context(&configs);
     let state = Arc::new(ProxyState {
         http,
         url,
         configs: Mutex::new(configs),
         session: Mutex::new(SessionMeta::default()),
+        link,
     });
 
     // All stdout writes go through one task so concurrent responses can't
@@ -131,10 +174,14 @@ pub async fn serve_proxy() -> Result<()> {
             }
         };
 
+        let mut msg = msg;
         if method_of(&msg) == Some("initialize") {
             let mut session = state.session.lock().await;
             session.init_request = Some(msg.clone());
             session.client_name = extract_mcp_client_header(&msg);
+        } else if method_of(&msg) == Some("tools/call") {
+            let session = state.session.lock().await;
+            inject_link_context(&state.link, &session.tool_params, &mut msg);
         }
 
         if handshake_done {
@@ -163,6 +210,99 @@ pub async fn serve_proxy() -> Result<()> {
 
 fn method_of(msg: &JsonValue) -> Option<&str> {
     msg.get("method").and_then(JsonValue::as_str)
+}
+
+/// Read the directory link the same way the local MCP server does, so the two
+/// surfaces resolve the same project. Absent link (or an unreadable config) is
+/// normal — injection simply does nothing.
+fn read_link_context(configs: &Configs) -> LinkContext {
+    let Ok(linked) = configs.get_local_linked_project() else {
+        return LinkContext::default();
+    };
+    LinkContext {
+        project_id: Some(linked.project.clone()).filter(|s| !s.is_empty()),
+        environment_id: linked.environment.clone().filter(|s| !s.is_empty()),
+        service_id: linked.service.clone().filter(|s| !s.is_empty()),
+    }
+}
+
+/// Learn each tool's declared parameters from a `tools/list` result.
+///
+/// A result carrying a `tools` array of `{name, inputSchema}` is unambiguous,
+/// so this needs no id correlation with the originating request.
+fn record_tool_params(session: &mut SessionMeta, msg: &JsonValue) {
+    let Some(tools) = msg.pointer("/result/tools").and_then(JsonValue::as_array) else {
+        return;
+    };
+    for tool in tools {
+        let Some(name) = tool.get("name").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let declared = tool
+            .pointer("/inputSchema/properties")
+            .and_then(JsonValue::as_object)
+            .map(|props| props.keys().cloned().collect::<HashSet<String>>())
+            .unwrap_or_default();
+        session.tool_params.insert(name.to_string(), declared);
+    }
+}
+
+/// Fill in linked project/environment/service on a `tools/call` the harness
+/// left them off.
+///
+/// Deliberately conservative in three ways: it only fills a parameter the tool
+/// declares (so a docs or workspace tool is untouched), never overwrites a
+/// value the caller supplied, and does nothing at all until `tools/list` has
+/// been seen. An unknown tool is left exactly as the harness sent it.
+fn inject_link_context(
+    link: &LinkContext,
+    tool_params: &HashMap<String, HashSet<String>>,
+    msg: &mut JsonValue,
+) {
+    if link.is_empty() || method_of(msg) != Some("tools/call") {
+        return;
+    }
+    let Some(tool_name) = msg
+        .pointer("/params/name")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(declared) = tool_params.get(&tool_name) else {
+        return;
+    };
+
+    let missing: Vec<(&str, String)> = INJECTABLE_PARAMS
+        .iter()
+        .filter(|param| declared.contains(**param))
+        .filter_map(|param| {
+            let already_set = msg
+                .pointer(&format!("/params/arguments/{param}"))
+                .is_some_and(|v| !v.is_null());
+            if already_set {
+                return None;
+            }
+            link.value_for(param).map(|v| (*param, v.to_string()))
+        })
+        .collect();
+
+    if missing.is_empty() {
+        return;
+    }
+
+    let Some(params) = msg.get_mut("params").and_then(JsonValue::as_object_mut) else {
+        return;
+    };
+    let arguments = params
+        .entry("arguments")
+        .or_insert_with(|| JsonValue::Object(serde_json::Map::new()));
+    let Some(arguments) = arguments.as_object_mut() else {
+        return;
+    };
+    for (param, value) in missing {
+        arguments.insert(param.to_string(), JsonValue::String(value));
+    }
 }
 
 /// Request ids awaiting a response in this message — one for a plain request,
@@ -445,11 +585,20 @@ async fn consume_response(
         .unwrap_or("")
         .to_string();
 
+    // A tools/list result tells us which context parameters each tool accepts,
+    // which is what makes link-context injection safe. Learned from whichever
+    // transport the server answered on.
+    let learn_tools = method_of(msg) == Some("tools/list");
+
     if content_type.starts_with("text/event-stream") {
-        stream_sse(resp, out).await
+        stream_sse(state, resp, out, learn_tools).await
     } else {
         let body = read_body_capped(resp).await?;
-        emit_json_line(body.trim(), out);
+        if let Some(parsed) = emit_json_line(body.trim(), out)
+            && learn_tools
+        {
+            record_tool_params(&mut *state.session.lock().await, &parsed);
+        }
         Ok(())
     }
 }
@@ -475,7 +624,12 @@ async fn read_body_capped(resp: reqwest::Response) -> Result<String> {
 
 /// Relay every SSE `data:` payload to stdout as its own JSON-RPC line. The
 /// server closes the per-request stream after the final response message.
-async fn stream_sse(resp: reqwest::Response, out: &Out) -> Result<()> {
+async fn stream_sse(
+    state: &ProxyState,
+    resp: reqwest::Response,
+    out: &Out,
+    learn_tools: bool,
+) -> Result<()> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
 
@@ -484,7 +638,11 @@ async fn stream_sse(resp: reqwest::Response, out: &Out) -> Result<()> {
         buf.extend_from_slice(&chunk);
         while let Some((event_len, boundary_end)) = find_event_boundary(&buf) {
             let event: Vec<u8> = buf.drain(..boundary_end).collect();
-            emit_sse_event(&event[..event_len], out);
+            if let Some(parsed) = emit_sse_event(&event[..event_len], out)
+                && learn_tools
+            {
+                record_tool_params(&mut *state.session.lock().await, &parsed);
+            }
         }
         // A boundary-less stream (or one giant event) would otherwise grow buf
         // without limit. Cap it: past the ceiling, no legitimate single SSE
@@ -495,8 +653,11 @@ async fn stream_sse(resp: reqwest::Response, out: &Out) -> Result<()> {
             );
         }
     }
-    if !buf.is_empty() {
-        emit_sse_event(&buf, out);
+    if !buf.is_empty()
+        && let Some(parsed) = emit_sse_event(&buf, out)
+        && learn_tools
+    {
+        record_tool_params(&mut *state.session.lock().await, &parsed);
     }
     Ok(())
 }
@@ -518,7 +679,7 @@ fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-fn emit_sse_event(raw: &[u8], out: &Out) {
+fn emit_sse_event(raw: &[u8], out: &Out) -> Option<JsonValue> {
     let text = String::from_utf8_lossy(raw);
     let data_lines: Vec<&str> = text
         .lines()
@@ -526,22 +687,25 @@ fn emit_sse_event(raw: &[u8], out: &Out) {
         .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
         .collect();
     if data_lines.is_empty() {
-        return;
+        return None;
     }
-    emit_json_line(&data_lines.join("\n"), out);
+    emit_json_line(&data_lines.join("\n"), out)
 }
 
 /// Write one JSON-RPC message as a single stdout line. Payloads are compacted
 /// through serde so an upstream message containing raw newlines can't corrupt
 /// the newline-delimited stdio framing.
-fn emit_json_line(payload: &str, out: &Out) {
+fn emit_json_line(payload: &str, out: &Out) -> Option<JsonValue> {
     if payload.is_empty() {
-        return;
+        return None;
     }
-    let line = serde_json::from_str::<JsonValue>(payload)
+    let parsed = serde_json::from_str::<JsonValue>(payload).ok();
+    let line = parsed
+        .as_ref()
         .map(|v| v.to_string())
-        .unwrap_or_else(|_| payload.replace(['\n', '\r'], " "));
+        .unwrap_or_else(|| payload.replace(['\n', '\r'], " "));
     let _ = out.send(line);
+    parsed
 }
 
 fn send_error(out: &Out, id: &JsonValue, code: i64, message: &str) {
@@ -764,5 +928,162 @@ mod tests {
             let parsed: JsonValue = serde_json::from_str(line).unwrap();
             assert_eq!(parsed.pointer("/error/code").unwrap(), AUTH_ERROR_CODE);
         }
+    }
+}
+
+#[cfg(test)]
+mod link_context_tests {
+    use super::*;
+
+    fn link() -> LinkContext {
+        LinkContext {
+            project_id: Some("proj-1".into()),
+            environment_id: Some("env-1".into()),
+            service_id: Some("svc-1".into()),
+        }
+    }
+
+    /// What the server reports for a project-scoped tool.
+    fn params_for(tool: &str, declared: &[&str]) -> HashMap<String, HashSet<String>> {
+        let mut m = HashMap::new();
+        m.insert(
+            tool.to_string(),
+            declared.iter().map(|s| s.to_string()).collect(),
+        );
+        m
+    }
+
+    fn call(tool: &str, arguments: JsonValue) -> JsonValue {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments },
+        })
+    }
+
+    #[test]
+    fn fills_the_context_a_tool_declares_but_the_caller_omitted() {
+        // The gap this closes: ~44% of successful local MCP calls pass no
+        // projectId and rely on `railway link`, which the remote server cannot
+        // see.
+        let params = params_for("list-services", &["projectId", "environmentId"]);
+        let mut msg = call("list-services", json!({}));
+
+        inject_link_context(&link(), &params, &mut msg);
+
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "proj-1"
+        );
+        assert_eq!(
+            msg.pointer("/params/arguments/environmentId").unwrap(),
+            "env-1"
+        );
+        // Not declared by this tool, so not invented.
+        assert!(msg.pointer("/params/arguments/serviceId").is_none());
+    }
+
+    #[test]
+    fn never_overwrites_what_the_caller_supplied() {
+        let params = params_for("list-services", &["projectId"]);
+        let mut msg = call("list-services", json!({ "projectId": "explicit" }));
+
+        inject_link_context(&link(), &params, &mut msg);
+
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "explicit"
+        );
+    }
+
+    #[test]
+    fn leaves_tools_that_declare_no_context_alone() {
+        let params = params_for("search-docs", &["query"]);
+        let mut msg = call("search-docs", json!({ "query": "volumes" }));
+
+        inject_link_context(&link(), &params, &mut msg);
+
+        assert_eq!(
+            msg.pointer("/params/arguments").unwrap(),
+            &json!({ "query": "volumes" })
+        );
+    }
+
+    #[test]
+    fn does_nothing_before_tools_list_has_been_seen() {
+        // An unknown tool means no schema yet; guessing could send a parameter
+        // the tool does not accept.
+        let mut msg = call("list-services", json!({}));
+
+        inject_link_context(&link(), &HashMap::new(), &mut msg);
+
+        assert_eq!(msg.pointer("/params/arguments").unwrap(), &json!({}));
+    }
+
+    #[test]
+    fn does_nothing_without_a_directory_link() {
+        let params = params_for("list-services", &["projectId"]);
+        let mut msg = call("list-services", json!({}));
+
+        inject_link_context(&LinkContext::default(), &params, &mut msg);
+
+        assert_eq!(msg.pointer("/params/arguments").unwrap(), &json!({}));
+    }
+
+    #[test]
+    fn creates_the_arguments_object_when_the_caller_sent_none() {
+        let params = params_for("list-services", &["projectId"]);
+        let mut msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list-services" },
+        });
+
+        inject_link_context(&link(), &params, &mut msg);
+
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "proj-1"
+        );
+    }
+
+    #[test]
+    fn ignores_messages_that_are_not_tool_calls() {
+        let params = params_for("list-services", &["projectId"]);
+        let mut msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+
+        inject_link_context(&link(), &params, &mut msg);
+
+        assert!(msg.pointer("/params").is_none());
+    }
+
+    #[test]
+    fn learns_declared_parameters_from_a_tools_list_result() {
+        let mut session = SessionMeta::default();
+        record_tool_params(
+            &mut session,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "tools": [
+                    { "name": "list-services", "inputSchema": { "properties": {
+                        "projectId": {}, "environmentId": {}
+                    }}},
+                    { "name": "whoami", "inputSchema": { "properties": {} } }
+                ]}
+            }),
+        );
+
+        assert!(session.tool_params["list-services"].contains("projectId"));
+        assert!(session.tool_params["whoami"].is_empty());
+    }
+
+    #[test]
+    fn ignores_results_that_are_not_tool_listings() {
+        let mut session = SessionMeta::default();
+        record_tool_params(&mut session, &json!({ "result": { "content": [] } }));
+        assert!(session.tool_params.is_empty());
     }
 }
