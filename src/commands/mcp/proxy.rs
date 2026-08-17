@@ -75,12 +75,20 @@ struct SessionMeta {
     tool_params: HashMap<String, HashSet<String>>,
 }
 
-/// The project/environment/service the working directory is linked to.
+/// The project/environment/service this invocation targets.
 ///
 /// The local MCP server resolves these from `railway link`; the remote server
 /// is a different machine and never can. Roughly 44% of successful local tool
 /// calls pass no projectId and rely on exactly this, so without it the remote
 /// path is not a drop-in replacement.
+///
+/// Covers the two sources `get_linked_project` resolves without I/O — the
+/// RAILWAY_PROJECT_ID/ENVIRONMENT_ID/SERVICE_ID env vars and the directory
+/// link. Deliberately NOT covered: resolving a project from a RAILWAY_TOKEN,
+/// which costs a GraphQL round trip. Doing that here would put a network call
+/// (and a 15s connect timeout on a bad one) in front of proxy startup, which
+/// the harness is waiting on. Project-token users without a directory link or
+/// env vars get no injection and must pass ids explicitly.
 #[derive(Clone, Default)]
 struct LinkContext {
     project_id: Option<String>,
@@ -216,13 +224,34 @@ fn method_of(msg: &JsonValue) -> Option<&str> {
 /// surfaces resolve the same project. Absent link (or an unreadable config) is
 /// normal — injection simply does nothing.
 fn read_link_context(configs: &Configs) -> LinkContext {
-    let Ok(linked) = configs.get_local_linked_project() else {
-        return LinkContext::default();
-    };
+    let linked = configs.get_local_linked_project().ok();
+
+    // Env-var targeting wins over the directory link, matching
+    // `get_linked_project`. Mixing the two would silently pair project A with
+    // project B's environment, so an explicit RAILWAY_PROJECT_ID discards the
+    // directory link unless both name the same project.
+    let env_project = Configs::get_railway_project_id().filter(|s| !s.is_empty());
+    let linked_for_env = linked
+        .as_ref()
+        .filter(|p| env_project.as_ref().is_none_or(|id| &p.project == id));
+
+    let project_id = env_project
+        .clone()
+        .or_else(|| linked.as_ref().map(|p| p.project.clone()))
+        .filter(|s| !s.is_empty());
+
+    let environment_id = Configs::get_railway_environment_id()
+        .or_else(|| linked_for_env.and_then(|p| p.environment.clone()))
+        .filter(|s| !s.is_empty());
+
+    let service_id = Configs::get_railway_service_id()
+        .or_else(|| linked_for_env.and_then(|p| p.service.clone()))
+        .filter(|s| !s.is_empty());
+
     LinkContext {
-        project_id: Some(linked.project.clone()).filter(|s| !s.is_empty()),
-        environment_id: linked.environment.clone().filter(|s| !s.is_empty()),
-        service_id: linked.service.clone().filter(|s| !s.is_empty()),
+        project_id,
+        environment_id,
+        service_id,
     }
 }
 
@@ -1078,6 +1107,99 @@ mod link_context_tests {
 
         assert!(session.tool_params["list-services"].contains("projectId"));
         assert!(session.tool_params["whoami"].is_empty());
+    }
+
+    /// Serialized: these mutate process env, which is global.
+    #[test]
+    fn env_var_targeting_overrides_and_does_not_mix_with_a_stale_link() {
+        use std::sync::Mutex as StdMutex;
+        static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // RAILWAY_PROJECT_ID naming a different project than the directory
+        // link must not inherit that link's environment — pairing project A
+        // with project B's environment is exactly the silent-wrong-target bug
+        // injection is supposed to avoid.
+        let linked = LinkContext {
+            project_id: Some("proj-from-dir".into()),
+            environment_id: Some("env-from-dir".into()),
+            service_id: Some("svc-from-dir".into()),
+        };
+        assert_eq!(linked.value_for("projectId"), Some("proj-from-dir"));
+        assert_eq!(linked.value_for("unknownParam"), None);
+    }
+
+    #[test]
+    fn does_not_inject_into_a_jsonrpc_batch() {
+        // Known, deliberate gap: method_of() sees no method on a top-level
+        // array, so a batched tools/call is forwarded untouched. Fail-closed
+        // is the right side to err on, and batches are vanishingly rare.
+        let params = params_for("list-services", &["projectId"]);
+        let mut msg = json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": { "name": "list-services", "arguments": {} } }
+        ]);
+
+        inject_link_context(&link(), &params, &mut msg);
+
+        assert_eq!(msg.pointer("/0/params/arguments").unwrap(), &json!({}));
+    }
+
+    #[test]
+    fn survives_malformed_params_and_arguments() {
+        let params = params_for("list-services", &["projectId"]);
+
+        // params is not an object
+        let mut a = json!({ "method": "tools/call", "params": "nope" });
+        inject_link_context(&link(), &params, &mut a);
+        assert_eq!(a.pointer("/params").unwrap(), "nope");
+
+        // arguments is an array rather than an object
+        let mut b = json!({
+            "method": "tools/call",
+            "params": { "name": "list-services", "arguments": [1, 2] }
+        });
+        inject_link_context(&link(), &params, &mut b);
+        assert_eq!(b.pointer("/params/arguments").unwrap(), &json!([1, 2]));
+
+        // no tool name at all
+        let mut c = json!({ "method": "tools/call", "params": { "arguments": {} } });
+        inject_link_context(&link(), &params, &mut c);
+        assert_eq!(c.pointer("/params/arguments").unwrap(), &json!({}));
+    }
+
+    #[test]
+    fn treats_an_explicit_null_as_absent() {
+        let params = params_for("list-services", &["projectId"]);
+        let mut msg = call("list-services", json!({ "projectId": null }));
+
+        inject_link_context(&link(), &params, &mut msg);
+
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "proj-1"
+        );
+    }
+
+    #[test]
+    fn injects_only_what_the_link_actually_has() {
+        // A directory can be linked to a project without an environment.
+        let partial = LinkContext {
+            project_id: Some("proj-1".into()),
+            environment_id: None,
+            service_id: None,
+        };
+        let params = params_for("list-services", &["projectId", "environmentId"]);
+        let mut msg = call("list-services", json!({}));
+
+        inject_link_context(&partial, &params, &mut msg);
+
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "proj-1"
+        );
+        // Left for the server to default rather than invented here.
+        assert!(msg.pointer("/params/arguments/environmentId").is_none());
     }
 
     #[test]
