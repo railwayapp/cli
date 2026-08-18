@@ -260,6 +260,19 @@ fn render_block(
     alias: &str,
     identity_file: Option<&Path>,
 ) -> Result<String> {
+    // Fail closed: never serialize a server-returned name that isn't a safe
+    // single token into ssh config. Backboard validates this at create, but the
+    // sink is here, so we re-check to cover a legacy agent named before that
+    // shipped, or a server regression. We refuse rather than sanitize because
+    // the relay resolves the agent by this exact name.
+    if !ssh_config::is_valid_agent_name(agent_name) {
+        bail!(
+            "Refusing to write an SSH config for agent {agent_name:?}: its name is not a safe \
+             single token (letters, digits, and '.', '_' or '-', starting with a letter or \
+             digit). An agent created before name validation shipped can have such a name; \
+             recreate it with a valid name and re-run."
+        );
+    }
     let known_hosts = code::relay_known_hosts()?;
     Ok(ssh_config::render_agent_config_block(
         &ssh_config::AgentBlock {
@@ -652,6 +665,23 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn render_block_refuses_an_unsafe_agent_name() {
+        // A newline in the server-returned name would otherwise become its own
+        // ssh directive; render_block must fail closed rather than emit it.
+        let err = render_block(
+            "bbp\n    ProxyCommand /bin/sh -c 'id'",
+            "env-1",
+            "railway-agent-bbp",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not a safe single token"),
+            "unexpected error: {err}"
         );
     }
 
