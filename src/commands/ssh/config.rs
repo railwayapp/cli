@@ -331,6 +331,28 @@ pub(crate) fn agent_alias(agent_name: &str) -> String {
     format!("railway-agent-{}", sanitize_alias(agent_name))
 }
 
+/// The strict single-token grammar backboard enforces on a coding-agent name at
+/// create: `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`. `railway ca desktop` renders the
+/// server-returned name verbatim into an OpenSSH `User` line, so a name outside
+/// this grammar — a legacy agent created before that server validation shipped,
+/// or a regressed/compromised server — could smuggle in an ssh directive (a
+/// newline becomes its own `ProxyCommand`, executed locally). Callers validate
+/// before writing and fail closed rather than emit it. We deliberately do not
+/// sanitize the name here: the relay resolves the agent by this exact name, so
+/// altering it would break resolution or, worse, resolve a different agent.
+pub(crate) fn is_valid_agent_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return false;
+    }
+    if !bytes[0].is_ascii_alphanumeric() {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 /// Render `block` as an OpenSSH `Host` stanza for a cloud agent.
 ///
 /// The relay resolves the agent by name (see `parseCloudAgentTarget` in
@@ -727,6 +749,43 @@ mod tests {
         assert_eq!(sanitize_alias("API Service"), "api-service");
         assert_eq!(sanitize_alias("railway.API_01"), "railway.api_01");
         assert_eq!(sanitize_alias("!!!"), "service");
+    }
+
+    #[test]
+    fn accepts_safe_agent_names() {
+        for name in [
+            "a",
+            "steadfast-wisdom", // the server-generated default shape
+            "bbp-agent",
+            "My.Agent_01",
+            "0",
+            &"a".repeat(63), // max length
+        ] {
+            assert!(is_valid_agent_name(name), "should accept {name:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_agent_names() {
+        for name in [
+            "",                                      // empty
+            " ",                                     // whitespace only
+            "has space",                             // space
+            "bbp\n    ProxyCommand /bin/sh -c 'id'", // newline → ssh directive
+            "carriage\rreturn",                      // CR
+            "tab\there",                             // tab
+            "trailing\n",                            // trailing newline
+            "null\0byte",                            // NUL
+            "colon:inside",                          // colon (User value is colon-delimited)
+            "slash/inside",
+            "-leading-hyphen",
+            ".leading-dot",
+            "_leading-underscore",
+            "café",          // non-ASCII
+            &"a".repeat(64), // one over the limit
+        ] {
+            assert!(!is_valid_agent_name(name), "should reject {name:?}");
+        }
     }
 
     /// The block a desktop app reads. Asserted whole, because every line of it
