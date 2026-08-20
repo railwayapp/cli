@@ -489,6 +489,7 @@ async fn main() -> Result<()> {
     }
 
     util::agent_advisory::maybe_show(&raw_args, subcommand_name.as_deref()).await;
+    util::cac_deprecation::maybe_warn(&raw_args, subcommand_name.as_deref());
 
     handle_update_task(check_updates_handle).await;
 
