@@ -106,7 +106,7 @@ pub fn maybe_warn(raw_args: &[String], command: Option<&str>) {
     if reporter::mode() == reporter::OutputMode::Human {
         eprintln!(
             "  {}",
-            "Existing files keep working until a published hard cutoff."
+            "Existing files keep working until 2026-12-01."
                 .dimmed()
         );
     }
