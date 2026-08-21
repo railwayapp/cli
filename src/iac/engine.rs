@@ -44,13 +44,71 @@ struct NameNode {
 }
 
 #[derive(Debug, Deserialize)]
-struct EdgesQuery<T> {
-    project: Option<Connection<T>>,
+struct ProjectServicesQuery {
+    project: Option<ProjectServices>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectServices {
+    #[serde(default)]
+    services: Connection<Named>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectVolumesQuery {
+    project: Option<ProjectVolumes>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectVolumes {
+    #[serde(default)]
+    volumes: Connection<Named>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectBucketsQuery {
+    project: Option<ProjectBuckets>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectBuckets {
+    #[serde(default)]
+    buckets: Connection<Named>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Connection<T> {
     edges: Vec<Edge<T>>,
+}
+
+impl<T> Default for Connection<T> {
+    fn default() -> Self {
+        Self { edges: Vec::new() }
+    }
+}
+
+impl Default for ProjectServices {
+    fn default() -> Self {
+        Self {
+            services: Connection::default(),
+        }
+    }
+}
+
+impl Default for ProjectVolumes {
+    fn default() -> Self {
+        Self {
+            volumes: Connection::default(),
+        }
+    }
+}
+
+impl Default for ProjectBuckets {
+    fn default() -> Self {
+        Self {
+            buckets: Connection::default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,7 +179,7 @@ pub async fn run(
     }
     let current_graph = environment_config_to_graph(&current.config, &options);
     let owners = parse_owners(current.iac_partials.as_ref());
-    let change_set = diff_graphs(DiffOptions {
+    let mut change_set = diff_graphs(DiffOptions {
         current: &current_graph,
         desired: &evaluated.graph,
         reveal_values: args.show_values,
@@ -139,6 +197,25 @@ pub async fn run(
     let ok = all_diagnostics
         .iter()
         .all(|d| d.get("severity").and_then(Value::as_str) != Some("error"));
+
+    // Environment config reads mask variable values unless decryption was
+    // requested, so the local diff can report phantom variable updates (the
+    // current value looks like preserve()). Backboard's preview compares the
+    // change set against decrypted state server-side and drops those no-ops;
+    // plan/apply must use the previewed changes or variables never converge.
+    let mut preview = None;
+    if ok && !change_set.changes.is_empty() {
+        let previewed = preview_change_set(&client, &endpoint, &current.id, &change_set).await?;
+        if let Some(changes) = previewed
+            .get("changeSet")
+            .and_then(|set| set.get("changes"))
+            .and_then(Value::as_array)
+        {
+            change_set.changes = changes.clone();
+        }
+        preview = Some(previewed);
+    }
+
     let claim = needs_partial_claim_apply(
         &change_set.declared,
         owners.as_ref(),
@@ -177,6 +254,7 @@ pub async fn run(
         desired_graph: Some(evaluated.graph),
         apply_result,
         claim,
+        preview,
     })?;
     Ok(serialized)
 }
@@ -195,6 +273,8 @@ struct RunnerWire {
     desired_graph: Option<super::graph::RailwayGraph>,
     apply_result: Option<Value>,
     claim: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<Value>,
 }
 
 async fn fetch_current_environment(
@@ -252,54 +332,67 @@ async fn fill_name_maps(
             options.project_name = Some(name);
         }
     }
-    if let Ok(data) = post_graphql_raw::<EdgesQuery<Named>, _>(
+    let services = post_graphql_raw::<ProjectServicesQuery, _>(
         client,
         endpoint,
         "query IacProjectServices($projectId: String!) { project(id: $projectId) { services(first: 1000) { edges { node { id name } } } } }",
         json!({ "projectId": project_id }),
     )
     .await
-    {
-        for edge in data.project.unwrap_or(Connection { edges: vec![] }).edges {
-            if let Some(name) = edge.node.name {
-                options.service_names_by_id.insert(edge.node.id, json!(name));
-            }
+    .context("Failed to load project services for IaC name maps")?;
+    for edge in services.project.unwrap_or_default().services.edges {
+        if let Some(name) = edge.node.name {
+            options
+                .service_names_by_id
+                .insert(edge.node.id, json!(name));
         }
     }
-    if let Ok(data) = post_graphql_raw::<EdgesQuery<Named>, _>(
+
+    let volumes = post_graphql_raw::<ProjectVolumesQuery, _>(
         client,
         endpoint,
         "query IacProjectVolumes($projectId: String!) { project(id: $projectId) { volumes(first: 1000) { edges { node { id name } } } } }",
         json!({ "projectId": project_id }),
     )
     .await
-    {
-        for edge in data.project.unwrap_or(Connection { edges: vec![] }).edges {
-            if let Some(name) = edge.node.name {
-                options.volume_names_by_id.insert(edge.node.id.clone(), json!(name));
-            }
-            if let Some(refs) = current.canvas_group_refs.as_ref().and_then(Value::as_object) {
-                if let Some(group_id) = refs.get(&edge.node.id) {
-                    options.volume_group_ids_by_id.insert(edge.node.id, group_id.clone());
-                }
+    .context("Failed to load project volumes for IaC name maps")?;
+    for edge in volumes.project.unwrap_or_default().volumes.edges {
+        if let Some(name) = edge.node.name {
+            options
+                .volume_names_by_id
+                .insert(edge.node.id.clone(), json!(name));
+        }
+        if let Some(refs) = current
+            .canvas_group_refs
+            .as_ref()
+            .and_then(Value::as_object)
+        {
+            if let Some(group_id) = refs.get(&edge.node.id) {
+                options
+                    .volume_group_ids_by_id
+                    .insert(edge.node.id, group_id.clone());
             }
         }
     }
-    if let Ok(data) = post_graphql_raw::<EdgesQuery<Named>, _>(
+
+    let buckets = post_graphql_raw::<ProjectBucketsQuery, _>(
         client,
         endpoint,
         "query IacProjectBuckets($projectId: String!) { project(id: $projectId) { buckets(first: 1000) { edges { node { id name groupId } } } } }",
         json!({ "projectId": project_id }),
     )
     .await
-    {
-        for edge in data.project.unwrap_or(Connection { edges: vec![] }).edges {
-            if let Some(name) = edge.node.name {
-                options.bucket_names_by_id.insert(edge.node.id.clone(), json!(name));
-            }
-            if let Some(group_id) = edge.node.group_id {
-                options.bucket_group_ids_by_id.insert(edge.node.id, json!(group_id));
-            }
+    .context("Failed to load project buckets for IaC name maps")?;
+    for edge in buckets.project.unwrap_or_default().buckets.edges {
+        if let Some(name) = edge.node.name {
+            options
+                .bucket_names_by_id
+                .insert(edge.node.id.clone(), json!(name));
+        }
+        if let Some(group_id) = edge.node.group_id {
+            options
+                .bucket_group_ids_by_id
+                .insert(edge.node.id, json!(group_id));
         }
     }
     let _ = environment_id;
@@ -334,6 +427,35 @@ fn parse_owners(value: Option<&Value>) -> Option<super::partial::IacPartials> {
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+async fn preview_change_set(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    change_set: &super::change_set::ChangeSet,
+) -> Result<Value> {
+    let mutation = r#"
+      mutation IacPreviewChangeSet($environmentId: String!, $input: JSON!) {
+        environmentPreviewChangeSet(environmentId: $environmentId, input: $input) {
+          changeSet diagnostics effects
+        }
+      }
+    "#;
+    #[derive(Deserialize)]
+    struct PreviewQuery {
+        #[serde(rename = "environmentPreviewChangeSet")]
+        result: Value,
+    }
+    let data = post_graphql_raw::<PreviewQuery, _>(
+        client,
+        endpoint,
+        mutation,
+        json!({ "environmentId": environment_id, "input": change_set }),
+    )
+    .await
+    .context("Failed to preview change set")?;
+    Ok(data.result)
 }
 
 async fn apply_change_set(
@@ -413,4 +535,77 @@ async fn wait_for_apply(
         sleep(Duration::from_secs(1)).await;
     }
     bail!("Timed out waiting for Railway ChangeSet apply {id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_services_query_reads_nested_connection() {
+        let data: ProjectServicesQuery = serde_json::from_value(json!({
+            "project": {
+                "services": {
+                    "edges": [
+                        { "node": { "id": "svc-1", "name": "eu-api" } }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let edges = data.project.unwrap().services.edges;
+        assert_eq!(edges[0].node.id, "svc-1");
+        assert_eq!(edges[0].node.name.as_deref(), Some("eu-api"));
+    }
+
+    #[test]
+    fn project_volumes_and_buckets_query_read_nested_connections() {
+        let volumes: ProjectVolumesQuery = serde_json::from_value(json!({
+            "project": {
+                "volumes": { "edges": [{ "node": { "id": "vol-1", "name": "data" } }] }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            volumes.project.unwrap().volumes.edges[0]
+                .node
+                .name
+                .as_deref(),
+            Some("data")
+        );
+
+        let buckets: ProjectBucketsQuery = serde_json::from_value(json!({
+            "project": {
+                "buckets": {
+                    "edges": [{ "node": { "id": "bkt-1", "name": "uploads", "groupId": "grp-1" } }]
+                }
+            }
+        }))
+        .unwrap();
+        let node = &buckets.project.unwrap().buckets.edges[0].node;
+        assert_eq!(node.name.as_deref(), Some("uploads"));
+        assert_eq!(node.group_id.as_deref(), Some("grp-1"));
+    }
+
+    #[test]
+    fn leftover_edges_query_shape_cannot_read_services() {
+        // The previous deserializer expected { project: { edges } }. The API
+        // returns { project: { services: { edges } } }, so that shape dropped
+        // every name map and plan treated live services as UUID deletes.
+        #[derive(Deserialize)]
+        struct Broken {
+            project: Option<Connection<Named>>,
+        }
+        let broken = serde_json::from_value::<Broken>(json!({
+            "project": {
+                "services": {
+                    "edges": [{ "node": { "id": "svc-1", "name": "eu-api" } }]
+                }
+            }
+        }));
+        assert!(
+            broken.is_err(),
+            "the live GraphQL payload is not {{ project: {{ edges }} }}"
+        );
+    }
 }
