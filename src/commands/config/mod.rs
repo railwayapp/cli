@@ -1,3 +1,4 @@
+mod migrate;
 mod runner;
 
 use std::{
@@ -40,6 +41,9 @@ enum Command {
 
     /// Import the linked Railway project's current configuration into .railway/railway.ts
     Pull(PullArgs),
+
+    /// Translate railway.json / railway.toml into .railway/railway.ts
+    Migrate(migrate::MigrateArgs),
 }
 
 #[derive(Parser, Clone)]
@@ -171,6 +175,7 @@ pub async fn command(args: Args) -> Result<()> {
         }
         Command::Init(args) => init_config(args).await,
         Command::Pull(args) => pull_config(args).await,
+        Command::Migrate(args) => migrate::migrate_config(args).await,
     }
 }
 
@@ -1510,7 +1515,18 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
-    if find_railway_file(&cwd).is_some() {
+    let found = find_railway_files(&cwd);
+    if found.len() > 1 {
+        bail!(
+            "Multiple Railway configuration files found ({}). Keep only one of .railway/railway.{{ts,py,go}}.",
+            found
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !found.is_empty() {
         return Ok(());
     }
     let railway_file = cwd.join(".railway").join("railway.ts");
@@ -1543,19 +1559,35 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
 }
 
 fn find_railway_file(start: &Path) -> Option<PathBuf> {
+    find_railway_files(start).into_iter().next()
+}
+
+/// Discover IaC authoring files (`.ts` / `.py` / `.go`). Prefer a single file;
+/// when multiple exist, callers should error.
+fn find_railway_files(start: &Path) -> Vec<PathBuf> {
+    const NAMES: &[&str] = &["railway.ts", "railway.py", "railway.go"];
     for directory in start.ancestors() {
-        if directory.file_name().and_then(|name| name.to_str()) == Some(".railway") {
-            let direct = directory.join("railway.ts");
-            if direct.is_file() {
-                return Some(direct);
+        let mut found = Vec::new();
+        let railway_dir =
+            if directory.file_name().and_then(|name| name.to_str()) == Some(".railway") {
+                directory.to_path_buf()
+            } else {
+                directory.join(".railway")
+            };
+        if !railway_dir.is_dir() {
+            continue;
+        }
+        for name in NAMES {
+            let candidate = railway_dir.join(name);
+            if candidate.is_file() {
+                found.push(candidate);
             }
         }
-        let nested = directory.join(".railway").join("railway.ts");
-        if nested.is_file() {
-            return Some(nested);
+        if !found.is_empty() {
+            return found;
         }
     }
-    None
+    Vec::new()
 }
 
 #[cfg(test)]
