@@ -2269,30 +2269,12 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     );
 
     let progress = CliProgress::default();
-    // The flag check used to run to completion before prepare started — a
-    // serialized round-trip on every launch whose answer is almost always yes.
-    // Racing them keeps the fail-fast (an un-flagged user is stopped the
-    // moment the check answers, before any mint or create finishes) without
-    // making everyone else wait for it. If prepare somehow finishes first, the
-    // gate is still enforced before anything runs.
-    let ensure_fut = async {
-        let configs = Configs::new()?;
-        let client = GQLClient::new_authorized(&configs)?;
-        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await
-    };
-    let prepare_fut = prepare(&args, &progress, SessionStyle::FullTerminal);
-    tokio::pin!(ensure_fut);
-    tokio::pin!(prepare_fut);
-    let prepared = tokio::select! {
-        enabled = &mut ensure_fut => {
-            enabled?;
-            prepare_fut.await?
-        }
-        prepared = &mut prepare_fut => {
-            ensure_fut.await?;
-            prepared?
-        }
-    };
+    // TESTING: the ensure_enabled feature-flag pre-check is removed entirely
+    // for latency measurement. The create/wake mutations still refuse without
+    // the flag server-side — an un-flagged user gets that refusal instead of
+    // the friendlier pre-check message. Restore (as a select! race against
+    // prepare, not a serialized round-trip) before shipping.
+    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
     progress.finish();
 
     println!("Launching {}…", prepared.harness);
