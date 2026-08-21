@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::error::ErrorKind;
 
 mod commands;
+mod iac;
 use commands::*;
 use config::Configs;
 use errors::RailwayError;

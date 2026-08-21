@@ -47,7 +47,8 @@ pub struct Args {
     #[clap(long)]
     pub(super) include_types: bool,
 
-    /// Path to the TypeScript IaC runner binary. Defaults to RAILWAY_IAC_TS_BIN or railway-iac-ts.
+    /// Path to the TypeScript IaC runner. When set (or RAILWAY_IAC_TS_BIN / RAILWAY_IAC_ENGINE=ts),
+    /// plan/apply use railway-iac-ts. Default is the CLI-native engine.
     #[clap(long)]
     pub(super) runner: Option<String>,
 
@@ -385,6 +386,21 @@ async fn invoke_runner(
     command: &str,
 ) -> Result<RunnerResponse> {
     let cwd_path = env::current_dir().context("Unable to get current working directory")?;
+    if !crate::iac::use_legacy_ts_runner(args.runner.as_deref()) {
+        let value = crate::iac::run_native(
+            &crate::iac::NativeRun {
+                file: args.file.clone(),
+                decrypt_variables: args.decrypt_variables,
+                show_values: args.show_values,
+            },
+            configs,
+            linked_project,
+            command,
+        )
+        .await?;
+        return serde_json::from_value(value)
+            .context("Native IaC engine returned a response the CLI could not parse");
+    }
     let runner = resolve_runner(args.runner.as_deref(), &cwd_path);
 
     let cwd = cwd_path.to_string_lossy().to_string();

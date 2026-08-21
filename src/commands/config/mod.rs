@@ -72,7 +72,7 @@ struct SharedArgs {
     #[clap(long)]
     include_types: bool,
 
-    /// Path to the TypeScript configuration runner. Defaults to RAILWAY_IAC_TS_BIN or railway-iac-ts.
+    /// Optional TypeScript runner binary. When set, plan/apply use railway-iac-ts instead of the CLI engine.
     #[clap(long)]
     runner: Option<String>,
 
@@ -125,7 +125,7 @@ struct PullArgs {
     #[clap(long)]
     json: bool,
 
-    /// Path to the TypeScript configuration runner. Defaults to RAILWAY_IAC_TS_BIN or railway-iac-ts.
+    /// Optional TypeScript runner binary. When set, plan/apply use railway-iac-ts instead of the CLI engine.
     #[clap(long)]
     runner: Option<String>,
 
