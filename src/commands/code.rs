@@ -790,33 +790,39 @@ struct RelaySsh {
     host_pattern: String,
 }
 
-/// The per-launch connection-sharing options — see the [`RelaySsh`] doc for
-/// why only the provision connection may create the master and why probes get
-/// neither option.
-///
-/// Returns `(master_opts, client_opts)`: the provision connection takes
-/// `master_opts` (creates the master, keeps it alive 30s past its own exit);
-/// the session takes `client_opts` (rides the master when it is alive, falls
-/// back to a plain connection when it is not, and never creates one). The
-/// socket lives in the OS temp dir under a pid+random name so a recycled pid
-/// can never collide with a leftover socket from an earlier run.
-fn launch_mux() -> (Vec<String>, Vec<String>) {
-    let socket = std::env::temp_dir().join(format!(
+/// A fresh, never-reused control socket path: OS temp dir, pid + random, so
+/// neither a recycled pid nor two sockets within one launch can collide.
+/// Uniqueness is the safety property the whole mux design leans on — a socket
+/// is only ever ridden by connections that know it was created by a
+/// marker-verified connection to the real agent (see [`RelaySsh`]).
+fn mux_socket() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
         "railway-cm-{}-{:08x}.sock",
         std::process::id(),
         rand::random::<u32>()
-    ));
-    let path = format!("ControlPath={}", socket.display());
-    let master = vec![
+    ))
+}
+
+/// Options for a connection allowed to CREATE the master on `socket`:
+/// a readiness probe (each round gets its own fresh socket; only the round
+/// whose marker round-trips is ever promoted) or the provision connection.
+/// `persist` bounds how long an idle master outlives its last client — probes
+/// use a short one so the losing rounds' masters evaporate.
+fn mux_master_opts(socket: &std::path::Path, persist: &str) -> Vec<String> {
+    vec![
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
-        path.clone(),
+        format!("ControlPath={}", socket.display()),
         "-o".into(),
-        "ControlPersist=30s".into(),
-    ];
-    let client = vec!["-o".into(), path];
-    (master, client)
+        format!("ControlPersist={persist}"),
+    ]
+}
+
+/// Options for a connection that may RIDE the master on `socket` but never
+/// create one: a dead or missing socket falls back to a plain connection.
+fn mux_client_opts(socket: &std::path::Path) -> Vec<String> {
+    vec!["-o".into(), format!("ControlPath={}", socket.display())]
 }
 
 /// The known-hosts file the CLI keeps for the relay.
@@ -1588,13 +1594,18 @@ pub(crate) async fn relay_access() -> Result<RelayAccess> {
     })
 }
 
+/// On success, also returns the control socket of the winning probe's master
+/// when there was one: that probe verified the marker round-trip, so its
+/// connection provably reached the real agent, and the provision + session can
+/// multiplex over it instead of paying a fresh relay handshake. `None` when
+/// the status flip won the race (no verified connection exists yet).
 pub(crate) async fn wait_until_connectable(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
     id: &str,
     access: &RelayAccess,
-) -> Result<CodeAgent> {
+) -> Result<(CodeAgent, Option<std::path::PathBuf>)> {
     use queries::cloud_agent::CloudAgentStatus as S;
     // Measured as one stage because this is the leg the platform owns — VM
     // boot/restore up to a routable SSH target. Per-round detail goes to stderr
@@ -1612,9 +1623,17 @@ pub(crate) async fn wait_until_connectable(
         // catch terminal states. Running them together instead of fetch-then-
         // probe stops a serialized GraphQL round-trip from pushing the
         // discovering probe later every round.
+        //
+        // Every round probes as a would-be master on its own FRESH socket. A
+        // round that lands on the relay's dev.new fall-through (agent not yet
+        // routable) leaves a master nothing will ever reference — the socket
+        // name is never reused, and only the round whose marker comes back is
+        // promoted. Short persist so the losers evaporate.
+        let socket = mux_socket();
         let target = ssh_target.clone();
         let identity = access.identity.clone();
-        let opts = access.relay_opts.clone();
+        let mut opts = access.relay_opts.clone();
+        opts.extend(mux_master_opts(&socket, "10s"));
         let probe = tokio::task::spawn_blocking(move || {
             probe_native_ssh(&target, identity.as_deref(), &opts)
         });
@@ -1630,11 +1649,16 @@ pub(crate) async fn wait_until_connectable(
                 round_started.elapsed().as_millis()
             );
         }
-        // RUNNING routes by definition, so a probe that lost a race to the
-        // status flip doesn't cost another round.
-        if routed || agent.status == S::RUNNING {
+        if routed {
             ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
-            return Ok(agent);
+            return Ok((agent, Some(socket)));
+        }
+        // RUNNING routes by definition, so a probe that lost a race to the
+        // status flip doesn't cost another round — but there is no verified
+        // connection to promote.
+        if agent.status == S::RUNNING {
+            ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+            return Ok((agent, None));
         }
         match agent.status {
             S::RUNNING | S::STARTING | S::SLEEPING => {}
@@ -1658,11 +1682,17 @@ pub(crate) async fn wait_until_connectable(
                 agent.status
             );
         }
-        // Pace rounds to ~750ms of cadence rather than 750ms of added sleep: a
-        // probe that already took that long IS the pacing, and sleeping on top
-        // of it only delays noticing a box that came up mid-probe.
-        const CADENCE: std::time::Duration = std::time::Duration::from_millis(750);
-        if let Some(rest) = CADENCE.checked_sub(round_started.elapsed()) {
+        // Pace rounds to a cadence rather than sleeping on top of the probe: a
+        // probe that already took that long IS the pacing. The cadence is
+        // tight while the box is likely to come up (a fresh VM boots in
+        // ~750ms, and a 750ms grid quantizes its discovery a full round late)
+        // and relaxes once the wait has clearly become a boot-tail wait.
+        let cadence = if wait_started.elapsed() < std::time::Duration::from_secs(4) {
+            std::time::Duration::from_millis(250)
+        } else {
+            std::time::Duration::from_millis(750)
+        };
+        if let Some(rest) = cadence.checked_sub(round_started.elapsed()) {
             tokio::time::sleep(rest).await;
         }
     }
@@ -1678,7 +1708,7 @@ async fn ready_existing_agent(
     agent: CodeAgent,
     progress: &dyn Progress,
     access: &RelayAccess,
-) -> Result<Option<CodeAgent>> {
+) -> Result<Option<(CodeAgent, Option<std::path::PathBuf>)>> {
     use queries::cloud_agent::CloudAgentStatus as S;
 
     match agent.status {
@@ -1687,7 +1717,7 @@ async fn ready_existing_agent(
                 "Using agent {} (--new for a fresh one)",
                 agent.name
             ));
-            Ok(Some(agent))
+            Ok(Some((agent, None)))
         }
         // STARTING means a previous run is still booting it, so a re-run seconds
         // after a ctrl-c waits rather than minting a duplicate. SLEEPING is the
@@ -1709,14 +1739,14 @@ async fn ready_existing_agent(
                     return Err(e.into());
                 }
             }
-            let running =
+            let (running, probe_master) =
                 wait_until_connectable(client, backboard, environment_id, &agent.id, access)
                     .await?;
             progress.note(&format!(
                 "Woke agent {} — your work is on its disk",
                 running.name
             ));
-            Ok(Some(running))
+            Ok(Some((running, probe_master)))
         }
         S::CRASHED | S::FAILED | S::DELETING | S::Other(_) => {
             progress.note(&format!(
@@ -1854,6 +1884,17 @@ async fn resolve_target(
         // Either flag means the caller is targeting deliberately; hand both to
         // the shared resolver so `-p` alone still finds an environment.
         TargetSource::Flags => {
+            // Two UUIDs need no resolving — the TUI retargets launches with
+            // ids it already resolved, and the shared resolver was spending a
+            // round-trip re-answering a known question on every TUI launch.
+            // Trusting them is safe: the create/wake mutations validate the
+            // environment (and the caller's access to it) authoritatively.
+            if let (Some(project), Some(environment)) = (&args.project, &args.environment)
+                && is_uuid(project)
+                && is_uuid(environment)
+            {
+                return Ok((project.clone(), environment.clone()));
+            }
             resolve_project_and_env(
                 configs,
                 client,
@@ -1881,6 +1922,21 @@ async fn resolve_target(
         }
         TargetSource::Ask => resolve_project_and_env(configs, client, None, None).await,
     }
+}
+
+/// A canonical 8-4-4-4-12 lowercase-or-uppercase hex UUID, the only shape
+/// Railway ids take. Names can't collide with it in practice, and a
+/// pathological UUID-shaped name merely skips a convenience resolution — the
+/// mutation that follows still validates the id.
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, b)| match i {
+        8 | 13 | 18 | 23 => *b == b'-',
+        _ => b.is_ascii_hexdigit(),
+    })
 }
 
 /// Which answer wins, given what is available. Separated from the I/O so the
@@ -1960,7 +2016,7 @@ async fn resolve_agent(
     environment_id: &str,
     progress: &dyn Progress,
     access: &RelayAccess,
-) -> Result<(CodeAgent, bool)> {
+) -> Result<(CodeAgent, bool, Option<std::path::PathBuf>)> {
     let backboard = configs.get_backboard();
 
     // An explicit agent wins over everything: the caller is looking at the one
@@ -1981,14 +2037,14 @@ async fn resolve_agent(
         None => None,
     };
     if let Some(agent) = existing {
-        if let Some(ready) =
+        if let Some((ready, probe_master)) =
             ready_existing_agent(client, &backboard, environment_id, agent, progress, access)
                 .await?
         {
             warn_ignored_variables(args, progress);
             configs.set_code_agent(environment_id, &ready.id);
             configs.write()?;
-            return Ok((ready, false));
+            return Ok((ready, false, probe_master));
         }
         configs.remove_code_agent(environment_id);
     }
@@ -2023,9 +2079,9 @@ async fn resolve_agent(
     configs.write()?;
 
     match wait_until_connectable(client, &backboard, environment_id, &created.id, access).await {
-        Ok(running) => {
+        Ok((running, probe_master)) => {
             progress.note(&format!("Created agent {}", running.name));
-            Ok((running, true))
+            Ok((running, true, probe_master))
         }
         Err(e) => {
             progress.finish();
@@ -2549,7 +2605,7 @@ async fn prepare_inner(
         relay_opts: relay.opts.clone(),
     };
 
-    let (cloud_agent, created) = ssh_tel::timed_for(
+    let (cloud_agent, created, probe_master) = ssh_tel::timed_for(
         "cloud_agent_launch",
         "resolve_agent",
         resolve_agent(&mut configs, &client, args, &environment_id, progress, &access),
@@ -2618,15 +2674,27 @@ async fn prepare_inner(
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
     progress.step("Finalizing Configuration...");
-    // The provision connection opens the launch-scoped ControlMaster and the
-    // session rides it — one relay handshake instead of two. Only here: the
-    // route is verified by this point, and the AGENT-READY marker below proves
-    // the master reached the real agent (see the RelaySsh doc for why a probe
-    // must never create one).
-    let (mux_master, mux_client) = launch_mux();
+    // One relay handshake per launch: when a readiness probe won the wait, its
+    // marker-verified connection is already a master and both the provision
+    // and the session ride it. When no probe ran (agent already RUNNING, or
+    // the status flip won the race), the provision opens the master instead —
+    // it is equally verified, by the AGENT-READY marker below. See the
+    // RelaySsh doc for why an UNVERIFIED connection must never own one.
+    let (master_socket, mux_provision) = match probe_master {
+        Some(socket) => {
+            let client_opts = mux_client_opts(&socket);
+            (socket, client_opts)
+        }
+        None => {
+            let socket = mux_socket();
+            let master_opts = mux_master_opts(&socket, "30s");
+            (socket, master_opts)
+        }
+    };
+    let mux_client = mux_client_opts(&master_socket);
     let provision_relay = {
         let mut r = relay.clone();
-        r.opts.extend(mux_master);
+        r.opts.extend(mux_provision);
         r
     };
     let provision = async {
