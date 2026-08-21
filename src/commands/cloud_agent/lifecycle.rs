@@ -636,7 +636,7 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     ca::remember(configs, &agent)?;
 
     let connected = if !args.command.is_empty() {
-        telemetry::track_lifecycle("ssh_command", Duration::ZERO, None).await;
+        telemetry::track_lifecycle_detached("ssh_command");
         run_command(&agent, &args.command).await
     } else {
         attach(
@@ -746,7 +746,7 @@ async fn attach(
         }
         None => match running.len() {
             0 => {
-                telemetry::track_lifecycle("ssh_new_session", Duration::ZERO, None).await;
+                telemetry::track_lifecycle_detached("ssh_new_session");
                 return start_session(agent).await;
             }
             1 => running[0].name.clone(),
@@ -759,7 +759,7 @@ async fn attach(
         },
     };
 
-    telemetry::track_lifecycle("ssh_attach", Duration::ZERO, None).await;
+    telemetry::track_lifecycle_detached("ssh_attach");
     println!(
         "{}",
         format!("Attaching to {} · {}", agent.name, session_name).dimmed()

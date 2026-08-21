@@ -2392,13 +2392,28 @@ pub async fn prepare(
     // After the outcome, and detached: the stages are already measured, and
     // reporting them must not extend the launch they describe.
     ssh_tel::flush_stages("cloud_agent_launch");
-    crate::commands::cloud_agent::telemetry::track_launch_outcome(
-        agent.slug(),
-        result.as_ref().ok().map(|p| p.created),
-        start.elapsed(),
-        result.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
-    )
-    .await;
+    match &result {
+        // Detached on success for the same reason as the stage flush: the
+        // outcome event is an HTTP round-trip, and awaiting it sat between
+        // "provisioned" and "session opens" on every launch. The session that
+        // follows gives the send minutes of runway.
+        Ok(prepared) => crate::commands::cloud_agent::telemetry::track_launch_outcome_detached(
+            agent.slug(),
+            Some(prepared.created),
+            start.elapsed(),
+        ),
+        // Still awaited: the process is about to exit with this error, and a
+        // spawned task would be dropped before the failure ever reported.
+        Err(e) => {
+            crate::commands::cloud_agent::telemetry::track_launch_outcome(
+                agent.slug(),
+                None,
+                start.elapsed(),
+                Some(&format!("{e:#}")),
+            )
+            .await
+        }
+    }
     result
 }
 
