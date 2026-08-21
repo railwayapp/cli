@@ -80,6 +80,8 @@ pub(super) struct RunnerResponse {
     apply_result: Option<ChangeSetApplyResult>,
     deployment_id: Option<String>,
     staged_patch_id: Option<String>,
+    #[serde(default)]
+    claim: bool,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -213,7 +215,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
             .as_ref()
             .map(|change_set| change_set.changes.len())
             .unwrap_or(0);
-        if changes == 0 {
+        if changes == 0 && !preview.claim {
             if !args.json {
                 print_response_with_options(&preview, args.verbose);
             }
