@@ -764,19 +764,59 @@ fn remote_command(
 /// routine occurrence — it covers the fleet going back to per-instance keys
 /// without pinning us to a key that would then mismatch constantly.
 ///
-/// Deliberately NOT multiplexed. ControlMaster was here to make one host-key
-/// decision per run when the fleet answered with per-instance keys, which it no
-/// longer does. It also had a failure mode worse than the problem it solved:
-/// sleeping an agent on disconnect kills the master's TCP connection while the
-/// socket file lives on for ControlPersist, so the next run rides a dead master
-/// and dies with exit 255 and no message from either stream — invisible, and
-/// immune to retries because waiting cannot revive it.
+/// These BASE options are deliberately not multiplexed, and readiness probes
+/// must never be: a probe against a not-yet-routable agent still opens a real
+/// connection (the relay falls through to the dev.new control surface instead
+/// of refusing at the transport), so a ControlMaster owned by a failed probe
+/// pins every later channel to that dead path — measured at 8/20 launch
+/// timeouts when tried on 2026-08-18. Cross-RUN persistence is the other
+/// historical trap: sleeping an agent kills the master's TCP while the socket
+/// file lives on, so the next run rides a dead master and dies with a bare
+/// exit 255.
+///
+/// What IS safe — and what [`launch_mux`] provides — is a master scoped to
+/// one launch and opened only by the provision connection, which runs after
+/// the route is verified and whose output markers prove it reached the real
+/// agent. The interactive session then rides that master (one handshake saved,
+/// ~0.35s), and a stale or dead socket falls back to a plain connection
+/// because the session never sets ControlMaster itself. The socket path is
+/// unique per launch, so nothing outlives the run that made it beyond the
+/// 30s ControlPersist grace.
 #[derive(Clone)]
 struct RelaySsh {
     opts: Vec<String>,
     known_hosts: std::path::PathBuf,
     /// known-hosts pattern for ssh-keygen -R: `host` or `[host]:port`.
     host_pattern: String,
+}
+
+/// The per-launch connection-sharing options — see the [`RelaySsh`] doc for
+/// why only the provision connection may create the master and why probes get
+/// neither option.
+///
+/// Returns `(master_opts, client_opts)`: the provision connection takes
+/// `master_opts` (creates the master, keeps it alive 30s past its own exit);
+/// the session takes `client_opts` (rides the master when it is alive, falls
+/// back to a plain connection when it is not, and never creates one). The
+/// socket lives in the OS temp dir under a pid+random name so a recycled pid
+/// can never collide with a leftover socket from an earlier run.
+fn launch_mux() -> (Vec<String>, Vec<String>) {
+    let socket = std::env::temp_dir().join(format!(
+        "railway-cm-{}-{:08x}.sock",
+        std::process::id(),
+        rand::random::<u32>()
+    ));
+    let path = format!("ControlPath={}", socket.display());
+    let master = vec![
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        path.clone(),
+        "-o".into(),
+        "ControlPersist=30s".into(),
+    ];
+    let client = vec!["-o".into(), path];
+    (master, client)
 }
 
 /// The known-hosts file the CLI keeps for the relay.
@@ -2578,10 +2618,21 @@ async fn prepare_inner(
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
     progress.step("Finalizing Configuration...");
+    // The provision connection opens the launch-scoped ControlMaster and the
+    // session rides it — one relay handshake instead of two. Only here: the
+    // route is verified by this point, and the AGENT-READY marker below proves
+    // the master reached the real agent (see the RelaySsh doc for why a probe
+    // must never create one).
+    let (mux_master, mux_client) = launch_mux();
+    let provision_relay = {
+        let mut r = relay.clone();
+        r.opts.extend(mux_master);
+        r
+    };
     let provision = async {
         let target = target.clone();
         let identity = identity.clone();
-        let relay = relay.clone();
+        let relay = provision_relay.clone();
         // Copied out of `args`, which is a borrow the 'static closure can't take.
         let app_mode = args.app_mode;
         let skills_note = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2709,7 +2760,14 @@ async fn prepare_inner(
         remote_cmd,
         ssh_target: target,
         identity,
-        relay_opts: relay.opts,
+        relay_opts: {
+            // The session tries the provision connection's master first and
+            // falls back to a plain connection if it's gone (it never sets
+            // ControlMaster, so it can't create one).
+            let mut opts = relay.opts;
+            opts.extend(mux_client);
+            opts
+        },
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
         environment_id,
