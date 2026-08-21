@@ -32,6 +32,39 @@ pub fn record_stage(stage: &str, duration: Duration, success: bool) {
     record(stage, duration, success);
 }
 
+/// Detached sends in flight, so a process about to exit can give them a
+/// bounded window to finish. Without this, launches that end quickly (the
+/// `railway code -- <cmd>` exec path) dropped their spawned events and the
+/// funnel silently under-counted scripted usage.
+static DETACHED: Mutex<Vec<tokio::task::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Spawn a telemetry send off the caller's path, remembering the handle for
+/// [`drain_detached`]. The spawn itself never blocks anything.
+pub fn spawn_detached(fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    let handle = tokio::spawn(fut);
+    if let Ok(mut detached) = DETACHED.lock() {
+        detached.push(handle);
+    }
+}
+
+/// Give in-flight detached sends up to `limit` to finish — called AFTER the
+/// user's work is done (session ended, command finished), never on the
+/// launch path. Sends that outlast the budget are abandoned, same as before.
+pub async fn drain_detached(limit: Duration) {
+    let handles = match DETACHED.lock() {
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(_) => return,
+    };
+    let deadline = Instant::now() + limit;
+    for handle in handles {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let _ = tokio::time::timeout(remaining, handle).await;
+    }
+}
+
 /// Whether `RAILWAY_STAGE_TIMING` diagnostics are on, for callers that want to
 /// print per-round detail (probe cadence, poll counts) beyond the stage sums.
 pub fn timing_diagnostics() -> bool {
@@ -99,7 +132,7 @@ pub fn flush_stages(command: &'static str) {
         if !s.success {
             continue;
         }
-        tokio::spawn(telemetry::send(CliTrackEvent {
+        spawn_detached(telemetry::send(CliTrackEvent {
             command: command.to_string(),
             sub_command: Some(format!("stage_{}", s.stage)),
             success: true,

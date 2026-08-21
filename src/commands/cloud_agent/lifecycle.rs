@@ -603,6 +603,8 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
                 &agent.environment_id,
                 &agent.id,
                 &access,
+                // Caught mid-boot: it may be routable right now.
+                std::time::Duration::ZERO,
             )
             .await
             .map(|_| ())
@@ -616,6 +618,8 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
                     &agent.environment_id,
                     &agent.id,
                     &access,
+                    // The wake's physical floor; see the wait's doc.
+                    std::time::Duration::from_millis(350),
                 )
                 .await
                 .map(|_| ())
@@ -648,6 +652,10 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
         )
         .await
     };
+
+    // The user's work is done; let detached telemetry finish before the
+    // process exits (bounded — see drain_detached).
+    crate::commands::ssh::tel::drain_detached(Duration::from_secs(2)).await;
 
     // A connection that never happened still woke a machine with no idle
     // timeout, so put back what this run changed — but only that. An agent

@@ -803,12 +803,27 @@ fn mux_socket() -> std::path::PathBuf {
     ))
 }
 
+/// Whether connection sharing can work here at all: not on Windows, whose
+/// OpenSSH has no ControlMaster support (passing the options anywhere from
+/// warns to fails), and not when the socket path would overflow the unix
+/// socket path limit (~104 bytes; a deep $TMPDIR gets there). Both cases fall
+/// back to plain connections — the launch works identically, it just pays the
+/// handshakes multiplexing would have saved.
+fn mux_usable(socket: &std::path::Path) -> bool {
+    !cfg!(windows) && socket.as_os_str().len() <= 100
+}
+
 /// Options for a connection allowed to CREATE the master on `socket`:
 /// a readiness probe (each round gets its own fresh socket; only the round
 /// whose marker round-trips is ever promoted) or the provision connection.
 /// `persist` bounds how long an idle master outlives its last client — probes
 /// use a short one so the losing rounds' masters evaporate.
+/// Empty when multiplexing is unusable here, so every caller degrades to a
+/// plain connection without carrying the platform check itself.
 fn mux_master_opts(socket: &std::path::Path, persist: &str) -> Vec<String> {
+    if !mux_usable(socket) {
+        return Vec::new();
+    }
     vec![
         "-o".into(),
         "ControlMaster=auto".into(),
@@ -821,7 +836,11 @@ fn mux_master_opts(socket: &std::path::Path, persist: &str) -> Vec<String> {
 
 /// Options for a connection that may RIDE the master on `socket` but never
 /// create one: a dead or missing socket falls back to a plain connection.
+/// Empty when multiplexing is unusable here, same as [`mux_master_opts`].
 fn mux_client_opts(socket: &std::path::Path) -> Vec<String> {
+    if !mux_usable(socket) {
+        return Vec::new();
+    }
     vec!["-o".into(), format!("ControlPath={}", socket.display())]
 }
 
@@ -1605,6 +1624,7 @@ pub(crate) async fn wait_until_connectable(
     environment_id: &str,
     id: &str,
     access: &RelayAccess,
+    initial_delay: std::time::Duration,
 ) -> Result<(CodeAgent, Option<std::path::PathBuf>)> {
     use queries::cloud_agent::CloudAgentStatus as S;
     // Measured as one stage because this is the leg the platform owns — VM
@@ -1614,6 +1634,15 @@ pub(crate) async fn wait_until_connectable(
     let diagnostics = ssh_tel::timing_diagnostics();
     let ssh_target = format!("agent:{environment_id}:{id}");
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    // Callers that just issued the create or wake pass the physical floor of
+    // that operation (measured: a fresh VM is never routable before ~550ms, a
+    // restore before ~1.5s): probing earlier is a guaranteed miss that still
+    // opens a real relay connection into the dev.new fall-through. Callers
+    // that caught a boot already in flight pass zero — the box may be
+    // routable right now, and any delay would be a pure regression.
+    if !initial_delay.is_zero() {
+        tokio::time::sleep(initial_delay).await;
+    }
     let mut round = 0u32;
     loop {
         round += 1;
@@ -1724,6 +1753,9 @@ async fn ready_existing_agent(
         // resting state this command leaves behind.
         S::SLEEPING | S::STARTING => {
             progress.step(&format!("Waking agent {}", agent.name));
+            // The delay below is the wake's physical floor; a STARTING agent
+            // caught mid-boot gets none — it may be routable right now.
+            let mut probe_delay = std::time::Duration::ZERO;
             if agent.status == S::SLEEPING {
                 let wake_started = std::time::Instant::now();
                 let wake = post_graphql::<mutations::CloudAgentWake, _>(
@@ -1738,10 +1770,17 @@ async fn ready_existing_agent(
                 if let Err(e) = wake {
                     return Err(e.into());
                 }
+                probe_delay = std::time::Duration::from_millis(350);
             }
-            let (running, probe_master) =
-                wait_until_connectable(client, backboard, environment_id, &agent.id, access)
-                    .await?;
+            let (running, probe_master) = wait_until_connectable(
+                client,
+                backboard,
+                environment_id,
+                &agent.id,
+                access,
+                probe_delay,
+            )
+            .await?;
             progress.note(&format!(
                 "Woke agent {} — your work is on its disk",
                 running.name
@@ -1924,6 +1963,24 @@ async fn resolve_target(
     }
 }
 
+/// The single stdin stream `provision_script_with_skills` reads: the
+/// credential (exactly `len` bytes, which the script consumes via `head -c`)
+/// followed by the skills tarball. The framing length and the written bytes
+/// MUST come from the same buffer — this function is the only place both are
+/// produced, which is the contract the byte-framing test pins.
+fn combined_provision_payload(
+    credential: Option<&[u8]>,
+    tarball: &[u8],
+) -> (Vec<u8>, Option<usize>) {
+    let len = credential.map(<[u8]>::len);
+    let mut payload = Vec::with_capacity(len.unwrap_or(0) + tarball.len());
+    if let Some(credential) = credential {
+        payload.extend_from_slice(credential);
+    }
+    payload.extend_from_slice(tarball);
+    (payload, len)
+}
+
 /// A canonical 8-4-4-4-12 lowercase-or-uppercase hex UUID, the only shape
 /// Railway ids take. Names can't collide with it in practice, and a
 /// pathological UUID-shaped name merely skips a convenience resolution — the
@@ -2078,7 +2135,17 @@ async fn resolve_agent(
     configs.set_code_agent(environment_id, &created.id);
     configs.write()?;
 
-    match wait_until_connectable(client, &backboard, environment_id, &created.id, access).await {
+    match wait_until_connectable(
+        client,
+        &backboard,
+        environment_id,
+        &created.id,
+        access,
+        // A created VM's measured routability floor; see the wait's doc.
+        std::time::Duration::from_millis(350),
+    )
+    .await
+    {
         Ok((running, probe_master)) => {
             progress.note(&format!("Created agent {}", running.name));
             Ok((running, true, probe_master))
@@ -2365,16 +2432,39 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     );
 
     let progress = CliProgress::default();
-    // TESTING: the ensure_enabled feature-flag pre-check is removed entirely
-    // for latency measurement. The create/wake mutations still refuse without
-    // the flag server-side — an un-flagged user gets that refusal instead of
-    // the friendlier pre-check message. Restore (as a select! race against
-    // prepare, not a serialized round-trip) before shipping.
-    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
+    // The flag check races prepare instead of preceding it: an un-flagged user
+    // is still stopped the moment the check answers — before any mint or
+    // create completes — while everyone else no longer pays a serialized
+    // round-trip for a question whose answer is almost always yes. If prepare
+    // somehow finishes first, the gate is still enforced before anything runs.
+    let ensure_fut = async {
+        let configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await
+    };
+    let prepare_fut = prepare(&args, &progress, SessionStyle::FullTerminal);
+    tokio::pin!(ensure_fut);
+    tokio::pin!(prepare_fut);
+    let prepared = tokio::select! {
+        enabled = &mut ensure_fut => {
+            enabled?;
+            prepare_fut.await?
+        }
+        prepared = &mut prepare_fut => {
+            ensure_fut.await?;
+            prepared?
+        }
+    };
     progress.finish();
 
     println!("Launching {}…", prepared.harness);
     let exit_code = run_session(&prepared)?;
+
+    // The user's work is done; give detached telemetry a bounded window so a
+    // short exec launch (`railway code -- <cmd>`) doesn't exit before its
+    // outcome event leaves the machine. Interactive sessions resolve this
+    // instantly — their sends finished minutes ago.
+    ssh_tel::drain_detached(std::time::Duration::from_secs(2)).await;
 
     // Belt-and-suspenders for the remote reset: when the connection drops
     // mid-TUI the remote printf never reaches us, so scrub locally too before
@@ -2743,21 +2833,13 @@ async fn prepare_inner(
             // question. Send everything in one connection: the credential
             // (length-framed) and the tarball share the provision stdin.
             if created && let Some(packed) = &packed_skills {
-                let mut payload = Vec::with_capacity(
-                    auth.as_ref().map_or(0, |(line, _)| line.len()) + packed.tarball.len(),
+                let (payload, credential_len) = combined_provision_payload(
+                    auth.as_ref().map(|(line, _)| line.as_slice()),
+                    &packed.tarball,
                 );
-                if let Some((line, _)) = &auth {
-                    payload.extend_from_slice(line);
-                }
-                payload.extend_from_slice(&packed.tarball);
                 let out = ssh_plumbing(
                     &target,
-                    &provision_script_with_skills(
-                        agent,
-                        auth.as_ref().map(|(line, _)| line.len()),
-                        app_mode,
-                        &packed.hash,
-                    ),
+                    &provision_script_with_skills(agent, credential_len, app_mode, &packed.hash),
                     identity.as_deref(),
                     Some(&payload),
                     &relay,
@@ -3346,6 +3428,55 @@ mod tests {
         assert!(!script.contains("head -c"), "{script}");
         assert!(script.contains(r#"cat > "$payload""#), "{script}");
         assert!(script.contains("AGENT-READY"), "{script}");
+    }
+
+    /// The byte-framing contract behind `head -c`: the length the script reads
+    /// must be exactly the credential bytes at the front of the stream, with
+    /// the tarball intact behind them. Anyone who re-encodes the credential or
+    /// appends a newline breaks both at once — this test is what catches them.
+    #[test]
+    fn combined_payload_framing_splits_back_exactly() {
+        let credential = b"CLAUDE_CODE_OAUTH_TOKEN=tok-123\n";
+        let tarball = [0x1f, 0x8b, 0x08, 0x00, 0x42];
+        let (payload, len) = combined_provision_payload(Some(credential), &tarball);
+        let len = len.expect("credential present");
+        assert_eq!(&payload[..len], credential);
+        assert_eq!(&payload[len..], &tarball);
+        // And the script consumes exactly that many bytes.
+        let script = provision_script_with_skills(Agent::Claude, Some(len), false, "h");
+        assert!(script.contains(&format!("head -c {len} ")), "{script}");
+
+        let (payload, len) = combined_provision_payload(None, &tarball);
+        assert!(len.is_none());
+        assert_eq!(payload, tarball);
+    }
+
+    /// UUIDs are trusted as launch targets; anything else still resolves.
+    #[test]
+    fn uuid_shapes() {
+        assert!(is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf0356"));
+        assert!(is_uuid("DDCBA2F8-A773-4929-BFBD-52450CDF0356"));
+        assert!(!is_uuid("production"));
+        assert!(!is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf035")); // 35 chars
+        assert!(!is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf035g")); // non-hex
+        assert!(!is_uuid("ddcba2f8_a773_4929_bfbd_52450cdf0356")); // separators
+    }
+
+    /// Multiplexing degrades to plain connections rather than erroring where
+    /// it cannot work: Windows, and socket paths past the unix limit.
+    #[test]
+    fn mux_gating() {
+        let short = std::path::Path::new("/tmp/railway-cm-1-abc.sock");
+        if cfg!(windows) {
+            assert!(mux_master_opts(short, "10s").is_empty());
+            assert!(mux_client_opts(short).is_empty());
+        } else {
+            assert!(!mux_master_opts(short, "10s").is_empty());
+            assert!(!mux_client_opts(short).is_empty());
+            let long = std::path::PathBuf::from(format!("/{}/cm.sock", "x".repeat(120)));
+            assert!(mux_master_opts(&long, "10s").is_empty());
+            assert!(mux_client_opts(&long).is_empty());
+        }
     }
 
     /// The shell option starts nothing and changes nothing: no credential, no

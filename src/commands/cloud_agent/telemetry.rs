@@ -91,7 +91,7 @@ pub fn track_launch_outcome_detached(
     created: Option<bool>,
     duration: Duration,
 ) {
-    tokio::spawn(async move {
+    crate::commands::ssh::tel::spawn_detached(async move {
         track_launch_outcome(harness, created, duration, None).await;
     });
 }
@@ -146,7 +146,7 @@ pub async fn track_lifecycle(kind: &str, duration: Duration, error: Option<&str>
 /// plenty of runway; completion events at command exit keep the awaited form
 /// so a returning process can't drop them.
 pub fn track_lifecycle_detached(kind: &'static str) {
-    tokio::spawn(async move {
+    crate::commands::ssh::tel::spawn_detached(async move {
         track_lifecycle(kind, Duration::ZERO, None).await;
     });
 }
