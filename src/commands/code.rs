@@ -437,6 +437,22 @@ impl Agent {
         }
     }
 
+    /// [`credential_seed`] for a script whose stdin carries more than the
+    /// credential: reads exactly `len` bytes so the rest of the stream stays
+    /// available to the next reader (the skills tarball on a fresh agent).
+    /// Mirrors the `cat >` seeds above; the 0600 mode comes from the script's
+    /// `umask 077`, with claude's explicit chmod kept as belt-and-suspenders.
+    fn credential_seed_framed(self, len: usize) -> String {
+        match self {
+            Agent::Codex => format!("mkdir -p ~/.codex\nhead -c {len} > ~/.codex/auth.json"),
+            Agent::Claude => {
+                format!("head -c {len} > ~/.claude-code-env\nchmod 600 ~/.claude-code-env")
+            }
+            Agent::Grok => format!("mkdir -p ~/.grok\nhead -c {len} > ~/.grok/auth.json"),
+            Agent::Railway | Agent::Shell => "true".to_string(),
+        }
+    }
+
     /// The local sign-in file this command copies, as `$HOME`-relative
     /// components. `None` for Claude, whose credential is minted rather than
     /// copied — sharing the local sign-in's rotating refresh token across two
@@ -609,22 +625,7 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
     let name = agent.name();
     let hash_marker = skills_sync::REMOTE_HASH_MARKER;
     let hash_file = skills_sync::REMOTE_HASH_FILE;
-    // The autostart in COMMON_SEED reads both: the sentinel disables it
-    // outright, and `~/.railway-code-agent` is what it would otherwise launch.
-    //
-    // A shell launch is "give me the machine", not "retarget this VM": the
-    // recorded autostart agent stays whatever a previous launch made it, so
-    // plain reconnects keep dropping into that agent. App-mode still wins if
-    // it was asked for — desktop takes the login shell entirely.
-    let mode_seed = if app_mode {
-        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
-    } else {
-        let record = match agent {
-            Agent::Shell => "true".to_string(),
-            _ => format!("echo {name} > ~/.railway-code-agent"),
-        };
-        format!("rm -f ~/.railway-app-mode\n{record}")
-    };
+    let mode_seed = mode_seed(agent, app_mode);
     format!(
         r#"umask 077
 {HARNESS_PATH}
@@ -634,6 +635,57 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
 printf '{hash_marker}%s\n' "$(cat "{hash_file}" 2>/dev/null || true)"
 if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi"#
     )
+}
+
+/// [`provision_script`] plus the skills sync, one connection, for a freshly
+/// created agent. A fresh VM cannot already hold the skills hash, so the
+/// report-then-upload dance is a wasted relay round-trip there — the tarball
+/// rides the provision stdin instead, behind the length-framed credential.
+/// The AGENT-READY check prints before the sync block because that block's
+/// degradation paths `exit 0`.
+fn provision_script_with_skills(
+    agent: Agent,
+    credential_len: Option<usize>,
+    app_mode: bool,
+    skills_hash: &str,
+) -> String {
+    let seed = match credential_len {
+        Some(len) => agent.credential_seed_framed(len),
+        None => "true".to_string(),
+    };
+    let name = agent.name();
+    let mode_seed = mode_seed(agent, app_mode);
+    let sync = skills_sync::sync_body(skills_hash);
+    format!(
+        r#"umask 077
+{HARNESS_PATH}
+{seed}
+payload="$HOME/.railway-skills-payload.tgz"
+cat > "$payload"
+{COMMON_SEED}
+{mode_seed}
+if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi
+{sync}"#
+    )
+}
+
+/// The autostart in COMMON_SEED reads both: the sentinel disables it
+/// outright, and `~/.railway-code-agent` is what it would otherwise launch.
+///
+/// A shell launch is "give me the machine", not "retarget this VM": the
+/// recorded autostart agent stays whatever a previous launch made it, so
+/// plain reconnects keep dropping into that agent. App-mode still wins if
+/// it was asked for — desktop takes the login shell entirely.
+fn mode_seed(agent: Agent, app_mode: bool) -> String {
+    if app_mode {
+        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
+    } else {
+        let record = match agent {
+            Agent::Shell => "true".to_string(),
+            _ => format!("echo {} > ~/.railway-code-agent", agent.name()),
+        };
+        format!("rm -f ~/.railway-app-mode\n{record}")
+    }
 }
 
 /// Where a prepared session's output lands, which decides what quitting the
@@ -1472,11 +1524,36 @@ async fn fetch_agent(
 /// projection, and a poll interval. Status is still read each round, but only
 /// to catch terminal states (CRASHED/FAILED/DELETING) early instead of
 /// burning the whole timeout on a box that will never come up.
+/// The relay-side plumbing a probe or session needs, independent of which
+/// agent it points at: the local key to offer and the relay's SSH options.
+/// Built once per launch (the identity half costs an API round-trip) and
+/// threaded through, where each waiter previously rebuilt it via
+/// `connect_info` — a redundant registered-keys query at the top of every
+/// wake and create wait.
+pub(crate) struct RelayAccess {
+    pub identity: Option<std::path::PathBuf>,
+    pub relay_opts: Vec<String>,
+}
+
+/// Build [`RelayAccess`] the way `connect_info` does, for callers outside the
+/// launch flow (the `ca` verbs) that don't already hold one.
+pub(crate) async fn relay_access() -> Result<RelayAccess> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let identity = ensure_ssh_key_quiet(&client, &configs).await?;
+    let relay = relay_ssh()?;
+    Ok(RelayAccess {
+        identity,
+        relay_opts: relay.opts,
+    })
+}
+
 pub(crate) async fn wait_until_connectable(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
     id: &str,
+    access: &RelayAccess,
 ) -> Result<CodeAgent> {
     use queries::cloud_agent::CloudAgentStatus as S;
     // Measured as one stage because this is the leg the platform owns — VM
@@ -1484,34 +1561,43 @@ pub(crate) async fn wait_until_connectable(
     // under RAILWAY_STAGE_TIMING; the recorded stage is what telemetry sees.
     let wait_started = std::time::Instant::now();
     let diagnostics = ssh_tel::timing_diagnostics();
-    let info = connect_info(environment_id, id).await?;
-    if diagnostics {
-        eprintln!(
-            "[wait_connectable] connect_info={}ms",
-            wait_started.elapsed().as_millis()
-        );
-    }
+    let ssh_target = format!("agent:{environment_id}:{id}");
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
     let mut round = 0u32;
     loop {
         round += 1;
         let round_started = std::time::Instant::now();
-        let agent = fetch_agent(client, backboard, environment_id, id)
-            .await?
-            .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
+
+        // The probe is what usually ends the wait; the status fetch exists to
+        // catch terminal states. Running them together instead of fetch-then-
+        // probe stops a serialized GraphQL round-trip from pushing the
+        // discovering probe later every round.
+        let target = ssh_target.clone();
+        let identity = access.identity.clone();
+        let opts = access.relay_opts.clone();
+        let probe = tokio::task::spawn_blocking(move || {
+            probe_native_ssh(&target, identity.as_deref(), &opts)
+        });
+        let (agent, routed) =
+            tokio::join!(fetch_agent(client, backboard, environment_id, id), probe);
+        let agent = agent?.ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
+        let routed = routed?.unwrap_or(false);
+
+        if diagnostics {
+            eprintln!(
+                "[wait_connectable] round {round}: status={:?} round={}ms routed={routed}",
+                agent.status,
+                round_started.elapsed().as_millis()
+            );
+        }
+        // RUNNING routes by definition, so a probe that lost a race to the
+        // status flip doesn't cost another round.
+        if routed || agent.status == S::RUNNING {
+            ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+            return Ok(agent);
+        }
         match agent.status {
-            // RUNNING routes by definition; skip the probe round-trip.
-            S::RUNNING => {
-                ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
-                if diagnostics {
-                    eprintln!(
-                        "[wait_connectable] round {round}: status=RUNNING after {}ms",
-                        wait_started.elapsed().as_millis()
-                    );
-                }
-                return Ok(agent);
-            }
-            S::STARTING | S::SLEEPING => {}
+            S::RUNNING | S::STARTING | S::SLEEPING => {}
             S::CRASHED => bail!(
                 "Agent {} crashed while starting. `railway code --new` for a fresh one.",
                 agent.name
@@ -1524,26 +1610,6 @@ pub(crate) async fn wait_until_connectable(
             S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
         }
 
-        let target = info.ssh_target.clone();
-        let identity = info.identity.clone();
-        let opts = info.relay_opts.clone();
-        let routed = tokio::task::spawn_blocking(move || {
-            probe_native_ssh(&target, identity.as_deref(), &opts)
-        })
-        .await?
-        .unwrap_or(false);
-        if diagnostics {
-            eprintln!(
-                "[wait_connectable] round {round}: status={:?} round={}ms routed={routed}",
-                agent.status,
-                round_started.elapsed().as_millis()
-            );
-        }
-        if routed {
-            ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
-            return Ok(agent);
-        }
-
         if std::time::Instant::now() >= deadline {
             bail!(
                 "Agent {} did not become connectable within {}s (last state: {:?}).",
@@ -1552,7 +1618,13 @@ pub(crate) async fn wait_until_connectable(
                 agent.status
             );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        // Pace rounds to ~750ms of cadence rather than 750ms of added sleep: a
+        // probe that already took that long IS the pacing, and sleeping on top
+        // of it only delays noticing a box that came up mid-probe.
+        const CADENCE: std::time::Duration = std::time::Duration::from_millis(750);
+        if let Some(rest) = CADENCE.checked_sub(round_started.elapsed()) {
+            tokio::time::sleep(rest).await;
+        }
     }
 }
 
@@ -1565,6 +1637,7 @@ async fn ready_existing_agent(
     environment_id: &str,
     agent: CodeAgent,
     progress: &dyn Progress,
+    access: &RelayAccess,
 ) -> Result<Option<CodeAgent>> {
     use queries::cloud_agent::CloudAgentStatus as S;
 
@@ -1597,7 +1670,8 @@ async fn ready_existing_agent(
                 }
             }
             let running =
-                wait_until_connectable(client, backboard, environment_id, &agent.id).await?;
+                wait_until_connectable(client, backboard, environment_id, &agent.id, access)
+                    .await?;
             progress.note(&format!(
                 "Woke agent {} — your work is on its disk",
                 running.name
@@ -1845,6 +1919,7 @@ async fn resolve_agent(
     args: &LaunchArgs,
     environment_id: &str,
     progress: &dyn Progress,
+    access: &RelayAccess,
 ) -> Result<(CodeAgent, bool)> {
     let backboard = configs.get_backboard();
 
@@ -1867,7 +1942,8 @@ async fn resolve_agent(
     };
     if let Some(agent) = existing {
         if let Some(ready) =
-            ready_existing_agent(client, &backboard, environment_id, agent, progress).await?
+            ready_existing_agent(client, &backboard, environment_id, agent, progress, access)
+                .await?
         {
             warn_ignored_variables(args, progress);
             configs.set_code_agent(environment_id, &ready.id);
@@ -1906,7 +1982,7 @@ async fn resolve_agent(
     configs.set_code_agent(environment_id, &created.id);
     configs.write()?;
 
-    match wait_until_connectable(client, &backboard, environment_id, &created.id).await {
+    match wait_until_connectable(client, &backboard, environment_id, &created.id, access).await {
         Ok(running) => {
             progress.note(&format!("Created agent {}", running.name));
             Ok((running, true))
@@ -2186,15 +2262,6 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         return destroy_agent(&mut configs, &client, &environment_id).await;
     }
 
-    // Before anything is resolved, minted or provisioned: without the flag the
-    // create at the end of all that is refused, and the work up to it — a
-    // credential, possibly a browser round-trip — is spent for nothing.
-    {
-        let configs = Configs::new()?;
-        let client = GQLClient::new_authorized(&configs)?;
-        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await?;
-    }
-
     eprintln!(
         "{}",
         "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
@@ -2202,7 +2269,30 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     );
 
     let progress = CliProgress::default();
-    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
+    // The flag check used to run to completion before prepare started — a
+    // serialized round-trip on every launch whose answer is almost always yes.
+    // Racing them keeps the fail-fast (an un-flagged user is stopped the
+    // moment the check answers, before any mint or create finishes) without
+    // making everyone else wait for it. If prepare somehow finishes first, the
+    // gate is still enforced before anything runs.
+    let ensure_fut = async {
+        let configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await
+    };
+    let prepare_fut = prepare(&args, &progress, SessionStyle::FullTerminal);
+    tokio::pin!(ensure_fut);
+    tokio::pin!(prepare_fut);
+    let prepared = tokio::select! {
+        enabled = &mut ensure_fut => {
+            enabled?;
+            prepare_fut.await?
+        }
+        prepared = &mut prepare_fut => {
+            ensure_fut.await?;
+            prepared?
+        }
+    };
     progress.finish();
 
     println!("Launching {}…", prepared.harness);
@@ -2394,35 +2484,46 @@ async fn prepare_inner(
     // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
+    // The SSH key check is independent of where the agent lives, and the waits
+    // inside resolve_agent need its result to probe with — so it runs alongside
+    // target resolution instead of after the agent is already up, where its
+    // round-trip (registered-keys query, plus a register mutation on first run)
+    // was pure added latency. Its own `Configs` because resolve_target holds
+    // the mutable borrow.
     // The project is no longer carried on `Prepared` — its only reader was the
     // launcher's exit hint, which now names the agent instead.
-    let (_project_id, environment_id) = ssh_tel::timed_for(
-        "cloud_agent_launch",
-        "resolve_target",
-        resolve_target(&mut configs, &client, args, &mut prefs, home),
-    )
-    .await?;
+    let (target_res, identity) = tokio::join!(
+        ssh_tel::timed_for(
+            "cloud_agent_launch",
+            "resolve_target",
+            resolve_target(&mut configs, &client, args, &mut prefs, home),
+        ),
+        ssh_tel::timed_for("cloud_agent_launch", "ssh_key", async {
+            let key_configs = Configs::new()?;
+            ensure_ssh_key_quiet(&client, &key_configs).await
+        }),
+    );
+    let (_project_id, environment_id) = target_res?;
+    let identity = identity?;
+
+    let relay = ssh_tel::timed_for("cloud_agent_launch", "relay", async { relay_ssh() }).await?;
+    let access = RelayAccess {
+        identity: identity.clone(),
+        relay_opts: relay.opts.clone(),
+    };
 
     let (cloud_agent, created) = ssh_tel::timed_for(
         "cloud_agent_launch",
         "resolve_agent",
-        resolve_agent(&mut configs, &client, args, &environment_id, progress),
+        resolve_agent(&mut configs, &client, args, &environment_id, progress, &access),
     )
     .await?;
     configs.set_code_agent(&environment_id, &cloud_agent.id);
     configs.write()?;
 
-    let identity = ssh_tel::timed_for(
-        "cloud_agent_launch",
-        "ssh_key",
-        ensure_ssh_key_quiet(&client, &configs),
-    )
-    .await?;
     // The relay's cloud-agent grammar; by id rather than name because names are
     // not unique within an environment.
     let target = format!("agent:{environment_id}:{}", cloud_agent.id);
-
-    let relay = ssh_tel::timed_for("cloud_agent_launch", "relay", async { relay_ssh() }).await?;
 
     // --- Deferred Claude mint. A setup-token lasts a year and the agent's disk
     // survives sleep, so a reused agent is normally still authenticated; minting
@@ -2494,6 +2595,68 @@ async fn prepare_inner(
                     n.push(line);
                 }
             };
+            let skills_note = |out: &str| {
+                let reason = if out.contains("SKILLS-NO-TAR") {
+                    "the agent has no `tar`"
+                } else if out.contains("SKILLS-EXTRACT-FAILED") {
+                    "the transfer did not unpack"
+                } else {
+                    "the sync did not report success"
+                };
+                format!(
+                    "Couldn't sync your skills onto the agent ({reason}); continuing without them."
+                )
+            };
+            let check_ready = |out: &str| -> Result<()> {
+                if out.contains("AGENT-READY") {
+                    Ok(())
+                } else if out.contains("AGENT-MISSING") {
+                    bail!(
+                        "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). Cloud agents bake every harness, so report this with the agent id rather than retrying.",
+                        agent.name()
+                    )
+                } else {
+                    bail!(
+                        "Provisioning produced no status marker — the connection likely dropped mid-script."
+                    )
+                }
+            };
+
+            // A fresh agent cannot already hold the skills, so the two-step
+            // report-then-upload costs a relay round-trip that answers a known
+            // question. Send everything in one connection: the credential
+            // (length-framed) and the tarball share the provision stdin.
+            if created && let Some(packed) = &packed_skills {
+                let mut payload = Vec::with_capacity(
+                    auth.as_ref().map_or(0, |(line, _)| line.len()) + packed.tarball.len(),
+                );
+                if let Some((line, _)) = &auth {
+                    payload.extend_from_slice(line);
+                }
+                payload.extend_from_slice(&packed.tarball);
+                let out = ssh_plumbing(
+                    &target,
+                    &provision_script_with_skills(
+                        agent,
+                        auth.as_ref().map(|(line, _)| line.len()),
+                        app_mode,
+                        &packed.hash,
+                    ),
+                    identity.as_deref(),
+                    Some(&payload),
+                    &relay,
+                )?;
+                let out = String::from_utf8_lossy(&out);
+                check_ready(&out)?;
+                // Never fatal: the agent is fully usable without skills, and
+                // losing a session over a skills copy would be a worse trade
+                // than launching without one.
+                if !out.contains("SKILLS-OK") {
+                    push(skills_note(&out));
+                }
+                return Ok(());
+            }
+
             let out = ssh_plumbing(
                 &target,
                 &provision_script(agent, auth.is_some(), app_mode),
@@ -2502,18 +2665,7 @@ async fn prepare_inner(
                 &relay,
             )?;
             let out = String::from_utf8_lossy(&out);
-            if out.contains("AGENT-READY") {
-                // ok
-            } else if out.contains("AGENT-MISSING") {
-                bail!(
-                    "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). Cloud agents bake every harness, so report this with the agent id rather than retrying.",
-                    agent.name()
-                )
-            } else {
-                bail!(
-                    "Provisioning produced no status marker — the connection likely dropped mid-script."
-                )
-            }
+            check_ready(&out)?;
             // Skills, when the set on the agent isn't already the set on this
             // machine. The hash rides the script above, so an unchanged set
             // costs nothing beyond the round-trip we already made.
@@ -2528,21 +2680,8 @@ async fn prepare_inner(
                         &relay,
                     )?;
                     let out = String::from_utf8_lossy(&out);
-                    // Never fatal: the agent is fully usable without them, and
-                    // losing a session over a skills copy would be a worse
-                    // trade than launching without one. Name the marker so a
-                    // report says which step gave up.
                     if !out.contains("SKILLS-OK") {
-                        let reason = if out.contains("SKILLS-NO-TAR") {
-                            "the agent has no `tar`"
-                        } else if out.contains("SKILLS-EXTRACT-FAILED") {
-                            "the transfer did not unpack"
-                        } else {
-                            "the sync did not report success"
-                        };
-                        push(format!(
-                            "Couldn't sync your skills onto the agent ({reason}); continuing without them."
-                        ));
+                        push(skills_note(&out));
                     }
                 }
             }
@@ -3045,6 +3184,45 @@ mod tests {
         assert!(script.contains("if command -v railway-agent-tui"));
         assert!(script.contains("railway-code agent autostart"));
         assert!(script.contains("AGENT-READY"));
+    }
+
+    /// The combined fresh-agent script shares one stdin between the credential
+    /// and the skills tarball, so the credential read must be length-framed —
+    /// a `cat >` seed would swallow the tarball too.
+    #[test]
+    fn combined_provision_frames_the_credential() {
+        let script = provision_script_with_skills(Agent::Claude, Some(42), false, "abc123");
+        assert!(script.contains("head -c 42 > ~/.claude-code-env"), "{script}");
+        assert!(!script.contains("cat > ~/.claude-code-env"), "{script}");
+        // The tarball is the rest of the stream, saved before anything can bail.
+        assert!(script.contains(r#"cat > "$payload""#), "{script}");
+        assert!(script.contains("'abc123'"), "{script}");
+    }
+
+    /// The sync block's degradation paths `exit 0`, so the launch's own status
+    /// marker must already be printed by the time it runs — AGENT-READY before
+    /// the tar check, or a skills failure would read as a dropped connection.
+    #[test]
+    fn combined_provision_reports_ready_before_skills() {
+        let script = provision_script_with_skills(Agent::Claude, Some(10), false, "h");
+        let ready = script.find("AGENT-READY").expect("ready marker");
+        let sync = script.find("command -v tar").expect("sync block");
+        assert!(ready < sync, "{script}");
+        // The credential must be consumed before the payload drain, or the
+        // tarball's first bytes land in the credential file.
+        let cred = script.find("head -c 10").expect("framed credential");
+        let drain = script.find(r#"cat > "$payload""#).expect("payload drain");
+        assert!(cred < drain, "{script}");
+    }
+
+    /// No credential to write (sign-in deferred to the agent): stdin is the
+    /// tarball alone, and nothing tries to read a credential off it.
+    #[test]
+    fn combined_provision_without_credential_reads_only_the_tarball() {
+        let script = provision_script_with_skills(Agent::Claude, None, false, "h");
+        assert!(!script.contains("head -c"), "{script}");
+        assert!(script.contains(r#"cat > "$payload""#), "{script}");
+        assert!(script.contains("AGENT-READY"), "{script}");
     }
 
     /// The shell option starts nothing and changes nothing: no credential, no

@@ -596,15 +596,29 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     let ready = match agent.status {
         ca::Status::Running => Ok(()),
         ca::Status::Starting => {
-            code::wait_until_connectable(client, &backboard, &agent.environment_id, &agent.id)
-                .await
-                .map(|_| ())
+            let access = code::relay_access().await?;
+            code::wait_until_connectable(
+                client,
+                &backboard,
+                &agent.environment_id,
+                &agent.id,
+                &access,
+            )
+            .await
+            .map(|_| ())
         }
         ca::Status::Sleeping => match ca::wake(client, &backboard, &agent.id).await {
             Ok(()) => {
-                code::wait_until_connectable(client, &backboard, &agent.environment_id, &agent.id)
-                    .await
-                    .map(|_| ())
+                let access = code::relay_access().await?;
+                code::wait_until_connectable(
+                    client,
+                    &backboard,
+                    &agent.environment_id,
+                    &agent.id,
+                    &access,
+                )
+                .await
+                .map(|_| ())
             }
             Err(e) => Err(e),
         },
