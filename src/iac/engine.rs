@@ -179,7 +179,7 @@ pub async fn run(
     }
     let current_graph = environment_config_to_graph(&current.config, &options);
     let owners = parse_owners(current.iac_partials.as_ref());
-    let change_set = diff_graphs(DiffOptions {
+    let mut change_set = diff_graphs(DiffOptions {
         current: &current_graph,
         desired: &evaluated.graph,
         reveal_values: args.show_values,
@@ -197,6 +197,25 @@ pub async fn run(
     let ok = all_diagnostics
         .iter()
         .all(|d| d.get("severity").and_then(Value::as_str) != Some("error"));
+
+    // Environment config reads mask variable values unless decryption was
+    // requested, so the local diff can report phantom variable updates (the
+    // current value looks like preserve()). Backboard's preview compares the
+    // change set against decrypted state server-side and drops those no-ops;
+    // plan/apply must use the previewed changes or variables never converge.
+    let mut preview = None;
+    if ok && !change_set.changes.is_empty() {
+        let previewed = preview_change_set(&client, &endpoint, &current.id, &change_set).await?;
+        if let Some(changes) = previewed
+            .get("changeSet")
+            .and_then(|set| set.get("changes"))
+            .and_then(Value::as_array)
+        {
+            change_set.changes = changes.clone();
+        }
+        preview = Some(previewed);
+    }
+
     let claim = needs_partial_claim_apply(
         &change_set.declared,
         owners.as_ref(),
@@ -235,6 +254,7 @@ pub async fn run(
         desired_graph: Some(evaluated.graph),
         apply_result,
         claim,
+        preview,
     })?;
     Ok(serialized)
 }
@@ -253,6 +273,8 @@ struct RunnerWire {
     desired_graph: Option<super::graph::RailwayGraph>,
     apply_result: Option<Value>,
     claim: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<Value>,
 }
 
 async fn fetch_current_environment(
@@ -405,6 +427,35 @@ fn parse_owners(value: Option<&Value>) -> Option<super::partial::IacPartials> {
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+async fn preview_change_set(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    change_set: &super::change_set::ChangeSet,
+) -> Result<Value> {
+    let mutation = r#"
+      mutation IacPreviewChangeSet($environmentId: String!, $input: JSON!) {
+        environmentPreviewChangeSet(environmentId: $environmentId, input: $input) {
+          changeSet diagnostics effects
+        }
+      }
+    "#;
+    #[derive(Deserialize)]
+    struct PreviewQuery {
+        #[serde(rename = "environmentPreviewChangeSet")]
+        result: Value,
+    }
+    let data = post_graphql_raw::<PreviewQuery, _>(
+        client,
+        endpoint,
+        mutation,
+        json!({ "environmentId": environment_id, "input": change_set }),
+    )
+    .await
+    .context("Failed to preview change set")?;
+    Ok(data.result)
 }
 
 async fn apply_change_set(
