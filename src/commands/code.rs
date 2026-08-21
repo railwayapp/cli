@@ -2698,7 +2698,14 @@ async fn prepare_inner(
     let (cloud_agent, created, probe_master) = ssh_tel::timed_for(
         "cloud_agent_launch",
         "resolve_agent",
-        resolve_agent(&mut configs, &client, args, &environment_id, progress, &access),
+        resolve_agent(
+            &mut configs,
+            &client,
+            args,
+            &environment_id,
+            progress,
+            &access,
+        ),
     )
     .await?;
     configs.set_code_agent(&environment_id, &cloud_agent.id);
@@ -3397,7 +3404,10 @@ mod tests {
     #[test]
     fn combined_provision_frames_the_credential() {
         let script = provision_script_with_skills(Agent::Claude, Some(42), false, "abc123");
-        assert!(script.contains("head -c 42 > ~/.claude-code-env"), "{script}");
+        assert!(
+            script.contains("head -c 42 > ~/.claude-code-env"),
+            "{script}"
+        );
         assert!(!script.contains("cat > ~/.claude-code-env"), "{script}");
         // The tarball is the rest of the stream, saved before anything can bail.
         assert!(script.contains(r#"cat > "$payload""#), "{script}");
