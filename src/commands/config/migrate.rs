@@ -1,10 +1,7 @@
 //! Migrate Config as Code (`railway.json` / `railway.toml`) into
 //! `.railway/railway.ts`. CaC → graph/DSL translation lives in the CLI only.
 
-use std::{
-    fs,
-    path::Path,
-};
+use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
@@ -12,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use crate::{
-    client::{post_graphql, GQLClient},
+    client::{GQLClient, post_graphql},
     config::Configs,
     gql::mutations::{self, ServiceInstanceUpdate},
     util::cac_deprecation::find_cac_file,
@@ -89,9 +86,8 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
-    let cac_path = find_cac_file(&cwd).context(
-        "No railway.json or railway.toml found in this directory or its parents.",
-    )?;
+    let cac_path = find_cac_file(&cwd)
+        .context("No railway.json or railway.toml found in this directory or its parents.")?;
 
     let cac = parse_cac_file(&cac_path)?;
     let service_name = args
@@ -117,11 +113,7 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
         "Found".dimmed(),
         cac_path.display().to_string().cyan()
     );
-    eprintln!(
-        "{} service {}",
-        "Migrating".dimmed(),
-        service_name.cyan()
-    );
+    eprintln!("{} service {}", "Migrating".dimmed(), service_name.cyan());
 
     if !args.apply {
         println!("{emitted}");
@@ -178,8 +170,8 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
 }
 
 fn parse_cac_file(path: &Path) -> Result<CacFile> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -295,13 +287,13 @@ fn emit_railway_ts(service_name: &str, cac: &CacFile) -> String {
         fields.push(format!("    replicas: {},", json_to_ts(regions)));
     } else if let Some(region) = &cac.deploy.region {
         // Single-region placement via replicas map is the IaC form.
-        fields.push(format!(
-            "    replicas: {{ {}: 1 }},",
-            js_string(region)
-        ));
+        fields.push(format!("    replicas: {{ {}: 1 }},", js_string(region)));
     }
     if let Some(dockerfile) = &cac.build.dockerfile_path {
-        fields.push(format!("    // dockerfilePath from CaC: {}", js_string(dockerfile)));
+        fields.push(format!(
+            "    // dockerfilePath from CaC: {}",
+            js_string(dockerfile)
+        ));
     }
     if let Some(builder) = &cac.build.builder {
         fields.push(format!("    // builder from CaC: {}", js_string(builder)));
@@ -310,7 +302,10 @@ fn emit_railway_ts(service_name: &str, cac: &CacFile) -> String {
         fields.push(format!("    // cronSchedule from CaC: {}", js_string(cron)));
     }
     if let Some(pre) = &cac.deploy.pre_deploy_command {
-        fields.push(format!("    // preDeployCommand from CaC: {}", json_to_ts(pre)));
+        fields.push(format!(
+            "    // preDeployCommand from CaC: {}",
+            json_to_ts(pre)
+        ));
     }
     if let Some(watch) = &cac.build.watch_patterns {
         let arr = watch

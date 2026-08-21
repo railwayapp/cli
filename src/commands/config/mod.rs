@@ -1,5 +1,5 @@
-mod runner;
 mod migrate;
+mod runner;
 
 use std::{
     fs,
@@ -1568,12 +1568,12 @@ fn find_railway_files(start: &Path) -> Vec<PathBuf> {
     const NAMES: &[&str] = &["railway.ts", "railway.py", "railway.go"];
     for directory in start.ancestors() {
         let mut found = Vec::new();
-        let railway_dir = if directory.file_name().and_then(|name| name.to_str()) == Some(".railway")
-        {
-            directory.to_path_buf()
-        } else {
-            directory.join(".railway")
-        };
+        let railway_dir =
+            if directory.file_name().and_then(|name| name.to_str()) == Some(".railway") {
+                directory.to_path_buf()
+            } else {
+                directory.join(".railway")
+            };
         if !railway_dir.is_dir() {
             continue;
         }

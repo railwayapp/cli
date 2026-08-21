@@ -7,7 +7,8 @@ use colored::Colorize;
 
 use crate::util::reporter;
 
-const DOCS_URL: &str = "https://docs.railway.com/infrastructure-as-code#migrating-from-config-as-code";
+const DOCS_URL: &str =
+    "https://docs.railway.com/infrastructure-as-code#migrating-from-config-as-code";
 const DISABLE_ENV: &str = "RAILWAY_CAC_DEPRECATION_WARNING";
 
 fn disabled_by_env() -> bool {
@@ -71,7 +72,11 @@ pub fn find_cac_file(start: &Path) -> Option<PathBuf> {
 fn display_path(path: &Path) -> String {
     std::env::current_dir()
         .ok()
-        .and_then(|cwd| path.strip_prefix(&cwd).ok().map(|p| p.display().to_string()))
+        .and_then(|cwd| {
+            path.strip_prefix(&cwd)
+                .ok()
+                .map(|p| p.display().to_string())
+        })
         .unwrap_or_else(|| path.display().to_string())
 }
 
@@ -96,7 +101,7 @@ pub fn maybe_warn(raw_args: &[String], command: Option<&str>) {
 
     let shown = display_path(&path);
     let message = format!(
-            "Config as Code (railway.json / railway.toml) is deprecated. Prefer Infrastructure as Code (.railway/railway.ts). Run `railway config migrate` or see https://docs.railway.com/infrastructure-as-code#migrating-from-config-as-code"
+        "Config as Code (railway.json / railway.toml) is deprecated. Prefer Infrastructure as Code (.railway/railway.ts). Run `railway config migrate` or see https://docs.railway.com/infrastructure-as-code#migrating-from-config-as-code"
     );
     let hint = format!("Migrate: `railway config migrate` — {DOCS_URL}");
 
@@ -106,8 +111,7 @@ pub fn maybe_warn(raw_args: &[String], command: Option<&str>) {
     if reporter::mode() == reporter::OutputMode::Human {
         eprintln!(
             "  {}",
-            "Existing files keep working until 2026-12-01."
-                .dimmed()
+            "Existing files keep working until 2026-12-01.".dimmed()
         );
     }
 }
