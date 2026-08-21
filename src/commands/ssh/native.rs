@@ -432,15 +432,82 @@ pub fn run_native_ssh_with_opts(
 /// actually run (verified against prod, 2026-08-13).
 const PROBE_MARKER: &str = "RAILWAY_CONNECT_PROBE_OK";
 
-/// Silently test whether a target is connectable yet: ask it to echo a
-/// marker, with success defined as the marker coming back. Failure carries no
-/// diagnosis (a booting agent and a typo'd target look the same), so callers
-/// only ever use this inside a loop that also watches status.
+/// Why a readiness probe did not succeed.
+///
+/// The three failures are genuinely different and used to be one `false`: a
+/// relay that answered but cannot route yet is the normal path through a boot,
+/// while a non-zero ssh or a failed spawn are not, and a loop that retries all
+/// three for 180s should still be able to say which it spent that time on.
+#[derive(Debug, Clone)]
+pub enum ProbeOutcome {
+    /// The marker came back: the target is connectable.
+    Routed,
+    /// Clean exit, no marker. The relay answers an unroutable target with a
+    /// status JSON and exit 0 (see [`PROBE_MARKER`]), so `detail` is that
+    /// answer and is the closest thing to a reason the relay gives.
+    NotRoutable { detail: String },
+    /// ssh itself failed. 255 is the relay refusing, the key being rejected,
+    /// or the connection dying mid-session.
+    SshFailed { code: i32, stderr: String },
+    /// ssh could not be run at all. A local fault, not the agent's.
+    Spawn { error: String },
+}
+
+impl ProbeOutcome {
+    pub fn routed(&self) -> bool {
+        matches!(self, Self::Routed)
+    }
+
+    /// Low-cardinality slug, safe for a metric tag: no relay text, no target.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Routed => "routed",
+            Self::NotRoutable { .. } => "not_routable",
+            Self::SshFailed { .. } => "ssh_failed",
+            Self::Spawn { .. } => "spawn_failed",
+        }
+    }
+
+    /// One line for a human, carrying whatever the far side actually said.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Routed => "marker returned".into(),
+            Self::NotRoutable { detail } if detail.is_empty() => {
+                "exit 0, no marker, no output".into()
+            }
+            Self::NotRoutable { detail } => format!("exit 0, no marker: {detail}"),
+            Self::SshFailed { code, stderr } if stderr.is_empty() => {
+                format!("ssh exit {code}, no stderr")
+            }
+            Self::SshFailed { code, stderr } => format!("ssh exit {code}: {stderr}"),
+            Self::Spawn { error } => format!("could not run ssh: {error}"),
+        }
+    }
+}
+
+/// Keeps a relay status JSON or an ssh error readable without letting a
+/// pathological far side write unbounded text into an error message.
+fn probe_snippet(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match s.char_indices().nth(200) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s,
+    }
+}
+
+/// Test whether a target is connectable yet: ask it to echo a marker, with
+/// success defined as the marker coming back.
+///
+/// Callers still only use this inside a loop that also watches status, but the
+/// outcome now says which failure it was — stderr and the relay's own answer
+/// were previously discarded, which made a booting agent and a rejected key
+/// indistinguishable from each other and from a broken local ssh.
 pub fn probe_native_ssh(
     ssh_target: &str,
     identity_file: Option<&Path>,
     extra_opts: &[String],
-) -> Result<bool> {
+) -> ProbeOutcome {
     let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
     for opt in extra_opts {
         ssh_cmd.arg(opt);
@@ -452,9 +519,25 @@ pub fn probe_native_ssh(
     ssh_cmd.arg(&target);
     ssh_cmd.arg(format!("echo {PROBE_MARKER}"));
     ssh_cmd.stdin(Stdio::null());
-    ssh_cmd.stderr(Stdio::null());
-    let output = ssh_cmd.output().context("Failed to execute ssh command")?;
-    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains(PROBE_MARKER))
+    // Captured, not nulled: on a non-zero exit this is the only place the
+    // reason exists.
+    ssh_cmd.stderr(Stdio::piped());
+    let output = match ssh_cmd.output() {
+        Ok(o) => o,
+        Err(e) => return ProbeOutcome::Spawn { error: e.to_string() },
+    };
+    if !output.status.success() {
+        return ProbeOutcome::SshFailed {
+            code: output.status.code().unwrap_or(-1),
+            stderr: probe_snippet(&output.stderr),
+        };
+    }
+    if String::from_utf8_lossy(&output.stdout).contains(PROBE_MARKER) {
+        return ProbeOutcome::Routed;
+    }
+    ProbeOutcome::NotRoutable {
+        detail: probe_snippet(&output.stdout),
+    }
 }
 
 /// One `-L` style forward: localhost:`local_port` → 127.0.0.1:`remote_port`

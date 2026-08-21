@@ -11,7 +11,8 @@ use crate::commands::cloud_agent::skills_sync;
 use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
 use crate::commands::ssh::tel as ssh_tel;
 use crate::commands::ssh::{
-    ensure_ssh_key_quiet, probe_native_ssh, run_native_ssh_captured, run_native_ssh_with_opts,
+    ProbeOutcome, ensure_ssh_key_quiet, probe_native_ssh, run_native_ssh_captured,
+    run_native_ssh_with_opts,
 };
 use crate::config::Configs;
 use crate::controllers::project::get_project;
@@ -1465,7 +1466,10 @@ pub(crate) async fn wait_until_connectable(
 ) -> Result<CodeAgent> {
     use queries::cloud_agent::CloudAgentStatus as S;
     let info = connect_info(environment_id, id).await?;
-    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    let waited = std::time::Instant::now();
+    let deadline = waited + READY_TIMEOUT;
+    let mut tally: std::collections::BTreeMap<&'static str, u32> = Default::default();
+    let mut attempts: u32 = 0;
     loop {
         let agent = fetch_agent(client, backboard, environment_id, id)
             .await?
@@ -1489,25 +1493,167 @@ pub(crate) async fn wait_until_connectable(
         let target = info.ssh_target.clone();
         let identity = info.identity.clone();
         let opts = info.relay_opts.clone();
-        let routed = tokio::task::spawn_blocking(move || {
+        let attempt_started = std::time::Instant::now();
+        let outcome = tokio::task::spawn_blocking(move || {
             probe_native_ssh(&target, identity.as_deref(), &opts)
         })
-        .await?
-        .unwrap_or(false);
-        if routed {
+        .await?;
+        attempts += 1;
+        *tally.entry(outcome.reason()).or_insert(0) += 1;
+        probe_debug(attempts, waited.elapsed(), attempt_started.elapsed(), &outcome);
+        if outcome.routed() {
             return Ok(agent);
         }
 
         if std::time::Instant::now() >= deadline {
+            // The probe reason, not just the agent's status: a box stuck in
+            // STARTING and a key the relay rejects both timed out here and used
+            // to read identically.
             bail!(
-                "Agent {} did not become connectable within {}s (last state: {:?}).",
+                "Agent {} did not become connectable within {}s (last state: {:?}). \
+                 {attempts} probes: {}. Last probe: {}",
                 agent.name,
                 READY_TIMEOUT.as_secs(),
-                agent.status
+                agent.status,
+                summarise(&tally),
+                outcome.detail(),
             );
         }
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
     }
+}
+
+/// Provision and skills-sync over a single relay connection.
+///
+/// Same two scripts and same marker checks as the `ssh_plumbing` path, run as
+/// two channels on one transport instead of two connections. The relay routes
+/// per connection, not per channel (`ssh_listener/main.go:560`, channel loop at
+/// `:672`), so this pays `session.Route` + `session.WaitForTunnel` once.
+///
+/// Returns the notes the caller should surface; skills failures are notes
+/// rather than errors, matching the existing path, because an agent is fully
+/// usable without them.
+async fn provision_via_mux(
+    target: &str,
+    agent: Agent,
+    auth: Option<&[u8]>,
+    app_mode: bool,
+    packed_skills: Option<&skills_sync::PackedSkills>,
+) -> Result<Vec<String>> {
+    let mut notes = Vec::new();
+    let conn = crate::commands::ssh::mux::RelayMux::connect(target).await?;
+
+    let out = conn
+        .exec(&provision_script(agent, auth.is_some(), app_mode), auth)
+        .await?;
+    let text = out.stdout_utf8();
+    if text.contains("AGENT-MISSING") {
+        bail!(
+            "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). Cloud agents bake every harness, so report this with the agent id rather than retrying.",
+            agent.name()
+        )
+    }
+    if !text.contains("AGENT-READY") {
+        bail!("Provisioning produced no status marker — the connection likely dropped mid-script.")
+    }
+
+    if let Some(packed) = packed_skills
+        && skills_sync::parse_remote_hash(&text).as_deref() != Some(packed.hash.as_str())
+    {
+        let out = conn
+            .exec(
+                &skills_sync::provision_script(&packed.hash),
+                Some(&packed.tarball),
+            )
+            .await?;
+        let text = out.stdout_utf8();
+        if !text.contains("SKILLS-OK") {
+            let reason = if text.contains("SKILLS-NO-TAR") {
+                "the agent has no `tar`"
+            } else if text.contains("SKILLS-EXTRACT-FAILED") {
+                "the transfer did not unpack"
+            } else {
+                "the sync did not report success"
+            };
+            notes.push(format!(
+                "Couldn't sync your skills onto the agent ({reason}); continuing without them."
+            ));
+        }
+    }
+
+    Ok(notes)
+}
+
+/// Wall-clock boundaries through the launch pipeline, off unless asked for.
+///
+/// The four SSH connections a launch opens are visible in server traces, but
+/// the gaps between them are not: they are client-side, and measure at 733ms,
+/// 546ms and 990ms against 309ms of connection setup each. Attributing those
+/// gaps by reading the code is guesswork, so this prints them.
+///
+/// Emits per mark rather than accumulating, so a launch that fails partway
+/// still reports the stages it did reach.
+struct LaunchTrace {
+    enabled: bool,
+    start: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl LaunchTrace {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            enabled: std::env::var_os("RAILWAY_PROBE_DEBUG").is_some(),
+            start: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, stage: &str) {
+        if !self.enabled {
+            return;
+        }
+        let now = std::time::Instant::now();
+        eprintln!(
+            "[launch] {stage:<18} +{:>7.0}ms   t+{:.3}s",
+            (now - self.last).as_secs_f64() * 1000.0,
+            (now - self.start).as_secs_f64(),
+        );
+        self.last = now;
+    }
+}
+
+/// Per-attempt probe trace, off unless asked for.
+///
+/// Not `progress.note`: this fires several times a boot and is diagnostic, not
+/// something a user launching an agent needs narrated at them.
+fn probe_debug(
+    attempt: u32,
+    since_start: std::time::Duration,
+    took: std::time::Duration,
+    outcome: &ProbeOutcome,
+) {
+    if std::env::var_os("RAILWAY_PROBE_DEBUG").is_none() {
+        return;
+    }
+    eprintln!(
+        "[probe] #{attempt} t+{:.3}s took {:.0}ms {} — {}",
+        since_start.as_secs_f64(),
+        took.as_secs_f64() * 1000.0,
+        outcome.reason(),
+        outcome.detail(),
+    );
+}
+
+/// `not_routable x4, ssh_failed x1`, ordered so the commonest reads first.
+fn summarise(tally: &std::collections::BTreeMap<&'static str, u32>) -> String {
+    let mut pairs: Vec<_> = tally.iter().collect();
+    pairs.sort_by_key(|(reason, n)| (std::cmp::Reverse(**n), *reason));
+    pairs
+        .iter()
+        .map(|(reason, n)| format!("{reason} x{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Bring an agent that already exists up to RUNNING: reuse it when it is
@@ -2266,6 +2412,7 @@ pub async fn prepare(
     };
 
     let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
+    let mut trace = LaunchTrace::new();
     crate::commands::cloud_agent::telemetry::track_launch_outcome(
         agent.slug(),
         result.as_ref().ok().map(|p| p.created),
@@ -2273,6 +2420,9 @@ pub async fn prepare(
         result.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
     )
     .await;
+    // Awaited, and it sits between the provision connection and the session:
+    // telemetry::send builds a client and POSTs, bounded at 3s.
+    trace.mark("telemetry(await)");
     result
 }
 
@@ -2284,6 +2434,7 @@ async fn prepare_inner(
     home: &Path,
     style: SessionStyle,
 ) -> Result<Prepared> {
+    let mut trace = LaunchTrace::new();
     // --- Resolve the local credential (client-side only, announced).
     //
     // Only the cheap sources run here. Codex and Grok read a local file, and a
@@ -2326,6 +2477,7 @@ async fn prepare_inner(
         PendingAuth::None => progress.note("Using the agent's own integrated Railway credentials"),
         PendingAuth::MintClaude => {}
     }
+    trace.mark("credential");
     // Pack the user's skills before spending a VM: a skills directory that has
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
@@ -2343,6 +2495,8 @@ async fn prepare_inner(
         ));
     }
 
+    trace.mark("skills_pack");
+
     // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
@@ -2354,6 +2508,7 @@ async fn prepare_inner(
         resolve_target(&mut configs, &client, args, &mut prefs, home).await,
     )
     .await?;
+    trace.mark("resolve_target");
 
     let (cloud_agent, created) = ssh_tel::track_for(
         "cloud_agent_launch",
@@ -2363,6 +2518,8 @@ async fn prepare_inner(
     .await?;
     configs.set_code_agent(&environment_id, &cloud_agent.id);
     configs.write()?;
+    // Contains the create mutation AND the whole probe loop (connection #1).
+    trace.mark("resolve_agent");
 
     let identity = ssh_tel::track_for(
         "cloud_agent_launch",
@@ -2370,11 +2527,15 @@ async fn prepare_inner(
         ensure_ssh_key_quiet(&client, &configs).await,
     )
     .await?;
+    // The second of two ensure_ssh_key_quiet calls: connect_info already ran one
+    // at code.rs:2604 before the probe. This mark prices the duplicate.
+    trace.mark("ssh_key(dup)");
     // The relay's cloud-agent grammar; by id rather than name because names are
     // not unique within an environment.
     let target = format!("agent:{environment_id}:{}", cloud_agent.id);
 
     let relay = ssh_tel::track_for("cloud_agent_launch", "relay", relay_ssh()).await?;
+    trace.mark("relay");
 
     // --- Deferred Claude mint. A setup-token lasts a year and the agent's disk
     // survives sleep, so a reused agent is normally still authenticated; minting
@@ -2433,10 +2594,34 @@ async fn prepare_inner(
             }
         }
     };
+    // Zero unless the Claude mint ran; when it does it can include the
+    // credential probe, which is its own SSH connection.
+    trace.mark("claude_mint");
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
     progress.step("Finalizing Configuration...");
-    let provision = {
+
+    // Both scripts over ONE relay connection instead of one each. Behind a flag
+    // while the saving is being measured; the path below is unchanged.
+    let mux = std::env::var_os("RAILWAY_MUX").is_some();
+    if mux {
+        let notes = provision_via_mux(
+            &target,
+            agent,
+            auth.as_ref().map(|(line, _)| line.as_slice()),
+            args.app_mode,
+            packed_skills.as_ref(),
+        )
+        .await?;
+        for line in &notes {
+            progress.note(line);
+        }
+        trace.mark("provision+skills(mux)");
+    }
+
+    let provision: Result<()> = if mux {
+        Ok(())
+    } else {
         let target = target.clone();
         let identity = identity.clone();
         let relay = relay.clone();
@@ -2512,7 +2697,11 @@ async fn prepare_inner(
         }
         result
     };
-    ssh_tel::track_for("cloud_agent_launch", "provision", provision).await?;
+    // Connections #2 (provision) and #3 (skills, conditional on the hash).
+    if !mux {
+        ssh_tel::track_for("cloud_agent_launch", "provision", provision).await?;
+        trace.mark("provision+skills");
+    }
 
     let env_prefix = format!(
         "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
