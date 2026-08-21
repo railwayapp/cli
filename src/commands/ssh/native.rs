@@ -92,7 +92,7 @@ pub async fn get_service_instance_id(
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
 pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
-    ensure_ssh_key_impl(client, configs, true).await
+    ensure_ssh_key_impl(client, configs, true, true).await
 }
 
 /// `ensure_ssh_key` without the "Using SSH key from ..." announcement when a
@@ -100,13 +100,25 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option
 /// ssh is plumbing, not the product. First-run registration still prompts
 /// and prints normally.
 pub async fn ensure_ssh_key_quiet(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
-    ensure_ssh_key_impl(client, configs, false).await
+    ensure_ssh_key_impl(client, configs, false, true).await
+}
+
+/// [`ensure_ssh_key_quiet`] that never prompts: the registration path errors
+/// with the recipe instead. For callers running concurrently with another
+/// interactive flow — two prompt sequences interleaved on one terminal are
+/// gibberish — which retry interactively afterwards if they want the prompt.
+pub async fn ensure_ssh_key_noninteractive(
+    client: &Client,
+    configs: &Configs,
+) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, false, false).await
 }
 
 async fn ensure_ssh_key_impl(
     client: &Client,
     configs: &Configs,
     announce: bool,
+    interactive: bool,
 ) -> Result<Option<PathBuf>> {
     let local_keys = find_local_ssh_keys().await?;
 
@@ -148,7 +160,7 @@ async fn ensure_ssh_key_impl(
     // so both get the recipe instead. `railway ca` runs this same function as
     // a preflight before taking the screen, so inside its TUI this path only
     // fires if the key disappeared mid-session.
-    if !std::io::stdin().is_terminal() || crate::util::prompt::terminal_owned() {
+    if !interactive || !std::io::stdin().is_terminal() || crate::util::prompt::terminal_owned() {
         bail!(
             "No registered SSH keys found. Register one with:\n  railway ssh keys add\n\n\
             Or import from GitHub:\n  railway ssh keys github"

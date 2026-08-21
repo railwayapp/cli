@@ -595,9 +595,11 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     // box, so this waits rather than issuing a second wake.
     let ready = match agent.status {
         ca::Status::Running => Ok(()),
-        ca::Status::Starting => {
-            let access = code::relay_access().await?;
-            code::wait_until_connectable(
+        // relay_access errors flow into `ready` rather than `?`-ing out: the
+        // spinner above is cleared only after this match, and an early return
+        // would leave it animating over the error output.
+        ca::Status::Starting => match code::relay_access().await {
+            Ok(access) => code::wait_until_connectable(
                 client,
                 &backboard,
                 &agent.environment_id,
@@ -607,12 +609,12 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
                 std::time::Duration::ZERO,
             )
             .await
-            .map(|_| ())
-        }
+            .map(|_| ()),
+            Err(e) => Err(e),
+        },
         ca::Status::Sleeping => match ca::wake(client, &backboard, &agent.id).await {
-            Ok(()) => {
-                let access = code::relay_access().await?;
-                code::wait_until_connectable(
+            Ok(()) => match code::relay_access().await {
+                Ok(access) => code::wait_until_connectable(
                     client,
                     &backboard,
                     &agent.environment_id,
@@ -622,8 +624,9 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
                     std::time::Duration::from_millis(350),
                 )
                 .await
-                .map(|_| ())
-            }
+                .map(|_| ()),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         },
         _ => Err(anyhow::anyhow!(

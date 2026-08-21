@@ -330,6 +330,37 @@ pub(crate) struct InflightLaunch {
     rx: mpsc::UnboundedReceiver<Message>,
 }
 
+impl InflightLaunch {
+    /// Wait (bounded) for the running pipeline to settle, for a caller that is
+    /// about to abort with an error: the pipeline may already have CREATED an
+    /// agent, and exiting without saying so would orphan a billing VM with no
+    /// user-visible record. Returns the line to print when there is one.
+    pub(crate) async fn settle_for_abort(mut self, limit: std::time::Duration) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                Ok(Some(Message::LaunchReady(prepared, _))) => {
+                    return Some(format!(
+                        "A launch was already in flight and created agent {} — `railway ca ssh {}` reattaches it, `railway ca delete {}` removes it.",
+                        prepared.agent_name, prepared.agent_name, prepared.agent_name
+                    ));
+                }
+                // Failed before creating anything worth reporting.
+                Ok(Some(Message::LaunchFailed(_))) => return None,
+                Ok(Some(_)) => continue,
+                // Pipeline gone or still running at the deadline: point at the
+                // list rather than guessing.
+                Ok(None) => return None,
+                Err(_) => {
+                    return Some(
+                        "A launch was still in flight — check `railway ca list` for an agent it may have created.".to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Run the prepare pipeline for `req`, streaming progress and the outcome into
 /// `sink` as loop messages. Shared by [`start_launch`] (sink = the loop's own
 /// channel) and [`begin_launch_early`] (sink = a buffer the loop adopts later).

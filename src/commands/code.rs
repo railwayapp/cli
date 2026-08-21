@@ -1483,6 +1483,7 @@ fn ssh_plumbing(
     identity: Option<&std::path::Path>,
     stdin_payload: Option<&[u8]>,
     relay: &RelaySsh,
+    mux_socket: Option<&std::path::Path>,
 ) -> Result<Vec<u8>> {
     // A woken agent re-boots its entrypoint, and the relay refuses the session
     // until the machine's new incarnation is attachable, so the first attempts
@@ -1518,6 +1519,14 @@ fn ssh_plumbing(
             || stderr_text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED");
         if hostkey_mismatch {
             relay.heal_known_hosts();
+        }
+        // A failed attempt must not leave a master for the next attempt to
+        // ride: removing the socket makes ControlMaster=auto open a genuinely
+        // fresh connection instead of pinning every retry to whatever dead or
+        // misrouted path the failure created — the historical 8/20-timeouts
+        // trap, scoped here to within a single call.
+        if let Some(socket) = mux_socket {
+            let _ = std::fs::remove_file(socket);
         }
         last = (code, reason);
 
@@ -1644,71 +1653,87 @@ pub(crate) async fn wait_until_connectable(
         tokio::time::sleep(initial_delay).await;
     }
     let mut round = 0u32;
+    // The status fetch keeps its OLD ~750ms grid even while probes run at the
+    // tight cadence: it exists only to catch rare terminal states, and letting
+    // it ride the probe cadence would triple backboard polling per launching
+    // client for nothing. Round 1 always fetches.
+    let mut last_fetch: Option<std::time::Instant> = None;
+    let mut last_agent: Option<CodeAgent> = None;
     loop {
         round += 1;
         let round_started = std::time::Instant::now();
 
-        // The probe is what usually ends the wait; the status fetch exists to
-        // catch terminal states. Running them together instead of fetch-then-
-        // probe stops a serialized GraphQL round-trip from pushing the
-        // discovering probe later every round.
-        //
         // Every round probes as a would-be master on its own FRESH socket. A
         // round that lands on the relay's dev.new fall-through (agent not yet
         // routable) leaves a master nothing will ever reference — the socket
         // name is never reused, and only the round whose marker comes back is
-        // promoted. Short persist so the losers evaporate.
+        // promoted. Losers are told to exit below, with a short persist as the
+        // backstop, so they don't pile up relay connections during a slow boot.
         let socket = mux_socket();
         let target = ssh_target.clone();
         let identity = access.identity.clone();
         let mut opts = access.relay_opts.clone();
-        opts.extend(mux_master_opts(&socket, "10s"));
+        opts.extend(mux_master_opts(&socket, "3s"));
         let probe = tokio::task::spawn_blocking(move || {
             probe_native_ssh(&target, identity.as_deref(), &opts)
         });
-        let (agent, routed) =
-            tokio::join!(fetch_agent(client, backboard, environment_id, id), probe);
-        let agent = agent?.ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
-        let routed = routed?.unwrap_or(false);
 
+        // Await the fetch BEFORE the probe (both are already in flight): a
+        // terminal state must bail immediately, not after a probe that can sit
+        // on its full ConnectTimeout against a box that will never answer.
+        let fetch_due = last_fetch.is_none_or(|at| at.elapsed().as_millis() >= 700);
+        if fetch_due {
+            let agent = fetch_agent(client, backboard, environment_id, id)
+                .await?
+                .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
+            last_fetch = Some(std::time::Instant::now());
+            match agent.status {
+                S::RUNNING | S::STARTING | S::SLEEPING => {}
+                S::CRASHED => bail!(
+                    "Agent {} crashed while starting. `railway code --new` for a fresh one.",
+                    agent.name
+                ),
+                S::FAILED => bail!(
+                    "Agent {} failed to start. `railway code --new` for a fresh one.",
+                    agent.name
+                ),
+                S::DELETING => bail!("Agent {} is being deleted.", agent.name),
+                S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+            }
+            // RUNNING routes by definition, so don't spend another round on a
+            // probe that lost the race to the status flip — but there is no
+            // verified connection to promote (the in-flight probe is abandoned;
+            // its master, if any, exits on the persist backstop).
+            if agent.status == S::RUNNING {
+                ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+                return Ok((agent, None));
+            }
+            last_agent = Some(agent);
+        }
+
+        let routed = probe.await?.unwrap_or(false);
         if diagnostics {
             eprintln!(
-                "[wait_connectable] round {round}: status={:?} round={}ms routed={routed}",
-                agent.status,
+                "[wait_connectable] round {round}: status={:?} round={}ms routed={routed} fetched={fetch_due}",
+                last_agent.as_ref().map(|a| &a.status),
                 round_started.elapsed().as_millis()
             );
         }
         if routed {
             ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+            let agent = last_agent
+                .ok_or_else(|| anyhow!("Agent {id} was never observed while starting."))?;
             return Ok((agent, Some(socket)));
         }
-        // RUNNING routes by definition, so a probe that lost a race to the
-        // status flip doesn't cost another round — but there is no verified
-        // connection to promote.
-        if agent.status == S::RUNNING {
-            ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
-            return Ok((agent, None));
-        }
-        match agent.status {
-            S::RUNNING | S::STARTING | S::SLEEPING => {}
-            S::CRASHED => bail!(
-                "Agent {} crashed while starting. `railway code --new` for a fresh one.",
-                agent.name
-            ),
-            S::FAILED => bail!(
-                "Agent {} failed to start. `railway code --new` for a fresh one.",
-                agent.name
-            ),
-            S::DELETING => bail!("Agent {} is being deleted.", agent.name),
-            S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
-        }
+        // This round's would-be master lost; release it now rather than
+        // letting it hold a relay connection for the persist window.
+        release_probe_master(&socket, &ssh_target);
 
         if std::time::Instant::now() >= deadline {
             bail!(
-                "Agent {} did not become connectable within {}s (last state: {:?}).",
-                agent.name,
+                "Agent {id} did not become connectable within {}s (last state: {:?}).",
                 READY_TIMEOUT.as_secs(),
-                agent.status
+                last_agent.map(|a| a.status)
             );
         }
         // Pace rounds to a cadence rather than sleeping on top of the probe: a
@@ -1725,6 +1750,26 @@ pub(crate) async fn wait_until_connectable(
             tokio::time::sleep(rest).await;
         }
     }
+}
+
+/// Tell a losing probe round's background master to exit now instead of
+/// holding an authenticated relay connection until its persist backstop.
+/// Fire-and-forget: the master may not exist (connection never completed) or
+/// may already be gone — both are fine, and nothing waits on the result.
+fn release_probe_master(socket: &std::path::Path, target: &str) {
+    if !mux_usable(socket) {
+        return;
+    }
+    let _ = std::process::Command::new("ssh")
+        .arg("-O")
+        .arg("exit")
+        .arg("-o")
+        .arg(format!("ControlPath={}", socket.display()))
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Bring an agent that already exists up to RUNNING: reuse it when it is
@@ -2683,11 +2728,27 @@ async fn prepare_inner(
         ),
         ssh_tel::timed_for("cloud_agent_launch", "ssh_key", async {
             let key_configs = Configs::new()?;
-            ensure_ssh_key_quiet(&client, &key_configs).await
+            // Non-interactive inside the join: resolve_target can be running
+            // its own picker/setup prompts concurrently, and two prompt flows
+            // interleaved on one terminal are gibberish. The rare
+            // needs-registration case retries interactively below, after the
+            // join, when the terminal is free again.
+            crate::commands::ssh::native::ensure_ssh_key_noninteractive(&client, &key_configs).await
         }),
     );
     let (_project_id, environment_id) = target_res?;
-    let identity = identity?;
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(_) => {
+            let key_configs = Configs::new()?;
+            ssh_tel::timed_for(
+                "cloud_agent_launch",
+                "ssh_key_interactive",
+                ensure_ssh_key_quiet(&client, &key_configs),
+            )
+            .await?
+        }
+    };
 
     let relay = ssh_tel::timed_for("cloud_agent_launch", "relay", async { relay_ssh() }).await?;
     let access = RelayAccess {
@@ -2734,6 +2795,7 @@ async fn prepare_inner(
                         identity.as_deref(),
                         None,
                         &relay,
+                        None,
                     )
                 })
                 .await?;
@@ -2774,9 +2836,12 @@ async fn prepare_inner(
     // One relay handshake per launch: when a readiness probe won the wait, its
     // marker-verified connection is already a master and both the provision
     // and the session ride it. When no probe ran (agent already RUNNING, or
-    // the status flip won the race), the provision opens the master instead —
-    // it is equally verified, by the AGENT-READY marker below. See the
-    // RelaySsh doc for why an UNVERIFIED connection must never own one.
+    // the status flip won the race), the provision opens the master instead.
+    // That one is verified only after the fact — the master exists from
+    // connect time, and a marker failure does not tear it down — which is why
+    // ssh_plumbing removes the socket on every failed attempt: no retry (and
+    // no session) can ride a connection whose attempt didn't produce the
+    // marker. See the RelaySsh doc for the history this guards against.
     let (master_socket, mux_provision) = match probe_master {
         Some(socket) => {
             let client_opts = mux_client_opts(&socket);
@@ -2798,6 +2863,7 @@ async fn prepare_inner(
         let target = target.clone();
         let identity = identity.clone();
         let relay = provision_relay.clone();
+        let master_socket = master_socket.clone();
         // Copied out of `args`, which is a borrow the 'static closure can't take.
         let app_mode = args.app_mode;
         let skills_note = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2850,6 +2916,7 @@ async fn prepare_inner(
                     identity.as_deref(),
                     Some(&payload),
                     &relay,
+                    Some(&master_socket),
                 )?;
                 let out = String::from_utf8_lossy(&out);
                 check_ready(&out)?;
@@ -2868,6 +2935,8 @@ async fn prepare_inner(
                 identity.as_deref(),
                 auth.as_ref().map(|(line, _)| line.as_slice()),
                 &relay,
+
+                Some(&master_socket),
             )?;
             let out = String::from_utf8_lossy(&out);
             check_ready(&out)?;
@@ -2883,6 +2952,8 @@ async fn prepare_inner(
                         identity.as_deref(),
                         Some(&packed.tarball),
                         &relay,
+
+                        Some(&master_socket),
                     )?;
                     let out = String::from_utf8_lossy(&out);
                     if !out.contains("SKILLS-OK") {
@@ -3027,6 +3098,7 @@ pub async fn kill_session(environment_id: &str, agent_id: &str, session_name: &s
             info.identity.as_deref(),
             None,
             &relay,
+            None,
         )
     })
     .await??;

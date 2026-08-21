@@ -240,11 +240,19 @@ fn read_link_context(configs: &Configs) -> LinkContext {
         .or_else(|| linked.as_ref().map(|p| p.project.clone()))
         .filter(|s| !s.is_empty());
 
+    // Env-var environment/service ids count only alongside RAILWAY_PROJECT_ID,
+    // matching `Configs::resolve_env_var_project`, which refuses
+    // RAILWAY_ENVIRONMENT_ID without RAILWAY_PROJECT_ID outright. Without this
+    // guard, a stray RAILWAY_ENVIRONMENT_ID from another project's tooling
+    // would silently pair project A (the link) with project B's environment.
+    // Silently ignoring the orphaned var beats silently mispairing it.
     let environment_id = Configs::get_railway_environment_id()
+        .filter(|_| env_project.is_some())
         .or_else(|| linked_for_env.and_then(|p| p.environment.clone()))
         .filter(|s| !s.is_empty());
 
     let service_id = Configs::get_railway_service_id()
+        .filter(|_| env_project.is_some())
         .or_else(|| linked_for_env.and_then(|p| p.service.clone()))
         .filter(|s| !s.is_empty());
 

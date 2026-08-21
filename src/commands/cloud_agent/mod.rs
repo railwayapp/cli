@@ -266,6 +266,16 @@ pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
 }
 
 async fn browse_with(opts: BrowseOpts) -> Result<()> {
+    let result = browse_with_inner(opts).await;
+    // The user's work is done; give detached telemetry (launch outcomes, stage
+    // sums) a bounded window before the process exits — a pane session closed
+    // seconds after launching would otherwise drop the very events this
+    // command's telemetry exists to collect. Instant when nothing is in flight.
+    crate::commands::ssh::tel::drain_detached(std::time::Duration::from_secs(2)).await;
+    result
+}
+
+async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     let BrowseOpts {
         initial_screen,
         collapsed,
@@ -312,12 +322,37 @@ async fn browse_with(opts: BrowseOpts) -> Result<()> {
         },
     );
     spinner.finish_and_clear();
-    let (_, tree) = loaded?;
+    let (_, tree) = match loaded {
+        Ok(pair) => pair,
+        Err(e) => {
+            // The early pipeline may already have created an agent; exiting on
+            // the tree/flag error without saying so would orphan a billing VM
+            // with no user-visible record.
+            if let Some(inflight) = inflight
+                && let Some(note) = inflight
+                    .settle_for_abort(std::time::Duration::from_secs(30))
+                    .await
+            {
+                eprintln!("{}", note.yellow());
+            }
+            return Err(e);
+        }
+    };
     if tree.is_empty() {
         println!(
             "No projects with environments you can use. Create one with {} first.",
             "railway init".cyan()
         );
+        // Same orphan guard as the error path above — an early launch that
+        // somehow targeted an environment this listing can't see still spent
+        // (or is spending) a create.
+        if let Some(inflight) = inflight
+            && let Some(note) = inflight
+                .settle_for_abort(std::time::Duration::from_secs(30))
+                .await
+        {
+            eprintln!("{}", note.yellow());
+        }
         return Ok(());
     }
 
