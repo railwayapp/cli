@@ -668,6 +668,13 @@ pub fn run_native_ssh_captured(
     for opt in extra_opts {
         ssh_cmd.arg(opt);
     }
+    // Bound the connect the same way `probe_native_ssh` does. Without it a
+    // blackholed connection hangs forever: `ServerAliveInterval` only polices a
+    // session that is already established, and `ssh_plumbing`'s retry budget is
+    // fiction if a single attempt never returns. Observed in the wild as a
+    // launch parked on "Finalizing Configuration..." with no error and no
+    // timeout, on a VM that was up and billing.
+    ssh_cmd.arg("-o").arg("ConnectTimeout=10");
     ssh_cmd.arg("-T");
     ssh_cmd.arg(&target);
     ssh_cmd.arg(command);

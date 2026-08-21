@@ -853,7 +853,17 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
 /// mint locally, store the result as a repository secret, and use it on remote
 /// runners. Cleared by `railway logout`, or by `--refresh-auth`.
 fn claude_token_cache_path() -> Option<std::path::PathBuf> {
-    Some(dirs::home_dir()?.join(".railway").join("claude-code-token"))
+    Some(claude_token_cache_path_in(&dirs::home_dir()?))
+}
+
+/// The cache path under an explicit home, so callers that already scope
+/// themselves to one (`railway ca setup --reset`, and the tests that drive it
+/// against a tempdir) clear the right file. Resolving `dirs::home_dir()` here
+/// regardless of the caller's home meant the suite deleted the developer's own
+/// cached setup-token every run, sending their next `--claude` launch through a
+/// browser mint.
+fn claude_token_cache_path_in(home: &Path) -> std::path::PathBuf {
+    home.join(".railway").join("claude-code-token")
 }
 
 /// Read the cached token, if one is there and still plausible.
@@ -917,9 +927,14 @@ fn cached_token_source(age_days: Option<u64>) -> String {
 
 /// Forget the cached token. Called by `railway logout`.
 pub fn clear_claude_token_cache() {
-    if let Some(path) = claude_token_cache_path() {
-        let _ = std::fs::remove_file(path);
+    if let Some(home) = dirs::home_dir() {
+        clear_claude_token_cache_in(&home);
     }
+}
+
+/// [`clear_claude_token_cache`] scoped to an explicit home.
+pub fn clear_claude_token_cache_in(home: &Path) {
+    let _ = std::fs::remove_file(claude_token_cache_path_in(home));
 }
 
 /// The credential to push, or the knowledge that obtaining one costs a browser
@@ -2266,6 +2281,9 @@ pub async fn prepare(
     };
 
     let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
+    // After the outcome, and detached: the stages are already measured, and
+    // reporting them must not extend the launch they describe.
+    ssh_tel::flush_stages("cloud_agent_launch");
     crate::commands::cloud_agent::telemetry::track_launch_outcome(
         agent.slug(),
         result.as_ref().ok().map(|p| p.created),
@@ -2293,19 +2311,15 @@ async fn prepare_inner(
     // see `PendingAuth`.
     let pending = match agent {
         Agent::Codex | Agent::Grok => {
-            ssh_tel::track_for(
-                "cloud_agent_launch",
-                "credential",
-                local_signin(agent, home),
-            )
+            ssh_tel::timed_for("cloud_agent_launch", "credential", async {
+                local_signin(agent, home)
+            })
             .await?
         }
         Agent::Claude => {
-            ssh_tel::track_for(
-                "cloud_agent_launch",
-                "credential",
-                claude_credentials_cheap(args.refresh_auth),
-            )
+            ssh_tel::timed_for("cloud_agent_launch", "credential", async {
+                claude_credentials_cheap(args.refresh_auth)
+            })
             .await?
         }
         // Nothing to read or mint — the VM already carries its own, and a
@@ -2329,11 +2343,9 @@ async fn prepare_inner(
     // Pack the user's skills before spending a VM: a skills directory that has
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
-    let packed_skills = ssh_tel::track_for(
-        "cloud_agent_launch",
-        "skills_pack",
-        skills_sync::pack(&prefs, home),
-    )
+    let packed_skills = ssh_tel::timed_for("cloud_agent_launch", "skills_pack", async {
+        skills_sync::pack(&prefs, home)
+    })
     .await?;
     if let Some(packed) = &packed_skills {
         progress.note(&format!(
@@ -2348,33 +2360,33 @@ async fn prepare_inner(
     let client = GQLClient::new_authorized(&configs)?;
     // The project is no longer carried on `Prepared` — its only reader was the
     // launcher's exit hint, which now names the agent instead.
-    let (_project_id, environment_id) = ssh_tel::track_for(
+    let (_project_id, environment_id) = ssh_tel::timed_for(
         "cloud_agent_launch",
         "resolve_target",
-        resolve_target(&mut configs, &client, args, &mut prefs, home).await,
+        resolve_target(&mut configs, &client, args, &mut prefs, home),
     )
     .await?;
 
-    let (cloud_agent, created) = ssh_tel::track_for(
+    let (cloud_agent, created) = ssh_tel::timed_for(
         "cloud_agent_launch",
         "resolve_agent",
-        resolve_agent(&mut configs, &client, args, &environment_id, progress).await,
+        resolve_agent(&mut configs, &client, args, &environment_id, progress),
     )
     .await?;
     configs.set_code_agent(&environment_id, &cloud_agent.id);
     configs.write()?;
 
-    let identity = ssh_tel::track_for(
+    let identity = ssh_tel::timed_for(
         "cloud_agent_launch",
         "ssh_key",
-        ensure_ssh_key_quiet(&client, &configs).await,
+        ensure_ssh_key_quiet(&client, &configs),
     )
     .await?;
     // The relay's cloud-agent grammar; by id rather than name because names are
     // not unique within an environment.
     let target = format!("agent:{environment_id}:{}", cloud_agent.id);
 
-    let relay = ssh_tel::track_for("cloud_agent_launch", "relay", relay_ssh()).await?;
+    let relay = ssh_tel::timed_for("cloud_agent_launch", "relay", async { relay_ssh() }).await?;
 
     // --- Deferred Claude mint. A setup-token lasts a year and the agent's disk
     // survives sleep, so a reused agent is normally still authenticated; minting
@@ -2388,17 +2400,15 @@ async fn prepare_inner(
             // explicit request to replace whatever is there; neither needs a probe.
             let needs_probe = !created && !args.refresh_auth;
             let inherit = if needs_probe {
-                let probe = ssh_tel::track_for(
-                    "cloud_agent_launch",
-                    "claude_probe",
+                let probe = ssh_tel::timed_for("cloud_agent_launch", "claude_probe", async {
                     ssh_plumbing(
                         &target,
                         CLAUDE_CREDENTIAL_PROBE,
                         identity.as_deref(),
                         None,
                         &relay,
-                    ),
-                )
+                    )
+                })
                 .await?;
                 String::from_utf8_lossy(&probe).contains("CRED-PRESENT")
             } else {
@@ -2410,11 +2420,9 @@ async fn prepare_inner(
                 );
                 None
             } else {
-                match ssh_tel::track_for(
-                    "cloud_agent_launch",
-                    "claude_mint",
-                    mint_claude_credentials(),
-                )
+                match ssh_tel::timed_for("cloud_agent_launch", "claude_mint", async {
+                    mint_claude_credentials()
+                })
                 .await?
                 {
                     Some((line, source)) => {
@@ -2436,7 +2444,7 @@ async fn prepare_inner(
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
     progress.step("Finalizing Configuration...");
-    let provision = {
+    let provision = async {
         let target = target.clone();
         let identity = identity.clone();
         let relay = relay.clone();
@@ -2512,7 +2520,7 @@ async fn prepare_inner(
         }
         result
     };
-    ssh_tel::track_for("cloud_agent_launch", "provision", provision).await?;
+    ssh_tel::timed_for("cloud_agent_launch", "provision", provision).await?;
 
     let env_prefix = format!(
         "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
