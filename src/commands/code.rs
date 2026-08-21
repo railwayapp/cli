@@ -1479,15 +1479,38 @@ pub(crate) async fn wait_until_connectable(
     id: &str,
 ) -> Result<CodeAgent> {
     use queries::cloud_agent::CloudAgentStatus as S;
+    // Measured as one stage because this is the leg the platform owns — VM
+    // boot/restore up to a routable SSH target. Per-round detail goes to stderr
+    // under RAILWAY_STAGE_TIMING; the recorded stage is what telemetry sees.
+    let wait_started = std::time::Instant::now();
+    let diagnostics = ssh_tel::timing_diagnostics();
     let info = connect_info(environment_id, id).await?;
+    if diagnostics {
+        eprintln!(
+            "[wait_connectable] connect_info={}ms",
+            wait_started.elapsed().as_millis()
+        );
+    }
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    let mut round = 0u32;
     loop {
+        round += 1;
+        let round_started = std::time::Instant::now();
         let agent = fetch_agent(client, backboard, environment_id, id)
             .await?
             .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
         match agent.status {
             // RUNNING routes by definition; skip the probe round-trip.
-            S::RUNNING => return Ok(agent),
+            S::RUNNING => {
+                ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+                if diagnostics {
+                    eprintln!(
+                        "[wait_connectable] round {round}: status=RUNNING after {}ms",
+                        wait_started.elapsed().as_millis()
+                    );
+                }
+                return Ok(agent);
+            }
             S::STARTING | S::SLEEPING => {}
             S::CRASHED => bail!(
                 "Agent {} crashed while starting. `railway code --new` for a fresh one.",
@@ -1509,7 +1532,15 @@ pub(crate) async fn wait_until_connectable(
         })
         .await?
         .unwrap_or(false);
+        if diagnostics {
+            eprintln!(
+                "[wait_connectable] round {round}: status={:?} round={}ms routed={routed}",
+                agent.status,
+                round_started.elapsed().as_millis()
+            );
+        }
         if routed {
+            ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
             return Ok(agent);
         }
 
@@ -1550,17 +1581,20 @@ async fn ready_existing_agent(
         // resting state this command leaves behind.
         S::SLEEPING | S::STARTING => {
             progress.step(&format!("Waking agent {}", agent.name));
-            if agent.status == S::SLEEPING
-                && let Err(e) = post_graphql::<mutations::CloudAgentWake, _>(
+            if agent.status == S::SLEEPING {
+                let wake_started = std::time::Instant::now();
+                let wake = post_graphql::<mutations::CloudAgentWake, _>(
                     client,
                     backboard,
                     mutations::cloud_agent_wake::Variables {
                         id: agent.id.clone(),
                     },
                 )
-                .await
-            {
-                return Err(e.into());
+                .await;
+                ssh_tel::record_stage("wake_mutation", wake_started.elapsed(), wake.is_ok());
+                if let Err(e) = wake {
+                    return Err(e.into());
+                }
             }
             let running =
                 wait_until_connectable(client, backboard, environment_id, &agent.id).await?;
@@ -1847,7 +1881,8 @@ async fn resolve_agent(
         .map(serde_json::to_value)
         .transpose()?;
     progress.step("Creating a cloud agent");
-    let created = match post_graphql::<mutations::CloudAgentCreate, _>(
+    let create_started = std::time::Instant::now();
+    let create = post_graphql::<mutations::CloudAgentCreate, _>(
         client,
         &backboard,
         mutations::cloud_agent_create::Variables {
@@ -1858,8 +1893,9 @@ async fn resolve_agent(
             },
         },
     )
-    .await
-    {
+    .await;
+    ssh_tel::record_stage("create_mutation", create_started.elapsed(), create.is_ok());
+    let created = match create {
         Ok(res) => res.cloud_agent_create,
         Err(e) => return Err(e.into()),
     };

@@ -25,6 +25,19 @@ fn timing_to_stderr() -> bool {
     std::env::var("RAILWAY_STAGE_TIMING").is_ok_and(|v| v == "1" || v == "true")
 }
 
+/// Record a stage measured by the caller itself, for spans that don't wrap
+/// cleanly in [`timed_for`] — the sub-legs inside a wake or create wait, where
+/// the timing brackets a loop rather than one future.
+pub fn record_stage(stage: &str, duration: Duration, success: bool) {
+    record(stage, duration, success);
+}
+
+/// Whether `RAILWAY_STAGE_TIMING` diagnostics are on, for callers that want to
+/// print per-round detail (probe cadence, poll counts) beyond the stage sums.
+pub fn timing_diagnostics() -> bool {
+    timing_to_stderr()
+}
+
 fn record(stage: &str, duration: Duration, success: bool) {
     let timing = StageTiming {
         stage: stage.to_string(),
