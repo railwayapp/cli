@@ -210,16 +210,37 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
 pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    // Before anything is resolved or minted: without the flag the create at the
-    // end of all this is refused anyway.
-    access::ensure_enabled(&client, &configs).await?;
     eprintln!(
         "{}",
         "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
             .yellow()
     );
 
-    let resolved = crate::commands::code::resolve_launch(&args, &mut configs, &client).await?;
+    // The flag check races target resolution instead of preceding it: an
+    // un-flagged user is still stopped the moment the check answers — before
+    // any prompt is worth their time — while everyone else no longer pays a
+    // serialized round-trip. `browse_with` checks again beside its tree load,
+    // which is what actually gates the create. Its own `Configs` because
+    // resolve_launch holds the mutable borrow.
+    let resolved = {
+        let ensure_fut = async {
+            let flag_configs = Configs::new()?;
+            access::ensure_enabled(&client, &flag_configs).await
+        };
+        let resolve_fut = crate::commands::code::resolve_launch(&args, &mut configs, &client);
+        tokio::pin!(ensure_fut);
+        tokio::pin!(resolve_fut);
+        tokio::select! {
+            enabled = &mut ensure_fut => {
+                enabled?;
+                resolve_fut.await?
+            }
+            resolved = &mut resolve_fut => {
+                ensure_fut.await?;
+                resolved?
+            }
+        }
+    };
     let launch = tui::LaunchRequest {
         project_id: resolved.project_id,
         environment_id: resolved.environment_id,
@@ -245,6 +266,16 @@ pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
 }
 
 async fn browse_with(opts: BrowseOpts) -> Result<()> {
+    let result = browse_with_inner(opts).await;
+    // The user's work is done; give detached telemetry (launch outcomes, stage
+    // sums) a bounded window before the process exits — a pane session closed
+    // seconds after launching would otherwise drop the very events this
+    // command's telemetry exists to collect. Instant when nothing is in flight.
+    crate::commands::ssh::tel::drain_detached(std::time::Duration::from_secs(2)).await;
+    result
+}
+
+async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     let BrowseOpts {
         initial_screen,
         collapsed,
@@ -257,23 +288,71 @@ async fn browse_with(opts: BrowseOpts) -> Result<()> {
     // All under one spinner: the flag check and the key check are small
     // queries against the same client, and running them beside the tree load
     // rather than before it keeps them off the clock.
+    //
+    // An arriving launch starts its pipeline in here too, the moment the key
+    // check answers Ready — the tree is for drawing the manage screen, not
+    // something the launch consumes, and waiting for it put the whole
+    // workspace query in front of every `railway code`. Only gate-free
+    // launches start early: a registered key (checked below) and no
+    // interactive Claude mint (checked here), because a pipeline started
+    // before the frame exists has nowhere to ask a question.
+    let launch_early = launch.as_ref().filter(|req| {
+        !(req.harness == "claude" && crate::commands::code::claude_needs_local_mint())
+    });
+    let (key_ready_tx, key_ready_rx) = tokio::sync::oneshot::channel::<bool>();
     let spinner = create_spinner("Loading your projects".to_string());
-    let (loaded, ssh_key) = tokio::join!(
+    let (loaded, ssh_key, inflight) = tokio::join!(
         async {
             tokio::try_join!(
                 access::ensure_enabled(&client, &configs),
                 tui::load_tree(&client, &configs),
             )
         },
-        check_ssh_key(&client, &configs),
+        async {
+            let state = check_ssh_key(&client, &configs).await;
+            let _ = key_ready_tx.send(matches!(state, tui::app::SshKeyState::Ready));
+            state
+        },
+        async {
+            let req = launch_early?;
+            match key_ready_rx.await {
+                Ok(true) => Some(tui::begin_launch_early(req.clone())),
+                _ => None,
+            }
+        },
     );
     spinner.finish_and_clear();
-    let (_, tree) = loaded?;
+    let (_, tree) = match loaded {
+        Ok(pair) => pair,
+        Err(e) => {
+            // The early pipeline may already have created an agent; exiting on
+            // the tree/flag error without saying so would orphan a billing VM
+            // with no user-visible record.
+            if let Some(inflight) = inflight
+                && let Some(note) = inflight
+                    .settle_for_abort(std::time::Duration::from_secs(30))
+                    .await
+            {
+                eprintln!("{}", note.yellow());
+            }
+            return Err(e);
+        }
+    };
     if tree.is_empty() {
         println!(
             "No projects with environments you can use. Create one with {} first.",
             "railway init".cyan()
         );
+        // Same orphan guard as the error path above — an early launch that
+        // somehow targeted an environment this listing can't see still spent
+        // (or is spending) a create.
+        if let Some(inflight) = inflight
+            && let Some(note) = inflight
+                .settle_for_abort(std::time::Duration::from_secs(30))
+                .await
+        {
+            eprintln!("{}", note.yellow());
+        }
         return Ok(());
     }
 
@@ -350,7 +429,14 @@ async fn browse_with(opts: BrowseOpts) -> Result<()> {
     // session ends; bare `railway ca` keeps its tree. Held on the app rather
     // than derived from `autostart`, which the loop consumes on frame one.
     app.quit_when_done = launch.is_some();
-    app.autostart = launch;
+    // A pipeline that started beside the tree load is adopted by the loop;
+    // otherwise the request dispatches normally (and meets the gates) on
+    // frame one.
+    if inflight.is_some() {
+        app.autostart_inflight = inflight;
+    } else {
+        app.autostart = launch;
+    }
 
     let mut pending: Option<tui::LaunchRequest> = None;
     loop {

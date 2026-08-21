@@ -380,11 +380,6 @@ pub fn parse_remote_hash(provision_output: &str) -> Option<String> {
 /// payload, or an unwritable harness directory costs the user their skills, not
 /// their session. The launcher reports which marker came back.
 pub fn provision_script(hash: &str) -> String {
-    let link_dirs = REMOTE_LINK_DIRS
-        .iter()
-        .map(|d| format!("\"$HOME/{d}\""))
-        .collect::<Vec<_>>()
-        .join(" ");
     format!(
         r#"umask 077
 # Read stdin FIRST, before anything that can bail: a script that exits without
@@ -392,7 +387,24 @@ pub fn provision_script(hash: &str) -> String {
 # graceful degradation below into a hard launch failure.
 payload="$HOME/.railway-skills-payload.tgz"
 cat > "$payload"
-command -v tar >/dev/null 2>&1 || {{ rm -f "$payload"; echo SKILLS-NO-TAR; exit 0; }}
+{}"#,
+        sync_body(hash)
+    )
+}
+
+/// The sync steps from a saved `$payload` onward, for scripts that drained
+/// stdin into that file themselves — the combined provision on a fresh agent,
+/// where the tarball rides the same connection as the credential. Failure
+/// paths `exit 0`, so a caller embedding this must print everything else it
+/// needs (AGENT-READY et al) *before* this block.
+pub fn sync_body(hash: &str) -> String {
+    let link_dirs = REMOTE_LINK_DIRS
+        .iter()
+        .map(|d| format!("\"$HOME/{d}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"command -v tar >/dev/null 2>&1 || {{ rm -f "$payload"; echo SKILLS-NO-TAR; exit 0; }}
 staging="$HOME/.railway-skills-incoming"
 rm -rf "$staging" && mkdir -p "$staging" || {{ rm -f "$payload"; echo SKILLS-STAGING-FAILED; exit 0; }}
 tar -xzf "$payload" -C "$staging" --no-same-owner 2>/dev/null || {{ rm -rf "$staging" "$payload"; echo SKILLS-EXTRACT-FAILED; exit 0; }}

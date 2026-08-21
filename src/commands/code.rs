@@ -437,6 +437,22 @@ impl Agent {
         }
     }
 
+    /// [`credential_seed`] for a script whose stdin carries more than the
+    /// credential: reads exactly `len` bytes so the rest of the stream stays
+    /// available to the next reader (the skills tarball on a fresh agent).
+    /// Mirrors the `cat >` seeds above; the 0600 mode comes from the script's
+    /// `umask 077`, with claude's explicit chmod kept as belt-and-suspenders.
+    fn credential_seed_framed(self, len: usize) -> String {
+        match self {
+            Agent::Codex => format!("mkdir -p ~/.codex\nhead -c {len} > ~/.codex/auth.json"),
+            Agent::Claude => {
+                format!("head -c {len} > ~/.claude-code-env\nchmod 600 ~/.claude-code-env")
+            }
+            Agent::Grok => format!("mkdir -p ~/.grok\nhead -c {len} > ~/.grok/auth.json"),
+            Agent::Railway | Agent::Shell => "true".to_string(),
+        }
+    }
+
     /// The local sign-in file this command copies, as `$HOME`-relative
     /// components. `None` for Claude, whose credential is minted rather than
     /// copied — sharing the local sign-in's rotating refresh token across two
@@ -609,22 +625,7 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
     let name = agent.name();
     let hash_marker = skills_sync::REMOTE_HASH_MARKER;
     let hash_file = skills_sync::REMOTE_HASH_FILE;
-    // The autostart in COMMON_SEED reads both: the sentinel disables it
-    // outright, and `~/.railway-code-agent` is what it would otherwise launch.
-    //
-    // A shell launch is "give me the machine", not "retarget this VM": the
-    // recorded autostart agent stays whatever a previous launch made it, so
-    // plain reconnects keep dropping into that agent. App-mode still wins if
-    // it was asked for — desktop takes the login shell entirely.
-    let mode_seed = if app_mode {
-        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
-    } else {
-        let record = match agent {
-            Agent::Shell => "true".to_string(),
-            _ => format!("echo {name} > ~/.railway-code-agent"),
-        };
-        format!("rm -f ~/.railway-app-mode\n{record}")
-    };
+    let mode_seed = mode_seed(agent, app_mode);
     format!(
         r#"umask 077
 {HARNESS_PATH}
@@ -634,6 +635,57 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
 printf '{hash_marker}%s\n' "$(cat "{hash_file}" 2>/dev/null || true)"
 if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi"#
     )
+}
+
+/// [`provision_script`] plus the skills sync, one connection, for a freshly
+/// created agent. A fresh VM cannot already hold the skills hash, so the
+/// report-then-upload dance is a wasted relay round-trip there — the tarball
+/// rides the provision stdin instead, behind the length-framed credential.
+/// The AGENT-READY check prints before the sync block because that block's
+/// degradation paths `exit 0`.
+fn provision_script_with_skills(
+    agent: Agent,
+    credential_len: Option<usize>,
+    app_mode: bool,
+    skills_hash: &str,
+) -> String {
+    let seed = match credential_len {
+        Some(len) => agent.credential_seed_framed(len),
+        None => "true".to_string(),
+    };
+    let name = agent.name();
+    let mode_seed = mode_seed(agent, app_mode);
+    let sync = skills_sync::sync_body(skills_hash);
+    format!(
+        r#"umask 077
+{HARNESS_PATH}
+{seed}
+payload="$HOME/.railway-skills-payload.tgz"
+cat > "$payload"
+{COMMON_SEED}
+{mode_seed}
+if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi
+{sync}"#
+    )
+}
+
+/// The autostart in COMMON_SEED reads both: the sentinel disables it
+/// outright, and `~/.railway-code-agent` is what it would otherwise launch.
+///
+/// A shell launch is "give me the machine", not "retarget this VM": the
+/// recorded autostart agent stays whatever a previous launch made it, so
+/// plain reconnects keep dropping into that agent. App-mode still wins if
+/// it was asked for — desktop takes the login shell entirely.
+fn mode_seed(agent: Agent, app_mode: bool) -> String {
+    if app_mode {
+        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
+    } else {
+        let record = match agent {
+            Agent::Shell => "true".to_string(),
+            _ => format!("echo {} > ~/.railway-code-agent", agent.name()),
+        };
+        format!("rm -f ~/.railway-app-mode\n{record}")
+    }
 }
 
 /// Where a prepared session's output lands, which decides what quitting the
@@ -712,19 +764,84 @@ fn remote_command(
 /// routine occurrence — it covers the fleet going back to per-instance keys
 /// without pinning us to a key that would then mismatch constantly.
 ///
-/// Deliberately NOT multiplexed. ControlMaster was here to make one host-key
-/// decision per run when the fleet answered with per-instance keys, which it no
-/// longer does. It also had a failure mode worse than the problem it solved:
-/// sleeping an agent on disconnect kills the master's TCP connection while the
-/// socket file lives on for ControlPersist, so the next run rides a dead master
-/// and dies with exit 255 and no message from either stream — invisible, and
-/// immune to retries because waiting cannot revive it.
+/// These BASE options are deliberately not multiplexed, and readiness probes
+/// must never be: a probe against a not-yet-routable agent still opens a real
+/// connection (the relay falls through to the dev.new control surface instead
+/// of refusing at the transport), so a ControlMaster owned by a failed probe
+/// pins every later channel to that dead path — measured at 8/20 launch
+/// timeouts when tried on 2026-08-18. Cross-RUN persistence is the other
+/// historical trap: sleeping an agent kills the master's TCP while the socket
+/// file lives on, so the next run rides a dead master and dies with a bare
+/// exit 255.
+///
+/// What IS safe — and what [`launch_mux`] provides — is a master scoped to
+/// one launch and opened only by the provision connection, which runs after
+/// the route is verified and whose output markers prove it reached the real
+/// agent. The interactive session then rides that master (one handshake saved,
+/// ~0.35s), and a stale or dead socket falls back to a plain connection
+/// because the session never sets ControlMaster itself. The socket path is
+/// unique per launch, so nothing outlives the run that made it beyond the
+/// 30s ControlPersist grace.
 #[derive(Clone)]
 struct RelaySsh {
     opts: Vec<String>,
     known_hosts: std::path::PathBuf,
     /// known-hosts pattern for ssh-keygen -R: `host` or `[host]:port`.
     host_pattern: String,
+}
+
+/// A fresh, never-reused control socket path: OS temp dir, pid + random, so
+/// neither a recycled pid nor two sockets within one launch can collide.
+/// Uniqueness is the safety property the whole mux design leans on — a socket
+/// is only ever ridden by connections that know it was created by a
+/// marker-verified connection to the real agent (see [`RelaySsh`]).
+fn mux_socket() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "railway-cm-{}-{:08x}.sock",
+        std::process::id(),
+        rand::random::<u32>()
+    ))
+}
+
+/// Whether connection sharing can work here at all: not on Windows, whose
+/// OpenSSH has no ControlMaster support (passing the options anywhere from
+/// warns to fails), and not when the socket path would overflow the unix
+/// socket path limit (~104 bytes; a deep $TMPDIR gets there). Both cases fall
+/// back to plain connections — the launch works identically, it just pays the
+/// handshakes multiplexing would have saved.
+fn mux_usable(socket: &std::path::Path) -> bool {
+    !cfg!(windows) && socket.as_os_str().len() <= 100
+}
+
+/// Options for a connection allowed to CREATE the master on `socket`:
+/// a readiness probe (each round gets its own fresh socket; only the round
+/// whose marker round-trips is ever promoted) or the provision connection.
+/// `persist` bounds how long an idle master outlives its last client — probes
+/// use a short one so the losing rounds' masters evaporate.
+/// Empty when multiplexing is unusable here, so every caller degrades to a
+/// plain connection without carrying the platform check itself.
+fn mux_master_opts(socket: &std::path::Path, persist: &str) -> Vec<String> {
+    if !mux_usable(socket) {
+        return Vec::new();
+    }
+    vec![
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        format!("ControlPath={}", socket.display()),
+        "-o".into(),
+        format!("ControlPersist={persist}"),
+    ]
+}
+
+/// Options for a connection that may RIDE the master on `socket` but never
+/// create one: a dead or missing socket falls back to a plain connection.
+/// Empty when multiplexing is unusable here, same as [`mux_master_opts`].
+fn mux_client_opts(socket: &std::path::Path) -> Vec<String> {
+    if !mux_usable(socket) {
+        return Vec::new();
+    }
+    vec!["-o".into(), format!("ControlPath={}", socket.display())]
 }
 
 /// The known-hosts file the CLI keeps for the relay.
@@ -853,7 +970,17 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
 /// mint locally, store the result as a repository secret, and use it on remote
 /// runners. Cleared by `railway logout`, or by `--refresh-auth`.
 fn claude_token_cache_path() -> Option<std::path::PathBuf> {
-    Some(dirs::home_dir()?.join(".railway").join("claude-code-token"))
+    Some(claude_token_cache_path_in(&dirs::home_dir()?))
+}
+
+/// The cache path under an explicit home, so callers that already scope
+/// themselves to one (`railway ca setup --reset`, and the tests that drive it
+/// against a tempdir) clear the right file. Resolving `dirs::home_dir()` here
+/// regardless of the caller's home meant the suite deleted the developer's own
+/// cached setup-token every run, sending their next `--claude` launch through a
+/// browser mint.
+fn claude_token_cache_path_in(home: &Path) -> std::path::PathBuf {
+    home.join(".railway").join("claude-code-token")
 }
 
 /// Read the cached token, if one is there and still plausible.
@@ -917,9 +1044,14 @@ fn cached_token_source(age_days: Option<u64>) -> String {
 
 /// Forget the cached token. Called by `railway logout`.
 pub fn clear_claude_token_cache() {
-    if let Some(path) = claude_token_cache_path() {
-        let _ = std::fs::remove_file(path);
+    if let Some(home) = dirs::home_dir() {
+        clear_claude_token_cache_in(&home);
     }
+}
+
+/// [`clear_claude_token_cache`] scoped to an explicit home.
+pub fn clear_claude_token_cache_in(home: &Path) {
+    let _ = std::fs::remove_file(claude_token_cache_path_in(home));
 }
 
 /// The credential to push, or the knowledge that obtaining one costs a browser
@@ -1351,6 +1483,7 @@ fn ssh_plumbing(
     identity: Option<&std::path::Path>,
     stdin_payload: Option<&[u8]>,
     relay: &RelaySsh,
+    mux_socket: Option<&std::path::Path>,
 ) -> Result<Vec<u8>> {
     // A woken agent re-boots its entrypoint, and the relay refuses the session
     // until the machine's new incarnation is attachable, so the first attempts
@@ -1386,6 +1519,14 @@ fn ssh_plumbing(
             || stderr_text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED");
         if hostkey_mismatch {
             relay.heal_known_hosts();
+        }
+        // A failed attempt must not leave a master for the next attempt to
+        // ride: removing the socket makes ControlMaster=auto open a genuinely
+        // fresh connection instead of pinning every retry to whatever dead or
+        // misrouted path the failure created — the historical 8/20-timeouts
+        // trap, scoped here to within a single call.
+        if let Some(socket) = mux_socket {
+            let _ = std::fs::remove_file(socket);
         }
         last = (code, reason);
 
@@ -1457,57 +1598,178 @@ async fn fetch_agent(
 /// projection, and a poll interval. Status is still read each round, but only
 /// to catch terminal states (CRASHED/FAILED/DELETING) early instead of
 /// burning the whole timeout on a box that will never come up.
+/// The relay-side plumbing a probe or session needs, independent of which
+/// agent it points at: the local key to offer and the relay's SSH options.
+/// Built once per launch (the identity half costs an API round-trip) and
+/// threaded through, where each waiter previously rebuilt it via
+/// `connect_info` — a redundant registered-keys query at the top of every
+/// wake and create wait.
+pub(crate) struct RelayAccess {
+    pub identity: Option<std::path::PathBuf>,
+    pub relay_opts: Vec<String>,
+}
+
+/// Build [`RelayAccess`] the way `connect_info` does, for callers outside the
+/// launch flow (the `ca` verbs) that don't already hold one.
+pub(crate) async fn relay_access() -> Result<RelayAccess> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let identity = ensure_ssh_key_quiet(&client, &configs).await?;
+    let relay = relay_ssh()?;
+    Ok(RelayAccess {
+        identity,
+        relay_opts: relay.opts,
+    })
+}
+
+/// On success, also returns the control socket of the winning probe's master
+/// when there was one: that probe verified the marker round-trip, so its
+/// connection provably reached the real agent, and the provision + session can
+/// multiplex over it instead of paying a fresh relay handshake. `None` when
+/// the status flip won the race (no verified connection exists yet).
 pub(crate) async fn wait_until_connectable(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
     id: &str,
-) -> Result<CodeAgent> {
+    access: &RelayAccess,
+    initial_delay: std::time::Duration,
+) -> Result<(CodeAgent, Option<std::path::PathBuf>)> {
     use queries::cloud_agent::CloudAgentStatus as S;
-    let info = connect_info(environment_id, id).await?;
+    // Measured as one stage because this is the leg the platform owns — VM
+    // boot/restore up to a routable SSH target. Per-round detail goes to stderr
+    // under RAILWAY_STAGE_TIMING; the recorded stage is what telemetry sees.
+    let wait_started = std::time::Instant::now();
+    let diagnostics = ssh_tel::timing_diagnostics();
+    let ssh_target = format!("agent:{environment_id}:{id}");
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    // Callers that just issued the create or wake pass the physical floor of
+    // that operation (measured: a fresh VM is never routable before ~550ms, a
+    // restore before ~1.5s): probing earlier is a guaranteed miss that still
+    // opens a real relay connection into the dev.new fall-through. Callers
+    // that caught a boot already in flight pass zero — the box may be
+    // routable right now, and any delay would be a pure regression.
+    if !initial_delay.is_zero() {
+        tokio::time::sleep(initial_delay).await;
+    }
+    let mut round = 0u32;
+    // The status fetch keeps its OLD ~750ms grid even while probes run at the
+    // tight cadence: it exists only to catch rare terminal states, and letting
+    // it ride the probe cadence would triple backboard polling per launching
+    // client for nothing. Round 1 always fetches.
+    let mut last_fetch: Option<std::time::Instant> = None;
+    let mut last_agent: Option<CodeAgent> = None;
     loop {
-        let agent = fetch_agent(client, backboard, environment_id, id)
-            .await?
-            .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
-        match agent.status {
-            // RUNNING routes by definition; skip the probe round-trip.
-            S::RUNNING => return Ok(agent),
-            S::STARTING | S::SLEEPING => {}
-            S::CRASHED => bail!(
-                "Agent {} crashed while starting. `railway code --new` for a fresh one.",
-                agent.name
-            ),
-            S::FAILED => bail!(
-                "Agent {} failed to start. `railway code --new` for a fresh one.",
-                agent.name
-            ),
-            S::DELETING => bail!("Agent {} is being deleted.", agent.name),
-            S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+        round += 1;
+        let round_started = std::time::Instant::now();
+
+        // Every round probes as a would-be master on its own FRESH socket. A
+        // round that lands on the relay's dev.new fall-through (agent not yet
+        // routable) leaves a master nothing will ever reference — the socket
+        // name is never reused, and only the round whose marker comes back is
+        // promoted. Losers are told to exit below, with a short persist as the
+        // backstop, so they don't pile up relay connections during a slow boot.
+        let socket = mux_socket();
+        let target = ssh_target.clone();
+        let identity = access.identity.clone();
+        let mut opts = access.relay_opts.clone();
+        opts.extend(mux_master_opts(&socket, "3s"));
+        let probe = tokio::task::spawn_blocking(move || {
+            probe_native_ssh(&target, identity.as_deref(), &opts)
+        });
+
+        // Await the fetch BEFORE the probe (both are already in flight): a
+        // terminal state must bail immediately, not after a probe that can sit
+        // on its full ConnectTimeout against a box that will never answer.
+        let fetch_due = last_fetch.is_none_or(|at| at.elapsed().as_millis() >= 700);
+        if fetch_due {
+            let agent = fetch_agent(client, backboard, environment_id, id)
+                .await?
+                .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
+            last_fetch = Some(std::time::Instant::now());
+            match agent.status {
+                S::RUNNING | S::STARTING | S::SLEEPING => {}
+                S::CRASHED => bail!(
+                    "Agent {} crashed while starting. `railway code --new` for a fresh one.",
+                    agent.name
+                ),
+                S::FAILED => bail!(
+                    "Agent {} failed to start. `railway code --new` for a fresh one.",
+                    agent.name
+                ),
+                S::DELETING => bail!("Agent {} is being deleted.", agent.name),
+                S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+            }
+            // RUNNING routes by definition, so don't spend another round on a
+            // probe that lost the race to the status flip — but there is no
+            // verified connection to promote (the in-flight probe is abandoned;
+            // its master, if any, exits on the persist backstop).
+            if agent.status == S::RUNNING {
+                ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+                return Ok((agent, None));
+            }
+            last_agent = Some(agent);
         }
 
-        let target = info.ssh_target.clone();
-        let identity = info.identity.clone();
-        let opts = info.relay_opts.clone();
-        let routed = tokio::task::spawn_blocking(move || {
-            probe_native_ssh(&target, identity.as_deref(), &opts)
-        })
-        .await?
-        .unwrap_or(false);
-        if routed {
-            return Ok(agent);
+        let routed = probe.await?.unwrap_or(false);
+        if diagnostics {
+            eprintln!(
+                "[wait_connectable] round {round}: status={:?} round={}ms routed={routed} fetched={fetch_due}",
+                last_agent.as_ref().map(|a| &a.status),
+                round_started.elapsed().as_millis()
+            );
         }
+        if routed {
+            ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+            let agent = last_agent
+                .ok_or_else(|| anyhow!("Agent {id} was never observed while starting."))?;
+            return Ok((agent, Some(socket)));
+        }
+        // This round's would-be master lost; release it now rather than
+        // letting it hold a relay connection for the persist window.
+        release_probe_master(&socket, &ssh_target);
 
         if std::time::Instant::now() >= deadline {
             bail!(
-                "Agent {} did not become connectable within {}s (last state: {:?}).",
-                agent.name,
+                "Agent {id} did not become connectable within {}s (last state: {:?}).",
                 READY_TIMEOUT.as_secs(),
-                agent.status
+                last_agent.map(|a| a.status)
             );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        // Pace rounds to a cadence rather than sleeping on top of the probe: a
+        // probe that already took that long IS the pacing. The cadence is
+        // tight while the box is likely to come up (a fresh VM boots in
+        // ~750ms, and a 750ms grid quantizes its discovery a full round late)
+        // and relaxes once the wait has clearly become a boot-tail wait.
+        let cadence = if wait_started.elapsed() < std::time::Duration::from_secs(4) {
+            std::time::Duration::from_millis(250)
+        } else {
+            std::time::Duration::from_millis(750)
+        };
+        if let Some(rest) = cadence.checked_sub(round_started.elapsed()) {
+            tokio::time::sleep(rest).await;
+        }
     }
+}
+
+/// Tell a losing probe round's background master to exit now instead of
+/// holding an authenticated relay connection until its persist backstop.
+/// Fire-and-forget: the master may not exist (connection never completed) or
+/// may already be gone — both are fine, and nothing waits on the result.
+fn release_probe_master(socket: &std::path::Path, target: &str) {
+    if !mux_usable(socket) {
+        return;
+    }
+    let _ = std::process::Command::new("ssh")
+        .arg("-O")
+        .arg("exit")
+        .arg("-o")
+        .arg(format!("ControlPath={}", socket.display()))
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Bring an agent that already exists up to RUNNING: reuse it when it is
@@ -1519,7 +1781,8 @@ async fn ready_existing_agent(
     environment_id: &str,
     agent: CodeAgent,
     progress: &dyn Progress,
-) -> Result<Option<CodeAgent>> {
+    access: &RelayAccess,
+) -> Result<Option<(CodeAgent, Option<std::path::PathBuf>)>> {
     use queries::cloud_agent::CloudAgentStatus as S;
 
     match agent.status {
@@ -1528,32 +1791,46 @@ async fn ready_existing_agent(
                 "Using agent {} (--new for a fresh one)",
                 agent.name
             ));
-            Ok(Some(agent))
+            Ok(Some((agent, None)))
         }
         // STARTING means a previous run is still booting it, so a re-run seconds
         // after a ctrl-c waits rather than minting a duplicate. SLEEPING is the
         // resting state this command leaves behind.
         S::SLEEPING | S::STARTING => {
             progress.step(&format!("Waking agent {}", agent.name));
-            if agent.status == S::SLEEPING
-                && let Err(e) = post_graphql::<mutations::CloudAgentWake, _>(
+            // The delay below is the wake's physical floor; a STARTING agent
+            // caught mid-boot gets none — it may be routable right now.
+            let mut probe_delay = std::time::Duration::ZERO;
+            if agent.status == S::SLEEPING {
+                let wake_started = std::time::Instant::now();
+                let wake = post_graphql::<mutations::CloudAgentWake, _>(
                     client,
                     backboard,
                     mutations::cloud_agent_wake::Variables {
                         id: agent.id.clone(),
                     },
                 )
-                .await
-            {
-                return Err(e.into());
+                .await;
+                ssh_tel::record_stage("wake_mutation", wake_started.elapsed(), wake.is_ok());
+                if let Err(e) = wake {
+                    return Err(e.into());
+                }
+                probe_delay = std::time::Duration::from_millis(350);
             }
-            let running =
-                wait_until_connectable(client, backboard, environment_id, &agent.id).await?;
+            let (running, probe_master) = wait_until_connectable(
+                client,
+                backboard,
+                environment_id,
+                &agent.id,
+                access,
+                probe_delay,
+            )
+            .await?;
             progress.note(&format!(
                 "Woke agent {} — your work is on its disk",
                 running.name
             ));
-            Ok(Some(running))
+            Ok(Some((running, probe_master)))
         }
         S::CRASHED | S::FAILED | S::DELETING | S::Other(_) => {
             progress.note(&format!(
@@ -1691,6 +1968,17 @@ async fn resolve_target(
         // Either flag means the caller is targeting deliberately; hand both to
         // the shared resolver so `-p` alone still finds an environment.
         TargetSource::Flags => {
+            // Two UUIDs need no resolving — the TUI retargets launches with
+            // ids it already resolved, and the shared resolver was spending a
+            // round-trip re-answering a known question on every TUI launch.
+            // Trusting them is safe: the create/wake mutations validate the
+            // environment (and the caller's access to it) authoritatively.
+            if let (Some(project), Some(environment)) = (&args.project, &args.environment)
+                && is_uuid(project)
+                && is_uuid(environment)
+            {
+                return Ok((project.clone(), environment.clone()));
+            }
             resolve_project_and_env(
                 configs,
                 client,
@@ -1718,6 +2006,39 @@ async fn resolve_target(
         }
         TargetSource::Ask => resolve_project_and_env(configs, client, None, None).await,
     }
+}
+
+/// The single stdin stream `provision_script_with_skills` reads: the
+/// credential (exactly `len` bytes, which the script consumes via `head -c`)
+/// followed by the skills tarball. The framing length and the written bytes
+/// MUST come from the same buffer — this function is the only place both are
+/// produced, which is the contract the byte-framing test pins.
+fn combined_provision_payload(
+    credential: Option<&[u8]>,
+    tarball: &[u8],
+) -> (Vec<u8>, Option<usize>) {
+    let len = credential.map(<[u8]>::len);
+    let mut payload = Vec::with_capacity(len.unwrap_or(0) + tarball.len());
+    if let Some(credential) = credential {
+        payload.extend_from_slice(credential);
+    }
+    payload.extend_from_slice(tarball);
+    (payload, len)
+}
+
+/// A canonical 8-4-4-4-12 lowercase-or-uppercase hex UUID, the only shape
+/// Railway ids take. Names can't collide with it in practice, and a
+/// pathological UUID-shaped name merely skips a convenience resolution — the
+/// mutation that follows still validates the id.
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, b)| match i {
+        8 | 13 | 18 | 23 => *b == b'-',
+        _ => b.is_ascii_hexdigit(),
+    })
 }
 
 /// Which answer wins, given what is available. Separated from the I/O so the
@@ -1796,7 +2117,8 @@ async fn resolve_agent(
     args: &LaunchArgs,
     environment_id: &str,
     progress: &dyn Progress,
-) -> Result<(CodeAgent, bool)> {
+    access: &RelayAccess,
+) -> Result<(CodeAgent, bool, Option<std::path::PathBuf>)> {
     let backboard = configs.get_backboard();
 
     // An explicit agent wins over everything: the caller is looking at the one
@@ -1817,13 +2139,14 @@ async fn resolve_agent(
         None => None,
     };
     if let Some(agent) = existing {
-        if let Some(ready) =
-            ready_existing_agent(client, &backboard, environment_id, agent, progress).await?
+        if let Some((ready, probe_master)) =
+            ready_existing_agent(client, &backboard, environment_id, agent, progress, access)
+                .await?
         {
             warn_ignored_variables(args, progress);
             configs.set_code_agent(environment_id, &ready.id);
             configs.write()?;
-            return Ok((ready, false));
+            return Ok((ready, false, probe_master));
         }
         configs.remove_code_agent(environment_id);
     }
@@ -1832,7 +2155,8 @@ async fn resolve_agent(
         .map(serde_json::to_value)
         .transpose()?;
     progress.step("Creating a cloud agent");
-    let created = match post_graphql::<mutations::CloudAgentCreate, _>(
+    let create_started = std::time::Instant::now();
+    let create = post_graphql::<mutations::CloudAgentCreate, _>(
         client,
         &backboard,
         mutations::cloud_agent_create::Variables {
@@ -1843,8 +2167,9 @@ async fn resolve_agent(
             },
         },
     )
-    .await
-    {
+    .await;
+    ssh_tel::record_stage("create_mutation", create_started.elapsed(), create.is_ok());
+    let created = match create {
         Ok(res) => res.cloud_agent_create,
         Err(e) => return Err(e.into()),
     };
@@ -1855,10 +2180,20 @@ async fn resolve_agent(
     configs.set_code_agent(environment_id, &created.id);
     configs.write()?;
 
-    match wait_until_connectable(client, &backboard, environment_id, &created.id).await {
-        Ok(running) => {
+    match wait_until_connectable(
+        client,
+        &backboard,
+        environment_id,
+        &created.id,
+        access,
+        // A created VM's measured routability floor; see the wait's doc.
+        std::time::Duration::from_millis(350),
+    )
+    .await
+    {
+        Ok((running, probe_master)) => {
             progress.note(&format!("Created agent {}", running.name));
-            Ok((running, true))
+            Ok((running, true, probe_master))
         }
         Err(e) => {
             progress.finish();
@@ -2135,15 +2470,6 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         return destroy_agent(&mut configs, &client, &environment_id).await;
     }
 
-    // Before anything is resolved, minted or provisioned: without the flag the
-    // create at the end of all that is refused, and the work up to it — a
-    // credential, possibly a browser round-trip — is spent for nothing.
-    {
-        let configs = Configs::new()?;
-        let client = GQLClient::new_authorized(&configs)?;
-        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await?;
-    }
-
     eprintln!(
         "{}",
         "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
@@ -2151,11 +2477,39 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     );
 
     let progress = CliProgress::default();
-    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
+    // The flag check races prepare instead of preceding it: an un-flagged user
+    // is still stopped the moment the check answers — before any mint or
+    // create completes — while everyone else no longer pays a serialized
+    // round-trip for a question whose answer is almost always yes. If prepare
+    // somehow finishes first, the gate is still enforced before anything runs.
+    let ensure_fut = async {
+        let configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await
+    };
+    let prepare_fut = prepare(&args, &progress, SessionStyle::FullTerminal);
+    tokio::pin!(ensure_fut);
+    tokio::pin!(prepare_fut);
+    let prepared = tokio::select! {
+        enabled = &mut ensure_fut => {
+            enabled?;
+            prepare_fut.await?
+        }
+        prepared = &mut prepare_fut => {
+            ensure_fut.await?;
+            prepared?
+        }
+    };
     progress.finish();
 
     println!("Launching {}…", prepared.harness);
     let exit_code = run_session(&prepared)?;
+
+    // The user's work is done; give detached telemetry a bounded window so a
+    // short exec launch (`railway code -- <cmd>`) doesn't exit before its
+    // outcome event leaves the machine. Interactive sessions resolve this
+    // instantly — their sends finished minutes ago.
+    ssh_tel::drain_detached(std::time::Duration::from_secs(2)).await;
 
     // Belt-and-suspenders for the remote reset: when the connection drops
     // mid-TUI the remote printf never reaches us, so scrub locally too before
@@ -2266,13 +2620,31 @@ pub async fn prepare(
     };
 
     let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
-    crate::commands::cloud_agent::telemetry::track_launch_outcome(
-        agent.slug(),
-        result.as_ref().ok().map(|p| p.created),
-        start.elapsed(),
-        result.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
-    )
-    .await;
+    // After the outcome, and detached: the stages are already measured, and
+    // reporting them must not extend the launch they describe.
+    ssh_tel::flush_stages("cloud_agent_launch");
+    match &result {
+        // Detached on success for the same reason as the stage flush: the
+        // outcome event is an HTTP round-trip, and awaiting it sat between
+        // "provisioned" and "session opens" on every launch. The session that
+        // follows gives the send minutes of runway.
+        Ok(prepared) => crate::commands::cloud_agent::telemetry::track_launch_outcome_detached(
+            agent.slug(),
+            Some(prepared.created),
+            start.elapsed(),
+        ),
+        // Still awaited: the process is about to exit with this error, and a
+        // spawned task would be dropped before the failure ever reported.
+        Err(e) => {
+            crate::commands::cloud_agent::telemetry::track_launch_outcome(
+                agent.slug(),
+                None,
+                start.elapsed(),
+                Some(&format!("{e:#}")),
+            )
+            .await
+        }
+    }
     result
 }
 
@@ -2293,19 +2665,15 @@ async fn prepare_inner(
     // see `PendingAuth`.
     let pending = match agent {
         Agent::Codex | Agent::Grok => {
-            ssh_tel::track_for(
-                "cloud_agent_launch",
-                "credential",
-                local_signin(agent, home),
-            )
+            ssh_tel::timed_for("cloud_agent_launch", "credential", async {
+                local_signin(agent, home)
+            })
             .await?
         }
         Agent::Claude => {
-            ssh_tel::track_for(
-                "cloud_agent_launch",
-                "credential",
-                claude_credentials_cheap(args.refresh_auth),
-            )
+            ssh_tel::timed_for("cloud_agent_launch", "credential", async {
+                claude_credentials_cheap(args.refresh_auth)
+            })
             .await?
         }
         // Nothing to read or mint — the VM already carries its own, and a
@@ -2329,11 +2697,9 @@ async fn prepare_inner(
     // Pack the user's skills before spending a VM: a skills directory that has
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
-    let packed_skills = ssh_tel::track_for(
-        "cloud_agent_launch",
-        "skills_pack",
-        skills_sync::pack(&prefs, home),
-    )
+    let packed_skills = ssh_tel::timed_for("cloud_agent_launch", "skills_pack", async {
+        skills_sync::pack(&prefs, home)
+    })
     .await?;
     if let Some(packed) = &packed_skills {
         progress.note(&format!(
@@ -2346,35 +2712,69 @@ async fn prepare_inner(
     // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
+    // The SSH key check is independent of where the agent lives, and the waits
+    // inside resolve_agent need its result to probe with — so it runs alongside
+    // target resolution instead of after the agent is already up, where its
+    // round-trip (registered-keys query, plus a register mutation on first run)
+    // was pure added latency. Its own `Configs` because resolve_target holds
+    // the mutable borrow.
     // The project is no longer carried on `Prepared` — its only reader was the
     // launcher's exit hint, which now names the agent instead.
-    let (_project_id, environment_id) = ssh_tel::track_for(
-        "cloud_agent_launch",
-        "resolve_target",
-        resolve_target(&mut configs, &client, args, &mut prefs, home).await,
-    )
-    .await?;
+    let (target_res, identity) = tokio::join!(
+        ssh_tel::timed_for(
+            "cloud_agent_launch",
+            "resolve_target",
+            resolve_target(&mut configs, &client, args, &mut prefs, home),
+        ),
+        ssh_tel::timed_for("cloud_agent_launch", "ssh_key", async {
+            let key_configs = Configs::new()?;
+            // Non-interactive inside the join: resolve_target can be running
+            // its own picker/setup prompts concurrently, and two prompt flows
+            // interleaved on one terminal are gibberish. The rare
+            // needs-registration case retries interactively below, after the
+            // join, when the terminal is free again.
+            crate::commands::ssh::native::ensure_ssh_key_noninteractive(&client, &key_configs).await
+        }),
+    );
+    let (_project_id, environment_id) = target_res?;
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(_) => {
+            let key_configs = Configs::new()?;
+            ssh_tel::timed_for(
+                "cloud_agent_launch",
+                "ssh_key_interactive",
+                ensure_ssh_key_quiet(&client, &key_configs),
+            )
+            .await?
+        }
+    };
 
-    let (cloud_agent, created) = ssh_tel::track_for(
+    let relay = ssh_tel::timed_for("cloud_agent_launch", "relay", async { relay_ssh() }).await?;
+    let access = RelayAccess {
+        identity: identity.clone(),
+        relay_opts: relay.opts.clone(),
+    };
+
+    let (cloud_agent, created, probe_master) = ssh_tel::timed_for(
         "cloud_agent_launch",
         "resolve_agent",
-        resolve_agent(&mut configs, &client, args, &environment_id, progress).await,
+        resolve_agent(
+            &mut configs,
+            &client,
+            args,
+            &environment_id,
+            progress,
+            &access,
+        ),
     )
     .await?;
     configs.set_code_agent(&environment_id, &cloud_agent.id);
     configs.write()?;
 
-    let identity = ssh_tel::track_for(
-        "cloud_agent_launch",
-        "ssh_key",
-        ensure_ssh_key_quiet(&client, &configs).await,
-    )
-    .await?;
     // The relay's cloud-agent grammar; by id rather than name because names are
     // not unique within an environment.
     let target = format!("agent:{environment_id}:{}", cloud_agent.id);
-
-    let relay = ssh_tel::track_for("cloud_agent_launch", "relay", relay_ssh()).await?;
 
     // --- Deferred Claude mint. A setup-token lasts a year and the agent's disk
     // survives sleep, so a reused agent is normally still authenticated; minting
@@ -2388,17 +2788,16 @@ async fn prepare_inner(
             // explicit request to replace whatever is there; neither needs a probe.
             let needs_probe = !created && !args.refresh_auth;
             let inherit = if needs_probe {
-                let probe = ssh_tel::track_for(
-                    "cloud_agent_launch",
-                    "claude_probe",
+                let probe = ssh_tel::timed_for("cloud_agent_launch", "claude_probe", async {
                     ssh_plumbing(
                         &target,
                         CLAUDE_CREDENTIAL_PROBE,
                         identity.as_deref(),
                         None,
                         &relay,
-                    ),
-                )
+                        None,
+                    )
+                })
                 .await?;
                 String::from_utf8_lossy(&probe).contains("CRED-PRESENT")
             } else {
@@ -2410,11 +2809,9 @@ async fn prepare_inner(
                 );
                 None
             } else {
-                match ssh_tel::track_for(
-                    "cloud_agent_launch",
-                    "claude_mint",
-                    mint_claude_credentials(),
-                )
+                match ssh_tel::timed_for("cloud_agent_launch", "claude_mint", async {
+                    mint_claude_credentials()
+                })
                 .await?
                 {
                     Some((line, source)) => {
@@ -2436,10 +2833,37 @@ async fn prepare_inner(
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
     progress.step("Finalizing Configuration...");
-    let provision = {
+    // One relay handshake per launch: when a readiness probe won the wait, its
+    // marker-verified connection is already a master and both the provision
+    // and the session ride it. When no probe ran (agent already RUNNING, or
+    // the status flip won the race), the provision opens the master instead.
+    // That one is verified only after the fact — the master exists from
+    // connect time, and a marker failure does not tear it down — which is why
+    // ssh_plumbing removes the socket on every failed attempt: no retry (and
+    // no session) can ride a connection whose attempt didn't produce the
+    // marker. See the RelaySsh doc for the history this guards against.
+    let (master_socket, mux_provision) = match probe_master {
+        Some(socket) => {
+            let client_opts = mux_client_opts(&socket);
+            (socket, client_opts)
+        }
+        None => {
+            let socket = mux_socket();
+            let master_opts = mux_master_opts(&socket, "30s");
+            (socket, master_opts)
+        }
+    };
+    let mux_client = mux_client_opts(&master_socket);
+    let provision_relay = {
+        let mut r = relay.clone();
+        r.opts.extend(mux_provision);
+        r
+    };
+    let provision = async {
         let target = target.clone();
         let identity = identity.clone();
-        let relay = relay.clone();
+        let relay = provision_relay.clone();
+        let master_socket = master_socket.clone();
         // Copied out of `args`, which is a borrow the 'static closure can't take.
         let app_mode = args.app_mode;
         let skills_note = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2450,26 +2874,72 @@ async fn prepare_inner(
                     n.push(line);
                 }
             };
+            let skills_note = |out: &str| {
+                let reason = if out.contains("SKILLS-NO-TAR") {
+                    "the agent has no `tar`"
+                } else if out.contains("SKILLS-EXTRACT-FAILED") {
+                    "the transfer did not unpack"
+                } else {
+                    "the sync did not report success"
+                };
+                format!(
+                    "Couldn't sync your skills onto the agent ({reason}); continuing without them."
+                )
+            };
+            let check_ready = |out: &str| -> Result<()> {
+                if out.contains("AGENT-READY") {
+                    Ok(())
+                } else if out.contains("AGENT-MISSING") {
+                    bail!(
+                        "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). Cloud agents bake every harness, so report this with the agent id rather than retrying.",
+                        agent.name()
+                    )
+                } else {
+                    bail!(
+                        "Provisioning produced no status marker — the connection likely dropped mid-script."
+                    )
+                }
+            };
+
+            // A fresh agent cannot already hold the skills, so the two-step
+            // report-then-upload costs a relay round-trip that answers a known
+            // question. Send everything in one connection: the credential
+            // (length-framed) and the tarball share the provision stdin.
+            if created && let Some(packed) = &packed_skills {
+                let (payload, credential_len) = combined_provision_payload(
+                    auth.as_ref().map(|(line, _)| line.as_slice()),
+                    &packed.tarball,
+                );
+                let out = ssh_plumbing(
+                    &target,
+                    &provision_script_with_skills(agent, credential_len, app_mode, &packed.hash),
+                    identity.as_deref(),
+                    Some(&payload),
+                    &relay,
+                    Some(&master_socket),
+                )?;
+                let out = String::from_utf8_lossy(&out);
+                check_ready(&out)?;
+                // Never fatal: the agent is fully usable without skills, and
+                // losing a session over a skills copy would be a worse trade
+                // than launching without one.
+                if !out.contains("SKILLS-OK") {
+                    push(skills_note(&out));
+                }
+                return Ok(());
+            }
+
             let out = ssh_plumbing(
                 &target,
                 &provision_script(agent, auth.is_some(), app_mode),
                 identity.as_deref(),
                 auth.as_ref().map(|(line, _)| line.as_slice()),
                 &relay,
+
+                Some(&master_socket),
             )?;
             let out = String::from_utf8_lossy(&out);
-            if out.contains("AGENT-READY") {
-                // ok
-            } else if out.contains("AGENT-MISSING") {
-                bail!(
-                    "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). Cloud agents bake every harness, so report this with the agent id rather than retrying.",
-                    agent.name()
-                )
-            } else {
-                bail!(
-                    "Provisioning produced no status marker — the connection likely dropped mid-script."
-                )
-            }
+            check_ready(&out)?;
             // Skills, when the set on the agent isn't already the set on this
             // machine. The hash rides the script above, so an unchanged set
             // costs nothing beyond the round-trip we already made.
@@ -2482,23 +2952,12 @@ async fn prepare_inner(
                         identity.as_deref(),
                         Some(&packed.tarball),
                         &relay,
+
+                        Some(&master_socket),
                     )?;
                     let out = String::from_utf8_lossy(&out);
-                    // Never fatal: the agent is fully usable without them, and
-                    // losing a session over a skills copy would be a worse
-                    // trade than launching without one. Name the marker so a
-                    // report says which step gave up.
                     if !out.contains("SKILLS-OK") {
-                        let reason = if out.contains("SKILLS-NO-TAR") {
-                            "the agent has no `tar`"
-                        } else if out.contains("SKILLS-EXTRACT-FAILED") {
-                            "the transfer did not unpack"
-                        } else {
-                            "the sync did not report success"
-                        };
-                        push(format!(
-                            "Couldn't sync your skills onto the agent ({reason}); continuing without them."
-                        ));
+                        push(skills_note(&out));
                     }
                 }
             }
@@ -2512,7 +2971,7 @@ async fn prepare_inner(
         }
         result
     };
-    ssh_tel::track_for("cloud_agent_launch", "provision", provision).await?;
+    ssh_tel::timed_for("cloud_agent_launch", "provision", provision).await?;
 
     let env_prefix = format!(
         "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
@@ -2529,7 +2988,14 @@ async fn prepare_inner(
         remote_cmd,
         ssh_target: target,
         identity,
-        relay_opts: relay.opts,
+        relay_opts: {
+            // The session tries the provision connection's master first and
+            // falls back to a plain connection if it's gone (it never sets
+            // ControlMaster, so it can't create one).
+            let mut opts = relay.opts;
+            opts.extend(mux_client);
+            opts
+        },
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
         environment_id,
@@ -2632,6 +3098,7 @@ pub async fn kill_session(environment_id: &str, agent_id: &str, session_name: &s
             info.identity.as_deref(),
             None,
             &relay,
+            None,
         )
     })
     .await??;
@@ -3001,6 +3468,97 @@ mod tests {
         assert!(script.contains("if command -v railway-agent-tui"));
         assert!(script.contains("railway-code agent autostart"));
         assert!(script.contains("AGENT-READY"));
+    }
+
+    /// The combined fresh-agent script shares one stdin between the credential
+    /// and the skills tarball, so the credential read must be length-framed —
+    /// a `cat >` seed would swallow the tarball too.
+    #[test]
+    fn combined_provision_frames_the_credential() {
+        let script = provision_script_with_skills(Agent::Claude, Some(42), false, "abc123");
+        assert!(
+            script.contains("head -c 42 > ~/.claude-code-env"),
+            "{script}"
+        );
+        assert!(!script.contains("cat > ~/.claude-code-env"), "{script}");
+        // The tarball is the rest of the stream, saved before anything can bail.
+        assert!(script.contains(r#"cat > "$payload""#), "{script}");
+        assert!(script.contains("'abc123'"), "{script}");
+    }
+
+    /// The sync block's degradation paths `exit 0`, so the launch's own status
+    /// marker must already be printed by the time it runs — AGENT-READY before
+    /// the tar check, or a skills failure would read as a dropped connection.
+    #[test]
+    fn combined_provision_reports_ready_before_skills() {
+        let script = provision_script_with_skills(Agent::Claude, Some(10), false, "h");
+        let ready = script.find("AGENT-READY").expect("ready marker");
+        let sync = script.find("command -v tar").expect("sync block");
+        assert!(ready < sync, "{script}");
+        // The credential must be consumed before the payload drain, or the
+        // tarball's first bytes land in the credential file.
+        let cred = script.find("head -c 10").expect("framed credential");
+        let drain = script.find(r#"cat > "$payload""#).expect("payload drain");
+        assert!(cred < drain, "{script}");
+    }
+
+    /// No credential to write (sign-in deferred to the agent): stdin is the
+    /// tarball alone, and nothing tries to read a credential off it.
+    #[test]
+    fn combined_provision_without_credential_reads_only_the_tarball() {
+        let script = provision_script_with_skills(Agent::Claude, None, false, "h");
+        assert!(!script.contains("head -c"), "{script}");
+        assert!(script.contains(r#"cat > "$payload""#), "{script}");
+        assert!(script.contains("AGENT-READY"), "{script}");
+    }
+
+    /// The byte-framing contract behind `head -c`: the length the script reads
+    /// must be exactly the credential bytes at the front of the stream, with
+    /// the tarball intact behind them. Anyone who re-encodes the credential or
+    /// appends a newline breaks both at once — this test is what catches them.
+    #[test]
+    fn combined_payload_framing_splits_back_exactly() {
+        let credential = b"CLAUDE_CODE_OAUTH_TOKEN=tok-123\n";
+        let tarball = [0x1f, 0x8b, 0x08, 0x00, 0x42];
+        let (payload, len) = combined_provision_payload(Some(credential), &tarball);
+        let len = len.expect("credential present");
+        assert_eq!(&payload[..len], credential);
+        assert_eq!(&payload[len..], &tarball);
+        // And the script consumes exactly that many bytes.
+        let script = provision_script_with_skills(Agent::Claude, Some(len), false, "h");
+        assert!(script.contains(&format!("head -c {len} ")), "{script}");
+
+        let (payload, len) = combined_provision_payload(None, &tarball);
+        assert!(len.is_none());
+        assert_eq!(payload, tarball);
+    }
+
+    /// UUIDs are trusted as launch targets; anything else still resolves.
+    #[test]
+    fn uuid_shapes() {
+        assert!(is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf0356"));
+        assert!(is_uuid("DDCBA2F8-A773-4929-BFBD-52450CDF0356"));
+        assert!(!is_uuid("production"));
+        assert!(!is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf035")); // 35 chars
+        assert!(!is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf035g")); // non-hex
+        assert!(!is_uuid("ddcba2f8_a773_4929_bfbd_52450cdf0356")); // separators
+    }
+
+    /// Multiplexing degrades to plain connections rather than erroring where
+    /// it cannot work: Windows, and socket paths past the unix limit.
+    #[test]
+    fn mux_gating() {
+        let short = std::path::Path::new("/tmp/railway-cm-1-abc.sock");
+        if cfg!(windows) {
+            assert!(mux_master_opts(short, "10s").is_empty());
+            assert!(mux_client_opts(short).is_empty());
+        } else {
+            assert!(!mux_master_opts(short, "10s").is_empty());
+            assert!(!mux_client_opts(short).is_empty());
+            let long = std::path::PathBuf::from(format!("/{}/cm.sock", "x".repeat(120)));
+            assert!(mux_master_opts(&long, "10s").is_empty());
+            assert!(mux_client_opts(&long).is_empty());
+        }
     }
 
     /// The shell option starts nothing and changes nothing: no credential, no

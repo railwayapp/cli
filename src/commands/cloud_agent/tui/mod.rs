@@ -320,6 +320,74 @@ impl Progress for ChannelProgress {
     fn finish(&self) {}
 }
 
+/// A launch pipeline already running before the TUI took the screen, plus the
+/// request that started it. `railway code` starts the pipeline beside the
+/// tree load instead of after it — the tree is for drawing the manage screen,
+/// not something the launch consumes — and the loop adopts this on frame one
+/// exactly where it would otherwise have dispatched the autostart.
+pub(crate) struct InflightLaunch {
+    pub(crate) req: LaunchRequest,
+    rx: mpsc::UnboundedReceiver<Message>,
+}
+
+impl InflightLaunch {
+    /// Wait (bounded) for the running pipeline to settle, for a caller that is
+    /// about to abort with an error: the pipeline may already have CREATED an
+    /// agent, and exiting without saying so would orphan a billing VM with no
+    /// user-visible record. Returns the line to print when there is one.
+    pub(crate) async fn settle_for_abort(mut self, limit: std::time::Duration) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                Ok(Some(Message::LaunchReady(prepared, _))) => {
+                    return Some(format!(
+                        "A launch was already in flight and created agent {} — `railway ca ssh {}` reattaches it, `railway ca delete {}` removes it.",
+                        prepared.agent_name, prepared.agent_name, prepared.agent_name
+                    ));
+                }
+                // Failed before creating anything worth reporting.
+                Ok(Some(Message::LaunchFailed(_))) => return None,
+                Ok(Some(_)) => continue,
+                // Pipeline gone or still running at the deadline: point at the
+                // list rather than guessing.
+                Ok(None) => return None,
+                Err(_) => {
+                    return Some(
+                        "A launch was still in flight — check `railway ca list` for an agent it may have created.".to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Run the prepare pipeline for `req`, streaming progress and the outcome into
+/// `sink` as loop messages. Shared by [`start_launch`] (sink = the loop's own
+/// channel) and [`begin_launch_early`] (sink = a buffer the loop adopts later).
+fn spawn_prepare(req: LaunchRequest, sink: mpsc::UnboundedSender<Message>) {
+    tokio::spawn(async move {
+        let req = req;
+        let args = launch_args_for(&req);
+        let progress = ChannelProgress(sink.clone());
+        let message = match code::prepare(&args, &progress, code::SessionStyle::Pane).await {
+            Ok(prepared) => Message::LaunchReady(Box::new(prepared), Box::new(req)),
+            Err(err) => Message::LaunchFailed(format!("{err:#}")),
+        };
+        let _ = sink.send(message);
+    });
+}
+
+/// Start `req`'s pipeline now, before the TUI exists, buffering its messages
+/// until the loop adopts them. ONLY for launches every dispatch gate would
+/// wave through — the caller must have verified the SSH key is registered and
+/// no interactive Claude mint is needed, because a pipeline started here has
+/// no frame to raise those questions in and would surface them as failures.
+pub(crate) fn begin_launch_early(req: LaunchRequest) -> InflightLaunch {
+    let (tx, rx) = mpsc::unbounded_channel();
+    spawn_prepare(req.clone(), tx);
+    InflightLaunch { req, rx }
+}
+
 /// Build the tree from the workspace listing. Deleted projects are dropped, and
 /// so are environments the caller cannot access — an agent can't be listed or
 /// created in either, so showing them would only offer dead ends.
@@ -587,6 +655,32 @@ pub async fn run(
             finish_copy(app, copied);
         }
         sync_session_size(app, &terminal);
+
+        // A pipeline `railway code` already started beside the tree load:
+        // adopt it — the same screen moves as a dispatched launch, minus the
+        // gates, which were verified before it was allowed to start (see
+        // `begin_launch_early`).
+        if let Some(inflight) = app.autostart_inflight.take() {
+            let InflightLaunch { req, mut rx } = inflight;
+            app.screen = Screen::Manage;
+            if let Some(Effect::LoadAgents {
+                environment_id,
+                path,
+            }) = app.reveal_environment(&req.environment_id)
+            {
+                spawn_env_agents_fetch(environment_id, path, &tx, &client, &backboard);
+            }
+            app.start_loading(&req);
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(message) = rx.recv().await {
+                    if tx.send(message).is_err() {
+                        break;
+                    }
+                }
+            });
+            continue;
+        }
 
         // A launch the caller arrived with, started once the first frame is on
         // screen so the terminal is already in the state the loading pane will
@@ -1583,17 +1677,7 @@ fn dispatch_launch(
 /// Kick off a launch in the background and show the loading screen.
 fn start_launch(app: &mut App, req: LaunchRequest, tx: &mpsc::UnboundedSender<Message>) {
     app.start_loading(&req);
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let req = req;
-        let args = launch_args_for(&req);
-        let progress = ChannelProgress(tx.clone());
-        let message = match code::prepare(&args, &progress, code::SessionStyle::Pane).await {
-            Ok(prepared) => Message::LaunchReady(Box::new(prepared), Box::new(req)),
-            Err(err) => Message::LaunchFailed(format!("{err:#}")),
-        };
-        let _ = tx.send(message);
-    });
+    spawn_prepare(req, tx.clone());
 }
 
 /// One lifecycle mutation. Kept next to the loop rather than in the app so the

@@ -891,6 +891,10 @@ pub struct App {
     /// the same path a keypress would, so the ssh-key gate and the Claude
     /// mint still get their say.
     pub autostart: Option<LaunchRequest>,
+    /// Like `autostart`, but the pipeline is already running — started beside
+    /// the tree load because its gates were verified up front. The loop adopts
+    /// it on frame one instead of dispatching.
+    pub autostart_inflight: Option<super::InflightLaunch>,
     /// Leave the TUI when the last session pane closes on its own.
     ///
     /// `railway code` came for one session; when the harness exits (ctrl-c
@@ -1020,6 +1024,7 @@ impl App {
             agent_pick: None,
             maximized: false,
             autostart: None,
+            autostart_inflight: None,
             quit_when_done: false,
             exit_note: None,
             pointer_to_app: false,

@@ -595,17 +595,38 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     // box, so this waits rather than issuing a second wake.
     let ready = match agent.status {
         ca::Status::Running => Ok(()),
-        ca::Status::Starting => {
-            code::wait_until_connectable(client, &backboard, &agent.environment_id, &agent.id)
-                .await
-                .map(|_| ())
-        }
+        // relay_access errors flow into `ready` rather than `?`-ing out: the
+        // spinner above is cleared only after this match, and an early return
+        // would leave it animating over the error output.
+        ca::Status::Starting => match code::relay_access().await {
+            Ok(access) => code::wait_until_connectable(
+                client,
+                &backboard,
+                &agent.environment_id,
+                &agent.id,
+                &access,
+                // Caught mid-boot: it may be routable right now.
+                std::time::Duration::ZERO,
+            )
+            .await
+            .map(|_| ()),
+            Err(e) => Err(e),
+        },
         ca::Status::Sleeping => match ca::wake(client, &backboard, &agent.id).await {
-            Ok(()) => {
-                code::wait_until_connectable(client, &backboard, &agent.environment_id, &agent.id)
-                    .await
-                    .map(|_| ())
-            }
+            Ok(()) => match code::relay_access().await {
+                Ok(access) => code::wait_until_connectable(
+                    client,
+                    &backboard,
+                    &agent.environment_id,
+                    &agent.id,
+                    &access,
+                    // The wake's physical floor; see the wait's doc.
+                    std::time::Duration::from_millis(350),
+                )
+                .await
+                .map(|_| ()),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         },
         _ => Err(anyhow::anyhow!(
@@ -622,7 +643,7 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     ca::remember(configs, &agent)?;
 
     let connected = if !args.command.is_empty() {
-        telemetry::track_lifecycle("ssh_command", Duration::ZERO, None).await;
+        telemetry::track_lifecycle_detached("ssh_command");
         run_command(&agent, &args.command).await
     } else {
         attach(
@@ -634,6 +655,10 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
         )
         .await
     };
+
+    // The user's work is done; let detached telemetry finish before the
+    // process exits (bounded — see drain_detached).
+    crate::commands::ssh::tel::drain_detached(Duration::from_secs(2)).await;
 
     // A connection that never happened still woke a machine with no idle
     // timeout, so put back what this run changed — but only that. An agent
@@ -732,7 +757,7 @@ async fn attach(
         }
         None => match running.len() {
             0 => {
-                telemetry::track_lifecycle("ssh_new_session", Duration::ZERO, None).await;
+                telemetry::track_lifecycle_detached("ssh_new_session");
                 return start_session(agent).await;
             }
             1 => running[0].name.clone(),
@@ -745,7 +770,7 @@ async fn attach(
         },
     };
 
-    telemetry::track_lifecycle("ssh_attach", Duration::ZERO, None).await;
+    telemetry::track_lifecycle_detached("ssh_attach");
     println!(
         "{}",
         format!("Attaching to {} · {}", agent.name, session_name).dimmed()

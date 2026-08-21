@@ -182,7 +182,7 @@ fn reset(home: &Path) -> Result<()> {
         std::fs::remove_file(&path)
             .with_context(|| format!("Failed to remove {}", path.display()))?;
     }
-    crate::commands::code::clear_claude_token_cache();
+    crate::commands::code::clear_claude_token_cache_in(home);
     println!("Cleared cloud agent preferences and cached tokens.");
     println!("Run {} to configure again.", "railway ca setup".cyan());
     Ok(())
