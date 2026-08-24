@@ -2151,9 +2151,11 @@ async fn resolve_agent(
         configs.remove_code_agent(environment_id);
     }
 
-    let variables = variables_to_input(&args.env_files, &args.variables)?
-        .map(serde_json::to_value)
-        .transpose()?;
+    let variables = crate::controllers::cloud_agent::with_default_variables(
+        variables_to_input(&args.env_files, &args.variables)?
+            .map(serde_json::to_value)
+            .transpose()?,
+    );
     progress.step("Creating a cloud agent");
     let create_started = std::time::Instant::now();
     let create = post_graphql::<mutations::CloudAgentCreate, _>(
