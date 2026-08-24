@@ -25,13 +25,14 @@ pub struct ChangeSet {
     pub telemetry: Option<ChangeSetTelemetry>,
 }
 
+/// Authoring language is the only adoption dimension the server cannot observe
+/// on its own: CLI version arrives in the request headers, the engine is
+/// implied by the change set API, and CI is already on the `config` command
+/// event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeSetTelemetry {
     pub language: String,
-    pub engine: String,
-    pub cli_version: String,
-    pub is_ci: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

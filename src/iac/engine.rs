@@ -202,9 +202,6 @@ pub async fn run(
     });
     change_set.telemetry = Some(ChangeSetTelemetry {
         language: authoring_language(&evaluated.file).to_string(),
-        engine: "native".to_string(),
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
-        is_ci: Configs::env_is_ci(),
     });
     let mut all_diagnostics = diagnostics;
     for diagnostic in &change_set.diagnostics {
