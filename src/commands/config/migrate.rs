@@ -223,6 +223,9 @@ fn emit_railway_py(service_name: &str, cac: &CacFile) -> String {
     format!(
         r#"from railway_iac import define_railway, project, service
 
+# Last resort for a per-service CaC repo. Prefer one .railway file for the
+# project and drop this if you later combine services into that file.
+PARTIAL = {project}
 
 @define_railway
 def main(ctx=None):
@@ -254,6 +257,10 @@ fn emit_railway_go(service_name: &str, cac: &CacFile) -> String {
         r#"package main
 
 import "github.com/railwayapp/railway-go-iac/iac"
+
+// Last resort for a per-service CaC repo. Prefer one .railway file for the
+// project and drop this if you later combine services into that file.
+const Partial = {name}
 
 func Railway() iac.Project {{
 	web := iac.ServiceNamed({name}, {config})
@@ -328,6 +335,10 @@ fn emit_railway_ts(service_name: &str, cac: &CacFile) -> String {
 
     format!(
         r#"import {{ defineRailway, project, service }} from "railway/iac";
+
+// Last resort for a per-service CaC repo. Prefer one .railway file for the
+// project and drop this if you later combine services into that file.
+export const partial = {project};
 
 export default defineRailway(() => {{
 {body}
@@ -441,6 +452,7 @@ mod tests {
         assert!(out.contains("start: \"pnpm start\""));
         assert!(out.contains("healthcheck: \"/health\""));
         assert!(out.contains("service(\"api\""));
+        assert!(out.contains("export const partial = \"api\""));
     }
 
     #[test]
