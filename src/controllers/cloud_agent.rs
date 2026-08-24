@@ -194,6 +194,30 @@ pub async fn list_in_environment(
         .collect())
 }
 
+/// Layer the CLI's default variables under the caller's, for a new agent.
+///
+/// `SHELL` is a stopgap: the VM's session runner wraps every command in
+/// `bash -c`, and bash self-assigns `$SHELL` without exporting it — so the
+/// variable reads as set from a shell prompt but is invisible to child
+/// processes. Codex desktop's remote bootstrap probes it from a `sh -c`
+/// wrapper and refuses to start when it's empty, which a GUI surfaces as a
+/// bare "SSH connection failed". A create-time variable lands in the VM's
+/// real environment, so it is exported everywhere. Only at create: variables
+/// don't reach an agent that already exists. A caller-supplied SHELL wins.
+/// Remove once vm-init exports SHELL itself.
+pub fn with_default_variables(variables: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let mut map = match variables {
+        None => serde_json::Map::new(),
+        Some(serde_json::Value::Object(map)) => map,
+        // Never produced by our callers (variables come from string maps);
+        // reshaping someone else's value is worse than leaving it alone.
+        Some(other) => return Some(other),
+    };
+    map.entry("SHELL")
+        .or_insert_with(|| serde_json::Value::String("/bin/bash".to_owned()));
+    Some(serde_json::Value::Object(map))
+}
+
 /// Create an agent. The VM only — no harness, no credential, no session.
 /// Provisioning belongs to whatever opens a session on it, so an agent created
 /// here works with any of them.
@@ -211,7 +235,7 @@ pub async fn create(
             input: mutations::cloud_agent_create::CloudAgentCreateInput {
                 environment_id: environment_id.to_owned(),
                 name,
-                variables,
+                variables: with_default_variables(variables),
             },
         },
     )
@@ -571,6 +595,25 @@ mod tests {
         assert!(!Status::Failed.is_live());
         assert!(!Status::Deleting.is_live());
         assert!(!Status::Unknown("wat".into()).is_live());
+    }
+
+    #[test]
+    fn shell_is_seeded_when_absent() {
+        // No variables at all still yields SHELL — Codex's remote bootstrap
+        // dies without it, and this is the only moment it can be set.
+        let vars = with_default_variables(None).unwrap();
+        assert_eq!(vars["SHELL"], "/bin/bash");
+
+        let vars = with_default_variables(Some(serde_json::json!({ "FOO": "bar" }))).unwrap();
+        assert_eq!(vars["SHELL"], "/bin/bash");
+        assert_eq!(vars["FOO"], "bar");
+    }
+
+    #[test]
+    fn a_callers_shell_wins_over_the_default() {
+        let vars =
+            with_default_variables(Some(serde_json::json!({ "SHELL": "/bin/zsh" }))).unwrap();
+        assert_eq!(vars["SHELL"], "/bin/zsh");
     }
 
     #[test]
