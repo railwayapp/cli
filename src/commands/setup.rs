@@ -42,8 +42,8 @@ pub struct AgentArgs {
     #[clap(long, conflicts_with = "local")]
     remote: bool,
 
-    /// Configure the local GraphQL-backed MCP server (`railway mcp`) instead of the
-    /// remote CLI proxy default.
+    /// Configure the local GraphQL-backed MCP server (`railway mcp local`) instead of
+    /// the remote CLI proxy default.
     #[clap(long, conflicts_with_all = ["remote", "oauth"])]
     local: bool,
 
@@ -95,7 +95,7 @@ impl fmt::Display for McpChoice {
             McpChoice::Local => write!(
                 f,
                 "Local            {}",
-                "— runs `railway mcp` as a stdio server".dimmed()
+                "— runs `railway mcp local` as a stdio server".dimmed()
             ),
             McpChoice::RemoteOauth => write!(
                 f,
