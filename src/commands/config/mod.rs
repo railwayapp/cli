@@ -1,5 +1,8 @@
+mod authoring;
 mod migrate;
 mod runner;
+
+use self::authoring::AuthoringLang;
 
 use std::{
     fs,
@@ -17,7 +20,7 @@ use super::*;
 const LEGACY_CONFIG_SKILL_SHA256: &str =
     "08dff6674cd2df2d8a37fd2c0f3ef8aa506b353e88005331910387514430e00e";
 
-/// Define, import, preview, and apply your Railway project from .railway/railway.ts
+/// Define, import, preview, and apply your Railway project from .railway/railway.ts (or .py / .go)
 #[derive(Parser)]
 pub struct Args {
     #[clap(subcommand)]
@@ -26,29 +29,29 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Command {
-    /// Preview the changes Railway would make from .railway/railway.ts without applying them
+    /// Preview the changes Railway would make from the authoring file without applying them
     Plan(SharedArgs),
 
     /// Staged Railway configuration changes are not available yet; use `railway config plan` or `railway config apply`
     #[clap(hide = true)]
     Stage(SharedArgs),
 
-    /// Apply the changes from .railway/railway.ts to the linked Railway project
+    /// Apply the changes from the authoring file to the linked Railway project
     Apply(SharedArgs),
 
-    /// Create .railway/railway.ts for this repo or import from the linked project
+    /// Create .railway/railway.ts (or .py / .go) for this repo or import from the linked project
     Init(InitArgs),
 
-    /// Import the linked Railway project's current configuration into .railway/railway.ts
+    /// Import the linked Railway project's current configuration into the authoring file
     Pull(PullArgs),
 
-    /// Translate railway.json / railway.toml into .railway/railway.ts
+    /// Translate railway.json / railway.toml into an authoring file
     Migrate(migrate::MigrateArgs),
 }
 
 #[derive(Parser, Clone)]
 struct SharedArgs {
-    /// Path to the Railway configuration file. Defaults to nearest .railway/railway.ts.
+    /// Path to the Railway configuration file. Defaults to nearest .railway/railway.{ts,py,go}.
     #[clap(long)]
     file: Option<PathBuf>,
 
@@ -110,14 +113,14 @@ impl std::fmt::Display for InitMode {
 
 #[derive(Parser)]
 struct InitArgs {
-    /// Overwrite an existing .railway/railway.ts file.
+    /// Overwrite an existing authoring file.
     #[clap(long)]
     force: bool,
 }
 
 #[derive(Parser)]
 struct PullArgs {
-    /// Overwrite an existing .railway/railway.ts file.
+    /// Overwrite an existing authoring file.
     #[clap(long)]
     force: bool,
 
@@ -133,7 +136,7 @@ struct PullArgs {
     #[clap(long)]
     omit_preserved_variables: bool,
 
-    /// Ask an agent to turn imported state into idiomatic railway.ts code.
+    /// Ask an agent to turn imported state into idiomatic authoring code.
     #[clap(long)]
     agent: bool,
 }
@@ -261,8 +264,10 @@ async fn init_config(args: InitArgs) -> Result<()> {
         .to_string();
 
     let railway_dir = cwd.join(".railway");
-    let railway_file = railway_dir.join("railway.ts");
+    let railway_file = authoring_file_for_write(&cwd)?;
+    let lang = AuthoringLang::from_path(&railway_file).unwrap_or(AuthoringLang::TypeScript);
     let readme_file = railway_dir.join("README.md");
+    let relative_file = format!(".railway/{}", lang.file_name());
 
     create_parent(&railway_file)?;
 
@@ -272,7 +277,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
         println!();
         println!("{}", "Initialize Railway configuration".bold());
         println!("Railway will create the files that define your project infrastructure as code.");
-        println!("{} {}", "Main file".dimmed(), ".railway/railway.ts".cyan());
+        println!("{} {}", "Main file".dimmed(), relative_file.cyan());
         println!(
             "{} {}",
             "Docs".dimmed(),
@@ -292,19 +297,19 @@ async fn init_config(args: InitArgs) -> Result<()> {
     match init_mode {
         InitMode::GenerateFromRepo => write_new(
             &railway_file,
-            &railway_ts_from_repo(&cwd, &project_name),
+            &railway_stub_from_repo(&cwd, &project_name, lang),
             args.force,
         )?,
         InitMode::ImportFromRailway => {
             write_pulled_config(&railway_file, args.force, None, true).await?
         }
-        InitMode::MinimalFile => write_new(&railway_file, &railway_ts(&project_name), args.force)?,
+        InitMode::MinimalFile => write_new(
+            &railway_file,
+            &railway_stub(&project_name, lang),
+            args.force,
+        )?,
     }
-    write_new(
-        &readme_file,
-        include_str!("../../../assets/iac/README.md"),
-        args.force,
-    )?;
+    write_new(&readme_file, &iac_readme(lang), args.force)?;
 
     println!("{}", "Railway configuration initialized".green().bold());
     println!(
@@ -326,7 +331,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
     println!(
         "  {} Edit {} to describe your Railway project.",
         "•".cyan(),
-        ".railway/railway.ts".cyan()
+        relative_file.cyan()
     );
     println!(
         "  {} Run {} to preview changes.",
@@ -375,7 +380,9 @@ fn write_new(path: &Path, contents: &str, force: bool) -> Result<()> {
 
 async fn pull_config(args: PullArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
-    let railway_file = cwd.join(".railway").join("railway.ts");
+    let railway_file = authoring_file_for_write(&cwd)?;
+    let lang = AuthoringLang::from_path(&railway_file).unwrap_or(AuthoringLang::TypeScript);
+    let relative_file = format!(".railway/{}", lang.file_name());
     let readme_file = cwd.join(".railway").join("README.md");
 
     if args.json {
@@ -392,8 +399,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         !args.omit_preserved_variables,
     )
     .await?;
-    let wrote_readme =
-        write_asset_if_missing(&readme_file, include_str!("../../../assets/iac/README.md"))?;
+    let wrote_readme = write_asset_if_missing(&readme_file, &iac_readme(lang))?;
 
     println!("{}", "Railway configuration imported".green().bold());
     println!(
@@ -413,7 +419,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     println!(
         "  {} Review {} and remove anything you do not want managed from code.",
         "•".cyan(),
-        ".railway/railway.ts".cyan()
+        relative_file.cyan()
     );
     println!(
         "  {} Run {} to verify it matches Railway.",
@@ -437,9 +443,10 @@ async fn write_pulled_config(
     preserve_variables: bool,
 ) -> Result<()> {
     let graph = load_current_graph(runner).await?;
+    let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
         path,
-        &render_graph_as_railway_ts(&graph, preserve_variables),
+        &render_graph_as_railway(&graph, preserve_variables, lang),
         force,
     )
 }
@@ -463,7 +470,7 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
             .create_new(true)
             .open(&temp_file)
             .context("Failed to create temporary Railway config")?;
-        file.write_all(railway_ts("import-placeholder").as_bytes())
+        file.write_all(railway_stub("import-placeholder", AuthoringLang::TypeScript).as_bytes())
             .context("Failed to write temporary Railway config")?;
     }
 
@@ -509,7 +516,11 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
         .context("Railway did not return current project state")
 }
 
-fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: bool) -> String {
+fn render_graph_as_railway(
+    graph: &runner::DesiredGraph,
+    preserve_variables: bool,
+    lang: AuthoringLang,
+) -> String {
     let mut imports = vec!["defineRailway", "project", "service"];
     if graph
         .resources
@@ -577,15 +588,11 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
     imports.sort();
     imports.dedup();
 
-    let mut out = format!(
-        "import {{ {} }} from \"railway/iac\";\n\n",
-        imports.join(", ")
-    );
-    out.push_str("export default defineRailway(() => {\n");
+    let mut out = render_preamble(lang, &imports);
 
     let source_aliases = shared_github_sources(graph);
     for (alias, source) in &source_aliases {
-        out.push_str(&format!("  const {alias} = {};\n", render_source(source)));
+        out.push_str(&assign_stmt(lang, alias, &render_source(source, lang)));
     }
     if !source_aliases.is_empty() {
         out.push('\n');
@@ -643,63 +650,56 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
                     _ => "service",
                 };
                 if helper == "service" {
-                    out.push_str(&format!(
-                        "  const {var_name} = service({});\n",
-                        ts_string(&resource.name)
+                    out.push_str(&assign_stmt(
+                        lang,
+                        &var_name,
+                        &call_helper(lang, "service", &[ts_string(&resource.name)]),
                     ));
                 } else {
-                    let region = database_region(resource.deploy.as_ref());
-                    let args = region
-                        .map(|region| format!("{:?}, {{ region: {:?} }}", resource.name, region))
-                        .unwrap_or_else(|| format!("{:?}", resource.name));
-                    out.push_str(&format!("  const {var_name} = {helper}({args});\n"));
-                    render_database_deploy_overrides(resource.deploy.as_ref(), &var_name, &mut out);
+                    let mut args = vec![ts_string(&resource.name)];
+                    if let Some(region) = database_region(resource.deploy.as_ref()) {
+                        args.push(region_arg(lang, region));
+                    }
+                    out.push_str(&assign_stmt(
+                        lang,
+                        &var_name,
+                        &call_helper(lang, helper, &args),
+                    ));
+                    render_database_deploy_overrides(
+                        resource.deploy.as_ref(),
+                        &var_name,
+                        lang,
+                        &mut out,
+                    );
                 }
             }
             "service" => {
-                out.push_str(&format!(
-                    "  const {var_name} = service({}",
-                    ts_string(&resource.name)
-                ));
                 let body = render_service_body(
                     resource,
                     &source_aliases,
                     &resource_names,
                     preserve_variables,
+                    lang,
                 );
-                if body.is_empty() {
-                    out.push_str(");\n");
-                } else {
-                    out.push_str(&format!(", {body});\n"));
-                }
+                out.push_str(&assign_stmt(
+                    lang,
+                    &var_name,
+                    &service_call(lang, &ts_string(&resource.name), &body),
+                ));
             }
-            "bucket" => {
-                let config = resource.config.as_ref().map(ts_value).unwrap_or_default();
-                if config.is_empty() {
-                    out.push_str(&format!(
-                        "  const {var_name} = bucket({});\n",
-                        ts_string(&resource.name)
-                    ));
+            "bucket" | "volume" => {
+                let helper = resource.r#type.as_str();
+                let config = resource
+                    .config
+                    .as_ref()
+                    .map(|value| code_value(value, lang))
+                    .unwrap_or_default();
+                let expr = if config.is_empty() {
+                    call_helper(lang, helper, &[ts_string(&resource.name)])
                 } else {
-                    out.push_str(&format!(
-                        "  const {var_name} = bucket({}, {config});\n",
-                        ts_string(&resource.name)
-                    ));
-                }
-            }
-            "volume" => {
-                let config = resource.config.as_ref().map(ts_value).unwrap_or_default();
-                if config.is_empty() {
-                    out.push_str(&format!(
-                        "  const {var_name} = volume({});\n",
-                        ts_string(&resource.name)
-                    ));
-                } else {
-                    out.push_str(&format!(
-                        "  const {var_name} = volume({}, {config});\n",
-                        ts_string(&resource.name)
-                    ));
-                }
+                    call_helper(lang, helper, &[ts_string(&resource.name), config])
+                };
+                out.push_str(&assign_stmt(lang, &var_name, &expr));
             }
             _ => {}
         }
@@ -725,18 +725,16 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
                 resource_names.get(&key).cloned()
             })
             .collect::<Vec<_>>();
-        if children.is_empty() {
-            out.push_str(&format!(
-                "  const {var_name} = group({});\n",
-                ts_string(&resource.name)
-            ));
+        let expr = if children.is_empty() {
+            call_helper(lang, "group", &[ts_string(&resource.name)])
         } else {
-            out.push_str(&format!(
-                "  const {var_name} = group({}, [{}]);\n",
-                ts_string(&resource.name),
-                children.join(", ")
-            ));
-        }
+            call_helper(
+                lang,
+                "group",
+                &[ts_string(&resource.name), list_literal(lang, &children)],
+            )
+        };
+        out.push_str(&assign_stmt(lang, &var_name, &expr));
         group_names.insert(resource.name.clone(), var_name.clone());
         names.push(var_name);
     }
@@ -767,14 +765,88 @@ fn render_graph_as_railway_ts(graph: &runner::DesiredGraph, preserve_variables: 
         .as_ref()
         .map(|project| project.name.as_str())
         .unwrap_or("imported-project");
-    out.push_str(&format!("\n  return project({:?}, {{\n", project_name));
-    out.push_str(&format!(
-        "    resources: [{}],\n",
-        top_level_names.join(", ")
-    ));
-    out.push_str("  });\n");
-    out.push_str("});\n");
+    out.push_str(&render_project_return(lang, project_name, &top_level_names));
     out
+}
+
+fn render_preamble(lang: AuthoringLang, imports: &[&str]) -> String {
+    match lang {
+        AuthoringLang::TypeScript => format!(
+            "import {{ {} }} from \"railway/iac\";\n\nexport default defineRailway(() => {{\n",
+            imports.join(", ")
+        ),
+        AuthoringLang::Python => format!(
+            "from railway_iac import {}\n\n\n@define_railway\ndef main(ctx=None):\n",
+            imports
+                .iter()
+                .map(|name| match *name {
+                    "defineRailway" => "define_railway",
+                    other => other,
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AuthoringLang::Go => {
+            "package main\n\nimport \"github.com/railwayapp/railway-go-iac/iac\"\n\nfunc Railway() iac.Project {\n"
+                .to_string()
+        }
+    }
+}
+
+fn assign_stmt(lang: AuthoringLang, ident: &str, expr: &str) -> String {
+    match lang {
+        AuthoringLang::TypeScript => format!("  const {ident} = {expr};\n"),
+        AuthoringLang::Python => format!("    {ident} = {expr}\n"),
+        AuthoringLang::Go => format!("  {ident} := {expr}\n"),
+    }
+}
+
+fn call_helper(lang: AuthoringLang, helper: &str, args: &[String]) -> String {
+    format!("{}({})", lang.helper(helper), args.join(", "))
+}
+
+fn list_literal(lang: AuthoringLang, items: &[String]) -> String {
+    match lang {
+        AuthoringLang::Go => format!("[]any{{{}}}", items.join(", ")),
+        _ => format!("[{}]", items.join(", ")),
+    }
+}
+
+fn region_arg(lang: AuthoringLang, region: &str) -> String {
+    match lang {
+        AuthoringLang::TypeScript => format!("{{ region: {:?} }}", region),
+        AuthoringLang::Python => format!("region={:?}", region),
+        AuthoringLang::Go => format!("map[string]any{{\"region\": {:?}}}", region),
+    }
+}
+
+fn service_call(lang: AuthoringLang, name: &str, body: &str) -> String {
+    if body.is_empty() {
+        return match lang {
+            AuthoringLang::Go => format!("{}({name}, nil)", lang.helper("service")),
+            _ => call_helper(lang, "service", &[name.to_string()]),
+        };
+    }
+    match lang {
+        AuthoringLang::TypeScript => format!("service({name}, {body})"),
+        AuthoringLang::Python => format!("service(\n        {name},\n{body}\n    )"),
+        AuthoringLang::Go => format!(
+            "{}({name}, iac.ServiceConfig{{\n{body}\n  }})",
+            lang.helper("service")
+        ),
+    }
+}
+
+fn render_project_return(lang: AuthoringLang, project_name: &str, resources: &[String]) -> String {
+    let name = ts_string(project_name);
+    let list = list_literal(lang, resources);
+    match lang {
+        AuthoringLang::TypeScript => {
+            format!("\n  return project({name}, {{\n    resources: {list},\n  }});\n}});\n")
+        }
+        AuthoringLang::Python => format!("    return project({name}, resources={list})\n"),
+        AuthoringLang::Go => format!("  return {}({name}, {list})\n}}\n", lang.helper("project")),
+    }
 }
 
 fn has_preserved_variables(resource: &runner::DesiredResource) -> bool {
@@ -842,6 +914,7 @@ fn render_service_body(
     source_aliases: &std::collections::BTreeMap<String, serde_json::Value>,
     resource_names: &std::collections::HashMap<String, String>,
     preserve_variables: bool,
+    lang: AuthoringLang,
 ) -> String {
     let mut lines = Vec::new();
     if let Some(source) = &resource.source {
@@ -853,46 +926,56 @@ fn render_service_body(
             let alias = source_aliases
                 .iter()
                 .find_map(|(alias, shared_source)| (shared_source == source).then_some(alias));
-            if let Some(alias) = alias {
-                lines.push(format!("    source: {alias},"));
-            } else {
-                lines.push(format!("    source: {},", render_source(source)));
-            }
+            let value = alias
+                .cloned()
+                .unwrap_or_else(|| render_source(source, lang));
+            lines.push(lang.config_field("source", &value));
         } else if source
             .get("image")
             .and_then(|value| value.as_str())
             .is_some()
         {
-            lines.push(format!("    source: {},", render_source(source)));
+            lines.push(lang.config_field("source", &render_source(source, lang)));
         }
     }
-    render_build(resource.build.as_ref(), &mut lines);
+    render_build(resource.build.as_ref(), lang, &mut lines);
     render_deploy(
         resource.deploy.as_ref(),
         resource.source.as_ref(),
+        lang,
         &mut lines,
     );
-    render_networking(resource.networking.as_ref(), &mut lines);
+    render_networking(resource.networking.as_ref(), lang, &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
         resource_names,
+        lang,
         &mut lines,
     );
-    render_variables(resource.variables.as_ref(), &mut lines, preserve_variables);
+    render_variables(
+        resource.variables.as_ref(),
+        resource_names,
+        lang,
+        &mut lines,
+        preserve_variables,
+    );
     if lines.is_empty() {
         return String::new();
     }
-    format!("{{\n{}\n  }}", lines.join("\n"))
+    match lang {
+        AuthoringLang::TypeScript => format!("{{\n{}\n  }}", lines.join("\n")),
+        AuthoringLang::Python | AuthoringLang::Go => lines.join("\n"),
+    }
 }
 
-fn render_source(source: &serde_json::Value) -> String {
+fn render_source(source: &serde_json::Value, lang: AuthoringLang) -> String {
     let (helper, identifier) =
         if let Some(repo) = source.get("repo").and_then(|value| value.as_str()) {
             ("github", repo)
         } else if let Some(image) = source.get("image").and_then(|value| value.as_str()) {
             ("image", image)
         } else {
-            return ts_value(source);
+            return code_value(source, lang);
         };
 
     let mut options = source.as_object().cloned().unwrap_or_default();
@@ -913,12 +996,18 @@ fn render_source(source: &serde_json::Value) -> String {
         options.remove("rootDirectory");
     }
 
+    let helper = lang.helper(helper);
     if options.is_empty() {
         format!("{helper}({identifier:?})")
+    } else if lang == AuthoringLang::Python {
+        format!(
+            "{helper}({identifier:?}, **{})",
+            code_value(&serde_json::Value::Object(options), lang)
+        )
     } else {
         format!(
             "{helper}({identifier:?}, {})",
-            ts_value(&serde_json::Value::Object(options))
+            code_value(&serde_json::Value::Object(options), lang)
         )
     }
 }
@@ -948,6 +1037,7 @@ fn database_region(deploy: Option<&serde_json::Value>) -> Option<&str> {
 fn render_database_deploy_overrides(
     deploy: Option<&serde_json::Value>,
     var_name: &str,
+    lang: AuthoringLang,
     out: &mut String,
 ) {
     let Some(deploy) = deploy.and_then(|value| value.as_object()) else {
@@ -965,15 +1055,26 @@ fn render_database_deploy_overrides(
     if overrides.is_empty() {
         return;
     }
-    out.push_str(&format!(
-        "  {var_name}.deploy = {};\n",
-        ts_value(&serde_json::Value::Object(overrides))
-    ));
+    match lang {
+        AuthoringLang::TypeScript => out.push_str(&format!(
+            "  {var_name}.deploy = {};\n",
+            ts_value(&serde_json::Value::Object(overrides))
+        )),
+        AuthoringLang::Python => out.push_str(&format!(
+            "    # deploy overrides: {}\n",
+            code_value(&serde_json::Value::Object(overrides), lang)
+        )),
+        AuthoringLang::Go => out.push_str(&format!(
+            "  // deploy overrides: {}\n",
+            code_value(&serde_json::Value::Object(overrides), lang)
+        )),
+    }
 }
 
 fn render_volume_attachments(
     attachments: Option<&serde_json::Map<String, serde_json::Value>>,
     resource_names: &std::collections::HashMap<String, String>,
+    lang: AuthoringLang,
     lines: &mut Vec<String>,
 ) {
     let Some(attachments) = attachments else {
@@ -987,20 +1088,29 @@ fn render_volume_attachments(
                 .get("mountPath")
                 .and_then(|value| value.as_str())?;
             let volume_var = resource_names.get(volume)?;
-            Some(format!("      {:?}: {volume_var},", mount_path))
+            Some((mount_path.to_string(), volume_var.clone()))
         })
         .collect::<Vec<_>>();
     rendered.sort();
     if rendered.is_empty() {
         return;
     }
-    lines.push("    volumeMounts: {".to_string());
-    lines.extend(rendered);
-    lines.push("    },".to_string());
+    let inner = rendered
+        .iter()
+        .map(|(path, var)| format!("{:?}: {var}", path))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value = match lang {
+        AuthoringLang::Go => format!("map[string]any{{{inner}}}"),
+        _ => format!("{{ {inner} }}"),
+    };
+    lines.push(lang.config_field("volumeMounts", &value));
 }
 
 fn render_variables(
     vars: Option<&serde_json::Map<String, serde_json::Value>>,
+    resource_names: &std::collections::HashMap<String, String>,
+    lang: AuthoringLang,
     lines: &mut Vec<String>,
     preserve_variables: bool,
 ) {
@@ -1012,38 +1122,68 @@ fn render_variables(
     let rendered = entries
         .into_iter()
         .filter_map(|(key, value)| {
-            if value.get("type").and_then(|value| value.as_str()) == Some("preserve") {
-                return preserve_variables.then(|| format!("      {}: preserve(),", ts_key(key)));
-            }
-            if let Some(literal) = value.get("value").and_then(|value| value.as_str()) {
-                return Some(format!("      {}: {:?},", ts_key(key), literal));
-            }
-            if let (Some(resource), Some(output)) = (
-                value.get("resource").and_then(|value| value.as_str()),
-                value.get("output").and_then(|value| value.as_str()),
-            ) {
-                let name = resource.split('.').skip(1).collect::<Vec<_>>().join(".");
-                return Some(format!(
-                    "      {}: /* {}.{} */ \"${{{{{}}}}}\",",
-                    ts_key(key),
-                    name,
-                    output,
-                    output
-                ));
-            }
-            None
+            let rendered_value =
+                if value.get("type").and_then(|value| value.as_str()) == Some("preserve") {
+                    preserve_variables.then(|| format!("{}()", lang.helper("preserve")))?
+                } else if let Some(literal) = value.get("value").and_then(|value| value.as_str()) {
+                    format!("{:?}", literal)
+                } else if let (Some(resource), Some(output)) = (
+                    value.get("resource").and_then(|value| value.as_str()),
+                    value.get("output").and_then(|value| value.as_str()),
+                ) {
+                    if let Some(var) = resource_names.get(resource) {
+                        env_ref(lang, var, output)
+                    } else {
+                        let name = resource.split('.').skip(1).collect::<Vec<_>>().join(".");
+                        match lang {
+                            AuthoringLang::TypeScript => {
+                                format!("/* {}.{} */ \"${{{{{}}}}}\"", name, output, output)
+                            }
+                            AuthoringLang::Python => format!("\"${{{{{}}}}}\"", output),
+                            AuthoringLang::Go => format!("\"${{{{{}}}}}\"", output),
+                        }
+                    }
+                } else {
+                    return None;
+                };
+            Some(object_entry(lang, key, &rendered_value))
         })
         .collect::<Vec<_>>();
 
     if rendered.is_empty() {
         return;
     }
-    lines.push("    env: {".to_string());
-    lines.extend(rendered);
-    lines.push("    },".to_string());
+    let inner = rendered.join(", ");
+    let value = match lang {
+        AuthoringLang::Go => format!("map[string]any{{{inner}}}"),
+        _ => format!("{{ {inner} }}"),
+    };
+    lines.push(lang.config_field("env", &value));
 }
 
-fn render_build(build: Option<&serde_json::Value>, lines: &mut Vec<String>) {
+fn env_ref(lang: AuthoringLang, var: &str, output: &str) -> String {
+    match lang {
+        AuthoringLang::TypeScript => format!("{var}.env.{output}"),
+        AuthoringLang::Python => {
+            if is_ident(output) {
+                format!("{var}.env.{output}")
+            } else {
+                format!("{var}.env[{output:?}]")
+            }
+        }
+        AuthoringLang::Go => format!("{var}.Env({output:?})"),
+    }
+}
+
+fn object_entry(lang: AuthoringLang, key: &str, value: &str) -> String {
+    match lang {
+        AuthoringLang::TypeScript => format!("{}: {value}", ts_key(key)),
+        AuthoringLang::Python => format!("{:?}: {value}", key),
+        AuthoringLang::Go => format!("{:?}: {value}", key),
+    }
+}
+
+fn render_build(build: Option<&serde_json::Value>, lang: AuthoringLang, lines: &mut Vec<String>) {
     let Some(build) = build else {
         return;
     };
@@ -1064,19 +1204,20 @@ fn render_build(build: Option<&serde_json::Value>, lines: &mut Vec<String>) {
         }
         if non_default_keys == ["buildCommand"] {
             if let Some(command) = build.get("buildCommand").and_then(|value| value.as_str()) {
-                lines.push(format!("    build: {:?},", command));
+                lines.push(lang.config_field("build", &format!("{:?}", command)));
                 return;
             }
         }
     }
     if !is_empty_object(build) {
-        lines.push(format!("    build: {},", ts_value(build)));
+        lines.push(lang.config_field("build", &code_value(build, lang)));
     }
 }
 
 fn render_deploy(
     deploy: Option<&serde_json::Value>,
     source: Option<&serde_json::Value>,
+    lang: AuthoringLang,
     lines: &mut Vec<String>,
 ) {
     let Some(deploy) = deploy.and_then(|value| value.as_object()) else {
@@ -1088,19 +1229,19 @@ fn render_deploy(
         .remove("startCommand")
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
     {
-        lines.push(format!("    start: {:?},", start));
+        lines.push(lang.config_field("start", &format!("{:?}", start)));
     }
     if let Some(healthcheck) = remaining
         .remove("healthcheckPath")
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
     {
-        lines.push(format!("    healthcheck: {:?},", healthcheck));
+        lines.push(lang.config_field("healthcheck", &format!("{:?}", healthcheck)));
     }
     if let Some(timeout) = remaining.remove("healthcheckTimeout") {
-        lines.push(format!("    healthcheckTimeout: {},", ts_value(&timeout)));
+        lines.push(lang.config_field("healthcheckTimeout", &code_value(&timeout, lang)));
     }
     if let Some(regions) = remaining.remove("multiRegionConfig") {
-        lines.push(format!("    replicas: {},", render_replicas(&regions)));
+        lines.push(lang.config_field("replicas", &render_replicas(&regions, lang)));
     }
 
     if !is_image_source(source) {
@@ -1126,9 +1267,9 @@ fn render_deploy(
     }
 
     if !remaining.is_empty() {
-        lines.push(format!(
-            "    deploy: {},",
-            ts_value(&serde_json::Value::Object(remaining))
+        lines.push(lang.config_field(
+            "deploy",
+            &code_value(&serde_json::Value::Object(remaining), lang),
         ));
     }
 }
@@ -1140,15 +1281,15 @@ fn is_image_source(source: Option<&serde_json::Value>) -> bool {
         .is_some()
 }
 
-fn render_replicas(value: &serde_json::Value) -> String {
+fn render_replicas(value: &serde_json::Value, lang: AuthoringLang) -> String {
     // A single-region map is still placement intent. Flattening it to a number
     // makes pull lossy and relies on a later plan remembering remote state.
-    render_regions(value)
+    render_regions(value, lang)
 }
 
-fn render_regions(value: &serde_json::Value) -> String {
+fn render_regions(value: &serde_json::Value, lang: AuthoringLang) -> String {
     let Some(regions) = value.as_object() else {
-        return ts_value(value);
+        return code_value(value, lang);
     };
     let rendered = regions
         .iter()
@@ -1159,25 +1300,44 @@ fn render_regions(value: &serde_json::Value) -> String {
                 .and_then(|value| value.as_str());
             let value = match (replicas, stacker) {
                 (Some(replicas), None) => replicas.to_string(),
-                _ => {
-                    let mut parts = Vec::new();
-                    if let Some(replicas) = replicas {
-                        parts.push(format!("count: {replicas}"));
+                _ => match lang {
+                    AuthoringLang::Go => {
+                        let mut parts = Vec::new();
+                        if let Some(replicas) = replicas {
+                            parts.push(format!("\"count\": {replicas}"));
+                        }
+                        if let Some(stacker) = stacker {
+                            parts.push(format!("\"stacker\": {:?}", stacker));
+                        }
+                        format!("map[string]any{{{}}}", parts.join(", "))
                     }
-                    if let Some(stacker) = stacker {
-                        parts.push(format!("stacker: {:?}", stacker));
+                    _ => {
+                        let mut parts = Vec::new();
+                        if let Some(replicas) = replicas {
+                            parts.push(format!("count: {replicas}"));
+                        }
+                        if let Some(stacker) = stacker {
+                            parts.push(format!("stacker: {:?}", stacker));
+                        }
+                        format!("{{ {} }}", parts.join(", "))
                     }
-                    format!("{{ {} }}", parts.join(", "))
-                }
+                },
             };
             format!("{:?}: {value}", region)
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{{ {rendered} }}")
+    match lang {
+        AuthoringLang::Go => format!("map[string]any{{{rendered}}}"),
+        _ => format!("{{ {rendered} }}"),
+    }
 }
 
-fn render_networking(networking: Option<&serde_json::Value>, lines: &mut Vec<String>) {
+fn render_networking(
+    networking: Option<&serde_json::Value>,
+    lang: AuthoringLang,
+    lines: &mut Vec<String>,
+) {
     let Some(networking) = networking.and_then(|value| value.as_object()) else {
         return;
     };
@@ -1196,19 +1356,29 @@ fn render_networking(networking: Option<&serde_json::Value>, lines: &mut Vec<Str
                     let port = config.get("port").and_then(|value| value.as_u64());
                     match port {
                         Some(8080) | None => format!("{:?}", domain),
-                        Some(port) => format!("{{ domain: {:?}, port: {port} }}", domain),
+                        Some(port) => match lang {
+                            AuthoringLang::Go => format!(
+                                "map[string]any{{\"domain\": {:?}, \"port\": {port}}}",
+                                domain
+                            ),
+                            AuthoringLang::Python => {
+                                format!("{{ \"domain\": {:?}, \"port\": {port} }}", domain)
+                            }
+                            AuthoringLang::TypeScript => {
+                                format!("{{ domain: {:?}, port: {port} }}", domain)
+                            }
+                        },
                     }
                 })
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(format!("    domains: [{rendered}],"));
+                .collect::<Vec<_>>();
+            lines.push(lang.config_field("domains", &list_literal(lang, &rendered)));
         }
     }
 
     if !remaining.is_empty() {
-        lines.push(format!(
-            "    networking: {},",
-            ts_value(&serde_json::Value::Object(remaining))
+        lines.push(lang.config_field(
+            "networking",
+            &code_value(&serde_json::Value::Object(remaining), lang),
         ));
     }
 }
@@ -1293,18 +1463,77 @@ fn ts_value(value: &serde_json::Value) -> String {
     }
 }
 
-fn ts_key(key: &str) -> String {
-    if key
-        .chars()
+fn is_ident(key: &str) -> bool {
+    key.chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
         && key
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
+}
+
+fn ts_key(key: &str) -> String {
+    if is_ident(key) {
         key.to_string()
     } else {
         format!("{:?}", key)
+    }
+}
+
+fn code_value(value: &serde_json::Value, lang: AuthoringLang) -> String {
+    match lang {
+        AuthoringLang::TypeScript => ts_value(value),
+        AuthoringLang::Python => py_value(value),
+        AuthoringLang::Go => go_value(value),
+    }
+}
+
+fn py_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.is_empty() {
+                return "{}".to_string();
+            }
+            let fields = object
+                .iter()
+                .map(|(key, value)| format!("{}: {}", ts_key(key), py_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ {fields} }}")
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(py_value).collect::<Vec<_>>().join(", ")
+        ),
+        serde_json::Value::String(value) => format!("{:?}", value),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Bool(true) => "True".to_string(),
+        serde_json::Value::Bool(false) => "False".to_string(),
+        serde_json::Value::Null => "None".to_string(),
+    }
+}
+
+fn go_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.is_empty() {
+                return "map[string]any{}".to_string();
+            }
+            let fields = object
+                .iter()
+                .map(|(key, value)| format!("{:?}: {}", key, go_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("map[string]any{{{fields}}}")
+        }
+        serde_json::Value::Array(values) => format!(
+            "[]any{{{}}}",
+            values.iter().map(go_value).collect::<Vec<_>>().join(", ")
+        ),
+        serde_json::Value::String(value) => format!("{:?}", value),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => "nil".to_string(),
     }
 }
 
@@ -1361,10 +1590,10 @@ fn sanitize_ident(name: &str) -> String {
     out
 }
 
-fn railway_ts_from_repo(cwd: &Path, project_name: &str) -> String {
+fn railway_stub_from_repo(cwd: &Path, project_name: &str, lang: AuthoringLang) -> String {
     let package_json = cwd.join("package.json");
     if !package_json.exists() {
-        return railway_ts(project_name);
+        return railway_stub(project_name, lang);
     }
 
     let package = fs::read_to_string(package_json)
@@ -1388,33 +1617,49 @@ fn railway_ts_from_repo(cwd: &Path, project_name: &str) -> String {
             }
         });
     let github_source = detect_github_remote(cwd);
+    railway_stub_with_service(project_name, lang, github_source, build, start)
+}
 
-    let imports = if github_source.is_some() {
-        "defineRailway, github, project, service"
-    } else {
-        "defineRailway, project, service"
+fn railway_stub(project_name: &str, lang: AuthoringLang) -> String {
+    railway_stub_with_service(project_name, lang, None, None, None)
+}
+
+fn railway_stub_with_service(
+    project_name: &str,
+    lang: AuthoringLang,
+    github_source: Option<String>,
+    build: Option<String>,
+    start: Option<String>,
+) -> String {
+    let mut fields = Vec::new();
+    if let Some(source) = &github_source {
+        fields.push(lang.config_field(
+            "source",
+            &format!("{}({:?})", lang.helper("github"), source),
+        ));
+    }
+    if let Some(build) = &build {
+        fields.push(lang.config_field("build", &format!("{:?}", build)));
+    }
+    if let Some(start) = &start {
+        fields.push(lang.config_field("start", &format!("{:?}", start)));
+    }
+    if fields.is_empty() && lang == AuthoringLang::TypeScript {
+        fields.push("    env: {\n      NODE_ENV: \"production\",\n    },".to_string());
+    }
+    let body = match lang {
+        AuthoringLang::TypeScript => format!("{{\n{}\n  }}", fields.join("\n")),
+        _ => fields.join("\n"),
     };
-    let mut out = format!("import {{ {imports} }} from \"railway/iac\";\n\n");
-    out.push_str("export default defineRailway(() => {\n");
-    out.push_str("  const web = service(\"web\", {\n");
-    if let Some(source) = github_source {
-        out.push_str(&format!("    source: github({:?}),\n", source));
+    let web = service_call(lang, "\"web\"", &body);
+    let web_stmt = assign_stmt(lang, "web", &web);
+    let return_stmt = render_project_return(lang, project_name, &["web".to_string()]);
+    let imports = if github_source.is_some() {
+        vec!["defineRailway", "github", "project", "service"]
     } else {
-        out.push_str(
-            "    // No GitHub remote detected. `railway up` will upload this directory.\n",
-        );
-    }
-    if let Some(build) = build {
-        out.push_str(&format!("    build: {:?},\n", build));
-    }
-    if let Some(start) = start {
-        out.push_str(&format!("    start: {:?},\n", start));
-    }
-
-    out.push_str("  });\n\n");
-    out.push_str(&format!("  return project(\"{project_name}\", {{\n"));
-    out.push_str("    resources: [web],\n  });\n});\n");
-    out
+        vec!["defineRailway", "project", "service"]
+    };
+    format!("{}{web_stmt}{return_stmt}", render_preamble(lang, &imports))
 }
 
 fn script_command<'a>(
@@ -1465,28 +1710,6 @@ fn detect_package_manager(cwd: &Path) -> String {
     } else {
         "npm".to_string()
     }
-}
-
-fn railway_ts(project_name: &str) -> String {
-    format!(
-        r#"import {{ defineRailway, project, service }} from "railway/iac";
-
-export default defineRailway(() => {{
-  const web = service("web", {{
-    // Add build/start commands when Railway cannot infer them.
-    // build: "pnpm install --frozen-lockfile && pnpm build",
-    // start: "pnpm start",
-    env: {{
-      NODE_ENV: "production",
-    }},
-  }});
-
-  return project("{project_name}", {{
-    resources: [web],
-  }});
-}});
-"#
-    )
 }
 
 async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
@@ -1556,6 +1779,31 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
     init_config(InitArgs { force: false }).await?;
     println!();
     Ok(())
+}
+
+fn iac_readme(lang: AuthoringLang) -> String {
+    include_str!("../../../assets/iac/README.md").replace(
+        ".railway/railway.ts",
+        &format!(".railway/{}", lang.file_name()),
+    )
+}
+
+fn authoring_file_for_write(cwd: &Path) -> Result<PathBuf> {
+    let found = find_railway_files(cwd);
+    if found.len() > 1 {
+        bail!(
+            "Multiple Railway configuration files found ({}). Keep only one of .railway/railway.{{ts,py,go}}.",
+            found
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(found.into_iter().next().unwrap_or_else(|| {
+        cwd.join(".railway")
+            .join(AuthoringLang::TypeScript.file_name())
+    }))
 }
 
 fn find_railway_file(start: &Path) -> Option<PathBuf> {
@@ -1715,7 +1963,10 @@ mod tests {
     #[test]
     fn pull_renderer_preserves_single_region_placement() {
         assert_eq!(
-            render_replicas(&json!({ "europe-west4": { "numReplicas": 2 } })),
+            render_replicas(
+                &json!({ "europe-west4": { "numReplicas": 2 } }),
+                AuthoringLang::TypeScript
+            ),
             "{ \"europe-west4\": 2 }",
         );
     }
@@ -1735,6 +1986,7 @@ mod tests {
             &std::collections::BTreeMap::new(),
             &std::collections::HashMap::new(),
             true,
+            AuthoringLang::TypeScript,
         );
 
         assert!(rendered.contains("source: github"));
@@ -1758,6 +2010,7 @@ mod tests {
             &std::collections::BTreeMap::new(),
             &std::collections::HashMap::new(),
             true,
+            AuthoringLang::TypeScript,
         );
 
         assert!(rendered.contains("source: image(\"nginx:latest\")"));
@@ -1785,6 +2038,7 @@ mod tests {
             &std::collections::BTreeMap::new(),
             &std::collections::HashMap::new(),
             false,
+            AuthoringLang::TypeScript,
         );
 
         assert!(
@@ -1812,13 +2066,15 @@ mod tests {
             "autoUpdates": policy
         });
 
-        let rendered_image = render_source(&image_source);
+        let rendered_image = render_source(&image_source, AuthoringLang::TypeScript);
         assert!(rendered_image.contains("autoUpdates"));
         assert!(rendered_image.contains("schedule"));
-        let rendered_github = render_source(&github_source);
+        let rendered_github = render_source(&github_source, AuthoringLang::TypeScript);
         assert!(rendered_github.contains("branch: \"feature\""));
         assert!(!rendered_github.contains("autoUpdates"));
-        assert!(!render_source(&unsupported_source).contains("autoUpdates"));
+        assert!(
+            !render_source(&unsupported_source, AuthoringLang::TypeScript).contains("autoUpdates")
+        );
     }
 
     #[test]
@@ -1831,6 +2087,7 @@ mod tests {
                 "requiredMountPath": "/data"
             })),
             "cache",
+            AuthoringLang::TypeScript,
             &mut rendered,
         );
 
@@ -1851,9 +2108,74 @@ mod tests {
             &std::collections::BTreeMap::new(),
             &std::collections::HashMap::new(),
             true,
+            AuthoringLang::TypeScript,
         );
 
         assert!(rendered.contains("source: image"));
         assert!(rendered.contains("registryCredentials"));
+    }
+
+    #[test]
+    fn authoring_file_for_write_keeps_an_existing_python_file() {
+        let root = tempfile::tempdir().unwrap();
+        let railway_dir = root.path().join(".railway");
+        fs::create_dir_all(&railway_dir).unwrap();
+        let py = railway_dir.join("railway.py");
+        fs::write(&py, "from railway_iac import project\n").unwrap();
+
+        assert_eq!(authoring_file_for_write(root.path()).unwrap(), py);
+    }
+
+    #[test]
+    fn authoring_file_for_write_errors_when_two_languages_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let railway_dir = root.path().join(".railway");
+        fs::create_dir_all(&railway_dir).unwrap();
+        fs::write(railway_dir.join("railway.ts"), "").unwrap();
+        fs::write(railway_dir.join("railway.py"), "").unwrap();
+
+        let error = authoring_file_for_write(root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Multiple Railway configuration files"));
+    }
+
+    #[test]
+    fn pull_renderer_emits_python_when_asked() {
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject {
+                name: "demo".to_string(),
+            }),
+            resources: vec![service_resource(
+                json!({ "repo": "org/app" }),
+                json!({ "startCommand": "./app" }),
+            )],
+        };
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Python);
+        assert!(rendered.contains("from railway_iac import"));
+        assert!(rendered.contains("def main(ctx=None):"));
+        assert!(rendered.contains("source=github(\"org/app\")"));
+        assert!(rendered.contains("start=\"./app\""));
+        assert!(!rendered.contains("railway.ts"));
+        assert!(!rendered.contains("defineRailway"));
+    }
+
+    #[test]
+    fn pull_renderer_emits_go_when_asked() {
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject {
+                name: "demo".to_string(),
+            }),
+            resources: vec![service_resource(
+                json!({ "repo": "org/app" }),
+                json!({ "startCommand": "./app" }),
+            )],
+        };
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Go);
+        assert!(rendered.contains("github.com/railwayapp/railway-go-iac/iac"));
+        assert!(rendered.contains("func Railway()"));
+        assert!(rendered.contains("iac.Github(\"org/app\")"));
+        assert!(rendered.contains("\"start\": \"./app\""));
+        assert!(rendered.contains("iac.ServiceNamed"));
     }
 }
