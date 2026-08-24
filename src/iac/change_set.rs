@@ -21,6 +21,18 @@ pub struct ChangeSet {
     pub partial: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<ChangeSetTelemetry>,
+}
+
+/// Authoring language is the only adoption dimension the server cannot observe
+/// on its own: CLI version arrives in the request headers, the engine is
+/// implied by the change set API, and CI is already on the `config` command
+/// event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSetTelemetry {
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,6 +230,7 @@ fn change_set_result(
         diagnostics,
         partial: partial.map(str::to_string),
         declared,
+        telemetry: None,
     }
 }
 

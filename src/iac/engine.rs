@@ -10,7 +10,7 @@ use crate::{
     config::{Configs, LinkedProject},
 };
 
-use super::change_set::{DiffOptions, diff_graphs, render_change_set};
+use super::change_set::{ChangeSetTelemetry, DiffOptions, diff_graphs, render_change_set};
 use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
 use super::eval::evaluate_file;
 use super::graph::validate_graph;
@@ -131,6 +131,20 @@ pub struct NativeRun {
     pub show_values: bool,
 }
 
+fn authoring_language(file: &std::path::Path) -> &'static str {
+    match file
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "py" => "python",
+        "go" => "go",
+        _ => "typescript",
+    }
+}
+
 pub async fn run(
     args: &NativeRun,
     configs: &Configs,
@@ -185,6 +199,9 @@ pub async fn run(
         reveal_values: args.show_values,
         partial: evaluated.partial.as_deref(),
         owners: owners.as_ref(),
+    });
+    change_set.telemetry = Some(ChangeSetTelemetry {
+        language: authoring_language(&evaluated.file).to_string(),
     });
     let mut all_diagnostics = diagnostics;
     for diagnostic in &change_set.diagnostics {
@@ -606,6 +623,22 @@ mod tests {
         assert!(
             broken.is_err(),
             "the live GraphQL payload is not {{ project: {{ edges }} }}"
+        );
+    }
+
+    #[test]
+    fn authoring_language_normalizes_supported_extensions() {
+        assert_eq!(
+            authoring_language(std::path::Path::new(".railway/railway.ts")),
+            "typescript"
+        );
+        assert_eq!(
+            authoring_language(std::path::Path::new(".railway/railway.py")),
+            "python"
+        );
+        assert_eq!(
+            authoring_language(std::path::Path::new(".railway/railway.go")),
+            "go"
         );
     }
 }
