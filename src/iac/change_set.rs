@@ -21,6 +21,17 @@ pub struct ChangeSet {
     pub partial: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<ChangeSetTelemetry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSetTelemetry {
+    pub language: String,
+    pub engine: String,
+    pub cli_version: String,
+    pub is_ci: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,6 +229,7 @@ fn change_set_result(
         diagnostics,
         partial: partial.map(str::to_string),
         declared,
+        telemetry: None,
     }
 }
 
