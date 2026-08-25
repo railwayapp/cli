@@ -1017,6 +1017,48 @@ def main(ctx=None):
     );
 }
 
+#[test]
+fn evaluates_go_partial_and_graph() {
+    let dir = tempfile_dir("railway-iac-go-");
+    let file = dir.join("railway.go");
+    std::fs::write(
+        dir.join("go.mod"),
+        "module railway-eval\n\ngo 1.22\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &file,
+        r#"
+package main
+
+const Partial = "api"
+
+type graph map[string]any
+
+func (g graph) Graph() map[string]any { return g }
+
+func Railway() graph {
+	return graph{
+		"name": "app",
+		"resources": []any{
+			map[string]any{"type": "service", "name": "api", "start": "echo api"},
+		},
+	}
+}
+"#,
+    )
+    .unwrap();
+    let evaluated = evaluate_file(&file).expect("go should evaluate railway.go");
+    assert_eq!(evaluated.partial.as_deref(), Some("api"));
+    assert!(
+        evaluated
+            .graph
+            .resources
+            .iter()
+            .any(|r| r["address"] == "service.api")
+    );
+}
+
 fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
