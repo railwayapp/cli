@@ -958,7 +958,7 @@ pub async fn run(
                 session_name,
             }) => {
                 let command = ssh_command_for(&environment_id, &agent_id, &session_name);
-                match arboard::Clipboard::new().and_then(|mut c| c.set_text(command)) {
+                match crate::util::clipboard::copy(&command) {
                     Ok(()) => app.toast("Copied the ssh command"),
                     Err(err) => app.toast_error(format!("Couldn't copy: {err}")),
                 }
@@ -1756,7 +1756,7 @@ fn finish_copy(app: &mut App, text: Option<String>) {
     // In the corner rather than the header: a drag ends wherever the pointer
     // is, and the only other evidence that it worked is the clipboard, which
     // is not on the screen.
-    match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+    match crate::util::clipboard::copy(&text) {
         Ok(()) => app.toast(format!(
             "Copied {lines} line{}",
             if lines == 1 { "" } else { "s" }
