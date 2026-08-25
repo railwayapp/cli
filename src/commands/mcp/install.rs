@@ -63,10 +63,11 @@ impl McpTransport {
 fn stdio_args(transport: McpTransport) -> Vec<&'static str> {
     match transport {
         McpTransport::Local => vec!["mcp", "local"],
-        // Written explicitly rather than as a bare `mcp`, even though that is
-        // now the default: an installed config should not change meaning if
-        // the default ever moves again.
-        McpTransport::RemoteProxy => vec!["mcp", "proxy"],
+        // A bare `mcp` — the canonical invocation now that it starts the
+        // proxy. `mcp proxy` still works and still classifies as remote, so
+        // configs written before the cutover keep running; new ones just say
+        // it the short way.
+        McpTransport::RemoteProxy => vec!["mcp"],
         // RemoteOauth entries are URL-based; callers never ask for its argv.
         McpTransport::RemoteOauth => unreachable!("RemoteOauth has no stdio argv"),
     }
@@ -674,6 +675,8 @@ mod tests {
         let cases: [(&[&str], McpTransport, bool); 6] = [
             (&["mcp", "local"], McpTransport::Local, true),
             (&["mcp", "local"], McpTransport::RemoteProxy, false),
+            // No longer written by `install`, but pre-cutover configs contain
+            // it and must keep resolving to the remote server.
             (&["mcp", "proxy"], McpTransport::RemoteProxy, true),
             (&["mcp", "proxy"], McpTransport::Local, false),
             // Pre-cutover config: bare `mcp` starts the proxy now.
@@ -690,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_entry_is_not_mistaken_for_local() {
+    fn remote_installs_are_written_as_a_bare_mcp() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".cursor").join("mcp.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -700,10 +703,7 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         let root: JsonValue = serde_json::from_str(&written).unwrap();
         let railway = root.pointer("/mcpServers/railway").unwrap();
-        assert_eq!(
-            railway.get("args").unwrap(),
-            &serde_json::json!(["mcp", "proxy"])
-        );
+        assert_eq!(railway.get("args").unwrap(), &serde_json::json!(["mcp"]));
 
         assert!(mcp_configured_for_slug(
             home.path(),
@@ -780,7 +780,7 @@ mod tests {
         let railway = root.pointer("/mcp/railway").unwrap();
         assert_eq!(
             railway.get("command").unwrap(),
-            &serde_json::json!(["railway", "mcp", "proxy"])
+            &serde_json::json!(["railway", "mcp"])
         );
 
         assert!(mcp_configured_for_slug(
@@ -846,8 +846,8 @@ mod tests {
             .and_then(|railway| railway.get("args"))
             .and_then(toml::Value::as_array)
             .unwrap();
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[1].as_str(), Some("proxy"));
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].as_str(), Some("mcp"));
 
         assert!(mcp_configured_for_slug(
             home.path(),
