@@ -94,7 +94,7 @@ fn evaluate_python(file: &Path) -> Result<Value> {
     let script = r#"
 import importlib.util, json, sys
 path = sys.argv[1]
-spec = importlib.util.spec_from_file_location("railway_iac_user", path)
+spec = importlib.util.spec_from_file_location("railway_sdk_user", path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 partial = getattr(mod, "PARTIAL", None) or getattr(mod, "Partial", None) or getattr(mod, "partial", None)
@@ -115,7 +115,7 @@ fn evaluate_go(file: &Path) -> Result<Value> {
     let dir = file
         .parent()
         .context("Go IaC file has no parent directory")?;
-    let wrapper = dir.join(".railway-iac-eval.go");
+    let wrapper = dir.join("railway_iac_eval_main.go");
     let has_partial = fs::read_to_string(file)
         .unwrap_or_default()
         .contains("Partial");
@@ -148,7 +148,7 @@ func main() {
             wrapper
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or(".railway-iac-eval.go"),
+                .unwrap_or("railway_iac_eval_main.go"),
         ])
         .current_dir(dir)
         .output();
