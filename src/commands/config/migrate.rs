@@ -147,6 +147,24 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
         "Wrote".green().bold(),
         railway_file.display().to_string().cyan()
     );
+    match args.lang.as_str() {
+        "go" => {
+            let gomod = railway_dir.join("go.mod");
+            if !gomod.exists() {
+                fs::write(
+                    &gomod,
+                    "module railway-config\n\ngo 1.22\n\nrequire github.com/railwayapp/railway-go-sdk v0.2.0\n",
+                )?;
+            }
+        }
+        "py" => {
+            let req = railway_dir.join("requirements.txt");
+            if !req.exists() {
+                fs::write(&req, "railway-sdk>=0.2.0\n")?;
+            }
+        }
+        _ => {}
+    }
 
     clear_railway_config_file_on_linked_service().await?;
 
@@ -221,7 +239,7 @@ fn emit_railway_py(service_name: &str, cac: &CacFile) -> String {
         )
     };
     format!(
-        r#"from railway_iac import define_railway, project, service
+        r#"from railway_sdk import define_railway, project, service
 
 # Last resort for a per-service CaC repo. Prefer one .railway file for the
 # project and drop this if you later combine services into that file.
@@ -251,20 +269,20 @@ fn emit_railway_go(service_name: &str, cac: &CacFile) -> String {
     let config_block = if fields.is_empty() {
         "nil".to_string()
     } else {
-        format!("iac.ServiceConfig{{\n{}\n\t}}", fields.join("\n"))
+        format!("railway.ServiceConfig{{\n{}\n\t}}", fields.join("\n"))
     };
     format!(
         r#"package main
 
-import "github.com/railwayapp/railway-go-iac/iac"
+import "github.com/railwayapp/railway-go-sdk"
 
 // Last resort for a per-service CaC repo. Prefer one .railway file for the
 // project and drop this if you later combine services into that file.
 const Partial = {name}
 
-func Railway() iac.Project {{
-	web := iac.ServiceNamed({name}, {config})
-	return iac.ProjectNamed({name}, []any{{web}})
+func Railway() railway.Project {{
+	web := railway.ServiceNamed({name}, {config})
+	return railway.ProjectNamed({name}, []any{{web}})
 }}
 "#,
         name = js_string(service_name),
@@ -453,6 +471,13 @@ mod tests {
         assert!(out.contains("healthcheck: \"/health\""));
         assert!(out.contains("service(\"api\""));
         assert!(out.contains("export const partial = \"api\""));
+        let py = emit_railway_py("api", &cac);
+        assert!(py.contains("from railway_sdk import"));
+        assert!(py.contains("PARTIAL = \"api\""));
+        let go = emit_railway_go("api", &cac);
+        assert!(go.contains("github.com/railwayapp/railway-go-sdk"));
+        assert!(go.contains("railway.ServiceNamed"));
+        assert!(go.contains("const Partial = \"api\""));
     }
 
     #[test]

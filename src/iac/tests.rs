@@ -995,6 +995,9 @@ export default () => ({
 
 #[test]
 fn evaluates_python_partial_and_graph() {
+    if which::which("python3").is_err() {
+        return;
+    }
     let dir = tempfile_dir("railway-iac-py-");
     let file = dir.join("railway.py");
     std::fs::write(
@@ -1007,6 +1010,47 @@ def main(ctx=None):
     )
     .unwrap();
     let evaluated = evaluate_file(&file).expect("python3 should evaluate railway.py");
+    assert_eq!(evaluated.partial.as_deref(), Some("api"));
+    assert!(
+        evaluated
+            .graph
+            .resources
+            .iter()
+            .any(|r| r["address"] == "service.api")
+    );
+}
+
+#[test]
+fn evaluates_go_partial_and_graph() {
+    if which::which("go").is_err() {
+        return;
+    }
+    let dir = tempfile_dir("railway-iac-go-");
+    let file = dir.join("railway.go");
+    std::fs::write(dir.join("go.mod"), "module railway-eval\n\ngo 1.22\n").unwrap();
+    std::fs::write(
+        &file,
+        r#"
+package main
+
+const Partial = "api"
+
+type graph map[string]any
+
+func (g graph) Graph() map[string]any { return g }
+
+func Railway() graph {
+	return graph{
+		"name": "app",
+		"resources": []any{
+			map[string]any{"type": "service", "name": "api", "start": "echo api"},
+		},
+	}
+}
+"#,
+    )
+    .unwrap();
+    let evaluated = evaluate_file(&file).expect("go should evaluate railway.go");
     assert_eq!(evaluated.partial.as_deref(), Some("api"));
     assert!(
         evaluated

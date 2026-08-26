@@ -37,7 +37,7 @@ impl AuthoringLang {
 
     pub(super) fn helper(self, name: &str) -> String {
         match self {
-            Self::Go => format!("iac.{}", go_helper_ident(name)),
+            Self::Go => format!("railway.{}", go_helper_ident(name)),
             _ => name.to_string(),
         }
     }
