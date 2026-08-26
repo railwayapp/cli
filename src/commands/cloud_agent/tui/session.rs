@@ -315,7 +315,14 @@ impl Session {
             let got_output = got_output.clone();
             let kitty_keys = kitty_keys.clone();
             std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
+                // 64K per read, not 8K: a reattach replays the session's
+                // recorded output in one burst, and this thread is the only
+                // thing draining the pty. Fall behind and the far side backs
+                // up — ssh's keepalive replies queue behind the flood, and
+                // after ServerAliveCountMax of them go missing ssh kills the
+                // connection mid-replay. Fewer, larger reads keep the drain
+                // ahead of the network.
+                let mut buf = [0u8; 65536];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -420,6 +427,13 @@ impl Session {
     /// keys, because the durable session it was showing is still running.
     pub fn finished(&mut self) -> bool {
         self.ended() && self.exit_success() == Some(true)
+    }
+
+    /// The connection died under the session rather than finishing: ssh ended
+    /// without a clean exit. The recoverable state — the durable session is
+    /// almost certainly still running on the agent, and `r` dials it again.
+    pub fn dropped(&mut self) -> bool {
+        self.ended() && self.exit_success() == Some(false)
     }
 
     /// Ended, but ssh's exit status hasn't been collected yet — the pty's EOF
@@ -1609,6 +1623,63 @@ mod tests {
         assert!(
             top.contains("line-"),
             "what is shown is still real history:\n{top}"
+        );
+    }
+
+    /// The drain path under flood, the shape of a reattach replaying a long
+    /// session's recording: megabytes of output while the emulator lock is
+    /// hammered from the render side, the way a frame loop does. The reader
+    /// thread is the only thing draining the pty — if it falls behind, the
+    /// far side backs up until ssh's keepalive replies stop arriving and ssh
+    /// kills the connection. So: everything must land, promptly, with the
+    /// session alive and history still bounded by the emulator's retention.
+    #[test]
+    fn a_flood_drains_under_render_contention() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(40, 200);
+
+        // ~4MB through the pty (each byte travels twice: written in, echoed
+        // back out), in line-sized writes because the fixture pty is
+        // line-buffered.
+        let line = "x".repeat(196);
+        let started = std::time::Instant::now();
+        for i in 0..20_000 {
+            session.send(format!("{line}\r\n").as_bytes());
+            // The render side of the contention: a frame loop reading the
+            // screen between chunks, holding the same lock the reader needs.
+            if i % 50 == 0 {
+                let _ = session.with_screen(|s| s.contents());
+            }
+        }
+        session.send(b"FLOOD-DRAINED-MARKER\r\n");
+
+        // The whole flood, plus its echo, has to come out the other side.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut seen = false;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if session
+                .with_screen(|s| s.contents().contains("FLOOD-DRAINED-MARKER"))
+                .unwrap_or(false)
+            {
+                seen = true;
+                break;
+            }
+        }
+        assert!(seen, "the flood never finished draining");
+        assert!(!session.ended(), "a flood must not kill the session");
+        // Memory stays bounded: retention clamps, however much flowed through.
+        let history = session.with_screen(|s| s.scrollback());
+        session.scroll_by(isize::MAX);
+        assert!(
+            session.scroll <= 4000,
+            "history is clamped at retention, not the flood's size (scroll {}, scrollback {history:?})",
+            session.scroll
+        );
+        eprintln!(
+            "flood drained in {:?} ({} lines)",
+            started.elapsed(),
+            20_000
         );
     }
 

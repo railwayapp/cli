@@ -102,6 +102,11 @@ fn save_setup(
             source: outcome.skills_source.clone(),
             exclude: Vec::new(),
         },
+        // The wizard doesn't ask about MCP import; keep what the file has (or
+        // the on-by-default for a first run).
+        mcp: AgentPrefs::load_in(&home)
+            .map(|p| p.mcp)
+            .unwrap_or_default(),
         default_project: outcome.project.as_ref().map(|p| DefaultProject {
             project_id: p.project_id.clone(),
             project_name: p.project_name.clone(),
@@ -218,6 +223,17 @@ fn ssh_command_for(environment_id: &str, agent_id: &str, session_name: &str) -> 
 /// slow enough that a launch does not redraw the screen hundreds of times.
 const SPINNER_TICK: std::time::Duration = std::time::Duration::from_millis(110);
 
+/// The frame budget while messages are still queued. Session output wakes the
+/// loop once per read — a reattach replaying a long session's recording is
+/// thousands of wakes in a burst, and painting a full frame for each turned
+/// the replay into a visible slideshow. Worse than cosmetic: every frame takes
+/// the emulator lock the pty reader needs, and a starved reader stops draining
+/// ssh — the far side backs up until the keepalive replies stop arriving and
+/// ssh kills the connection mid-replay. While the queue is non-empty, frames
+/// are capped at ~30/s; the moment it drains the next frame is immediate, so
+/// interactive latency is untouched.
+const FLOOD_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+
 /// Why the TUI gave the terminal back.
 pub enum Outcome {
     /// A Claude credential has to be minted, which needs the real terminal.
@@ -282,6 +298,26 @@ enum Message {
         agent_name: String,
         session_name: String,
         info: Box<code::ConnectInfo>,
+    },
+    /// A foreground reattach's ssh info didn't come back. Carries the name so
+    /// the row's spinner comes off before the failure is announced.
+    ReattachFailed {
+        session_name: String,
+        error: String,
+    },
+    /// A background auto-connect resolved its ssh info; the pane opens
+    /// quietly — no focus steal, no screen change.
+    AutoReattachReady {
+        agent_id: String,
+        agent_name: String,
+        session_name: String,
+        info: Box<code::ConnectInfo>,
+    },
+    /// A background auto-connect failed. Quiet too: the spinner comes off and
+    /// the reason rides the status line, not a toast.
+    AutoConnectFailed {
+        session_name: String,
+        error: String,
     },
     SessionKilled {
         agent_id: String,
@@ -600,6 +636,7 @@ async fn fetch_sessions(
                     command: Some(edge.node.command),
                     running: edge.node.run_state.running,
                     attached: edge.node.attached,
+                    created_at: edge.node.created_at,
                 })
                 .collect()
         })
@@ -642,19 +679,29 @@ pub async fn run(
     let stop_fetching: StopFlag = Default::default();
     start_refresh(app, &tx, &client, &backboard);
 
+    // When the previous frame was painted, for the flood cap below.
+    let mut last_frame = std::time::Instant::now() - FLOOD_FRAME;
+
     loop {
-        let mut rects = app.panes;
-        let mut copied: Option<String> = None;
-        terminal.draw(|f| {
-            let (r, text) = ui::render_with_layout(app, f);
-            rects = r;
-            copied = text;
-        })?;
-        app.panes = rects;
-        if app.pending_copy.take().is_some() {
-            finish_copy(app, copied);
+        // Coalesce frames under load: with more messages already waiting,
+        // painting now just repeats a screen that is about to change again.
+        // See [`FLOOD_FRAME`]. Everything the skipped frame would have shown
+        // is still in the emulator; the frame after the burst shows it all.
+        if rx.is_empty() || last_frame.elapsed() >= FLOOD_FRAME {
+            let mut rects = app.panes;
+            let mut copied: Option<String> = None;
+            terminal.draw(|f| {
+                let (r, text) = ui::render_with_layout(app, f);
+                rects = r;
+                copied = text;
+            })?;
+            last_frame = std::time::Instant::now();
+            app.panes = rects;
+            if app.pending_copy.take().is_some() {
+                finish_copy(app, copied);
+            }
+            sync_session_size(app, &terminal);
         }
-        sync_session_size(app, &terminal);
 
         // A pipeline `railway code` already started beside the tree load:
         // adopt it — the same screen moves as a dispatched launch, minus the
@@ -699,8 +746,9 @@ pub async fn run(
             // Animate the loading screen. Only armed while it is showing, so an
             // idle TUI still blocks rather than spinning on a timer.
             // The wizard and settings borrow the same tick for their
-            // "creating…" spinners.
+            // "creating…" spinners, and the tree's connecting rows too.
             _ = tokio::time::sleep(SPINNER_TICK), if app.loading.active
+                || !app.connecting.is_empty()
                 || app.wizard.as_ref().is_some_and(|w| w.busy.is_some())
                 || app.settings.as_ref().is_some_and(|s| s.busy.is_some()) => {
                 app.tick();
@@ -771,6 +819,15 @@ pub async fn run(
             },
         };
 
+        // Background auto-connect: every listed session on a running agent
+        // gets a pane without being asked for one, so the tree comes up
+        // green instead of waiting to be clicked through. Checked each pass —
+        // candidates only exist once loads land — and each session is tried
+        // once per run, so a failure or a deliberate close stays closed.
+        for connect in app.take_auto_connects() {
+            spawn_auto_connect(connect, &tx);
+        }
+
         match effect {
             None => {}
             Some(Effect::Quit) => {
@@ -822,6 +879,9 @@ pub async fn run(
                 }) {
                     continue;
                 }
+                // The spinner goes on now — connect_info takes a beat, and a
+                // row that does nothing for it reads as a dead key.
+                app.connecting.insert(session_name.clone());
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let message = match code::connect_info(&environment_id, &agent_id).await {
@@ -832,13 +892,16 @@ pub async fn run(
                             info: Box::new(info),
                         },
                         Err(err) => {
-                            let message = format!("{err:#}");
+                            let error = format!("{err:#}");
                             super::telemetry::track_session_event(
                                 "reattach_connect_failed",
-                                Some(message.as_str()),
+                                Some(error.as_str()),
                             )
                             .await;
-                            Message::LaunchFailed(message)
+                            Message::ReattachFailed {
+                                session_name,
+                                error,
+                            }
                         }
                     };
                     let _ = tx.send(message);
@@ -1038,6 +1101,42 @@ pub async fn run(
 
 /// Fetch one environment's agents in the background, delivering the answer —
 /// or its rate-limit classification — as a message.
+/// Resolve one background auto-connect's ssh info off the loop. The same
+/// shape as a keyed reattach, but its outcome lands as the quiet messages —
+/// success must not steal focus and failure must not toast.
+fn spawn_auto_connect(connect: app::AutoConnect, tx: &mpsc::UnboundedSender<Message>) {
+    let app::AutoConnect {
+        agent_id,
+        agent_name,
+        environment_id,
+        session_name,
+    } = connect;
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let message = match code::connect_info(&environment_id, &agent_id).await {
+            Ok(info) => Message::AutoReattachReady {
+                agent_id,
+                agent_name,
+                session_name,
+                info: Box::new(info),
+            },
+            Err(err) => {
+                let error = format!("{err:#}");
+                super::telemetry::track_session_event(
+                    "auto_reattach_connect_failed",
+                    Some(error.as_str()),
+                )
+                .await;
+                Message::AutoConnectFailed {
+                    session_name,
+                    error,
+                }
+            }
+        };
+        let _ = tx.send(message);
+    });
+}
+
 fn spawn_env_agents_fetch(
     environment_id: String,
     path: (usize, usize, usize),
@@ -1225,6 +1324,7 @@ fn handle_message(
                     None
                 }
                 Err(err) => {
+                    app.connecting.remove(&session_name);
                     let message = format!("couldn't reattach: {err}");
                     let telemetry_message = message.clone();
                     tokio::spawn(async move {
@@ -1238,6 +1338,65 @@ fn handle_message(
                     None
                 }
             }
+        }
+        Message::ReattachFailed {
+            session_name,
+            error,
+        } => {
+            app.connecting.remove(&session_name);
+            app.launch_failed(error);
+            None
+        }
+        Message::AutoReattachReady {
+            agent_id,
+            agent_name,
+            session_name,
+            info,
+        } => {
+            let notify_tx = tx.clone();
+            match session::Session::spawn(
+                agent_id.clone(),
+                agent_name,
+                "session".to_string(),
+                &info.ssh_target,
+                info.identity.as_deref(),
+                &info.relay_opts,
+                // Reattaching runs nothing: the relay hands back the screen
+                // the session already has.
+                "",
+                true,
+                &session_name,
+                24,
+                80,
+                move || {
+                    let _ = notify_tx.send(Message::SessionOutput);
+                },
+            ) {
+                Ok(session) => {
+                    app.attach_session_background(session, agent_id);
+                    tokio::spawn(super::telemetry::track_session_event("auto_reattach", None));
+                }
+                Err(err) => {
+                    let error = format!("{err:#}");
+                    let telemetry_error = error.clone();
+                    tokio::spawn(async move {
+                        super::telemetry::track_session_event(
+                            "auto_reattach_open_failed",
+                            Some(telemetry_error.as_str()),
+                        )
+                        .await;
+                    });
+                    app.auto_connect_failed(&session_name, &error);
+                }
+            }
+            None
+        }
+        Message::AutoConnectFailed {
+            session_name,
+            error,
+        } => {
+            app.auto_connect_failed(&session_name, &error);
+            None
         }
         Message::ProjectCreated(result) => {
             if let Some(w) = app.wizard.as_mut() {
@@ -1637,7 +1796,7 @@ fn dispatch_launch(
 ) {
     // The launch lives on the manage screen — the tree the agent will land in —
     // so go there first and reveal its environment. The ssh gate's question
-    // then hangs over the place the answer matters, not over the menu it
+    // then hangs over the place the answer matters, not over wherever it
     // happened to be asked from.
     app.screen = Screen::Manage;
     if let Some(Effect::LoadAgents {

@@ -239,6 +239,9 @@ async fn prompt(home: &Path, existing: Option<AgentPrefs>) -> Result<AgentPrefs>
         version: super::prefs::CURRENT_VERSION,
         agent: Some(agent),
         skills,
+        // Setup doesn't ask about MCP import; whatever was configured (or the
+        // on-by-default) carries through.
+        mcp: previous.mcp.clone(),
         default_project,
         theme: Some(theme),
     })

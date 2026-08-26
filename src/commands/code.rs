@@ -6,6 +6,7 @@ use colored::Colorize;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
+use crate::commands::cloud_agent::mcp_sync;
 use crate::commands::cloud_agent::prefs::{AgentPrefs, DefaultProject};
 use crate::commands::cloud_agent::skills_sync;
 use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
@@ -625,6 +626,8 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
     let name = agent.name();
     let hash_marker = skills_sync::REMOTE_HASH_MARKER;
     let hash_file = skills_sync::REMOTE_HASH_FILE;
+    let mcp_marker = mcp_sync::REMOTE_HASH_MARKER;
+    let mcp_file = mcp_sync::REMOTE_HASH_FILE;
     let mode_seed = mode_seed(agent, app_mode);
     format!(
         r#"umask 077
@@ -633,6 +636,7 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
 {COMMON_SEED}
 {mode_seed}
 printf '{hash_marker}%s\n' "$(cat "{hash_file}" 2>/dev/null || true)"
+printf '{mcp_marker}%s\n' "$(cat "{mcp_file}" 2>/dev/null || true)"
 if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi"#
     )
 }
@@ -733,7 +737,19 @@ fn remote_command(
     if agent == Agent::Shell {
         return format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l");
     }
-    let name = agent.name();
+    // Railway's TUI fronts a shared daemon whose default is to join the
+    // directory's live session — every window becomes another view of the
+    // same conversation, and even a seeded prompt is steered into the run
+    // already in flight. An explicit `--session <id>` spawns (or rejoins)
+    // that exact id instead, so keying it to the durable session's own name —
+    // which vm-init stamps into every durable session's environment — makes
+    // each window its own conversation while keeping the daemon's
+    // persistence. The `-- args` exec form below is left alone: its arguments
+    // are the caller's, flags included.
+    let name = match agent {
+        Agent::Railway => "railway-agent-tui --session \"$RAILWAY_DURABLE_SESSION_NAME\"",
+        _ => agent.name(),
+    };
     let after = match style {
         SessionStyle::FullTerminal => "; exec bash -l",
         SessionStyle::Pane => "",
@@ -748,7 +764,11 @@ fn remote_command(
             "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {}{after}",
             terminal_reset_printf()
         ),
-        None => format!("{env_prefix}exec {name} {}", shell_join(agent_args)),
+        None => format!(
+            "{env_prefix}exec {} {}",
+            agent.name(),
+            shell_join(agent_args)
+        ),
     }
 }
 
@@ -2710,6 +2730,21 @@ async fn prepare_inner(
             packed.source_dir.display()
         ));
     }
+    // The launch directory's project MCP servers travel too — the `.mcp.json`
+    // the repo committed is what "the servers this project's people get"
+    // means. Packed up front for the same reason as skills: a malformed file
+    // should fail here, not after a VM.
+    let packed_mcp = match std::env::current_dir() {
+        Ok(cwd) => mcp_sync::pack(&prefs, &cwd)?,
+        Err(_) => None,
+    };
+    if let Some(packed) = &packed_mcp {
+        progress.note(&format!(
+            "Including {} MCP servers from the project ({})",
+            packed.names.len(),
+            packed.source_path.display()
+        ));
+    }
 
     // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
@@ -2888,6 +2923,38 @@ async fn prepare_inner(
                     "Couldn't sync your skills onto the agent ({reason}); continuing without them."
                 )
             };
+            let mcp_note = |out: &str| {
+                let reason = if out.contains("MCP-NO-JQ") {
+                    "the agent has no `jq`"
+                } else if out.contains("MCP-BAD-JSON") {
+                    "the payload did not survive the trip"
+                } else if out.contains("MCP-MERGE-FAILED") {
+                    "a harness config would not merge"
+                } else {
+                    "the sync did not report success"
+                };
+                format!(
+                    "Couldn't sync the project's MCP servers ({reason}); continuing without them."
+                )
+            };
+            // The project's MCP servers, merged add-only into the harness
+            // configs on the agent. Never fatal, same trade as skills: the
+            // agent is fully usable without them.
+            let sync_mcp = |packed: &mcp_sync::PackedMcp| -> Result<()> {
+                let out = ssh_plumbing(
+                    &target,
+                    &mcp_sync::provision_script(&packed.hash),
+                    identity.as_deref(),
+                    Some(&packed.payload),
+                    &relay,
+                    Some(&master_socket),
+                )?;
+                let out = String::from_utf8_lossy(&out);
+                if !out.contains("MCP-OK") {
+                    push(mcp_note(&out));
+                }
+                Ok(())
+            };
             let check_ready = |out: &str| -> Result<()> {
                 if out.contains("AGENT-READY") {
                     Ok(())
@@ -2928,6 +2995,10 @@ async fn prepare_inner(
                 if !out.contains("SKILLS-OK") {
                     push(skills_note(&out));
                 }
+                // A fresh agent cannot already hold the MCP set either.
+                if let Some(packed) = &packed_mcp {
+                    sync_mcp(packed)?;
+                }
                 return Ok(());
             }
 
@@ -2962,6 +3033,14 @@ async fn prepare_inner(
                         push(skills_note(&out));
                     }
                 }
+            }
+            // MCP by the same hash dance: the marker rode the script above,
+            // so an unchanged `.mcp.json` costs nothing beyond the round-trip
+            // already made.
+            if let Some(packed) = &packed_mcp
+                && mcp_sync::parse_remote_hash(&out).as_deref() != Some(packed.hash.as_str())
+            {
+                sync_mcp(packed)?;
             }
             Ok(())
         })
@@ -3636,6 +3715,9 @@ mod tests {
         let script = provision_script(Agent::Claude, true, false);
         assert!(script.contains(skills_sync::REMOTE_HASH_MARKER));
         assert!(script.contains(skills_sync::REMOTE_HASH_FILE));
+        // The MCP set rides the same connection, by the same dance.
+        assert!(script.contains(mcp_sync::REMOTE_HASH_MARKER));
+        assert!(script.contains(mcp_sync::REMOTE_HASH_FILE));
         // An agent that has never synced prints an empty value rather than
         // failing the script — the marker parser treats that as "no hash".
         assert!(script.contains("2>/dev/null || true"));
@@ -3683,6 +3765,41 @@ mod tests {
             blank,
             remote_command(Agent::Grok, "P; ", None, &[], FullTerminal)
         );
+
+        // Railway's TUI runs in-process, or the shared daemon would join
+        // every new session onto the directory's live conversation — and
+        // steer a seeded prompt into it.
+        let railway = remote_command(
+            Agent::Railway,
+            "P; ",
+            Some("fix the tests"),
+            &[],
+            FullTerminal,
+        );
+        assert!(
+            railway.contains(
+                "railway-agent-tui --session \"$RAILWAY_DURABLE_SESSION_NAME\" 'fix the tests';"
+            ),
+            "{railway}"
+        );
+        let railway_bare = remote_command(Agent::Railway, "P; ", None, &[], FullTerminal);
+        assert!(
+            railway_bare.contains("railway-agent-tui --session \"$RAILWAY_DURABLE_SESSION_NAME\";"),
+            "{railway_bare}"
+        );
+        // The exec form's args are the caller's, flags included.
+        let railway_exec = remote_command(
+            Agent::Railway,
+            "P; ",
+            None,
+            &["--continue".into()],
+            FullTerminal,
+        );
+        assert!(
+            railway_exec.contains("exec railway-agent-tui --continue"),
+            "{railway_exec}"
+        );
+        assert!(!railway_exec.contains("--session"), "{railway_exec}");
     }
 
     /// A pane session must end when the harness does. The shell fallback that

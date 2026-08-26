@@ -59,16 +59,18 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
             ("x", "end the session"),
-            ("n", "another session on this agent"),
             ("r", "reconnect a pane whose connection dropped"),
         ],
     ),
     (
         "agents",
         &[
-            ("n", "new agent (on a group, project, or environment)"),
-            ("⌥n", "new session, choosing the agent first"),
-            ("⌥p", "new session from a prompt"),
+            ("n", "new agent — pick its harness first"),
+            ("⌥n", "new agent now, on the selected harness"),
+            (
+                "⌥p",
+                "new session from a prompt, on the selected row's agent",
+            ),
             ("s", "sleep"),
             ("w", "wake"),
             ("d", "delete, with a confirmation"),
@@ -81,36 +83,11 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         "elsewhere",
         &[
             ("t", "set the prompt's target"),
-            ("esc", "back to the menu"),
+            ("esc", "quit (clears the prompt first)"),
             ("^c", "quit"),
         ],
     ),
 ];
-
-/// Menu cards: (label, description).
-///
-/// No key badges. Two cards a cursor already sits on do not need letters as
-/// well, and the letters were the only thing making the menu look like a list
-/// of commands rather than a place to start.
-pub const CARDS: &[(&str, &str)] = &[
-    (
-        "New Session",
-        "Create a new session on a Cloud Agent in your default project",
-    ),
-    (
-        "New Cloud Agent",
-        "Create a new Cloud Agent in your default project",
-    ),
-    (
-        "Manage Cloud Agents",
-        "Manage Cloud Agents and Sessions across multiple projects",
-    ),
-];
-
-/// The setup card, offered only until there are preferences to show. After
-/// that the answers live on the ⌥s settings card — a thing you go back to
-/// occasionally, not a third of the menu.
-pub const SETUP_CARD: (&str, &str) = ("Setup", "Default agent, skills, and theme");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
@@ -135,6 +112,9 @@ pub struct ConsoleSession {
     pub command: Option<String>,
     pub running: bool,
     pub attached: bool,
+    /// When the platform says it began — what breaks ties when a pane has to
+    /// be matched to a listed session (see [`App::adopt_pane_sessions`]).
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// The env prologue every launch prepends. Everything before it is plumbing —
@@ -153,15 +133,40 @@ impl ConsoleSession {
         self.running
     }
 
-    /// What the row says: the session's own name.
-    ///
-    /// The name is short, stable, and the same string the sessions list shows
-    /// for an open pane, so a row and a pane are visibly the same thing. The
-    /// command is a whole launch line — it never fitted, and truncating it lost
-    /// the end of the task, which was the only interesting part. It lives in
-    /// the detail pane now, where there is room.
-    pub fn label(&self) -> String {
-        self.name.clone()
+    /// The session's name, folded short and led by its harness:
+    /// `merry-daisy-ld9` running railway becomes `railway-ld9` — a petname
+    /// says nothing its random suffix doesn't, and a minted `railway-x2k9qm`
+    /// already leads with its harness. The plain name when the harness is
+    /// unknowable.
+    pub fn short_name(&self) -> String {
+        match self.harness_slug() {
+            Some(slug) if !self.name.starts_with(&format!("{slug}-")) => {
+                let segments: Vec<&str> = self.name.split('-').collect();
+                let short = match segments.as_slice() {
+                    [.., suffix] if segments.len() >= 3 => suffix,
+                    _ => self.name.as_str(),
+                };
+                format!("{slug}-{short}")
+            }
+            _ => self.name.clone(),
+        }
+    }
+
+    /// The harness this session runs, read off its launch line's binary.
+    fn harness_slug(&self) -> Option<&'static str> {
+        let summary = self.command_summary();
+        if summary == self.name {
+            return None;
+        }
+        let binary = summary.split_whitespace().next()?;
+        let base = binary.rsplit('/').next().unwrap_or(binary);
+        match base {
+            "railway-agent-tui" | "railway-agent" => Some("railway"),
+            "claude" => Some("claude"),
+            "codex" => Some("codex"),
+            "grok" => Some("grok"),
+            _ => None,
+        }
     }
 
     /// The command, cleaned up for the detail pane: the harness invocation
@@ -266,24 +271,20 @@ impl Target {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
-    Menu,
-    /// Choosing which agent a new session goes on, over the menu. Only when
-    /// the target holds more than one — with a single agent there is nothing
-    /// to ask.
-    AgentPick,
-    /// First-run setup, over the menu.
+    /// First-run setup, over the tree.
     Setup,
-    /// The ⌥s settings card, over the menu: every preference setup collects,
+    /// The ⌥s settings card, over the tree: every preference setup collects,
     /// changeable after the fact.
     Settings,
-    /// Choosing where the prompt lands, over the menu. The same card list the
+    /// Choosing where the prompt lands, over the tree. The same card list the
     /// setup flow asks with — picking a target is the same question, so it
     /// should not send anyone through the whole management tree to answer it.
     TargetPick,
     /// ⌥n on Manage: choosing which agent a new session runs, over the tree.
     HarnessPick,
     /// ⌥p on Manage: composing a prompt for a new session, over the tree —
-    /// the menu's prompt box, without the walk back to the menu.
+    /// the launcher's prompt box, without the walk back to the New Session
+    /// row.
     ManagePrompt,
     Manage,
 }
@@ -317,6 +318,12 @@ pub const WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(18
 pub const SLEEP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
 /// How often to ask again while waiting.
 pub const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How close together two Escapes must land to count as the double-tap that
+/// releases a focused session back to the tree. Wide enough for a deliberate
+/// tap-tap, tight enough that two Escapes meant for the harness (dismissing
+/// two of its menus, say) rarely fall inside it.
+const DOUBLE_ESC: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How often the tree asks the platform for everything again on its own.
 ///
@@ -364,32 +371,6 @@ impl Toast {
     /// Time until this toast has had its moment.
     pub fn remaining(&self) -> std::time::Duration {
         self.lifetime().saturating_sub(self.at.elapsed())
-    }
-}
-
-/// The agent chooser, for a new session on an agent that already exists.
-pub struct AgentPicker {
-    /// (id, name, status), in the order the environment lists them.
-    pub options: Vec<(String, String, String)>,
-    pub cursor: usize,
-}
-
-impl AgentPicker {
-    /// The rows to draw: the agent's name, with its status as a dim tag.
-    ///
-    /// Names are padded to the longest, so the statuses read as a column
-    /// rather than trailing off each name at a different place.
-    pub fn rows(&self) -> Vec<(String, String)> {
-        let width = self
-            .options
-            .iter()
-            .map(|(_, name, _)| name.chars().count())
-            .max()
-            .unwrap_or(0);
-        self.options
-            .iter()
-            .map(|(_, name, status)| (format!("{name:<width$}"), status.clone()))
-            .collect()
     }
 }
 
@@ -449,12 +430,6 @@ impl TargetPicker {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MenuFocus {
-    Prompt,
-    Cards,
-}
-
 /// A rectangle recorded by the renderer so mouse events can be mapped back to
 /// the pane that drew it. Plain numbers rather than a ratatui `Rect` so the app
 /// stays free of the drawing layer.
@@ -488,17 +463,16 @@ pub struct PaneRects {
     pub session: PaneBox,
     pub tree_outer: PaneBox,
     pub session_outer: PaneBox,
-    /// The menu's prompt box, borders included.
+    /// The new-session prompt box, borders included.
     pub prompt: PaneBox,
-    /// The rows each menu card occupies, in card order. A fixed array rather
-    /// than a `Vec` so this stays `Copy` — the menu has three cards and a
-    /// fourth on a first run, and nothing here should grow without someone
-    /// noticing.
-    pub cards: [PaneBox; MAX_CARDS],
+    /// The header's session tabs, drawn only while the pane is maximized. A
+    /// fixed array so this stays `Copy`; sessions past the cap keep their ⌥[
+    /// ⌥] keys but aren't clickable.
+    pub tabs: [PaneBox; MAX_TABS],
 }
 
-/// Menu cards, including the first-run Setup one.
-pub const MAX_CARDS: usize = 4;
+/// How many maximized-header tabs get a clickable box.
+pub const MAX_TABS: usize = 8;
 
 /// A drag in progress, confined to one pane. Copying out of the session must
 /// not pick up tree rows sitting at the same screen rows.
@@ -566,6 +540,10 @@ pub enum ManageFocus {
 /// A row in the flattened tree. Indices point back into [`App::tree`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RowKind {
+    /// The pinned first row: standing on it puts the keyboard in the prompt
+    /// and the session pane shows the launcher — the way a new session
+    /// starts, without a separate screen to come from.
+    NewSession,
     Workspace(usize),
     Project(usize, usize),
     Environment(usize, usize, usize),
@@ -830,6 +808,17 @@ pub enum Effect {
     Quit,
 }
 
+/// One session the background auto-connect should attach — everything a
+/// reattach needs, lifted out of the tree so the loop can spawn the ssh work
+/// without holding a borrow on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoConnect {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub environment_id: String,
+    pub session_name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchRequest {
     pub project_id: String,
@@ -866,8 +855,8 @@ pub struct App {
     /// preferences file when this directory has no link. Sorted to the top of
     /// the tree and separated from the rest.
     pub default_project: Option<String>,
-    /// Whether preferences exist yet. Decides whether the menu carries a Setup
-    /// card or leaves changing things to the ⌥s settings card.
+    /// Whether preferences exist yet. Decides whether first run offers the
+    /// setup wizard or leaves changing things to the ⌥s settings card.
     pub configured: bool,
     /// Environments this machine has launched an agent in, from the CLI's own
     /// records. Loaded eagerly, because an agent you made is one you expect to
@@ -879,8 +868,6 @@ pub struct App {
     pub harness_pick: Option<usize>,
     /// ⌥p's draft while [`Screen::ManagePrompt`] is up.
     pub manage_prompt: Option<String>,
-    /// The agent chooser, while it is open.
-    pub agent_pick: Option<AgentPicker>,
     /// The session pane has the whole screen: no tree, no detail column.
     pub maximized: bool,
     /// A launch to start as soon as the first frame is up, and then forget.
@@ -933,6 +920,22 @@ pub struct App {
     /// row that reads "running" in the meantime looks like the key did nothing.
     /// A name leaves this set when a refresh no longer lists it.
     pub ending: std::collections::HashSet<String>,
+    /// Session names whose attach is in flight — the row wears a spinner
+    /// instead of the branch marker until the pane opens or the attempt fails.
+    pub connecting: std::collections::HashSet<String>,
+    /// Session names auto-connect has already tried this run. One attempt
+    /// each: a failed relay path must not be retried in a loop, and a pane
+    /// closed with `x` must stay closed rather than reopening on the next
+    /// sweep. A name lands here when its attempt starts and whenever a pane
+    /// attaches by any path.
+    auto_attempted: std::collections::HashSet<String>,
+    /// Session names whose dropped connection has already pulled the keyboard
+    /// to its pane — once per drop, so Esc-ing away sticks. Cleared when the
+    /// name reattaches, so a second drop announces itself the same way.
+    drop_seen: std::collections::HashSet<String>,
+    /// When the last bare Escape went into a focused session, for spotting
+    /// the double-tap that releases the keyboard to the tree.
+    session_esc_at: Option<std::time::Instant>,
     /// First-run setup, when there are no preferences yet.
     pub wizard: Option<super::wizard::Wizard>,
     /// The ⌥s settings card, while it is open.
@@ -987,9 +990,14 @@ pub struct App {
     /// have the field at all. Learned from the first failure, so the fallback
     /// costs one wasted request per run rather than being guessed at.
     pub account_query_unavailable: bool,
-    pub menu_focus: MenuFocus,
-    pub card: usize,
+    /// Whether the New Session row's prompt has the keyboard. True whenever
+    /// the cursor arrives on the row; Esc there sets it false — the "home"
+    /// state, where letters are keys again and `q` quits.
+    pub prompt_focused: bool,
     pub prompt: String,
+    /// Where the next character lands in `prompt`, as a char offset — ←/→
+    /// move it, so a typo mid-sentence is fixable in place.
+    pub prompt_cursor: usize,
     pub harness: usize,
     pub target: Option<Target>,
     pub tree: Vec<WorkspaceNode>,
@@ -1021,7 +1029,6 @@ impl App {
             target_pick: None,
             harness_pick: None,
             manage_prompt: None,
-            agent_pick: None,
             maximized: false,
             autostart: None,
             autostart_inflight: None,
@@ -1030,7 +1037,7 @@ impl App {
             pointer_to_app: false,
             toast: None,
             theme: Theme::from_slug(theme),
-            screen: Screen::Menu,
+            screen: Screen::Manage,
             sessions: Vec::new(),
             active: None,
             focus: ManageFocus::Tree,
@@ -1040,6 +1047,10 @@ impl App {
             pending_select_session: None,
             panes: PaneRects::default(),
             ending: std::collections::HashSet::new(),
+            connecting: std::collections::HashSet::new(),
+            auto_attempted: std::collections::HashSet::new(),
+            drop_seen: std::collections::HashSet::new(),
+            session_esc_at: None,
             wizard: None,
             settings: None,
             skills_source: None,
@@ -1059,9 +1070,9 @@ impl App {
             refresh_announce: false,
             answered_at: std::collections::HashMap::new(),
             account_query_unavailable: false,
-            menu_focus: MenuFocus::Prompt,
-            card: 0,
+            prompt_focused: true,
             prompt: String::new(),
+            prompt_cursor: 0,
             harness,
             target,
             tree,
@@ -1091,17 +1102,7 @@ impl App {
         }
     }
 
-    /// The menu's cards. Setup joins them only while there is nothing set up:
-    /// the one moment it is the most useful thing on the screen.
-    pub fn cards(&self) -> Vec<(&'static str, &'static str)> {
-        let mut cards = CARDS.to_vec();
-        if !self.configured {
-            cards.push(SETUP_CARD);
-        }
-        cards
-    }
-
-    /// Open the target chooser over the menu.
+    /// Open the target chooser over the tree.
     pub fn start_target_pick(&mut self) {
         self.target_pick = Some(TargetPicker::new(
             &self.tree,
@@ -1123,7 +1124,7 @@ impl App {
             KeyCode::Enter => {
                 let picked = picker.options.get(picker.cursor).cloned();
                 self.target_pick = None;
-                self.screen = Screen::Menu;
+                self.screen = Screen::Manage;
                 // This card is where the default project is set, not just where
                 // this run is pointed: it is the same question setup asks, and
                 // answering it twice — once here, once in setup — would be a
@@ -1137,50 +1138,11 @@ impl App {
             }
             KeyCode::Esc => {
                 self.target_pick = None;
-                self.screen = Screen::Menu;
+                self.screen = Screen::Manage;
             }
             _ => {}
         }
         None
-    }
-
-    /// A new session on an agent that already exists in the target.
-    ///
-    /// One agent is not a question, so it does not ask one; several is, and
-    /// gets the same card the target uses. None is neither — that is what New
-    /// Agent is for, and saying so beats silently making one.
-    fn new_session_in_target(&mut self) -> Option<Effect> {
-        let Some(target) = self.target.clone() else {
-            self.start_target_pick();
-            self.status = "Pick where this should run".into();
-            return None;
-        };
-        let agents = self.agents_in_target();
-        match agents.len() {
-            0 => {
-                self.status = match self.target_agents_known() {
-                    true => format!(
-                        "No cloud agents in {} yet — New Cloud Agent makes one",
-                        target.label()
-                    ),
-                    false => format!("Still looking for agents in {}…", target.label()),
-                };
-                None
-            }
-            1 => {
-                let (id, name, _) = agents.into_iter().next()?;
-                self.status = format!("New session on {name}");
-                self.new_session_on(&id, &name)
-            }
-            _ => {
-                self.agent_pick = Some(AgentPicker {
-                    options: agents,
-                    cursor: 0,
-                });
-                self.screen = Screen::AgentPick;
-                None
-            }
-        }
     }
 
     /// Close the pane's window on the world along with the pane: a maximized
@@ -1205,97 +1167,11 @@ impl App {
         self.maximized && (self.active.is_some() || self.loading.active)
     }
 
-    /// The agents in the target environment: (id, name, status).
-    fn agents_in_target(&self) -> Vec<(String, String, String)> {
-        let Some(target) = self.target.as_ref() else {
-            return Vec::new();
-        };
-        for ws in &self.tree {
-            for project in &ws.projects {
-                for env in &project.envs {
-                    if env.id != target.environment_id {
-                        continue;
-                    }
-                    let Load::Loaded(agents) = &env.agents else {
-                        return Vec::new();
-                    };
-                    return agents
-                        .iter()
-                        .map(|a| (a.id.clone(), a.name.clone(), a.status.clone()))
-                        .collect();
-                }
-            }
-        }
-        Vec::new()
-    }
-
-    /// Has the target environment answered yet? An empty list means "none"
-    /// only once it has; before that it means "not yet".
-    fn target_agents_known(&self) -> bool {
-        let Some(target) = self.target.as_ref() else {
-            return false;
-        };
-        self.tree.iter().any(|ws| {
-            ws.projects.iter().any(|project| {
-                project.envs.iter().any(|env| {
-                    env.id == target.environment_id && matches!(env.agents, Load::Loaded(_))
-                })
-            })
-        })
-    }
-
-    fn new_session_on(&self, agent_id: &str, agent_name: &str) -> Option<Effect> {
-        let target = self.target.clone()?;
-        // Same contract as `launch`: shell sessions carry no prompt.
-        let prompt = (!self.shell_selected() && !self.prompt.trim().is_empty())
-            .then(|| self.prompt.trim().to_string());
-        Some(Effect::Launch(LaunchRequest {
-            project_id: target.project_id,
-            environment_id: target.environment_id,
-            agent_id: Some(agent_id.to_string()),
-            session_name: None,
-            force_new: false,
-            new_session: true,
-            harness: self.harness_name().to_string(),
-            prompt,
-            label: format!("{agent_name} · new session"),
-            base: Default::default(),
-        }))
-    }
-
-    fn on_key_agent_pick(&mut self, key: KeyEvent) -> Option<Effect> {
-        let picker = self.agent_pick.as_mut()?;
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                picker.cursor = picker.cursor.saturating_sub(1);
-                None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                picker.cursor = (picker.cursor + 1).min(picker.options.len().saturating_sub(1));
-                None
-            }
-            KeyCode::Enter => {
-                let picked = picker.options.get(picker.cursor).cloned();
-                self.agent_pick = None;
-                self.screen = Screen::Menu;
-                let (id, name, _) = picked?;
-                self.status = format!("New session on {name}");
-                self.new_session_on(&id, &name)
-            }
-            KeyCode::Esc => {
-                self.agent_pick = None;
-                self.screen = Screen::Menu;
-                None
-            }
-            _ => None,
-        }
-    }
-
-    /// Open setup over the menu.
+    /// Open setup over the tree.
     ///
     /// `ask_first` puts the "set up cloud agents?" question in front of it,
     /// which is right when nobody asked for setup — a first run — and wrong
-    /// when they picked it from the menu and have already answered it.
+    /// when they asked for it themselves and have already answered it.
     pub fn start_wizard(&mut self, ask_first: bool) {
         let mut wizard = super::wizard::Wizard::new(
             &self.tree,
@@ -1313,10 +1189,10 @@ impl App {
     /// Close it, whatever the reason.
     pub fn end_wizard(&mut self) {
         self.wizard = None;
-        self.screen = Screen::Menu;
+        self.screen = Screen::Manage;
     }
 
-    /// Open the ⌥s settings card over the menu, seeded with what is saved.
+    /// Open the ⌥s settings card over the tree, seeded with what is saved.
     ///
     /// The default project's names come from the target, which holds the
     /// saved default whenever one exists — the tree would only have the id.
@@ -1353,7 +1229,7 @@ impl App {
     /// Close it; every change was already saved on the way.
     pub fn end_settings(&mut self) {
         self.settings = None;
-        self.screen = Screen::Menu;
+        self.screen = Screen::Manage;
     }
 
     /// Adopt a theme slug; an unknown one leaves the current theme alone.
@@ -1385,21 +1261,24 @@ impl App {
     /// somewhere new.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
+        // The launcher, pinned first: where the cursor starts, and where it
+        // goes back to for the next task. Standing here puts the keyboard in
+        // the prompt and the launcher in the session pane.
+        rows.push(Row {
+            depth: 0,
+            kind: RowKind::NewSession,
+            label: "New Agent".into(),
+            note: String::new(),
+            status: None,
+            expanded: None,
+            dimmed: false,
+        });
+        // Ruled off from the list below it: the launcher is an action, and
+        // without the line it reads as the first thread.
+        rows.push(separator_row());
         let groups = self.agent_groups();
         for &(w, p, e) in &groups {
-            let proj = &self.tree[w].projects[p];
-            rows.push(Row {
-                depth: 0,
-                kind: RowKind::Group(w, p, e),
-                label: group_label(proj, e),
-                note: self.group_note(w, p),
-                status: None,
-                // Always open: collapsing the thing the screen exists to show
-                // would only manufacture a place to lose it.
-                expanded: Some(true),
-                dimmed: false,
-            });
-            self.push_agent_rows(&mut rows, w, p, e);
+            self.push_thread_rows(&mut rows, w, p, e);
         }
         if groups.is_empty() {
             // "None yet" is a definitive claim, so it waits until every
@@ -1423,7 +1302,7 @@ impl App {
                 } else if failed {
                     "couldn't check every environment — r retries".into()
                 } else {
-                    "no cloud agents yet — n creates one".into()
+                    "no threads yet — the prompt above starts one".into()
                 },
                 note: String::new(),
                 status: None,
@@ -1435,75 +1314,75 @@ impl App {
         rows
     }
 
-    /// One group's agents, sessions still nested beneath them.
-    fn push_agent_rows(&self, rows: &mut Vec<Row>, w: usize, p: usize, e: usize) {
-        let env = &self.tree[w].projects[p].envs[e];
+    /// One environment's threads, flat: every running session is an entry of
+    /// its own — an agent thread — and an agent with no sessions keeps a row
+    /// so it stays reachable (to wake, connect to, or start a thread on).
+    /// The containers are context, not levels: the project rides along as the
+    /// row's note, and the whole story lives in the detail pane.
+    fn push_thread_rows(&self, rows: &mut Vec<Row>, w: usize, p: usize, e: usize) {
+        let proj = &self.tree[w].projects[p];
+        let env = &proj.envs[e];
         let agents = env.agents_vec();
         let attached = self.agents_with_live_panes();
         for a in sorted_agents(agents, &attached) {
             let agent = &agents[a];
             let pending = self.ops.get(agent.id.as_str()).copied();
             let status = displayed_status(agent, &attached);
+            // The threads this agent carries: what the platform says is
+            // running in there, which outlives our connections and can be
+            // rejoined by name.
+            let live: Vec<(usize, &ConsoleSession)> = match &agent.sessions {
+                LoadSessions::Loaded(sessions) => sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, session)| {
+                        session.is_interesting() && !self.ending.contains(&session.name)
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            // The agent heads its threads: always on the list, so a sleeping
+            // or freshly created agent is reachable too.
             rows.push(Row {
-                depth: 1,
+                depth: 0,
                 kind: RowKind::Agent(w, p, e, a),
                 label: agent.name.clone(),
-                note: match pending {
-                    Some(op) => op.to_string(),
-                    None => agent_note(status, agent, &self.ending),
-                },
+                // No status tag: the orb's colour is the status, pending
+                // states included.
+                note: String::new(),
                 status: Some(pending.unwrap_or(status).to_string()),
                 expanded: Some(agent.expanded),
                 dimmed: false,
             });
-            if !agent.expanded {
-                continue;
-            }
-            // The agent's own sessions: what the platform says is running in
-            // there, which outlives our connections and can be rejoined by
-            // name.
-            match &agent.sessions {
-                LoadSessions::Loaded(sessions)
-                    if !sessions.iter().any(|session| {
-                        session.is_interesting() && !self.ending.contains(&session.name)
-                    }) =>
-                {
-                    rows.push(note_row(w, p, e, 2, "no sessions on this agent"));
-                }
-                LoadSessions::Loaded(sessions) => {
-                    for (i, session) in sessions.iter().enumerate() {
-                        if !session.is_interesting() || self.ending.contains(&session.name) {
-                            continue;
-                        }
-                        // Every listed session is running, so the only state
-                        // worth showing is whether this UI is attached to it.
-                        // The platform's own `attached` flag counts other
-                        // clients too, which is why it flickered.
-                        let connected = self.pane_for(&session.name).is_some();
-                        rows.push(Row {
-                            depth: 2,
-                            kind: RowKind::Session(w, p, e, a, i),
-                            label: session.label(),
-                            note: String::new(),
-                            status: connected.then(|| "connected".to_string()),
-                            expanded: None,
-                            dimmed: false,
-                        });
-                    }
-                }
-                LoadSessions::Loading => {
-                    rows.push(note_row(w, p, e, 2, "loading sessions…"));
-                }
-                LoadSessions::Failed(err) => {
-                    rows.push(note_row(
-                        w,
-                        p,
-                        e,
-                        2,
-                        &format!("couldn't load sessions: {err}"),
-                    ));
-                }
-                LoadSessions::NotLoaded => {}
+            // The agent's orb is green only when its effective status says
+            // running — and its sessions never look better than it does: a
+            // pane held open onto a sleeping agent is not "connected" in any
+            // way that matters.
+            let agent_live = pending.unwrap_or(status) == "running";
+            for (i, session) in live {
+                // Its sessions, as children — the session's NAME is the
+                // identity (every new agent is a session, like the
+                // dashboard), so the row leads with `[S] name` and the seeded
+                // task rides beside it as the note. `connected` is whether
+                // THIS UI is attached; the platform's own `attached` flag
+                // counts other clients too, which is why it flickered.
+                let connected = self.pane_for(&session.name).is_some();
+                let connecting = self.connecting.contains(&session.name);
+                rows.push(Row {
+                    depth: 1,
+                    kind: RowKind::Session(w, p, e, a, i),
+                    label: format!("[S] {}", session.short_name()),
+                    note: String::new(),
+                    status: if connected && agent_live {
+                        Some("connected".to_string())
+                    } else if connecting && agent_live {
+                        Some("connecting".to_string())
+                    } else {
+                        None
+                    },
+                    expanded: None,
+                    dimmed: false,
+                });
             }
         }
     }
@@ -1693,19 +1572,6 @@ impl App {
         groups
     }
 
-    /// What sits to the right of a group header: the default marker, and the
-    /// workspace when there is more than one for the project to belong to.
-    fn group_note(&self, w: usize, p: usize) -> String {
-        let mut parts = Vec::new();
-        if Some(self.tree[w].projects[p].id.as_str()) == self.default_project.as_deref() {
-            parts.push("(default)".to_string());
-        }
-        if self.tree.len() > 1 {
-            parts.push(self.tree[w].name.clone());
-        }
-        parts.join(" · ")
-    }
-
     pub fn selected_row(&self) -> Option<Row> {
         self.rows().into_iter().nth(self.cursor)
     }
@@ -1747,6 +1613,11 @@ impl App {
     /// along when the new row is a session.
     fn move_cursor(&mut self, delta: isize) -> Option<Effect> {
         self.move_cursor_inner(delta);
+        // Arriving on the launcher puts the keyboard in its prompt; only Esc
+        // there sets it down again.
+        if self.cursor == 0 {
+            self.prompt_focused = true;
+        }
         self.sync_active_to_cursor();
         self.auto_expand_agent()
     }
@@ -1853,6 +1724,9 @@ impl App {
         self.settle_watched_agents();
         self.restore_cursor(anchor);
         self.select_pending();
+        // A just-launched agent arrives here before its sessions can be
+        // asked about; the pane already attached to it is proof enough.
+        self.adopt_pane_sessions();
     }
 
     /// The whole account's agents arrived in one `myCloudAgents` request.
@@ -1912,6 +1786,7 @@ impl App {
         self.settle_watched_agents();
         self.restore_cursor(anchor);
         self.select_pending();
+        self.adopt_pane_sessions();
     }
 
     /// Fold up a project whose last agent has gone.
@@ -2071,7 +1946,10 @@ impl App {
             self.ending.retain(|name| live.contains(name.as_str()));
         }
         self.clamp_cursor();
-        self.select_pending_session();
+        // The platform's list may still be missing sessions we are attached
+        // to (the relay registers them a moment after ssh connects); fold
+        // those back in rather than letting the reply hide them.
+        self.adopt_pane_sessions();
     }
 
     /// Expand an environment, loading its agents the first time.
@@ -2092,16 +1970,6 @@ impl App {
     /// The agent the tree cursor is pointing at, directly or via one of its
     /// sessions. A prompt submitted while an agent is selected belongs to that
     /// agent — the alternative is silently starting work somewhere else.
-    fn selected_agent_id(&self) -> Option<String> {
-        let row = self.selected_row()?;
-        let (w, p, e, a) = match row.kind {
-            RowKind::Agent(w, p, e, a) => (w, p, e, a),
-            RowKind::Session(w, p, e, a, _) => (w, p, e, a),
-            _ => return None,
-        };
-        self.agent_at(w, p, e, a).map(|(id, _)| id)
-    }
-
     fn launch(&self, agent_id: Option<String>, force_new: bool) -> Option<Effect> {
         // A shell session takes no prompt; a draft left over from cycling
         // through the agents must not ride along.
@@ -2111,7 +1979,7 @@ impl App {
     }
 
     /// [`Self::launch`], with the prompt supplied by the caller instead of
-    /// read from the menu's box — what the ⌥p composer sends.
+    /// read from the launcher's box — what the ⌥p composer sends.
     fn launch_prompted(
         &self,
         agent_id: Option<String>,
@@ -2230,6 +2098,27 @@ impl App {
                 if dead && scroll.is_none() {
                     return self.dead_pane_key(i, key);
                 }
+                // Esc twice in quick succession releases the keyboard to the
+                // tree. One Esc belongs to the harness — it dismisses menus
+                // and cancels prompts in there — so the first still goes
+                // through; the double-tap is the reflex for "get me out",
+                // and only the second press is taken.
+                if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                    let now = std::time::Instant::now();
+                    if self
+                        .session_esc_at
+                        .take()
+                        .is_some_and(|at| now.duration_since(at) <= DOUBLE_ESC)
+                    {
+                        self.focus = ManageFocus::Tree;
+                        // Releasing means "show me the tree", same as ⇧esc.
+                        self.maximized = false;
+                        return None;
+                    }
+                    self.session_esc_at = Some(now);
+                } else {
+                    self.session_esc_at = None;
+                }
                 if let Some(session) = self.sessions.get_mut(i) {
                     match scroll {
                         // No pointer for a keyboard scroll; report it over the
@@ -2268,10 +2157,8 @@ impl App {
             Screen::Setup => self.on_key_wizard(key),
             Screen::Settings => self.on_key_settings(key),
             Screen::TargetPick => self.on_key_target_pick(key),
-            Screen::AgentPick => self.on_key_agent_pick(key),
             Screen::HarnessPick => self.on_key_harness_pick(key),
             Screen::ManagePrompt => self.on_key_manage_prompt(key),
-            Screen::Menu => self.on_key_menu(key),
             Screen::Manage => self.on_key_manage(key),
         }
     }
@@ -2310,8 +2197,8 @@ impl App {
             .filter(|c| !c.is_control())
             .collect();
         match self.screen {
-            Screen::Menu if self.menu_focus == MenuFocus::Prompt && !self.shell_selected() => {
-                self.prompt.push_str(&text);
+            Screen::Manage if self.new_session_selected() && !self.shell_selected() => {
+                self.prompt_insert_str(&text);
             }
             Screen::ManagePrompt if !self.shell_selected() => {
                 if let Some(draft) = self.manage_prompt.as_mut() {
@@ -2357,8 +2244,8 @@ impl App {
                 None
             }
             Action::Finish(outcome) => {
-                // There are preferences now, so the menu drops the Setup card
-                // and the answers move to the ⌥s settings card.
+                // There are preferences now, so the next start skips the
+                // wizard and the answers move to the ⌥s settings card.
                 self.configured = true;
                 self.end_wizard();
                 Some(Effect::SaveSetup(outcome))
@@ -2408,30 +2295,6 @@ impl App {
                 None
             }
         }
-    }
-
-    /// The menu is a form: the prompt takes the keyboard when you click it, and
-    /// a card is a button.
-    ///
-    /// A card acts on a single click, unlike a tree row. A tree row is a thing
-    /// you select and then do something to; a card is the doing.
-    fn on_mouse_menu(&mut self, kind: MouseAction, col: u16, row: u16) -> Option<Effect> {
-        if kind != MouseAction::Down {
-            return None;
-        }
-        if self.panes.prompt.contains(col, row) {
-            self.menu_focus = MenuFocus::Prompt;
-            return None;
-        }
-        let hit = self
-            .panes
-            .cards
-            .iter()
-            .take(self.cards().len())
-            .position(|card| card.contains(col, row))?;
-        self.menu_focus = MenuFocus::Cards;
-        self.card = hit;
-        self.activate_card(hit)
     }
 
     /// Hand a pointer event to the application, in the pane's own coordinates.
@@ -2499,9 +2362,6 @@ impl App {
         row: u16,
         shift: bool,
     ) -> Option<Effect> {
-        if self.screen == Screen::Menu {
-            return self.on_mouse_menu(kind, col, row);
-        }
         if self.screen != Screen::Manage {
             return None;
         }
@@ -2536,6 +2396,24 @@ impl App {
                 // a disconnected session must not leave "not connected"
                 // standing once the cursor is on a connected one.
                 self.status.clear();
+                // The maximized header's tabs: a click switches the pane.
+                if self.pane_is_full()
+                    && let Some(i) = (0..self.sessions.len().min(MAX_TABS))
+                        .find(|&i| self.panes.tabs[i].contains(col, row))
+                {
+                    self.active = Some(i);
+                    self.select_row_for_active();
+                    return None;
+                }
+                // The prompt box is drawn in the session pane, but clicking it
+                // means "let me type the task" — the keyboard for that lives
+                // with the tree's New Session row, not with a session.
+                if self.panes.prompt.contains(col, row) {
+                    self.cursor = 0;
+                    self.focus = ManageFocus::Tree;
+                    self.prompt_focused = true;
+                    return None;
+                }
                 let pane = self.pane_at(col, row)?;
                 // An agent with clickable output — "click here to copy", a menu
                 // you can point at — turns mouse reporting on and waits for the
@@ -2557,9 +2435,15 @@ impl App {
                 }
                 // Clicking the session panel means "let me type here"; clicking
                 // the tree does not, so the tree keeps the keyboard until a
-                // double click or enter asks for it.
+                // double click or enter asks for it. With no session open the
+                // right pane is the launcher (or an empty detail card):
+                // focusing it would send every key into a pane nothing is
+                // reading, so the keyboard stays where the prompt reads it —
+                // a drag there is still a selection.
                 let double = self.is_double_click(col, row);
-                self.focus = pane;
+                if pane != ManageFocus::Session || self.active.is_some() {
+                    self.focus = pane;
+                }
                 let effect = (pane == ManageFocus::Tree)
                     .then(|| self.click_tree_row(row, double))
                     .flatten();
@@ -2634,8 +2518,18 @@ impl App {
         self.click_tree_row_inner(row);
         self.sync_active_to_cursor();
         let clicked = self.selected_row()?;
-        // A click on an agent opens it, the same as arriving with the keyboard.
-        if matches!(clicked.kind, RowKind::Agent(..)) {
+        // Clicking the launcher row is clicking the prompt.
+        if matches!(clicked.kind, RowKind::NewSession) {
+            self.prompt_focused = true;
+            return None;
+        }
+        // A single click on an agent thread selects it (and asks for its
+        // sessions, the same as arriving with the keyboard); a double click
+        // connects, the same as enter.
+        if let RowKind::Agent(w, p, e, a) = clicked.kind {
+            if double {
+                return self.connect_agent_row(w, p, e, a);
+            }
             return self.auto_expand_agent();
         }
         // Anything with children toggles: clicking a folder to open it is the
@@ -2649,18 +2543,65 @@ impl App {
                 .map(|s| s.name.clone())
                 .and_then(|name| self.pane_for(&name))
             {
+                // One click selects — the pane comes up but the keyboard
+                // stays in the list, so ↑↓ and x still work on the rows. A
+                // double click is what hands the keyboard to the session.
                 Some(index) => {
                     self.active = Some(index);
                     if double {
                         self.focus = ManageFocus::Session;
                     }
                 }
-                // Reconnecting spends an ssh; that stays an explicit act.
                 None if double => return self.reattach_row(clicked.kind),
-                None => self.status = "Not connected — enter to reattach".into(),
+                None => self.status = "Double-click (or enter) to connect".into(),
             }
         }
         None
+    }
+
+    /// Connect to an agent thread: enter on its row, or a double click.
+    ///
+    /// Connecting also retargets: the place you just opened is almost
+    /// certainly where the next prompt should go.
+    fn connect_agent_row(&mut self, w: usize, p: usize, e: usize, a: usize) -> Option<Effect> {
+        let id = self.tree[w].projects[p].envs[e]
+            .agents_vec()
+            .get(a)?
+            .id
+            .clone();
+        self.target = self.target_at((w, p, e));
+        // Already open: show that session rather than starting a second ssh
+        // to the same agent, which would leave two panes fighting over one
+        // terminal.
+        if self.activate_session(&id) {
+            self.status = "Switched to the open session".into();
+            return None;
+        }
+        // A drafted prompt is new work and gets a session of its own. A plain
+        // connect reattaches to what is already running: launching here made
+        // a NEW durable session each time, which for a harness like
+        // `railway-agent-tui` is another window onto the same conversation
+        // under yet another name.
+        if self.shell_selected() || self.prompt.trim().is_empty() {
+            if let Some(i) = self.first_live_session(w, p, e, a) {
+                return self.reattach_row(RowKind::Session(w, p, e, a, i));
+            }
+        }
+        self.launch(Some(id), false)
+    }
+
+    /// The first still-running session on an agent, by index — the one a
+    /// plain "connect" should land in.
+    fn first_live_session(&self, w: usize, p: usize, e: usize, a: usize) -> Option<usize> {
+        let Load::Loaded(agents) = &self.tree.get(w)?.projects.get(p)?.envs.get(e)?.agents else {
+            return None;
+        };
+        let LoadSessions::Loaded(sessions) = &agents.get(a)?.sessions else {
+            return None;
+        };
+        sessions
+            .iter()
+            .position(|session| session.is_interesting() && !self.ending.contains(&session.name))
     }
 
     fn click_tree_row_inner(&mut self, row: u16) {
@@ -2691,7 +2632,7 @@ impl App {
     /// it: the task has been handed over, so the box should be empty when you
     /// come back to write the next one.
     pub fn start_loading(&mut self, req: &LaunchRequest) {
-        self.prompt.clear();
+        self.clear_prompt();
         // Straight to Manage: the wait belongs in the pane the session will
         // appear in, with the tree beside it.
         self.screen = Screen::Manage;
@@ -2780,12 +2721,122 @@ impl App {
         self.sessions.iter().position(|s| s.durable_name == name)
     }
 
+    /// The sessions the background auto-connect should attach right now:
+    /// every listed session on a running agent that has no pane yet, each
+    /// once per run. Marks what it returns as in flight, so the rows wear
+    /// spinners and the next pass doesn't return them again.
+    ///
+    /// Empty while a connect could not quietly succeed: an unregistered key
+    /// would land the pane on the relay's signup screen, the wizard means
+    /// nothing is set up yet, and `railway code` came for its one session.
+    pub fn take_auto_connects(&mut self) -> Vec<AutoConnect> {
+        if self.quit_when_done
+            || self.wizard.is_some()
+            || !matches!(self.ssh_key, SshKeyState::Ready | SshKeyState::Unknown)
+        {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut already_open = Vec::new();
+        for ws in &self.tree {
+            for proj in &ws.projects {
+                for env in &proj.envs {
+                    let Load::Loaded(agents) = &env.agents else {
+                        continue;
+                    };
+                    for agent in agents {
+                        // Only a green agent: attaching to a sleeping or
+                        // waking VM would hang the pane, and the wake path
+                        // reattaches on its own once the agent is up.
+                        if agent.status != "running" || self.ops.contains_key(agent.id.as_str()) {
+                            continue;
+                        }
+                        let LoadSessions::Loaded(sessions) = &agent.sessions else {
+                            continue;
+                        };
+                        for session in sessions {
+                            // `created_at` is only absent on the placeholders
+                            // adopted from our own panes — already attached by
+                            // definition.
+                            if !session.is_interesting()
+                                || session.created_at.is_none()
+                                || self.ending.contains(&session.name)
+                                || self.auto_attempted.contains(&session.name)
+                            {
+                                continue;
+                            }
+                            if self.pane_for(&session.name).is_some() {
+                                // Attached by some other path; remember that,
+                                // so closing the pane later doesn't get undone
+                                // by the next sweep.
+                                already_open.push(session.name.clone());
+                                continue;
+                            }
+                            out.push(AutoConnect {
+                                agent_id: agent.id.clone(),
+                                agent_name: agent.name.clone(),
+                                environment_id: env.id.clone(),
+                                session_name: session.name.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        self.auto_attempted.extend(already_open);
+        for connect in &out {
+            self.auto_attempted.insert(connect.session_name.clone());
+            self.connecting.insert(connect.session_name.clone());
+        }
+        out
+    }
+
+    /// Adopt a session the background auto-connect opened. Quietly: the pane
+    /// joins `sessions` and its row turns green, but focus, screen, cursor
+    /// and prompt all stay where they are — coming up connected must not
+    /// yank the keyboard out from under whatever is being typed.
+    pub fn attach_session_background(
+        &mut self,
+        session: super::session::Session,
+        agent_id: String,
+    ) {
+        self.connecting.remove(&session.durable_name);
+        self.auto_attempted.insert(session.durable_name.clone());
+        self.drop_seen.remove(&session.durable_name);
+        // A pane opening proves a wake landed, same as a foreground attach.
+        if self.ops.get(agent_id.as_str()) == Some(&AgentOp::Wake.pending_label()) {
+            self.ops.remove(agent_id.as_str());
+        }
+        if self
+            .watching
+            .get(agent_id.as_str())
+            .is_some_and(|w| w.want == "running")
+        {
+            self.watching.remove(agent_id.as_str());
+        }
+        self.sessions.push(session);
+        self.adopt_pane_sessions();
+    }
+
+    /// A background attach didn't make it. Quietly again: the spinner comes
+    /// off, the reason rides the status line rather than a toast, and the
+    /// name stays attempted so the failure isn't retried in a loop —
+    /// double-clicking the row still connects by hand.
+    pub fn auto_connect_failed(&mut self, session_name: &str, err: &str) {
+        self.connecting.remove(session_name);
+        let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.status = format!("Couldn't connect {session_name}: {flat}");
+    }
+
     /// Adopt a freshly opened session, make it active, and focus it.
     ///
     /// Appended rather than replacing: several agents can be working at once,
     /// and closing one because another opened would throw away a running task.
     pub fn attach_session(&mut self, session: super::session::Session, agent_id: String) {
         self.loading.active = false;
+        self.connecting.remove(&session.durable_name);
+        self.auto_attempted.insert(session.durable_name.clone());
+        self.drop_seen.remove(&session.durable_name);
         // A pane just opened on this agent, so a wake we were waiting for has
         // demonstrably landed — whatever the status projection still says. Left
         // alone, `waking…` would sit on the row until a poll happened to catch
@@ -2812,15 +2863,210 @@ impl App {
         self.active = Some(self.sessions.len() - 1);
         self.focus = ManageFocus::Session;
         self.screen = Screen::Manage;
-        self.prompt.clear();
+        self.clear_prompt();
         self.status.clear();
-        self.select_pending_session();
+        // The session just opened is a fact; put it in the tree now rather
+        // than after the platform lists it (this also lands the cursor on it).
+        self.adopt_pane_sessions();
         if self.pending_select_session.is_none() {
             // Landed on the session; the agent fallback is not needed.
             self.pending_select = None;
         } else {
             self.select_pending();
         }
+    }
+
+    /// Fold every open pane's session into the tree, ahead of the platform.
+    ///
+    /// We opened these sessions ourselves — the pane is attached over ssh —
+    /// so waiting for `cloudAgentConsoleSessions` to list them is waiting for
+    /// the relay's bookkeeping to catch up with a fact we already know. On a
+    /// fresh agent that wait was the whole story: the settle refreshes fired
+    /// before the agent row existed, and the session showed up disconnected-
+    /// looking (or not at all) until the next sweep. Called after every load,
+    /// so a platform reply that hasn't caught up yet can't erase the row; the
+    /// reply that has simply replaces it with the real record.
+    pub fn adopt_pane_sessions(&mut self) {
+        // First, reconcile names. The relay registers a session under a name
+        // of its own — the one the client sent rides along only as an env
+        // stamp — so once the platform lists the session a pane opened, that
+        // listing's name is the durable identity: reattach, copy-ssh and kill
+        // all go by it. The pane we hold takes the listed name over the one it
+        // was minted with, and the placeholder row under the minted name
+        // vanishes with the rename. Matched conservatively: only a listed
+        // session that is running, `attached` (we demonstrably are), and not
+        // already claimed by another pane — newest first when several fit.
+        for i in 0..self.sessions.len() {
+            if self.sessions[i].ended() {
+                continue;
+            }
+            let agent_id = self.sessions[i].agent_id.clone();
+            let minted = self.sessions[i].durable_name.clone();
+            let listed = self.agent_session_names(&agent_id);
+            if listed.is_empty() || listed.iter().any(|(name, ..)| *name == minted) {
+                continue;
+            }
+            let claimed: std::collections::HashSet<String> = self
+                .sessions
+                .iter()
+                .map(|pane| pane.durable_name.clone())
+                .collect();
+            let real = listed
+                .into_iter()
+                .filter(|(name, attached, running, _)| {
+                    *attached && *running && !claimed.contains(name)
+                })
+                .max_by_key(|(_, _, _, created)| *created)
+                .map(|(name, ..)| name);
+            if let Some(real) = real {
+                if self.pending_select_session.as_deref() == Some(minted.as_str()) {
+                    self.pending_select_session = Some(real.clone());
+                }
+                // The listed name is attached now, whatever it was minted as —
+                // auto-connect must treat it as already tried.
+                self.auto_attempted.insert(real.clone());
+                self.sessions[i].durable_name = real;
+            }
+        }
+
+        // Then adopt what is still missing: a pane whose session the platform
+        // has not listed yet gets a placeholder row, so a fresh launch shows
+        // selected and connected instead of waiting on the relay's
+        // bookkeeping. The reconciliation above retires it as soon as the
+        // real record lands.
+        let panes: Vec<(String, String)> = self
+            .sessions
+            .iter()
+            .filter(|pane| !pane.ended())
+            .map(|pane| (pane.agent_id.clone(), pane.durable_name.clone()))
+            .collect();
+        for (agent_id, name) in panes {
+            'tree: for ws in &mut self.tree {
+                for proj in &mut ws.projects {
+                    for env in &mut proj.envs {
+                        let Load::Loaded(agents) = &mut env.agents else {
+                            continue;
+                        };
+                        let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) else {
+                            continue;
+                        };
+                        let ours = ConsoleSession {
+                            name: name.clone(),
+                            kind: "SHELL".into(),
+                            command: None,
+                            running: true,
+                            attached: true,
+                            created_at: None,
+                        };
+                        match &mut agent.sessions {
+                            LoadSessions::Loaded(sessions) => {
+                                if !sessions.iter().any(|s| s.name == name) {
+                                    sessions.push(ours);
+                                }
+                            }
+                            other => *other = LoadSessions::Loaded(vec![ours]),
+                        }
+                        break 'tree;
+                    }
+                }
+            }
+        }
+        self.select_pending_session();
+    }
+
+    /// What a maximized-header tab says for the pane at `index`: the
+    /// session's own label — its seeded task, or its harness-led name — not
+    /// the agent it happens to run on. Falls back to the pane's durable name
+    /// while the platform hasn't listed the session yet.
+    pub fn session_tab_label(&self, index: usize) -> String {
+        let Some(pane) = self.sessions.get(index) else {
+            return String::new();
+        };
+        for ws in &self.tree {
+            for proj in &ws.projects {
+                for env in &proj.envs {
+                    let Load::Loaded(agents) = &env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter().find(|a| a.id == pane.agent_id) else {
+                        continue;
+                    };
+                    if let LoadSessions::Loaded(sessions) = &agent.sessions
+                        && let Some(session) = sessions.iter().find(|s| s.name == pane.durable_name)
+                    {
+                        return truncate(&session.short_name(), 20);
+                    }
+                }
+            }
+        }
+        truncate(&pane.durable_name, 20)
+    }
+
+    /// The session pane's title, read like a project reference:
+    /// `project / agent / session`. The session leg is the listed session's
+    /// short name once the platform has it, the pane's durable name until
+    /// then; the project leg drops off when the agent isn't in the tree yet,
+    /// leaving `agent / session` rather than a hole.
+    pub fn pane_breadcrumb(&self, pane: &super::session::Session) -> String {
+        let mut project = None;
+        let mut session = None;
+        'tree: for ws in &self.tree {
+            for proj in &ws.projects {
+                for env in &proj.envs {
+                    let Load::Loaded(agents) = &env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter().find(|a| a.id == pane.agent_id) else {
+                        continue;
+                    };
+                    project = Some(proj.name.clone());
+                    if let LoadSessions::Loaded(sessions) = &agent.sessions
+                        && let Some(listed) = sessions.iter().find(|s| s.name == pane.durable_name)
+                    {
+                        session = Some(listed.short_name());
+                    }
+                    break 'tree;
+                }
+            }
+        }
+        let session = session.unwrap_or_else(|| pane.durable_name.clone());
+        match project {
+            Some(project) => format!("{project} / {} / {session}", pane.agent_name),
+            None => format!("{} / {session}", pane.agent_name),
+        }
+    }
+
+    /// Every session the platform lists for an agent, as
+    /// `(name, attached, running, created_at)` — the fields pane
+    /// reconciliation matches on.
+    #[allow(clippy::type_complexity)]
+    fn agent_session_names(
+        &self,
+        agent_id: &str,
+    ) -> Vec<(String, bool, bool, Option<chrono::DateTime<chrono::Utc>>)> {
+        for ws in &self.tree {
+            for proj in &ws.projects {
+                for env in &proj.envs {
+                    let Load::Loaded(agents) = &env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter().find(|a| a.id == agent_id) else {
+                        continue;
+                    };
+                    let LoadSessions::Loaded(sessions) = &agent.sessions else {
+                        return Vec::new();
+                    };
+                    return sessions
+                        .iter()
+                        // Placeholders carry no timestamp; only platform
+                        // records can be adopted as a pane's real name.
+                        .filter(|s| s.created_at.is_some())
+                        .map(|s| (s.name.clone(), s.attached, s.running, s.created_at))
+                        .collect();
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Show an already-open session. Returns false when there isn't one.
@@ -2929,6 +3175,7 @@ impl App {
                 i += 1;
             }
         }
+        self.notice_dropped_panes();
         let agent_name = closed?;
         if self.quit_when_done && self.sessions.is_empty() {
             self.exit_note = Some(format!(
@@ -2938,6 +3185,29 @@ impl App {
         }
         self.toast(format!("Session on {agent_name} ended"));
         None
+    }
+
+    /// A pane whose connection just DIED (rather than finished) pulls the
+    /// keyboard to itself, once: its banner says "r reconnects", and r has to
+    /// mean that immediately — not the tree's refresh — without needing a
+    /// click first. Once per drop: Esc-ing back to the tree sticks, and a
+    /// reconnected pane that drops again gets to announce itself again.
+    fn notice_dropped_panes(&mut self) {
+        for i in 0..self.sessions.len() {
+            if !self.sessions[i].dropped() {
+                continue;
+            }
+            let name = self.sessions[i].durable_name.clone();
+            if !self.drop_seen.insert(name) {
+                continue;
+            }
+            // Never over a dialog: a y/n confirm or the ssh-key question owns
+            // the keyboard, and stealing it mid-answer would misroute keys.
+            if self.screen == Screen::Manage && self.confirm.is_none() && self.ssh_gate.is_none() {
+                self.active = Some(i);
+                self.focus = ManageFocus::Session;
+            }
+        }
     }
 
     /// Any pane that has ended but whose finished/dropped call is still
@@ -3035,6 +3305,13 @@ impl App {
         let name = self.console_session(w, p, e, a, i)?.name.clone();
         let (agent_id, agent_name) = self.agent_at(w, p, e, a)?;
         self.target = self.target_at((w, p, e));
+
+        // An attach already in flight — usually the startup auto-connect —
+        // would race a second ssh onto the same session.
+        if self.connecting.contains(&name) {
+            self.status = format!("Connecting to {name}…");
+            return None;
+        }
 
         // Already open: this means "put me in it", not "open another one" —
         // unless the pane's connection has died, in which case "connect"
@@ -3293,7 +3570,15 @@ impl App {
         };
         let rows = self.rows();
         for (i, row) in rows.iter().enumerate() {
-            if matches!(row.kind, RowKind::Session(..)) && row.label == name {
+            // By the session's own name, not the row label — the label carries
+            // the agent's name too.
+            let RowKind::Session(w, p, e, a, idx) = row.kind else {
+                continue;
+            };
+            if self
+                .console_session(w, p, e, a, idx)
+                .is_some_and(|session| session.name == name)
+            {
                 self.cursor = i;
                 self.pending_select_session = None;
                 self.pending_select = None;
@@ -3351,8 +3636,8 @@ impl App {
         None
     }
 
-    /// The chords that work everywhere. Settings is worth one because it left
-    /// the menu once first-run setup had been answered — and it is where the
+    /// The chords that work everywhere. Settings is worth one because it is
+    /// only reachable by chord — and it is where the
     /// theme now cycles, which is why there is no ⌥t any more: two chords to
     /// the same preference was how they drifted apart.
     fn alt_action(&mut self, action: char) -> Option<Effect> {
@@ -3370,22 +3655,17 @@ impl App {
             '[' => self.cycle_session(false),
             // Everything, everywhere: `r` refreshes the environment under the
             // cursor, and this is the one that answers "something changed and I
-            // don't know where". It works from the menu too, whose cards read
-            // the same agent lists to decide whether New Session has an agent to
-            // work on.
+            // don't know where".
             'r' => {
                 self.status = "Refreshing…".into();
                 self.refresh_announce = true;
                 Some(Effect::RefreshAll)
             }
-            // The launchers live on the Manage screen, where the tree the
-            // launch aims at is on screen. The menu already has both: its
-            // prompt box and its cards.
-            'n' if self.screen == Screen::Manage => {
-                self.harness_pick = Some(self.harness);
-                self.screen = Screen::HarnessPick;
-                None
-            }
+            // The launchers float over the tree the launch aims at; the
+            // New Session row's own prompt box covers the plain case.
+            // ⌥n skips the picker: a new agent right now, on whatever
+            // harness is already selected.
+            'n' if self.screen == Screen::Manage => self.launch_new_agent(),
             'p' if self.screen == Screen::Manage => {
                 self.manage_prompt = Some(String::new());
                 self.screen = Screen::ManagePrompt;
@@ -3536,9 +3816,9 @@ impl App {
 
     /// Give the session pane the whole screen, or give the tree back.
     ///
-    /// Only where there is a session to give it to: on the menu, or with
-    /// nothing open, a screen of empty pane is not a state worth being able to
-    /// reach by accident.
+    /// Only where there is a session to give it to: with nothing open, a
+    /// screen of empty pane is not a state worth being able to reach by
+    /// accident.
     fn toggle_maximized(&mut self) {
         if self.screen != Screen::Manage {
             return;
@@ -3557,94 +3837,136 @@ impl App {
         self.focus = ManageFocus::Session;
     }
 
-    fn on_key_menu(&mut self, key: KeyEvent) -> Option<Effect> {
-        match self.menu_focus {
+    /// Is the cursor on the pinned New Session row? While it is, the session
+    /// pane shows the launcher.
+    pub fn launcher_selected(&self) -> bool {
+        self.focus == ManageFocus::Tree
+            && self
+                .selected_row()
+                .is_some_and(|row| row.kind == RowKind::NewSession)
+    }
+
+    /// [`Self::launcher_selected`], with the prompt holding the keyboard.
+    /// False on the same row after Esc — the "home" state, where letters are
+    /// keys again and `q` quits.
+    pub fn new_session_selected(&self) -> bool {
+        self.launcher_selected() && self.prompt_focused
+    }
+
+    /// Keys while the cursor stands on New Session: the old menu's prompt box,
+    /// without the separate screen. Everything unhandled falls back to the
+    /// tree, so ↑/↓ still walk away from the row.
+    fn on_key_new_session(&mut self, key: KeyEvent) -> Result<Option<Effect>, KeyEvent> {
+        match key.code {
             // Typing is refused while shell is selected — the box says so —
             // rather than cleared: a draft typed for a real agent survives
             // cycling past shell.
-            MenuFocus::Prompt => match key.code {
-                KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.shell_selected() =>
-                {
-                    self.prompt.push(c);
-                    None
-                }
-                KeyCode::Backspace if !self.shell_selected() => {
-                    self.prompt.pop();
-                    None
-                }
-                KeyCode::BackTab => {
-                    self.harness = (self.harness + 1) % HARNESSES.len();
-                    None
-                }
-                KeyCode::Enter => self.launch_from_menu(false),
-                KeyCode::Down | KeyCode::Tab => {
-                    self.menu_focus = MenuFocus::Cards;
-                    None
-                }
-                // Esc clears a draft before it quits, so a stray Esc mid-typing
-                // doesn't throw the session away.
-                KeyCode::Esc if !self.prompt.is_empty() => {
-                    self.prompt.clear();
-                    None
-                }
-                KeyCode::Esc => Some(Effect::Quit),
-                _ => None,
-            },
-            MenuFocus::Cards => match key.code {
-                KeyCode::Up if self.card == 0 => {
-                    self.menu_focus = MenuFocus::Prompt;
-                    None
-                }
-                KeyCode::Up => {
-                    self.card -= 1;
-                    None
-                }
-                KeyCode::Down | KeyCode::Tab => {
-                    self.card = (self.card + 1).min(self.cards().len().saturating_sub(1));
-                    None
-                }
-                KeyCode::BackTab => {
-                    self.harness = (self.harness + 1) % HARNESSES.len();
-                    None
-                }
-                KeyCode::Enter => self.activate_card(self.card),
-                KeyCode::Char('q') | KeyCode::Esc => Some(Effect::Quit),
-                _ => None,
-            },
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.shell_selected() =>
+            {
+                self.prompt_insert(c);
+                Ok(None)
+            }
+            KeyCode::Backspace if !self.shell_selected() => {
+                self.prompt_backspace();
+                Ok(None)
+            }
+            // The cursor moves through the draft; a typo is fixed in place
+            // rather than by erasing back to it.
+            KeyCode::Left if !self.shell_selected() => {
+                self.prompt_cursor = self.prompt_cursor.saturating_sub(1);
+                Ok(None)
+            }
+            KeyCode::Right if !self.shell_selected() => {
+                self.prompt_cursor = (self.prompt_cursor + 1).min(self.prompt.chars().count());
+                Ok(None)
+            }
+            KeyCode::Home if !self.shell_selected() => {
+                self.prompt_cursor = 0;
+                Ok(None)
+            }
+            KeyCode::End if !self.shell_selected() => {
+                self.prompt_cursor = self.prompt.chars().count();
+                Ok(None)
+            }
+            KeyCode::BackTab => {
+                self.harness = (self.harness + 1) % HARNESSES.len();
+                Ok(None)
+            }
+            KeyCode::Enter => Ok(self.launch_from_prompt()),
+            // Esc walks up, one step per press: a draft is cleared first, so
+            // a stray Esc mid-typing doesn't throw the session away…
+            KeyCode::Esc if !self.prompt.is_empty() => {
+                self.clear_prompt();
+                Ok(None)
+            }
+            // …then the prompt lets go of the keyboard. That is the top of
+            // the chain — home — where letters are keys again and `q` quits.
+            KeyCode::Esc => {
+                self.prompt_focused = false;
+                Ok(None)
+            }
+            _ => Err(key),
         }
     }
 
-    fn launch_from_menu(&mut self, force_new: bool) -> Option<Effect> {
+    /// The byte offset of the prompt cursor, for splicing into the string.
+    fn prompt_byte(&self) -> usize {
+        self.prompt
+            .char_indices()
+            .nth(self.prompt_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.prompt.len())
+    }
+
+    fn prompt_insert(&mut self, c: char) {
+        let at = self.prompt_byte();
+        self.prompt.insert(at, c);
+        self.prompt_cursor += 1;
+    }
+
+    fn prompt_insert_str(&mut self, text: &str) {
+        let at = self.prompt_byte();
+        self.prompt.insert_str(at, text);
+        self.prompt_cursor += text.chars().count();
+    }
+
+    fn prompt_backspace(&mut self) {
+        if self.prompt_cursor == 0 {
+            return;
+        }
+        self.prompt_cursor -= 1;
+        let at = self.prompt_byte();
+        self.prompt.remove(at);
+    }
+
+    pub fn clear_prompt(&mut self) {
+        self.prompt.clear();
+        self.prompt_cursor = 0;
+    }
+
+    /// Launch what the prompt box holds — onto a brand-new agent, the same
+    /// default the dashboard has: each task gets a VM of its own. A blank
+    /// prompt does not spend one; only shell, whose box says enter launches
+    /// bare, may go without.
+    fn launch_from_prompt(&mut self) -> Option<Effect> {
+        if !self.shell_selected() && self.prompt.trim().is_empty() {
+            self.status = "Write a prompt first — it seeds the new agent".into();
+            return None;
+        }
+        self.launch_new_agent()
+    }
+
+    /// A new agent in the target project, carrying the prompt draft if one is
+    /// written: `n`'s picker, ⌥n's quick create, and the prompt box all end
+    /// here.
+    fn launch_new_agent(&mut self) -> Option<Effect> {
         if self.target.is_none() {
             self.start_target_pick();
             self.status = "Pick where this should run".into();
             return None;
         }
-        // A selected agent gets the work; otherwise the target's agent is
-        // reused or created as before.
-        let agent_id = if force_new {
-            None
-        } else {
-            self.selected_agent_id()
-        };
-        self.launch(agent_id, force_new)
-    }
-
-    fn activate_card(&mut self, i: usize) -> Option<Effect> {
-        match self.cards().get(i).map(|(label, _)| *label) {
-            Some("New Session") => self.new_session_in_target(),
-            Some("New Cloud Agent") => self.launch_from_menu(true),
-            Some("Manage Cloud Agents") => {
-                self.screen = Screen::Manage;
-                None
-            }
-            Some("Setup") => {
-                self.start_wizard(false);
-                None
-            }
-            _ => None,
-        }
+        self.launch(None, true)
     }
 
     fn on_key_manage(&mut self, key: KeyEvent) -> Option<Effect> {
@@ -3675,6 +3997,18 @@ impl App {
             self.keys_open = false;
             return None;
         }
+
+        // On the New Session row the keyboard writes the prompt; only what
+        // the prompt doesn't take (↑ ↓, tab, mouse chords) falls through to
+        // the tree below.
+        let key = if self.new_session_selected() {
+            match self.on_key_new_session(key) {
+                Ok(effect) => return effect,
+                Err(key) => key,
+            }
+        } else {
+            key
+        };
 
         let row = self.selected_row();
         match key.code {
@@ -3709,24 +4043,12 @@ impl App {
             KeyCode::Enter => {
                 let kind = row?.kind;
                 match kind {
-                    // Connecting also retargets: the place you just opened is
-                    // almost certainly where the next prompt should go.
-                    RowKind::Agent(w, p, e, a) => {
-                        let id = self.tree[w].projects[p].envs[e]
-                            .agents_vec()
-                            .get(a)?
-                            .id
-                            .clone();
-                        self.target = self.target_at((w, p, e));
-                        // Already open: show that session rather than starting a
-                        // second ssh to the same agent, which would leave two
-                        // panes fighting over one terminal.
-                        if self.activate_session(&id) {
-                            self.status = "Switched to the open session".into();
-                            return None;
-                        }
-                        self.launch(Some(id), false)
+                    // From home, Enter steps back into the prompt.
+                    RowKind::NewSession => {
+                        self.prompt_focused = true;
+                        None
                     }
+                    RowKind::Agent(w, p, e, a) => self.connect_agent_row(w, p, e, a),
                     RowKind::Session(..) => self.reattach_row(kind),
                     // A toggle: open drills straight through to the first
                     // environment's agents — what someone opening a project is
@@ -3765,7 +4087,13 @@ impl App {
                     other => self.set_expanded(other, true),
                 }
             }
-            KeyCode::Char('n') => self.new_here(),
+            // `n` is the dashboard's New Agent button: pick the harness,
+            // then a fresh agent in the target project.
+            KeyCode::Char('n') => {
+                self.harness_pick = Some(self.harness);
+                self.screen = Screen::HarnessPick;
+                None
+            }
             KeyCode::Char('t') => {
                 let path = self.env_of(row?.kind)?;
                 self.target = self.target_at(path);
@@ -3827,9 +4155,21 @@ impl App {
                     path: (w, p, e),
                 })
             }
-            KeyCode::Esc => {
-                self.screen = Screen::Menu;
+            // Esc walks back up the chain, one step per press, and never
+            // quits: a maximized pane gets the tree back first…
+            KeyCode::Esc if self.maximized => {
                 self.maximized = false;
+                None
+            }
+            // …then any thread returns to the launcher; on the launcher's
+            // unfocused home (the focused case cleared the draft and let go
+            // of the keyboard above) there is nowhere further up, and `q` is
+            // the way out.
+            KeyCode::Esc => {
+                if self.cursor != 0 {
+                    self.cursor = 0;
+                    self.prompt_focused = true;
+                }
                 None
             }
             KeyCode::Char('q') => Some(Effect::Quit),
@@ -3844,15 +4184,11 @@ impl App {
     /// VM nobody asked for. On a project, an environment, or a group, a whole
     /// new agent, because that is the only thing "new" can mean there.
     /// Anywhere else — the tail header, an empty tree — it falls back to the
-    /// target, the same place the menu's New Cloud Agent goes: the empty
-    /// state advertises `n`, so `n` has to work from where the cursor starts.
-    fn new_here(&mut self) -> Option<Effect> {
-        self.new_here_prompted(None)
-    }
-
+    /// target: the empty state advertises `n`, so `n` has to work from where
+    /// the cursor starts.
     /// [`Self::new_here`], carrying a prompt from the ⌥p composer. `None`
     /// keeps `n`'s behavior exactly: the agent-row launch sends no prompt,
-    /// and the create-an-agent paths fall back to the menu box's draft.
+    /// and the create-an-agent paths fall back to the launcher box's draft.
     fn new_here_prompted(&mut self, prompt: Option<String>) -> Option<Effect> {
         let kind = self.selected_row().map(|row| row.kind);
         match kind {
@@ -3922,7 +4258,7 @@ impl App {
                 self.harness = cursor.min(HARNESSES.len() - 1);
                 self.harness_pick = None;
                 self.screen = Screen::Manage;
-                self.new_here()
+                self.launch_new_agent()
             }
             KeyCode::Esc => {
                 self.harness_pick = None;
@@ -3933,10 +4269,11 @@ impl App {
         }
     }
 
-    /// Keys while the ⌥p composer is up: the menu prompt box's contract —
+    /// Keys while the ⌥p composer is up: the launcher prompt box's contract —
     /// type, shift+tab cycles the agent, enter sends, esc closes. And the
-    /// menu box's shell contract too: typing goes inert, and enter launches
-    /// the session bare, since a shell has nothing to hand a prompt to.
+    /// launcher box's shell contract too: typing goes inert, and enter
+    /// launches the session bare, since a shell has nothing to hand a prompt
+    /// to.
     fn on_key_manage_prompt(&mut self, key: KeyEvent) -> Option<Effect> {
         let mut draft = self.manage_prompt.take()?;
         match key.code {
@@ -4440,8 +4777,9 @@ impl App {
     }
 }
 
-/// A rule between the agent groups and the projects tail, so the tail reads
-/// as its own section rather than as one more group.
+/// A rule between the tree's sections: under the pinned New Session row, and
+/// between the agent groups and the projects tail — so each section reads as
+/// its own thing rather than as one more group.
 fn separator_row() -> Row {
     Row {
         depth: 0,
@@ -4464,18 +4802,6 @@ fn note_row(w: usize, p: usize, e: usize, depth: usize, text: &str) -> Row {
         expanded: None,
         dimmed: false,
     }
-}
-
-/// What a group header says: the project, and the environment only when it
-/// adds something. Most projects have a single `production`, and repeating
-/// that against every group would be the same noise the environment level was
-/// as a row of its own.
-fn group_label(project: &ProjectNode, e: usize) -> String {
-    let env = &project.envs[e];
-    if project.envs.len() > 1 && env.name != "production" {
-        return format!("{}/{}", project.name, env.name);
-    }
-    project.name.clone()
 }
 
 /// Display order for a group's agents: running first, waking next, sleeping
@@ -4502,24 +4828,6 @@ fn sorted_agents(
         })
     });
     order
-}
-
-/// What sits to the right of an agent: its status, plus how many sessions are
-/// running on it once that is known — the same `(N)` a project carries, for the
-/// same reason. Sessions are prefetched for running agents, so the number is
-/// usually there before the row is ever expanded.
-fn agent_note(status: &str, agent: &Agent, ending: &std::collections::HashSet<String>) -> String {
-    let sessions = match &agent.sessions {
-        LoadSessions::Loaded(sessions) => sessions
-            .iter()
-            .filter(|s| s.is_interesting() && !ending.contains(&s.name))
-            .count(),
-        _ => 0,
-    };
-    if sessions == 0 {
-        return status.to_string();
-    }
-    format!("{status} ({sessions})")
 }
 
 /// The status to show for an agent, which is not always the one the platform
@@ -4766,28 +5074,32 @@ mod tests {
             .collect()
     }
 
-    /// A target-less app with nothing loaded yet: no agents to lead with, so
-    /// the projects tail is the whole tree, open, behind the search hint.
+    /// A target-less app with nothing loaded yet: the pinned launcher first,
+    /// ruled off from the rest, then — with no agents to lead with — the
+    /// projects tail as the whole tree, open, behind the search hint.
     #[test]
     fn opens_with_the_projects_tail_open() {
         let a = app();
         let rows = a.rows();
-        assert_eq!(rows.len(), 3, "{rows:#?}");
-        assert_eq!(rows[0].label, "looking for cloud agents…");
-        assert!(!rows[0].selectable());
-        assert_eq!(rows[1].label, "projects");
-        assert_eq!(rows[2].label, "devtools");
-        // The cursor starts on a row a key can act on, not on the hint.
-        assert_eq!(a.cursor, 1);
+        assert_eq!(rows.len(), 5, "{rows:#?}");
+        assert_eq!(rows[0].label, "New Agent");
+        assert!(rows[0].selectable());
+        assert!(matches!(rows[1].kind, RowKind::Separator));
+        assert_eq!(rows[2].label, "looking for cloud agents…");
+        assert!(!rows[2].selectable());
+        assert_eq!(rows[3].label, "projects");
+        assert_eq!(rows[4].label, "devtools");
+        // The cursor starts on the launcher: the prompt is the first thing.
+        assert_eq!(a.cursor, 0);
     }
 
     #[test]
     fn expanding_an_environment_requests_its_agents_once() {
         let mut a = app();
         a.screen = Screen::Manage;
-        a.cursor = 2; // devtools
+        a.cursor = 4; // devtools
         assert_eq!(a.on_key(key(KeyCode::Right)), None);
-        a.cursor = 3; // production
+        a.cursor = 5; // production
         let effect = a.on_key(key(KeyCode::Right)).unwrap();
         assert_eq!(
             effect,
@@ -4805,9 +5117,9 @@ mod tests {
     fn a_loading_environment_shows_a_note_that_cannot_be_selected() {
         let mut a = app();
         a.screen = Screen::Manage;
-        a.cursor = 2; // devtools
+        a.cursor = 4; // devtools
         a.on_key(key(KeyCode::Right));
-        a.cursor = 3; // production
+        a.cursor = 5; // production
         a.on_key(key(KeyCode::Right));
         let rows = a.rows();
         let note = rows.iter().find(|r| r.label == "loading…").unwrap();
@@ -4848,15 +5160,405 @@ mod tests {
         assert_eq!(a.target.unwrap().label(), "devtools/production");
     }
 
-    /// The prompt has focus on open, so `t` there is a letter, not a command.
-    /// Retargeting is Ctrl-T everywhere.
+    /// Connecting to an agent that already has a running session reattaches
+    /// to it, rather than minting another durable session — which, for a
+    /// harness like railway's, is just another window onto the same
+    /// conversation under a new name.
+    #[test]
+    fn connecting_to_an_agent_reattaches_to_its_running_session() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions = LoadSessions::Loaded(vec![ConsoleSession {
+                name: "claude-one".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+                created_at: None,
+            }]);
+        }
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        let effect = a.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(
+                effect,
+                Some(Effect::Reattach { ref session_name, .. }) if session_name == "claude-one"
+            ),
+            "a plain connect must not mint a session: {effect:?}"
+        );
+
+        // A drafted prompt is new work, and does get a session of its own.
+        a.prompt = "fix the tests".into();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("a prompt seeds a fresh session");
+        };
+        assert_eq!(req.prompt.as_deref(), Some("fix the tests"));
+        assert!(req.wants_new_session());
+    }
+
+    /// A tab names the session, not the agent: the seeded task once the
+    /// platform lists it, the durable name until then.
+    #[test]
+    fn tabs_are_named_by_their_sessions() {
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "railway-t5soqz".into();
+        a.attach_session(pane, "ca_1".into());
+        assert_eq!(a.session_tab_label(0), "railway-t5soqz", "not yet listed");
+
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "merry-daisy-ld9".into(),
+                kind: "SHELL".into(),
+                command: Some(
+                    "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
+                     \"$RAILWAY_DURABLE_SESSION_NAME\" 'ship the release notes today'; printf 'x'"
+                        .into(),
+                ),
+                running: true,
+                attached: true,
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            }]),
+        );
+        assert_eq!(
+            a.session_tab_label(0),
+            "railway-ld9",
+            "the tab takes the listed name, folded short"
+        );
+    }
+
+    /// The pane's title reads like a project reference — project / agent /
+    /// session — using the listed session's short name once the platform has
+    /// it, and degrading gracefully while it doesn't.
+    #[test]
+    fn the_pane_title_is_a_project_path() {
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "merry-daisy-ld9".into();
+        // Before the listing lands: the durable name stands in.
+        assert_eq!(
+            a.pane_breadcrumb(&pane),
+            "devtools / nimble-otter / merry-daisy-ld9"
+        );
+
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "merry-daisy-ld9".into(),
+                kind: "SHELL".into(),
+                command: Some(
+                    "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
+                     \"$RAILWAY_DURABLE_SESSION_NAME\" 'ship it'; printf 'x'"
+                        .into(),
+                ),
+                running: true,
+                attached: true,
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            }]),
+        );
+        assert_eq!(
+            a.pane_breadcrumb(&pane),
+            "devtools / nimble-otter / railway-ld9",
+            "the listed session's short name takes over"
+        );
+
+        // An agent the tree doesn't know: no project leg, no hole.
+        let stray = session("ca_unknown", "wandering-ox");
+        assert_eq!(a.pane_breadcrumb(&stray), "wandering-ox / test");
+    }
+
+    /// The maximized header's tabs switch panes on a click.
+    #[test]
+    fn clicking_a_header_tab_switches_the_pane() {
+        let mut a = with_sessions(&["ca_1", "ca_2"]);
+        a.maximized = true;
+        a.focus = ManageFocus::Session;
+        a.active = Some(0);
+        a.panes.tabs[0] = PaneBox {
+            x: 24,
+            y: 1,
+            w: 10,
+            h: 1,
+        };
+        a.panes.tabs[1] = PaneBox {
+            x: 35,
+            y: 1,
+            w: 10,
+            h: 1,
+        };
+        assert_eq!(a.on_mouse(MouseAction::Down, 38, 1), None);
+        assert_eq!(a.active, Some(1), "the click picked the second tab");
+        assert!(a.maximized, "and the layout stayed put");
+    }
+
+    /// Clicking the thread list while typing in a session hands the keyboard
+    /// back to the list — so ↓ and x act on rows, instead of x landing in the
+    /// connected pane.
+    #[test]
+    fn clicking_the_list_takes_the_keyboard_back_from_a_session() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions = LoadSessions::Loaded(vec![ConsoleSession {
+                name: "claude-one".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+                created_at: None,
+            }]);
+        }
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "claude-one".into();
+        a.sessions = vec![pane];
+        a.active = Some(0);
+        a.focus = ManageFocus::Session;
+        a.panes = panes_fixture();
+
+        let row = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "[S] claude-one")
+            .unwrap() as u16;
+        a.on_mouse(MouseAction::Down, 5, 3 + row);
+        assert_eq!(a.focus, ManageFocus::Tree, "the click took the keyboard");
+
+        // And x now ends the highlighted session instead of typing into it.
+        let effect = a.on_key(key(KeyCode::Char('x')));
+        assert!(
+            matches!(effect, Some(Effect::KillSession { ref session_name, .. }) if session_name == "claude-one"),
+            "{effect:?}"
+        );
+    }
+
+    /// The relay registers a session under its own name, not the one the
+    /// pane was minted with — so when the listing arrives, the pane adopts
+    /// the listed name and the placeholder collapses into the real row,
+    /// rather than both standing as duplicates.
+    #[test]
+    fn a_platform_listing_renames_the_pane_instead_of_duplicating() {
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "railway-t5soqz".into();
+        a.attach_session(pane, "ca_1".into());
+        assert_eq!(a.selected_row().unwrap().label, "[S] railway-t5soqz");
+
+        // The platform lists the same session under its own petname.
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "merry-daisy-ld9".into(),
+                kind: "SHELL".into(),
+                command: Some(
+                    "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
+                     \"$RAILWAY_DURABLE_SESSION_NAME\" 'My firs test'; printf 'x'"
+                        .into(),
+                ),
+                running: true,
+                attached: true,
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            }]),
+        );
+
+        assert_eq!(
+            a.sessions[0].durable_name, "merry-daisy-ld9",
+            "the pane took the listed name"
+        );
+        let rows = a.rows();
+        let threads: Vec<&Row> = rows
+            .iter()
+            .filter(|r| matches!(r.kind, RowKind::Session(..)))
+            .collect();
+        assert_eq!(threads.len(), 1, "one session, one row: {rows:#?}");
+        assert_eq!(threads[0].label, "[S] railway-ld9", "the name leads");
+        assert!(threads[0].note.is_empty(), "the orb and name are the row");
+        assert_eq!(
+            threads[0].status.as_deref(),
+            Some("connected"),
+            "and the pane counts as attached to it"
+        );
+        assert_eq!(
+            a.selected_row().unwrap().label,
+            "[S] railway-ld9",
+            "the cursor followed the rename"
+        );
+    }
+
+    /// A running agent with one listed, running session — the shape startup
+    /// auto-connect acts on.
+    fn app_with_listed_session() -> App {
+        let mut a = loaded_app();
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "merry-daisy-ld9".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            }]),
+        );
+        a
+    }
+
+    /// Coming up, every listed session on a running agent gets a background
+    /// attach: returned once, spinner on while it is in flight, and the pane
+    /// joins without stealing the keyboard when it opens.
+    #[test]
+    fn startup_auto_connects_listed_sessions_once() {
+        let mut a = app_with_listed_session();
+        assert_eq!(
+            a.take_auto_connects(),
+            vec![AutoConnect {
+                agent_id: "ca_1".into(),
+                agent_name: "nimble-otter".into(),
+                environment_id: "env_prod".into(),
+                session_name: "merry-daisy-ld9".into(),
+            }]
+        );
+        let rows = a.rows();
+        let row = rows
+            .iter()
+            .find(|r| matches!(r.kind, RowKind::Session(..)))
+            .unwrap();
+        assert_eq!(
+            row.status.as_deref(),
+            Some("connecting"),
+            "the spinner is on while the attach is in flight"
+        );
+        assert!(
+            a.take_auto_connects().is_empty(),
+            "one attempt per session per run"
+        );
+
+        // The pane opens quietly: the spinner becomes the connected dot, and
+        // focus, cursor and the welcome pane all stay put.
+        let cursor = a.cursor;
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "merry-daisy-ld9".into();
+        a.attach_session_background(pane, "ca_1".into());
+        assert!(a.connecting.is_empty());
+        assert_eq!(a.focus, ManageFocus::Tree, "no focus steal");
+        assert_eq!(a.active, None, "the pane waits to be picked");
+        assert_eq!(a.cursor, cursor, "no cursor jump");
+        let rows = a.rows();
+        let row = rows
+            .iter()
+            .find(|r| matches!(r.kind, RowKind::Session(..)))
+            .unwrap();
+        assert_eq!(row.status.as_deref(), Some("connected"));
+    }
+
+    /// A sleeping agent's sessions are neither auto-attached nor ever shown
+    /// green — a session can't be better off than the agent it runs on. The
+    /// same for an agent mid-operation: `sleeping…` on the orb means hands
+    /// off.
+    #[test]
+    fn a_sleeping_agents_sessions_are_never_green_or_auto_connected() {
+        let mut a = app_with_listed_session();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].status = "sleeping".into();
+        }
+        assert!(a.take_auto_connects().is_empty());
+        // Even a pane still open onto it does not make the row green.
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "merry-daisy-ld9".into();
+        a.sessions = vec![pane];
+        let rows = a.rows();
+        let row = rows
+            .iter()
+            .find(|r| matches!(r.kind, RowKind::Session(..)))
+            .unwrap();
+        assert_eq!(row.status, None, "not green while the agent sleeps");
+
+        // A pending op holds auto-connect off too, even while the platform
+        // still says running.
+        let mut b = app_with_listed_session();
+        b.ops.insert("ca_1".into(), AgentOp::Sleep.pending_label());
+        assert!(b.take_auto_connects().is_empty());
+    }
+
+    /// Auto-connect stays quiet where a connect couldn't: `railway code` came
+    /// for its one session, and an unregistered key would land every pane on
+    /// the relay's signup screen.
+    #[test]
+    fn auto_connect_waits_for_the_gates() {
+        let mut a = app_with_listed_session();
+        a.quit_when_done = true;
+        assert!(a.take_auto_connects().is_empty());
+
+        let mut b = app_with_listed_session();
+        b.ssh_key = SshKeyState::NeedsRegistration(offer());
+        assert!(b.take_auto_connects().is_empty());
+        // The gate clearing lets the next pass start it.
+        b.ssh_key = SshKeyState::Ready;
+        assert_eq!(b.take_auto_connects().len(), 1);
+    }
+
+    /// `x` closes our window onto a session; the next sweep must not reopen
+    /// what was deliberately closed.
+    #[test]
+    fn a_closed_pane_is_not_reopened_by_auto_connect() {
+        let mut a = app_with_listed_session();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "merry-daisy-ld9".into();
+        a.attach_session(pane, "ca_1".into());
+        assert!(a.take_auto_connects().is_empty(), "already attached");
+        drop(a.take_session(0));
+        assert!(a.take_auto_connects().is_empty(), "closed means closed");
+    }
+
+    /// Enter on a session whose attach is already in flight must not race a
+    /// second ssh onto the same session — and a failed background attempt
+    /// hands the row back to manual connects instead of retrying in a loop.
+    #[test]
+    fn a_connecting_session_refuses_a_second_attach() {
+        let mut a = app_with_listed_session();
+        assert_eq!(a.take_auto_connects().len(), 1);
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Session(..)))
+            .unwrap();
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert!(a.status.starts_with("Connecting"), "{}", a.status);
+
+        a.auto_connect_failed("merry-daisy-ld9", "relay said no");
+        assert!(a.connecting.is_empty());
+        assert!(
+            a.take_auto_connects().is_empty(),
+            "a failure is not retried in a loop"
+        );
+        let effect = a.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(effect, Some(Effect::Reattach { .. })),
+            "but connecting by hand still works: {effect:?}"
+        );
+    }
+
+    /// The cursor opens on New Session, so `t` there is a letter, not a
+    /// command. Retargeting is Ctrl-T everywhere.
     #[test]
     fn t_types_in_the_prompt_and_ctrl_t_retargets() {
         let mut a = app();
         a.on_key(key(KeyCode::Char('t')));
         a.on_key(key(KeyCode::Char('e')));
         assert_eq!(a.prompt, "te");
-        assert_eq!(a.screen, Screen::Menu);
+        assert_eq!(a.screen, Screen::Manage);
 
         a.on_key(ctrl('t'));
         assert_eq!(a.screen, Screen::TargetPick);
@@ -4872,7 +5574,7 @@ mod tests {
         a.on_key(key(KeyCode::Char('f')));
         assert_eq!(a.on_paste("ix the login bug\nthen deploy".into()), None);
         assert_eq!(a.prompt, "fix the login bug then deploy");
-        assert_eq!(a.screen, Screen::Menu, "a pasted newline is not Enter");
+        assert_eq!(a.screen, Screen::Manage, "a pasted newline is not Enter");
     }
 
     /// Where typing is refused, pasting is too; and off the prompt a paste
@@ -4880,11 +5582,11 @@ mod tests {
     #[test]
     fn a_paste_respects_prompt_focus_and_shell() {
         let mut a = app();
-        a.menu_focus = MenuFocus::Cards;
+        a.cursor = 3; // the projects tail header, not the launcher
         assert_eq!(a.on_paste("stray".into()), None);
-        assert_eq!(a.prompt, "", "cards are not a text box");
+        assert_eq!(a.prompt, "", "tree rows are not a text box");
 
-        a.menu_focus = MenuFocus::Prompt;
+        a.cursor = 0;
         a.harness = HARNESSES.len() - 1;
         assert!(a.shell_selected());
         assert_eq!(a.on_paste("stray".into()), None);
@@ -4897,7 +5599,7 @@ mod tests {
     /// The target chooser is the setup flow's project card, not a trip through
     /// the management tree: one list of places, enter, back to the prompt.
     #[test]
-    fn picking_a_target_returns_to_the_menu_with_it_set() {
+    fn picking_a_target_returns_to_the_tree_with_it_set() {
         let mut a = loaded_app();
         a.on_key(ctrl('t'));
         assert_eq!(a.screen, Screen::TargetPick);
@@ -4922,7 +5624,7 @@ mod tests {
             panic!("the choice should be saved");
         };
         assert_eq!(saved.project_id, "proj_1");
-        assert_eq!(a.screen, Screen::Menu);
+        assert_eq!(a.screen, Screen::Manage);
         assert!(a.target_pick.is_none());
         assert_eq!(a.default_project.as_deref(), Some("proj_1"));
         assert_eq!(a.target.unwrap().label(), "devtools/production");
@@ -5140,12 +5842,12 @@ mod tests {
         assert_eq!(a.on_mouse(MouseAction::Up, col, row), None);
     }
 
-    /// The prompt box is clickable: the cards take the keyboard when you move
-    /// down to them, and clicking the box is how you get it back.
+    /// The prompt box is clickable: wherever the cursor has wandered in the
+    /// tree, clicking the box puts the keyboard back in the prompt.
     #[test]
     fn clicking_the_prompt_box_takes_the_keyboard_back() {
         let mut a = app();
-        a.menu_focus = MenuFocus::Cards;
+        a.cursor = 3; // off the launcher, into the tree
         a.panes.prompt = PaneBox {
             x: 8,
             y: 10,
@@ -5154,66 +5856,30 @@ mod tests {
         };
 
         assert_eq!(a.on_mouse(MouseAction::Down, 20, 12), None);
-        assert_eq!(a.menu_focus, MenuFocus::Prompt);
+        assert_eq!(a.cursor, 0, "the click lands on the New Session row");
+        assert_eq!(a.focus, ManageFocus::Tree);
 
-        // And typing goes into it, rather than being read as a card shortcut.
+        // And typing goes into it, rather than being read as a tree hotkey.
         a.on_key(key(KeyCode::Char('h')));
         assert_eq!(a.prompt, "h");
     }
 
-    /// A card is a button: one click does the thing, rather than selecting it
-    /// and waiting for enter. A tree row is the other way round, because a row
-    /// is a thing you then act on.
+    /// Clicking the launcher pane must not hand focus to a session pane that
+    /// isn't there — the keyboard stays with the tree, where the prompt reads
+    /// it.
     #[test]
-    fn clicking_a_card_opens_it() {
+    fn clicking_the_launcher_pane_keeps_the_keyboard() {
         let mut a = app();
-        for (i, card) in a.panes.cards.iter_mut().enumerate() {
-            *card = PaneBox {
-                x: 8,
-                y: 20 + i as u16 * 2,
-                w: 74,
-                h: 1,
-            };
-        }
-
-        // The third card is Manage.
-        assert_eq!(a.on_mouse(MouseAction::Down, 20, 24), None);
-        assert_eq!(a.card, 2);
-        assert_eq!(a.menu_focus, MenuFocus::Cards);
-        assert_eq!(a.screen, Screen::Manage);
-    }
-
-    /// The gaps between cards belong to neither of them.
-    #[test]
-    fn clicking_between_cards_does_nothing() {
-        let mut a = app();
-        for (i, card) in a.panes.cards.iter_mut().enumerate() {
-            *card = PaneBox {
-                x: 8,
-                y: 20 + i as u16 * 2,
-                w: 74,
-                h: 1,
-            };
-        }
-        assert_eq!(a.on_mouse(MouseAction::Down, 20, 21), None);
-        assert_eq!(a.screen, Screen::Menu);
-        assert_eq!(a.menu_focus, MenuFocus::Prompt, "focus is untouched");
-    }
-
-    /// A card that is not on the menu is not clickable, even though its slot in
-    /// the fixed array is still there.
-    #[test]
-    fn a_hidden_setup_card_cannot_be_clicked() {
-        let mut a = app();
-        assert_eq!(a.cards().len(), 3, "setup is not on the menu");
-        a.panes.cards[3] = PaneBox {
-            x: 8,
-            y: 26,
-            w: 74,
-            h: 1,
+        a.panes.session_outer = PaneBox {
+            x: 34,
+            y: 2,
+            w: 64,
+            h: 20,
         };
-        assert_eq!(a.on_mouse(MouseAction::Down, 20, 26), None);
-        assert_eq!(a.screen, Screen::Menu);
+        assert_eq!(a.on_mouse(MouseAction::Down, 40, 5), None);
+        assert_eq!(a.focus, ManageFocus::Tree, "no session to type into");
+        a.on_key(key(KeyCode::Char('h')));
+        assert_eq!(a.prompt, "h");
     }
 
     /// ⌥f gives the session pane the screen, and gives it back.
@@ -5315,6 +5981,99 @@ mod tests {
 
         assert_eq!(a.reap_ended_sessions(), None);
         assert_eq!(a.sessions.len(), 1, "the pane stays for recovery");
+    }
+
+    /// A drop pulls the keyboard to its pane — the banner says "r
+    /// reconnects", and r has to mean that without a click first — but only
+    /// once: stepping back out with Esc sticks, however many times the reap
+    /// runs over the same corpse.
+    #[test]
+    fn a_dropped_connection_takes_focus_once() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        // The user has moved on to the tree when the connection dies.
+        a.focus = ManageFocus::Tree;
+        a.active = None;
+        a.sessions[0].end_dropped_for_test();
+
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.focus, ManageFocus::Session, "the drop took the keyboard");
+        assert_eq!(a.active, Some(0), "and showed the pane that dropped");
+
+        // r now means reconnect, immediately.
+        let effect = a.on_key(key(KeyCode::Char('r')));
+        assert!(
+            matches!(effect, Some(Effect::Reattach { .. })),
+            "r reconnects the dropped pane: {effect:?}"
+        );
+
+        // The same drop noticed again must not wrestle Esc for the keyboard.
+        let mut b = loaded_app();
+        b.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        b.sessions[0].end_dropped_for_test();
+        assert_eq!(b.reap_ended_sessions(), None);
+        assert_eq!(b.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(b.focus, ManageFocus::Tree, "esc stepped out");
+        assert_eq!(b.reap_ended_sessions(), None);
+        assert_eq!(b.focus, ManageFocus::Tree, "and it stays stepped out");
+    }
+
+    /// Esc-Esc inside a live session steps back out to the tree. A single
+    /// Esc belongs to the harness (menus, cancels), so only the quick second
+    /// tap is taken — and two slow Escapes are just two Escapes.
+    #[test]
+    fn double_esc_releases_a_focused_session() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        assert_eq!(a.focus, ManageFocus::Session);
+
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(
+            a.focus,
+            ManageFocus::Session,
+            "a single esc stays in the session"
+        );
+
+        // The quick second tap releases — and unfolds a maximized layout,
+        // since focus on an invisible tree helps nobody.
+        a.maximized = true;
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.focus, ManageFocus::Tree, "the double-tap steps out");
+        assert!(!a.maximized, "and brings the tree back");
+
+        // Spaced-out Escapes belong to the harness.
+        a.focus = ManageFocus::Session;
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        a.session_esc_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(2000));
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(
+            a.focus,
+            ManageFocus::Session,
+            "slow escapes belong to the harness"
+        );
+
+        // Any other key in between resets the tap.
+        assert_eq!(a.on_key(key(KeyCode::Char('a'))), None);
+        assert!(a.session_esc_at.is_none(), "typing broke the sequence");
+    }
+
+    /// A drop never steals the keyboard out from under a dialog — a y/n
+    /// confirm answered into the wrong place is how sessions get killed by
+    /// accident.
+    #[test]
+    fn a_drop_does_not_take_focus_from_a_dialog() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.focus = ManageFocus::Tree;
+        a.confirm = Some(PendingConfirm {
+            op: AgentOp::Delete,
+            agent_id: "ca_1".into(),
+            environment_id: "env_prod".into(),
+            agent_name: "nimble-otter".into(),
+        });
+        a.sessions[0].end_dropped_for_test();
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(a.focus, ManageFocus::Tree, "the dialog keeps the keyboard");
     }
 
     /// Ended but with the exit status still on its way: no call is made yet —
@@ -5581,6 +6340,7 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]);
         }
         a.attach_session(
@@ -5589,7 +6349,7 @@ mod tests {
         );
         a.sessions[0].mark_ended();
         a.focus = ManageFocus::Tree;
-        a.cursor = a.rows().iter().position(|r| r.label == "test").unwrap();
+        a.cursor = a.rows().iter().position(|r| r.label == "[S] test").unwrap();
 
         let effect = a.on_key(key(KeyCode::Enter));
         assert_eq!(
@@ -5621,9 +6381,10 @@ mod tests {
         assert_eq!(a.focus, ManageFocus::Session);
     }
 
-    /// So does leaving the screen.
+    /// So does Esc from the tree: with the pane maximized it restores the
+    /// layout first, and quits only from the restored screen.
     #[test]
-    fn escaping_to_the_menu_restores_the_tree() {
+    fn escaping_a_maximized_pane_restores_the_tree() {
         let mut a = loaded_app();
         a.attach_session(
             super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap(),
@@ -5631,9 +6392,18 @@ mod tests {
         );
         a.on_key(alt('f'));
         a.focus = ManageFocus::Tree;
-        a.on_key(key(KeyCode::Esc));
-        assert_eq!(a.screen, Screen::Menu);
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.screen, Screen::Manage);
         assert!(!a.maximized);
+        // With nothing maximized, Esc keeps walking up the chain instead of
+        // leaving: a thread hands the cursor back to the launcher.
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.cursor, 0);
     }
 
     /// Cancelling saves nothing — the default is only changed by choosing one.
@@ -5665,7 +6435,7 @@ mod tests {
         );
 
         a.on_key(key(KeyCode::Esc));
-        assert_eq!(a.screen, Screen::Menu);
+        assert_eq!(a.screen, Screen::Manage);
         assert_eq!(a.target.unwrap().label(), "devtools/production");
     }
 
@@ -5697,13 +6467,13 @@ mod tests {
         assert_eq!(req.prompt.as_deref(), Some("fix the tests"));
         assert_eq!(req.harness, "claude");
         assert_eq!(req.agent_id, None);
-        assert!(!req.force_new);
+        assert!(req.force_new, "each prompt gets a fresh agent");
     }
 
     /// Whitespace is not a prompt — it would seed the agent with nothing and
     /// look like a bug.
     #[test]
-    fn a_blank_prompt_is_no_prompt() {
+    fn a_blank_prompt_does_not_spend_an_agent() {
         let mut a = app();
         a.target = Some(Target {
             project_id: "p".into(),
@@ -5712,19 +6482,28 @@ mod tests {
             environment_name: "e".into(),
         });
         a.prompt = "   ".into();
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            None,
+            "no VM on a stray enter"
+        );
+        assert!(a.status.contains("Write a prompt"), "{}", a.status);
+
+        // Shell is the exception: its box says enter launches bare.
+        a.harness = HARNESSES.len() - 1;
         let Effect::Launch(req) = a.on_key(key(KeyCode::Enter)).unwrap() else {
             panic!("expected a launch");
         };
         assert_eq!(req.prompt, None);
+        assert!(req.force_new, "each launch is its own agent");
     }
 
     #[test]
-    fn shift_tab_cycles_the_harness_in_both_focuses() {
+    fn shift_tab_cycles_the_harness_on_the_prompt() {
         let mut a = app();
         assert_eq!(a.harness_name(), "claude");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "codex");
-        a.menu_focus = MenuFocus::Cards;
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "grok");
         a.on_key(key(KeyCode::BackTab));
@@ -5750,7 +6529,7 @@ mod tests {
     /// it is selected, keeps a draft typed for a real agent, and launches
     /// without one.
     #[test]
-    fn the_menu_prompt_goes_inert_on_shell() {
+    fn the_prompt_goes_inert_on_shell() {
         let mut a = app();
         a.target = Some(Target {
             project_id: "p".into(),
@@ -5813,7 +6592,7 @@ mod tests {
         let first = a.theme.slug;
         assert_eq!(a.on_key(alt('t')), None);
         assert_eq!(a.theme.slug, first, "the theme is ⌥s territory now");
-        assert_eq!(a.screen, Screen::Menu);
+        assert_eq!(a.screen, Screen::Manage);
 
         // And its composed form is plain text again, like any other
         // Option-composed character the TUI has no claim on.
@@ -5893,39 +6672,13 @@ mod tests {
         assert_eq!(a.screen, Screen::TargetPick);
     }
 
-    /// The two kinds of "new" are different things and say which is which: a
-    /// session on an agent you have, or a whole agent.
+    /// Finishing the wizard marks the app configured, so a re-run is offered
+    /// through ⌥s rather than pushed at every start.
     #[test]
-    fn the_menu_separates_a_new_session_from_a_new_agent() {
-        let labels: Vec<&str> = CARDS.iter().map(|(label, _)| *label).collect();
-        assert_eq!(
-            labels,
-            vec!["New Session", "New Cloud Agent", "Manage Cloud Agents"]
-        );
-    }
-
-    /// Setup is a card only while there is nothing set up. Once there is, it is
-    /// ⌥s — still one keypress away, but no longer a third of the menu.
-    #[test]
-    fn setup_is_a_card_only_until_it_has_been_answered() {
+    fn finishing_setup_marks_the_app_configured() {
         let mut a = app();
-        assert_eq!(
-            a.cards().iter().map(|(l, _)| *l).collect::<Vec<_>>(),
-            vec!["New Session", "New Cloud Agent", "Manage Cloud Agents"],
-            "already configured"
-        );
-
         a.configured = false;
-        assert_eq!(
-            a.cards().last().map(|(l, _)| *l),
-            Some("Setup"),
-            "setup joins the end of the list"
-        );
-
-        // Picking it and finishing takes the card away again.
-        a.menu_focus = MenuFocus::Cards;
-        a.card = a.cards().len() - 1;
-        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        a.start_wizard(false);
         assert_eq!(a.screen, Screen::Setup);
         let wizard = a.wizard.as_mut().unwrap();
         wizard.step = crate::commands::cloud_agent::tui::wizard::Step::Theme;
@@ -5934,23 +6687,7 @@ mod tests {
             Some(Effect::SaveSetup(_))
         ));
         assert!(a.configured);
-        assert_eq!(a.cards().len(), CARDS.len());
-    }
-
-    /// The cards carry no letters, so the letters do nothing — including the
-    /// ones they used to be bound to.
-    #[test]
-    fn the_cards_have_no_letter_shortcuts() {
-        for letter in ['n', 'm'] {
-            let mut a = app();
-            a.menu_focus = MenuFocus::Cards;
-            assert_eq!(a.on_key(key(KeyCode::Char(letter))), None);
-            assert_eq!(a.screen, Screen::Menu, "{letter} must not open a card");
-
-            let mut b = app();
-            b.on_key(alt(letter));
-            assert_eq!(b.screen, Screen::Menu, "⌥{letter} must not open a card");
-        }
+        assert_eq!(a.screen, Screen::Manage, "setup lands back on the tree");
     }
 
     /// Settings keeps the chord setup had, from either focus and mid-prompt.
@@ -6040,152 +6777,134 @@ mod tests {
         let mut a = app();
         a.on_key(alt('s'));
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
-        assert_eq!(a.screen, Screen::Menu);
+        assert_eq!(a.screen, Screen::Manage);
         assert!(a.settings.is_none());
     }
 
+    /// ←/→ move through the draft, and editing happens at the cursor — a typo
+    /// mid-sentence is fixed in place, not by erasing back to it.
     #[test]
-    fn card_shortcuts_and_setup() {
+    fn arrow_keys_move_the_prompt_cursor() {
         let mut a = app();
-        a.menu_focus = MenuFocus::Cards;
-        a.card = 2;
-        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
-        assert_eq!(a.screen, Screen::Manage);
+        for c in "fix bug".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        for _ in 0..3 {
+            a.on_key(key(KeyCode::Left));
+        }
+        a.on_key(key(KeyCode::Char('a')));
+        assert_eq!(a.prompt, "fix abug");
+        a.on_key(key(KeyCode::Backspace));
+        assert_eq!(a.prompt, "fix bug");
+        a.on_key(key(KeyCode::Home));
+        a.on_key(key(KeyCode::Right));
+        a.on_key(key(KeyCode::Backspace));
+        assert_eq!(a.prompt, "ix bug");
+        a.on_key(key(KeyCode::End));
+        a.on_key(key(KeyCode::Char('!')));
+        assert_eq!(a.prompt, "ix bug!");
+        // The cursor never runs past either end.
+        for _ in 0..20 {
+            a.on_key(key(KeyCode::Right));
+        }
+        assert_eq!(a.prompt_cursor, a.prompt.chars().count());
     }
 
-    /// New Agent makes a VM in the target; it never reuses one.
+    /// A paste lands at the cursor, like typing does.
     #[test]
-    fn new_agent_forces_a_fresh_vm_in_the_target() {
-        let mut a = loaded_app();
-        a.screen = Screen::Menu;
-        a.target = Some(Target {
-            project_id: "proj_1".into(),
-            project_name: "devtools".into(),
-            environment_id: "env_prod".into(),
-            environment_name: "production".into(),
-        });
-        a.menu_focus = MenuFocus::Cards;
-        a.card = 1;
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("expected a launch");
-        };
-        assert!(req.force_new, "a new agent, not the one already there");
-        assert!(!req.new_session);
-        assert_eq!(req.agent_id, None);
-        assert_eq!(req.environment_id, "env_prod");
-    }
-
-    /// One agent in the target is not a question, so New Session does not ask
-    /// one — it starts a second session on the agent that is there.
-    #[test]
-    fn new_session_with_one_agent_skips_the_picker() {
-        let mut a = loaded_app();
-        a.screen = Screen::Menu;
-        a.target = Some(Target {
-            project_id: "proj_1".into(),
-            project_name: "devtools".into(),
-            environment_id: "env_prod".into(),
-            environment_name: "production".into(),
-        });
-        a.prompt = "fix the tests".into();
-        a.menu_focus = MenuFocus::Cards;
-        a.card = 0;
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("expected a launch");
-        };
-        assert_eq!(a.screen, Screen::Menu, "no card to answer");
-        assert!(req.new_session, "a session, not a VM");
-        assert!(!req.force_new);
-        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
-        assert_eq!(req.prompt.as_deref(), Some("fix the tests"));
-    }
-
-    /// Several agents is a question, and gets the same card the target uses.
-    #[test]
-    fn new_session_with_several_agents_asks_which_one() {
-        let mut a = loaded_app();
-        let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents else {
-            panic!("the fixture loads agents");
-        };
-        let mut second = agents[0].clone();
-        second.id = "ca_2".into();
-        second.name = "brisk-heron".into();
-        agents.push(second);
-        a.screen = Screen::Menu;
-        a.target = Some(Target {
-            project_id: "proj_1".into(),
-            project_name: "devtools".into(),
-            environment_id: "env_prod".into(),
-            environment_name: "production".into(),
-        });
-        a.menu_focus = MenuFocus::Cards;
-        a.card = 0;
-        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
-        assert_eq!(a.screen, Screen::AgentPick);
-
-        a.on_key(key(KeyCode::Down));
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("expected a launch");
-        };
-        assert_eq!(a.screen, Screen::Menu);
-        assert!(a.agent_pick.is_none());
-        assert_eq!(req.agent_id.as_deref(), Some("ca_2"));
-        assert!(req.new_session);
-    }
-
-    /// Nothing to put a session on says so, rather than quietly making a VM —
-    /// which is the other card, and costs money.
-    #[test]
-    fn new_session_with_no_agents_says_so_instead_of_making_one() {
+    fn a_paste_lands_at_the_cursor() {
         let mut a = app();
-        a.tree[0].projects[0].envs[0].agents = Load::Loaded(Vec::new());
-        a.target = Some(Target {
-            project_id: "proj_1".into(),
-            project_name: "devtools".into(),
-            environment_id: "env_prod".into(),
-            environment_name: "production".into(),
-        });
-        a.menu_focus = MenuFocus::Cards;
-        a.card = 0;
-        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
-        assert_eq!(a.screen, Screen::Menu);
-        assert!(a.status.contains("No cloud agents"), "{}", a.status);
-        assert!(a.status.contains("New Cloud Agent"), "{}", a.status);
+        for c in "fix the".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        for _ in 0..3 {
+            a.on_key(key(KeyCode::Left));
+        }
+        a.on_paste("up ".into());
+        assert_eq!(a.prompt, "fix up the");
     }
 
-    /// And an environment that has not answered yet is "not yet", not "none".
+    /// Sessions are named universally by `harness-<random>`: the harness is
+    /// read off the launch line's binary, and a relay petname folds down to
+    /// its random suffix. No prompt parsing — the task lives in the detail
+    /// card's command line, not the name.
     #[test]
-    fn new_session_waits_for_the_environment_to_answer() {
-        let mut a = app();
-        a.target = Some(Target {
-            project_id: "proj_1".into(),
-            project_name: "devtools".into(),
-            environment_id: "env_prod".into(),
-            environment_name: "production".into(),
-        });
-        a.menu_focus = MenuFocus::Cards;
-        a.card = 0;
-        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
-        assert!(a.status.contains("Still looking"), "{}", a.status);
+    fn session_names_are_harness_led() {
+        let minted = ConsoleSession {
+            name: "claude-one".into(),
+            kind: "SHELL".into(),
+            command: Some(
+                "export PATH=/x; export RAILWAY_CODE_AUTOSTARTED=1; \
+                 claude 'fix the login bug'; printf 'x'"
+                    .into(),
+            ),
+            running: true,
+            attached: false,
+            created_at: None,
+        };
+        assert_eq!(
+            minted.short_name(),
+            "claude-one",
+            "a minted name already leads with its harness — and the prompt \
+             stays out of it"
+        );
+
+        // The relay names sessions itself; the harness is prefixed onto the
+        // petname's random suffix, flags and prompt ignored alike.
+        let renamed = ConsoleSession {
+            name: "merry-daisy-ld9".into(),
+            kind: "SHELL".into(),
+            command: Some(
+                "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
+                 \"$RAILWAY_DURABLE_SESSION_NAME\" 'ship the release'; printf 'x'"
+                    .into(),
+            ),
+            running: true,
+            attached: false,
+            created_at: None,
+        };
+        assert_eq!(renamed.short_name(), "railway-ld9");
+
+        // No command on record: the name stands as it is.
+        let unknown = ConsoleSession {
+            name: "quiet-depot-x7v".into(),
+            kind: "SHELL".into(),
+            command: None,
+            running: true,
+            attached: false,
+            created_at: None,
+        };
+        assert_eq!(unknown.short_name(), "quiet-depot-x7v");
     }
 
-    /// With nowhere to run, New Session asks where before it asks which.
     #[test]
-    fn new_session_without_a_target_asks_for_one_first() {
-        let mut a = app();
-        a.menu_focus = MenuFocus::Cards;
-        a.card = 0;
-        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
-        assert_eq!(a.screen, Screen::TargetPick);
-    }
-
-    #[test]
-    fn esc_clears_a_draft_before_it_quits() {
+    fn esc_walks_home_and_q_quits_there() {
         let mut a = app();
         a.prompt = "half a thought".into();
+        // One step per press: the draft first…
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
         assert!(a.prompt.is_empty());
-        assert_eq!(a.on_key(key(KeyCode::Esc)), Some(Effect::Quit));
+        // …then the prompt lets go of the keyboard…
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert!(!a.prompt_focused, "home: letters are keys again");
+        // …and Esc never quits — q does, now that it is a key.
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.on_key(key(KeyCode::Char('q'))), Some(Effect::Quit));
+    }
+
+    /// From a thread, Esc returns to the launcher with the prompt focused —
+    /// the same place the screen opens on.
+    #[test]
+    fn esc_from_a_thread_returns_to_the_launcher() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.cursor, 0, "back on the launcher");
+        assert!(a.new_session_selected(), "with the prompt focused");
     }
 
     /// The loading screen has to show the task, not just a spinner — that is
@@ -6339,13 +7058,20 @@ mod tests {
         // not queue a duplicate.
         assert_eq!(a.on_key(key(KeyCode::Char('s'))), None);
         let row = a.selected_row().unwrap();
-        assert_eq!(row.note, "sleeping…");
+        assert_eq!(
+            row.status.as_deref(),
+            Some("sleeping…"),
+            "the orb carries the op"
+        );
 
         // Accepted is not arrived: the label stays up and the environment keeps
         // being asked until the agent says it is actually asleep.
         a.agent_op_finished("ca_1", "env_prod", AgentOp::Sleep, None);
         assert!(a.watching_agents());
-        assert_eq!(a.selected_row().unwrap().note, "sleeping…");
+        assert_eq!(
+            a.selected_row().unwrap().status.as_deref(),
+            Some("sleeping…")
+        );
 
         a.agents_loaded(
             (0, 0, 0),
@@ -6353,7 +7079,10 @@ mod tests {
         );
         assert!(!a.watching_agents(), "it arrived");
         assert!(a.ops.is_empty());
-        assert_eq!(a.selected_row().unwrap().note, "sleeping");
+        assert_eq!(
+            a.selected_row().unwrap().status.as_deref(),
+            Some("sleeping")
+        );
     }
 
     /// The bug this exists for: a wake is accepted long before the VM is up,
@@ -6388,7 +7117,7 @@ mod tests {
             (0, 0, 0),
             Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
         );
-        assert_eq!(a.selected_row().unwrap().note, "waking…");
+        assert_eq!(a.selected_row().unwrap().status.as_deref(), Some("waking…"));
         assert!(a.watching_agents(), "and it keeps asking");
         assert!(a.watch_tick().is_some(), "by refetching the environment");
 
@@ -6397,7 +7126,7 @@ mod tests {
             (0, 0, 0),
             Ok(vec![agent("ca_1", "nimble-otter", "starting")]),
         );
-        assert_eq!(a.selected_row().unwrap().note, "waking…");
+        assert_eq!(a.selected_row().unwrap().status.as_deref(), Some("waking…"));
         assert!(a.watching_agents());
 
         a.agents_loaded(
@@ -6406,7 +7135,7 @@ mod tests {
         );
         assert!(!a.watching_agents());
         assert!(a.ops.is_empty());
-        assert_eq!(a.selected_row().unwrap().note, "running");
+        assert_eq!(a.selected_row().unwrap().status.as_deref(), Some("running"));
     }
 
     /// An agent that never arrives stops being waited on, and the row goes back
@@ -6451,11 +7180,9 @@ mod tests {
     #[test]
     fn lifecycle_keys_need_an_agent_row() {
         let mut a = loaded_app();
-        a.cursor = a
-            .rows()
-            .iter()
-            .position(|r| matches!(r.kind, RowKind::Group(..)))
-            .unwrap();
+        // Home: letters are keys, but there is no agent under the cursor.
+        a.cursor = 0;
+        a.prompt_focused = false;
         assert_eq!(a.on_key(key(KeyCode::Char('d'))), None);
         assert!(a.confirm.is_none());
         assert!(a.status.contains("Select an agent"));
@@ -6492,14 +7219,18 @@ mod tests {
             Ok(vec![agent("ca_new", "just-created", "starting")]),
         );
 
-        let note_for = |a: &App| {
+        let status_for = |a: &App| {
             a.rows()
                 .into_iter()
                 .find(|r| r.label == "just-created")
                 .unwrap()
-                .note
+                .status
         };
-        assert_eq!(note_for(&a), "starting", "no pane yet: report what we know");
+        assert_eq!(
+            status_for(&a).as_deref(),
+            Some("starting"),
+            "no pane yet: report what we know"
+        );
 
         a.attach_session(
             super::super::session::Session::for_test("ca_new", "just-created").unwrap(),
@@ -6507,8 +7238,8 @@ mod tests {
         );
 
         assert_eq!(
-            note_for(&a),
-            "running",
+            status_for(&a).as_deref(),
+            Some("running"),
             "a live pane is proof the agent is up, whatever the projection says"
         );
     }
@@ -6544,8 +7275,9 @@ mod tests {
                 .into_iter()
                 .find(|r| r.label == "nimble-otter")
                 .unwrap()
-                .note,
-            "starting"
+                .status
+                .as_deref(),
+            Some("starting")
         );
     }
 
@@ -6783,6 +7515,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: true,
+                    created_at: None,
                 },
                 ConsoleSession {
                     name: "claude-two".into(),
@@ -6790,6 +7523,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: true,
+                    created_at: None,
                 },
             ]);
         }
@@ -6804,7 +7538,7 @@ mod tests {
         let two = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-two")
+            .position(|r| r.label == "[S] claude-two")
             .unwrap();
         a.cursor = two - 1;
         a.on_key(key(KeyCode::Down));
@@ -6815,52 +7549,6 @@ mod tests {
         assert_eq!(a.on_key(key(KeyCode::Enter)), None);
         assert_eq!(a.focus, ManageFocus::Session);
         assert_eq!(a.sessions.len(), 2, "no new session was opened");
-    }
-
-    /// `n` means different things depending on what is selected, and getting
-    /// it backwards either spends a VM or refuses to open a second session.
-    #[test]
-    fn n_makes_a_session_on_an_agent_and_an_agent_on_a_project() {
-        let mut a = loaded_app();
-
-        // On an agent: another session on that agent, no new VM.
-        a.cursor = a
-            .rows()
-            .iter()
-            .position(|r| r.label == "nimble-otter")
-            .unwrap();
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Char('n'))) else {
-            panic!("expected a launch");
-        };
-        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
-        assert!(!req.force_new, "must not create a second agent");
-        assert!(req.new_session, "must not reuse the open pane");
-        assert!(req.wants_new_session());
-
-        // On a group header — the environment's stand-in: a whole new agent.
-        a.cursor = a
-            .rows()
-            .iter()
-            .position(|r| matches!(r.kind, RowKind::Group(..)))
-            .unwrap();
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Char('n'))) else {
-            panic!("expected a launch");
-        };
-        assert!(req.force_new);
-        assert_eq!(req.agent_id, None);
-        assert_eq!(req.environment_id, "env_prod");
-
-        // On a project in the tail: a new agent in its first environment, and
-        // it says so.
-        let mut b = ordering_app();
-        b.screen = Screen::Manage;
-        b.cursor = b.rows().iter().position(|r| r.label == "Alpha").unwrap();
-        let Some(Effect::Launch(req)) = b.on_key(key(KeyCode::Char('n'))) else {
-            panic!("expected a launch");
-        };
-        assert!(req.force_new);
-        assert_eq!(req.environment_id, "p2-prod");
-        assert!(b.status.contains("production"), "{}", b.status);
     }
 
     /// Clicking a row with children opens it, and clicking again closes it —
@@ -6938,7 +7626,7 @@ mod tests {
     /// Clicking a session that is not connected says so rather than silently
     /// spending an ssh.
     #[test]
-    fn clicking_a_disconnected_session_prompts_to_reattach() {
+    fn double_clicking_a_disconnected_session_reattaches() {
         let mut a = loaded_app();
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].expanded = true;
@@ -6948,24 +7636,28 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]);
         }
         a.panes = panes_fixture();
         let row = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap();
-        a.on_mouse(MouseAction::Down, 5, 3 + row as u16);
-        assert_eq!(a.focus, ManageFocus::Tree);
-        assert!(a.status.contains("enter to reattach"), "{}", a.status);
+        assert_eq!(a.on_mouse(MouseAction::Down, 5, 3 + row as u16), None);
+        let effect = a.on_mouse(MouseAction::Down, 5, 3 + row as u16);
+        assert!(
+            matches!(effect, Some(Effect::Reattach { .. })),
+            "a double click connects: {effect:?}"
+        );
     }
 
     /// The reattach prompt answers the click that raised it: clicking a
     /// connected session afterwards clears it, the same as a keypress would,
     /// instead of leaving "not connected" standing over a connected pane.
     #[test]
-    fn clicking_a_connected_session_clears_the_reattach_prompt() {
+    fn one_click_selects_and_a_double_click_connects() {
         let mut a = loaded_app();
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].expanded = true;
@@ -6976,6 +7668,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: true,
+                    created_at: None,
                 },
                 ConsoleSession {
                     name: "claude-two".into(),
@@ -6983,6 +7676,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: false,
+                    created_at: None,
                 },
             ]);
         }
@@ -6992,22 +7686,32 @@ mod tests {
         a.active = Some(0);
         a.panes = panes_fixture();
 
+        // A disconnected sibling: one click only selects and says how to
+        // connect; the second click (a double) reattaches.
         let two = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-two")
+            .position(|r| r.label == "[S] claude-two")
             .unwrap();
-        a.on_mouse(MouseAction::Down, 5, 3 + two as u16);
-        assert!(a.status.contains("enter to reattach"), "{}", a.status);
+        assert_eq!(a.on_mouse(MouseAction::Down, 5, 3 + two as u16), None);
+        assert_eq!(a.focus, ManageFocus::Tree, "the list keeps the keyboard");
+        assert!(a.status.contains("Double-click"), "{}", a.status);
+        let effect = a.on_mouse(MouseAction::Down, 5, 3 + two as u16);
+        assert!(
+            matches!(effect, Some(Effect::Reattach { .. })),
+            "{effect:?}"
+        );
 
         let one = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap();
         a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
-        assert!(a.status.is_empty(), "{}", a.status);
-        assert_eq!(a.active, Some(0));
+        assert_eq!(a.active, Some(0), "one click shows the open pane");
+        assert_eq!(a.focus, ManageFocus::Tree, "without stealing the keys");
+        a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
+        assert_eq!(a.focus, ManageFocus::Session, "a double click connects");
     }
 
     /// Enter on a project toggles it: the first press opens it straight
@@ -7050,9 +7754,10 @@ mod tests {
     /// ⌥n floats the agent picker over the tree; enter launches the same new
     /// session `n` would have made, on the harness just chosen.
     #[test]
-    fn alt_n_picks_a_harness_then_launches() {
+    fn n_picks_a_harness_then_makes_a_new_agent() {
         let mut a = app();
         a.screen = Screen::Manage;
+        a.prompt_focused = false; // home: n is a key, not a letter
         a.target = Some(Target {
             project_id: "p1".into(),
             project_name: "devtools".into(),
@@ -7060,7 +7765,7 @@ mod tests {
             environment_name: "production".into(),
         });
         let opened_on = a.harness;
-        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.on_key(key(KeyCode::Char('n'))), None);
         assert_eq!(a.screen, Screen::HarnessPick);
         assert_eq!(
             a.harness_pick,
@@ -7078,11 +7783,33 @@ mod tests {
             req.harness, HARNESSES[picked],
             "the picked harness rides along"
         );
+        assert!(req.force_new, "a fresh agent, like the dashboard's New");
+        assert_eq!(req.agent_id, None);
 
         // Esc just closes it.
-        a.on_key(alt('n'));
+        a.on_key(key(KeyCode::Char('n')));
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
         assert_eq!(a.screen, Screen::Manage);
+    }
+
+    /// ⌥n skips the picker: a new agent immediately, on whatever harness is
+    /// already selected — the quick create.
+    #[test]
+    fn alt_n_quick_creates_a_new_agent() {
+        let mut a = app();
+        a.screen = Screen::Manage;
+        a.target = Some(Target {
+            project_id: "p1".into(),
+            project_name: "devtools".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        let Some(Effect::Launch(req)) = a.on_key(alt('n')) else {
+            panic!("expected a launch");
+        };
+        assert!(req.force_new);
+        assert_eq!(req.agent_id, None);
+        assert_eq!(req.harness, a.harness_name());
     }
 
     /// ⌥p floats the menu's prompt box over the tree: type, shift+tab to
@@ -7160,16 +7887,17 @@ mod tests {
     /// ⌥n's picker offers shell like any agent — last in the list — and
     /// picking it makes the same promptless session `n` would.
     #[test]
-    fn alt_n_offers_shell_last() {
+    fn the_picker_offers_shell_last() {
         let mut a = app();
         a.screen = Screen::Manage;
+        a.prompt_focused = false; // home: n is a key, not a letter
         a.target = Some(Target {
             project_id: "p1".into(),
             project_name: "devtools".into(),
             environment_id: "env_prod".into(),
             environment_name: "production".into(),
         });
-        a.on_key(alt('n'));
+        a.on_key(key(KeyCode::Char('n')));
         for _ in 0..HARNESSES.len() {
             a.on_key(key(KeyCode::Down));
         }
@@ -7184,6 +7912,7 @@ mod tests {
         };
         assert_eq!(req.harness, "shell");
         assert_eq!(req.prompt, None);
+        assert!(req.force_new, "the picker makes a new agent");
     }
 
     /// The launchers work from inside a session, which is where the thought
@@ -7227,11 +7956,8 @@ mod tests {
             "closing the card returns to typing in the session"
         );
 
-        // Same for the picker.
-        assert_eq!(a.on_key(alt('n')), None);
-        assert_eq!(a.screen, Screen::HarnessPick);
-        a.on_key(key(KeyCode::Esc));
-        assert_eq!(a.screen, Screen::Manage);
+        // ⌥n reaches past the session too — straight to a new agent.
+        assert!(matches!(a.on_key(alt('n')), Some(Effect::Launch(_))));
     }
 
     /// Releasing a focused session with ⇧esc also un-maximizes: focus moving
@@ -7316,16 +8042,17 @@ mod tests {
                 running: true,
                 // The agent says someone is attached; that someone is not us.
                 attached: true,
+                created_at: None,
             }]);
         }
         let row = |a: &App| {
             a.rows()
                 .into_iter()
-                .find(|r| r.label == "claude-one")
+                .find(|r| r.label == "[S] claude-one")
                 .unwrap()
         };
         assert_eq!(row(&a).status, None, "not open here, so no marker");
-        assert!(row(&a).note.is_empty(), "and nothing else to say");
+        assert!(row(&a).note.is_empty(), "the project lives in the card");
 
         let mut pane = session("ca_1", "nimble-otter");
         pane.durable_name = "claude-one".into();
@@ -7347,12 +8074,13 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]);
         }
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap();
 
         assert_eq!(
@@ -7368,18 +8096,17 @@ mod tests {
         // reap the processes, and a row that reads "running" in the meantime
         // looks like the key did nothing.
         assert!(
-            !a.rows().iter().any(|r| r.label == "claude-one"),
+            !a.rows().iter().any(|r| r.label == "[S] claude-one"),
             "the session should be gone from the tree immediately"
         );
         assert!(
-            a.rows()
-                .iter()
-                .any(|r| r.label == "no sessions on this agent")
+            a.rows().iter().any(|r| r.label == "nimble-otter"),
+            "with its only thread ending, the agent row returns"
         );
 
         // A kill that fails puts it back rather than hiding a live session.
         a.session_killed("claude-one", Some("permission denied".into()));
-        assert!(a.rows().iter().any(|r| r.label == "claude-one"));
+        assert!(a.rows().iter().any(|r| r.label == "[S] claude-one"));
         assert!(a.status.contains("permission denied"));
     }
 
@@ -7403,10 +8130,11 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]),
         );
         assert!(a.ending.contains("claude-one"));
-        assert!(!a.rows().iter().any(|r| r.label == "claude-one"));
+        assert!(!a.rows().iter().any(|r| r.label == "[S] claude-one"));
 
         // Gone from the agent: stop tracking it.
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(Vec::new()));
@@ -7426,6 +8154,7 @@ mod tests {
                 command: None,
                 running: true,
                 attached: true,
+                created_at: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
@@ -7438,7 +8167,7 @@ mod tests {
         let row = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap() as u16;
 
         a.on_mouse(MouseAction::Down, 5, 3 + row);
@@ -7492,19 +8221,15 @@ mod tests {
     /// `n` on an agent pins that agent, so the launch cannot wander off and
     /// create a second VM.
     #[test]
-    fn n_on_an_agent_pins_it_to_that_agent() {
+    fn n_opens_the_picker_from_any_row() {
         let mut a = loaded_app();
         a.cursor = a
             .rows()
             .iter()
             .position(|r| r.label == "nimble-otter")
             .unwrap();
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Char('n'))) else {
-            panic!("expected a launch");
-        };
-        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
-        assert!(!req.force_new);
-        assert!(req.new_session);
+        assert_eq!(a.on_key(key(KeyCode::Char('n'))), None);
+        assert_eq!(a.screen, Screen::HarnessPick, "n is the New Agent button");
     }
 
     /// `?` opens the key list, and the next key just puts it away — reading
@@ -7540,12 +8265,13 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]);
         }
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap();
         assert_eq!(
             a.on_key(key(KeyCode::Char('c'))),
@@ -7556,11 +8282,10 @@ mod tests {
             })
         );
 
-        a.cursor = a
-            .rows()
-            .iter()
-            .position(|r| r.label == "nimble-otter")
-            .unwrap();
+        // Off any session row — home, where letters are keys — c has nothing
+        // to copy.
+        a.cursor = 0;
+        a.prompt_focused = false;
         assert_eq!(a.on_key(key(KeyCode::Char('c'))), None);
         assert!(a.status.contains("Select a session"), "{}", a.status);
     }
@@ -7596,9 +8321,10 @@ mod tests {
                 command: None,
                 running: true,
                 attached: true,
+                created_at: None,
             }]),
         );
-        assert!(a.rows().iter().any(|r| r.label == "claude-one"));
+        assert!(a.rows().iter().any(|r| r.label == "[S] claude-one"));
     }
 
     /// An agent known to have nothing running is left closed: expanding it
@@ -7637,25 +8363,32 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
         pane.durable_name = "claude-one".into();
         a.attach_session(pane, "ca_1".into());
 
-        assert_eq!(a.selected_row().unwrap().label, "claude-one");
+        assert_eq!(a.selected_row().unwrap().label, "[S] claude-one");
         assert!(a.pending_select.is_none(), "the agent fallback was dropped");
     }
 
-    /// A brand-new session has no row yet, so the agent holds the cursor until
-    /// its sessions arrive — then the session takes it.
+    /// A brand-new session doesn't wait for the platform to list it: the pane
+    /// we just attached is proof, so its row appears — selected and connected
+    /// — the moment the launch lands.
     #[test]
-    fn a_new_session_takes_the_cursor_once_its_row_exists() {
+    fn a_new_session_takes_the_cursor_at_once() {
         let mut a = loaded_app();
         let mut pane = session("ca_1", "nimble-otter");
         pane.durable_name = "claude-new".into();
         a.attach_session(pane, "ca_1".into());
-        assert_eq!(a.selected_row().unwrap().label, "nimble-otter");
+        let row = a.selected_row().unwrap();
+        assert_eq!(
+            row.label, "[S] claude-new",
+            "adopted before the platform lists it"
+        );
+        assert_eq!(row.status.as_deref(), Some("connected"));
 
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].expanded = true;
@@ -7669,9 +8402,10 @@ mod tests {
                 command: None,
                 running: true,
                 attached: true,
+                created_at: None,
             }]),
         );
-        assert_eq!(a.selected_row().unwrap().label, "claude-new");
+        assert_eq!(a.selected_row().unwrap().label, "[S] claude-new");
     }
 
     /// A session with no pane reconnects directly — no provisioning flow for a
@@ -7687,12 +8421,13 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]);
         }
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap();
 
         assert_eq!(
@@ -7720,12 +8455,13 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]);
         }
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap();
         assert_eq!(a.on_key(key(KeyCode::Enter)), None);
         assert!(a.status.contains("press w to wake"), "{}", a.status);
@@ -7734,16 +8470,15 @@ mod tests {
     /// The count of sessions rides beside the agent's status, like a project's
     /// agent count.
     #[test]
-    fn agent_rows_carry_their_session_count() {
+    fn sessions_nest_under_their_agent() {
         let mut a = loaded_app();
-        let note = |a: &App| {
-            a.rows()
-                .into_iter()
-                .find(|r| r.label == "nimble-otter")
-                .unwrap()
-                .note
-        };
-        assert_eq!(note(&a), "running", "no count before sessions are known");
+        let rows = a.rows();
+        let agent = rows.iter().find(|r| r.label == "nimble-otter").unwrap();
+        assert_eq!(
+            agent.status.as_deref(),
+            Some("running"),
+            "the orb carries the status"
+        );
 
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].sessions = LoadSessions::Loaded(vec![
@@ -7753,6 +8488,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: false,
+                    created_at: None,
                 },
                 // A finished provisioning exec is not a session anyone has.
                 ConsoleSession {
@@ -7761,10 +8497,31 @@ mod tests {
                     command: None,
                     running: false,
                     attached: false,
+                    created_at: None,
                 },
             ]);
         }
-        assert_eq!(note(&a), "running (1)");
+        let rows = a.rows();
+        let agent = rows
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .expect("the agent heads its threads");
+        let thread = rows
+            .iter()
+            .position(|r| r.label == "[S] claude-one")
+            .expect("the running session is a child thread");
+        assert_eq!(thread, agent + 1, "nested right under it: {rows:#?}");
+        assert_eq!(rows[thread].depth, 1);
+        assert!(
+            !rows.iter().any(|r| r.label.contains("setup")),
+            "a finished provisioning exec is not a thread"
+        );
+        assert_eq!(
+            rows[agent].status.as_deref(),
+            Some("running"),
+            "the orb carries the status; no tag rides beside it"
+        );
+        assert!(rows[agent].note.is_empty());
     }
 
     /// Counts appear without expanding every agent: running ones are
@@ -7843,9 +8600,10 @@ mod tests {
         let mut a = ordering_app();
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
         let rows = a.rows();
+        // The last rule: the first one sits under the New Session row.
         let sep = rows
             .iter()
-            .position(|r| matches!(r.kind, RowKind::Separator))
+            .rposition(|r| matches!(r.kind, RowKind::Separator))
             .expect("a rule under the groups");
         assert!(
             matches!(rows[sep - 1].kind, RowKind::Agent(..)),
@@ -7863,15 +8621,19 @@ mod tests {
         ));
     }
 
-    /// With no agents there are no groups, so there is nothing to rule off.
+    /// With no agents there are no groups, so the tail gets no rule of its
+    /// own — the only one left is the launcher's, right under New Session.
     #[test]
     fn no_groups_means_no_rule() {
         let a = ordering_app();
-        assert!(
-            !a.rows()
-                .iter()
-                .any(|r| matches!(r.kind, RowKind::Separator))
-        );
+        let seps: Vec<usize> = a
+            .rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.kind, RowKind::Separator))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(seps, vec![1], "only the launcher's rule");
     }
 
     /// Alphabetical, case-insensitively — a capitalised project should not
@@ -7885,20 +8647,20 @@ mod tests {
     /// A project that gains agents leaves the tail and leads the tree as a
     /// group — groups with something running first.
     #[test]
-    fn projects_with_agents_become_groups() {
+    fn projects_with_agents_lead_the_thread_list() {
         let mut a = ordering_app();
         // `zebra` gains a sleeping agent, `mono` a running one.
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "sleeping")]));
         a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_2", "two", "running")]));
-        let groups: Vec<String> = a
+        let threads: Vec<String> = a
             .rows()
             .iter()
-            .filter(|r| matches!(r.kind, RowKind::Group(..)))
+            .filter(|r| matches!(r.kind, RowKind::Agent(..)))
             .map(|r| r.label.clone())
             .collect();
-        assert_eq!(groups, ["mono", "zebra"], "running leads");
+        assert_eq!(threads, ["two", "one"], "running leads");
 
-        // Groups exist now, so the untouched tail folded itself away…
+        // Threads exist now, so the untouched tail folded itself away…
         assert_eq!(project_order(&a), Vec::<String>::new());
         // …and holds the rest once opened.
         a.others_expanded = Some(true);
@@ -7907,25 +8669,6 @@ mod tests {
         // An environment that answers with nothing does not promote anyone.
         a.agents_loaded((0, 1, 0), Ok(Vec::new()));
         assert_eq!(project_order(&a), ["Alpha", "beta"]);
-    }
-
-    /// A group names its project, and its environment only when that says
-    /// something — not `production`, and not the only environment there is.
-    #[test]
-    fn group_labels_fold_the_environment_in_only_when_it_matters() {
-        let mut a = app();
-        a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        let group_labels = |a: &App| -> Vec<String> {
-            a.rows()
-                .iter()
-                .filter(|r| matches!(r.kind, RowKind::Group(..)))
-                .map(|r| r.label.clone())
-                .collect()
-        };
-        assert_eq!(group_labels(&a), ["devtools"], "production says nothing");
-
-        a.agents_loaded((0, 0, 1), Ok(vec![agent("ca_2", "two", "running")]));
-        assert_eq!(group_labels(&a), ["devtools", "devtools/staging"]);
     }
 
     /// Empty projects are de-emphasised, and stop being so the moment they
@@ -7941,8 +8684,11 @@ mod tests {
         );
 
         a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        let mono = a.rows().into_iter().find(|r| r.label == "mono").unwrap();
-        assert!(!mono.dimmed);
+        // With an agent, mono's thread is on the list and its project row is
+        // gone from the tail.
+        let rows = a.rows();
+        assert!(rows.iter().any(|r| r.label == "one"), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.label == "mono"));
     }
 
     /// Re-ordering must not move the selection to a different row: the cursor
@@ -7998,7 +8744,8 @@ mod tests {
                 path: (0, 0, 0, 0)
             }
         );
-        assert!(a.rows().iter().any(|r| r.label == "loading sessions…"));
+        // While the reply is on its way the agent row stays put.
+        assert!(a.rows().iter().any(|r| r.label == "nimble-otter"));
 
         a.sessions_loaded(
             (0, 0, 0, 0),
@@ -8009,16 +8756,20 @@ mod tests {
                 kind: "SHELL".into(),
                 running: true,
                 attached: false,
+                created_at: None,
             }]),
         );
         let rows = a.rows();
-        let session_row = rows.iter().find(|r| r.label == "sess-7").unwrap();
+        let session_row = rows
+            .iter()
+            .find(|r| r.label == "[S] claude-sess-7")
+            .unwrap();
         assert!(matches!(session_row.kind, RowKind::Session(0, 0, 0, 0, 0)));
-
-        // Collapsing hides them again without refetching.
-        a.cursor = row;
-        assert_eq!(a.on_key(key(KeyCode::Left)), None);
-        assert!(!a.rows().iter().any(|r| r.label == "sess-7"));
+        assert_eq!(session_row.depth, 1, "a child of its agent");
+        assert!(
+            rows.iter().any(|r| r.label == "nimble-otter"),
+            "the agent still heads its threads"
+        );
     }
 
     /// A session's label has to be readable. The platform reports the whole
@@ -8036,11 +8787,12 @@ mod tests {
             command: Some(raw.into()),
             running: true,
             attached: true,
+            created_at: None,
         };
         assert_eq!(
-            session.label(),
+            session.short_name(),
             "claude-3habai",
-            "rows are named by session"
+            "rows are named by the session, not the launch line"
         );
         assert_eq!(session.command_summary(), "claude 'Clone the repo'");
 
@@ -8048,6 +8800,7 @@ mod tests {
         let other = ConsoleSession {
             command: Some("npm run dev\nmore".into()),
             attached: false,
+            created_at: None,
             ..session.clone()
         };
         assert_eq!(other.command_summary(), "npm run dev");
@@ -8088,6 +8841,7 @@ mod tests {
             command: Some("umask 077\ncat > ~/.claude-code-env".into()),
             running: false,
             attached: false,
+            created_at: None,
         };
         assert!(!exec.is_interesting());
 
@@ -8118,12 +8872,17 @@ mod tests {
                 command: Some("umask 077".into()),
                 running: false,
                 attached: false,
+                created_at: None,
             }]);
         }
+        let rows = a.rows();
         assert!(
-            a.rows()
-                .iter()
-                .any(|r| r.label == "no sessions on this agent")
+            rows.iter().any(|r| r.label == "nimble-otter"),
+            "the agent keeps its own row: {rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.label.contains("zesty-spencer")),
+            "a finished exec is not a thread"
         );
     }
 
@@ -8284,6 +9043,7 @@ mod tests {
             command: None,
             running: true,
             attached: false,
+            created_at: None,
         }];
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(sessions.clone()));
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Err("502 from backboard".into()));
@@ -8455,7 +9215,8 @@ mod tests {
         assert_eq!(b.focus, ManageFocus::Session, "it must not release either");
     }
 
-    /// Rows are named by the session, not by a truncated launch line.
+    /// Rows are named by the session — the seeded task stays in the detail
+    /// card's command line, not the name.
     #[test]
     fn session_rows_show_the_session_name() {
         let session = ConsoleSession {
@@ -8467,8 +9228,9 @@ mod tests {
             ),
             running: true,
             attached: true,
+            created_at: None,
         };
-        assert_eq!(session.label(), "claude-3habai");
+        assert_eq!(session.short_name(), "claude-3habai");
         // The command is still available, for the pane with room for it.
         assert_eq!(session.command_summary(), "claude 'do the thing'");
     }
@@ -8531,9 +9293,11 @@ mod tests {
         let mut a = loaded_app();
         a.panes = panes_fixture();
 
-        // Press inside the session pane, then drag far into the tree.
+        // Press inside the session pane, then drag far into the tree. With no
+        // session open the keyboard stays with the tree — the pane is the
+        // launcher or a detail card — but the drag is still a selection.
         assert_eq!(a.on_mouse(MouseAction::Down, 40, 5), None);
-        assert_eq!(a.focus, ManageFocus::Session, "clicking focuses the pane");
+        assert_eq!(a.focus, ManageFocus::Tree, "nothing there to type into");
         a.on_mouse(MouseAction::Drag, 2, 8);
 
         let selection = a.selection.unwrap();
@@ -8568,9 +9332,11 @@ mod tests {
         let mut a = loaded_app();
         a.focus = ManageFocus::Session;
         a.panes = panes_fixture();
-        a.on_mouse(MouseAction::Down, 5, 4);
+        // Row 1 is the launcher's rule, so the first row a click can land on
+        // below the launcher is the group at 2.
+        a.on_mouse(MouseAction::Down, 5, 5);
         assert_eq!(a.focus, ManageFocus::Tree);
-        assert_eq!(a.cursor, 1, "second visible row");
+        assert_eq!(a.cursor, 2, "third visible row");
 
         // A click that lands on nothing changes neither.
         a.on_mouse(MouseAction::Down, 200, 200);
@@ -8768,6 +9534,7 @@ mod tests {
             command: Some("claude".into()),
             running: true,
             attached: false,
+            created_at: None,
         }]);
         if let Load::Loaded(agents) = &mut a.tree[w].projects[p].envs[e].agents {
             agents[0].expanded = true;
@@ -8847,6 +9614,7 @@ mod tests {
                 command: None,
                 running: true,
                 attached: false,
+                created_at: None,
             }]),
         );
 
@@ -8879,6 +9647,8 @@ mod tests {
     #[test]
     fn shift_r_scans_every_environment() {
         let mut a = loaded_app();
+        // Off the launcher, where `R` is a letter for the prompt.
+        a.on_key(key(KeyCode::Down));
         assert_eq!(
             a.on_key(key(KeyCode::Char('R'))),
             Some(Effect::ScanEverywhere)
@@ -9008,29 +9778,14 @@ mod tests {
     /// The empty state advertises `n`, so `n` must work from where the cursor
     /// starts: with a target it launches there, without one it asks for one.
     #[test]
-    fn n_falls_back_to_the_target_from_the_tail_header() {
+    fn a_new_agent_without_a_target_asks_for_one_first() {
         let mut a = app();
         a.screen = Screen::Manage;
-        assert!(matches!(
-            a.selected_row().unwrap().kind,
-            RowKind::OtherProjects
-        ));
+        a.on_key(key(KeyCode::Down));
         a.on_key(key(KeyCode::Char('n')));
+        assert_eq!(a.screen, Screen::HarnessPick);
+        a.on_key(key(KeyCode::Enter));
         assert_eq!(a.screen, Screen::TargetPick, "no target: ask for one");
-
-        let mut b = app();
-        b.screen = Screen::Manage;
-        b.target = Some(Target {
-            project_id: "proj_1".into(),
-            project_name: "devtools".into(),
-            environment_id: "env_prod".into(),
-            environment_name: "production".into(),
-        });
-        let Some(Effect::Launch(req)) = b.on_key(key(KeyCode::Char('n'))) else {
-            panic!("expected a launch into the target");
-        };
-        assert!(req.force_new);
-        assert_eq!(req.environment_id, "env_prod");
     }
 
     /// Loading an environment from the tail can promote it into a group; the
@@ -9048,12 +9803,9 @@ mod tests {
             .unwrap();
         a.on_key(key(KeyCode::Right));
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        assert_eq!(
-            a.selected_row().unwrap().kind,
-            RowKind::Group(0, 0, 0),
-            "{:#?}",
-            a.rows()
-        );
+        // The environment left the tail for the thread list; the cursor lands
+        // on a row that still exists rather than the one that vanished.
+        assert!(a.selected_row().unwrap().selectable(), "{:#?}", a.rows());
     }
 
     /// "None yet" is a definitive claim: the hint searches while anything is
@@ -9062,7 +9814,8 @@ mod tests {
     #[test]
     fn the_hint_waits_for_answers_before_claiming_empty() {
         let mut a = app();
-        let hint = |a: &App| a.rows().first().unwrap().label.clone();
+        // The hint sits under the pinned New Session row and its rule.
+        let hint = |a: &App| a.rows()[2].label.clone();
         assert_eq!(hint(&a), "looking for cloud agents…", "not loaded");
 
         a.tree[0].projects[0].envs[0].agents = Load::Loading;
@@ -9073,7 +9826,7 @@ mod tests {
         assert_eq!(hint(&a), "couldn't check every environment — r retries");
 
         a.agents_loaded((0, 0, 1), Ok(Vec::new()));
-        assert_eq!(hint(&a), "no cloud agents yet — n creates one");
+        assert_eq!(hint(&a), "no threads yet — the prompt above starts one");
     }
 
     fn offer() -> SshKeyOffer {

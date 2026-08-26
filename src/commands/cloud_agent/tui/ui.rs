@@ -10,8 +10,7 @@ use ratatui::widgets::{
 };
 
 use super::app::{
-    App, KEY_HELP, Load, LoadSessions, ManageFocus, MenuFocus, PaneBox, PaneRects, Row, RowKind,
-    Screen,
+    App, KEY_HELP, Load, LoadSessions, ManageFocus, PaneBox, PaneRects, Row, RowKind, Screen,
 };
 use super::theme::Theme;
 
@@ -31,12 +30,6 @@ const BANNER: &str = r#"██████   █████  ██████
 
 const BANNER_W: u16 = 55;
 const BANNER_H: u16 = 5;
-
-/// The column a menu card's name occupies, so the descriptions line up.
-const LABEL_W: usize = 20;
-
-/// The marker column plus the spaces either side of a card's name.
-const CARD_GUTTER: usize = 3;
 
 /// Width of the tree column in Manage, borders included.
 const TREE_W: u16 = 32;
@@ -85,8 +78,8 @@ fn page(f: &Frame) -> Rect {
 }
 
 /// The prompt box's shape — width, and height in rows including borders —
-/// shared by the menu's prompt and the ⌥p composer so the two read as the
-/// same control. Text rows plus the border: twice the writing room of the
+/// shared by the launcher's prompt and the ⌥p composer so the two read as
+/// the same control. Text rows plus the border: twice the writing room of the
 /// original two rows on screens with the height for it — a prompt is a
 /// paragraph these days, not a title — and a compact variant below that.
 fn prompt_box_size(area: Rect) -> (u16, u16) {
@@ -123,7 +116,7 @@ fn chord_badge(theme: &Theme, chord: &str) -> Span<'static> {
 }
 
 /// Footer chords: an inverse badge for the key, dim text for what it does.
-/// Shared so the menu and the manage screen read as the same product.
+/// Shared so the launcher and the manage screen read as the same product.
 fn chord_spans(theme: &Theme, chords: &[(&str, &str)]) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(chords.len() * 2);
     for (chord, what) in chords {
@@ -311,22 +304,17 @@ fn render_toast(app: &App, f: &mut Frame, rects: &PaneRects) {
 fn render_screen(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     match app.screen {
         Screen::Setup => {
-            render_menu(app, f, rects);
+            render_manage(app, f, rects);
             render_wizard(app, f);
         }
         Screen::Settings => {
-            render_menu(app, f, rects);
+            render_manage(app, f, rects);
             render_settings(app, f);
         }
-        Screen::Menu => render_menu(app, f, rects),
         Screen::Manage => render_manage(app, f, rects),
         Screen::TargetPick => {
-            render_menu(app, f, rects);
+            render_manage(app, f, rects);
             render_target_pick(app, f);
-        }
-        Screen::AgentPick => {
-            render_menu(app, f, rects);
-            render_agent_pick(app, f);
         }
         Screen::HarnessPick => {
             render_manage(app, f, rects);
@@ -370,40 +358,48 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
-fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
+/// The launcher, in the session pane: the wordmark and the prompt box that
+/// used to be their own screen, now living beside the tree. Drawn whenever
+/// the cursor stands on the pinned New Session row.
+fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
     let theme = app.theme;
-    let area = page(f);
-    let big = area.width >= BANNER_W + 8 && area.height >= 26;
+    let focused = app.new_session_selected();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused {
+            theme.accent
+        } else {
+            theme.accent_dim
+        }))
+        .title(Span::styled(" new agent ", Style::default().fg(theme.dim)));
+    let area = {
+        let inner = block.inner(pane);
+        f.render_widget(block, pane);
+        inner
+    };
+
+    let big = area.width >= BANNER_W + 2 && area.height >= 20;
     let banner_h = if big { BANNER_H } else { 1 };
     let (panel_w, prompt_h) = prompt_box_size(area);
-    // The room around the prompt lives outside its outline, not inside it.
-    let prompt_gap = if area.height >= 30 { 2 } else { 1 };
-    let cards = app.cards();
-    // Descriptions cost rows, and on a short screen those rows come out of the
-    // prompt box. Names only, rather than a menu with no prompt on it.
-    let chrome = banner_h + prompt_h + prompt_gap * 2 + 10;
-    let mut block = card_block(&cards, panel_w as usize, true);
-    if chrome + block.height(cards.len()) > area.height {
-        block = card_block(&cards, panel_w as usize, false);
-    }
-    let cards_h = block.height(cards.len());
-    let panel_h = chrome + cards_h;
+    // The room below the prompt, outside its outline. Above it the spacing
+    // is fixed: exactly two rows — the status line and one gap — separate
+    // the title from the prompt box, whatever the pane's height.
+    let prompt_gap = if area.height >= 26 { 2 } else { 1 };
+    // banner, gap, CLOUD AGENTS, title, status, gap, prompt, gap, target.
+    let panel_h = banner_h + 4 + 1 + prompt_h + prompt_gap + 1;
     let panel = centered(panel_w, panel_h.min(area.height), area);
 
     let rows = Layout::vertical([
         Constraint::Length(banner_h),
-        Constraint::Length(1),          // breathing room under the wordmark
-        Constraint::Length(1),          // CLOUD AGENTS
-        Constraint::Length(1),          // title
-        Constraint::Length(1),          // subtitle
-        Constraint::Length(prompt_gap), // the prompt's room, outside its outline
+        Constraint::Length(1), // breathing room under the wordmark
+        Constraint::Length(1), // CLOUD AGENTS
+        Constraint::Length(1), // title
+        Constraint::Length(1), // status
+        Constraint::Length(1), // one gap: the title sits two rows up
         Constraint::Length(prompt_h),
-        Constraint::Length(prompt_gap), // and the same below
-        Constraint::Length(cards_h),
-        Constraint::Min(0),
-        Constraint::Length(1), // target
-        Constraint::Length(1), // gap
-        Constraint::Length(1), // hint
+        Constraint::Length(prompt_gap), // the prompt's room below its outline
+        Constraint::Length(1),          // target
     ])
     .split(panel);
 
@@ -444,34 +440,15 @@ fn render_menu(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         );
     }
 
-    render_prompt(app, f, rows[6]);
+    render_prompt(app, f, rows[6], focused);
     rects.prompt = whole(rows[6]);
-    render_cards(app, f, rows[8], &block, rects);
 
-    // Where the prompt lands, on its own line above the keys. It was a chip in
+    // Where the prompt lands, on its own line under the box. It was a chip in
     // the prompt box, which put the least-changed setting in the busiest place
     // on the screen.
     f.render_widget(
         Paragraph::new(target_line(app)).alignment(Alignment::Center),
-        rows[10],
-    );
-
-    let chords: &[(&str, &str)] = match app.menu_focus {
-        MenuFocus::Prompt => &[
-            ("enter", "launch"),
-            ("shift+tab", "agent"),
-            ("⌥s", "settings"),
-        ],
-        MenuFocus::Cards => &[
-            ("↑↓", "select"),
-            ("enter", "open"),
-            ("⌥s", "settings"),
-            ("q", "quit"),
-        ],
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(chord_spans(theme, chords))).alignment(Alignment::Center),
-        rows[12],
+        rows[8],
     );
 }
 
@@ -673,9 +650,8 @@ fn step_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
+fn render_prompt(app: &App, f: &mut Frame, area: Rect, focused: bool) {
     let theme = app.theme;
-    let focused = app.menu_focus == MenuFocus::Prompt;
     let empty = app.prompt.is_empty();
     // The shell option takes no prompt, so the box explains itself instead of
     // taking dictation. Any draft stays in `app.prompt`, hidden until the
@@ -691,7 +667,18 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect) {
             theme.dim,
         )
     } else if focused {
-        (format!("{}▏", app.prompt), theme.fg)
+        // The bar sits where the next character lands — ←/→ move it, so it is
+        // not always at the end.
+        let at = app
+            .prompt
+            .char_indices()
+            .nth(app.prompt_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(app.prompt.len());
+        (
+            format!("{}▏{}", &app.prompt[..at], &app.prompt[at..]),
+            theme.fg,
+        )
     } else {
         (app.prompt.clone(), theme.fg)
     };
@@ -772,177 +759,6 @@ fn wrapped_lines(text: &str, width: usize) -> usize {
     rows
 }
 
-/// The menu's cards, centred as a block under the prompt.
-///
-/// Centred as a block, not line by line: each card is a name in a fixed column
-/// followed by a sentence of a different length, so centring them individually
-/// would leave the names in a ragged column down the middle.
-/// The cards, laid out: how they wrap and how far in the block starts.
-///
-/// Computed before the layout as well as during the draw, because the number
-/// of rows the cards need decides how much room the menu gives them.
-struct CardBlock {
-    /// Wrapped description lines, one list per card. Empty when the terminal is
-    /// too narrow to carry the sentences at all.
-    descriptions: Vec<Vec<String>>,
-    indent: usize,
-}
-
-impl CardBlock {
-    /// One line per description line, at least one per card, plus a blank
-    /// between cards.
-    fn height(&self, cards: usize) -> u16 {
-        let text: usize = match self.descriptions.is_empty() {
-            true => cards,
-            false => self.descriptions.iter().map(|d| d.len().max(1)).sum(),
-        };
-        (text + cards) as u16
-    }
-}
-
-/// Fit the cards to `width`.
-///
-/// Descriptions wrap into the column beside the name rather than widening the
-/// block: the cards belong under the prompt box, and a block wider than the box
-/// reads as a second, competing column. Where a wrapped sentence would be
-/// shredded — or where the screen is too short to hold the extra rows, which
-/// the caller decides with `descriptions` — the names stand alone.
-fn card_block(
-    cards: &[(&'static str, &'static str)],
-    width: usize,
-    descriptions: bool,
-) -> CardBlock {
-    let names = || CardBlock {
-        descriptions: Vec::new(),
-        indent: width
-            .saturating_sub(
-                cards
-                    .iter()
-                    .map(|(label, _)| 2 + label.chars().count())
-                    .max()
-                    .unwrap_or(0),
-            )
-            .div_euclid(2),
-    };
-
-    let desc_w = width.saturating_sub(LABEL_W + CARD_GUTTER);
-    if !descriptions || desc_w < 24 {
-        return names();
-    }
-    let descriptions: Vec<Vec<String>> = cards
-        .iter()
-        .map(|(_, desc)| wrap_words(desc, desc_w))
-        .collect();
-    let content = LABEL_W
-        + CARD_GUTTER
-        + descriptions
-            .iter()
-            .flatten()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0);
-    CardBlock {
-        descriptions,
-        indent: width.saturating_sub(content) / 2,
-    }
-}
-
-/// Break `text` on spaces at `width`, hard-splitting nothing — a word longer
-/// than the column simply overhangs, which cannot happen with the copy here and
-/// is better than a name broken in half if it ever does.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut line = String::new();
-    let mut column = 0usize;
-    for word in text.split_whitespace() {
-        let len = word.chars().count();
-        if column > 0 && column + 1 + len > width {
-            lines.push(std::mem::take(&mut line));
-            column = 0;
-        }
-        if column > 0 {
-            line.push(' ');
-            column += 1;
-        }
-        line.push_str(word);
-        column += len;
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-fn render_cards(app: &App, f: &mut Frame, area: Rect, block: &CardBlock, rects: &mut PaneRects) {
-    let theme = app.theme;
-    let cards = app.cards();
-    let indent = " ".repeat(block.indent);
-    rects.cards = Default::default();
-
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, (label, _)) in cards.iter().enumerate() {
-        // The card's own rows, not the blank after it: a click in the gap
-        // between two cards should pick neither.
-        if let Some(slot) = rects.cards.get_mut(i) {
-            let height = block
-                .descriptions
-                .get(i)
-                .map(|d| d.len().max(1))
-                .unwrap_or(1);
-            *slot = PaneBox {
-                x: area.x,
-                y: area.y + lines.len() as u16,
-                w: area.width,
-                h: height as u16,
-            };
-        }
-        let on = app.menu_focus == MenuFocus::Cards && i == app.card;
-        let (fg, bg) = if on {
-            (theme.on_accent, theme.accent)
-        } else {
-            (theme.fg, Color::Reset)
-        };
-        let desc = block.descriptions.get(i);
-        let dim = Style::default().fg(if on { theme.fg } else { theme.dim });
-
-        lines.push(Line::from(vec![
-            Span::raw(indent.clone()),
-            Span::styled(
-                if on { "▌" } else { " " },
-                Style::default().fg(theme.accent),
-            ),
-            Span::styled(
-                match desc.is_some() {
-                    true => format!(" {label:<LABEL_W$}"),
-                    false => format!(" {label}"),
-                },
-                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                match desc.and_then(|lines| lines.first()) {
-                    Some(first) => format!(" {first}"),
-                    None => String::new(),
-                },
-                dim,
-            ),
-        ]));
-        // Continuations line up under the first line of the description, not
-        // under the name — the two columns stay two columns.
-        for line in desc.map(|d| &d[1.min(d.len())..]).unwrap_or(&[]) {
-            lines.push(Line::from(vec![
-                Span::raw(format!(
-                    "{indent}{:width$}",
-                    "",
-                    width = LABEL_W + CARD_GUTTER
-                )),
-                Span::styled(line.clone(), dim),
-            ]));
-        }
-        lines.push(Line::from(""));
-    }
-    f.render_widget(Paragraph::new(lines), area);
-}
-
 /// The size the session pane will have, given the whole terminal — the same
 /// arithmetic `render_manage` does, so the emulator and the pane agree.
 /// `None` when there is no room for two panes.
@@ -979,24 +795,55 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     .split(area);
 
     let rows = app.rows();
-    let header = Line::from(vec![
-        Span::styled(
-            " RAILWAY CLOUD-AGENTS ",
-            Style::default()
-                .fg(theme.on_accent)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if app.status.is_empty() {
-                String::new()
-            } else {
-                format!("  ·  {}", app.status)
-            },
+    let full = app.pane_is_full();
+    let mut header = vec![Span::styled(
+        " RAILWAY CLOUD-AGENTS ",
+        Style::default()
+            .fg(theme.on_accent)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if full && !app.sessions.is_empty() {
+        // Maximized, the tree is folded away, so the open sessions become
+        // tabs on the header: click one (or ⌥[ ⌥]) to switch panes. The
+        // clickable boxes are recorded as they are laid out.
+        let mut x = chunks[0].x + " RAILWAY CLOUD-AGENTS ".chars().count() as u16;
+        for i in 0..app.sessions.len() {
+            // The tab names the session (its task, or its harness-led name),
+            // not the agent it runs on — the pane's title already says that.
+            let label = format!(" {} {} ", i + 1, app.session_tab_label(i));
+            header.push(Span::raw(" "));
+            x += 1;
+            let w = label.chars().count() as u16;
+            if let Some(slot) = rects.tabs.get_mut(i) {
+                *slot = PaneBox {
+                    x,
+                    y: chunks[0].y,
+                    w,
+                    h: 1,
+                };
+            }
+            let on = app.active == Some(i);
+            header.push(Span::styled(
+                label,
+                if on {
+                    Style::default()
+                        .fg(theme.on_accent)
+                        .bg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.dim).bg(theme.surface)
+                },
+            ));
+            x += w;
+        }
+    } else if !app.status.is_empty() {
+        header.push(Span::styled(
+            format!("  ·  {}", app.status),
             Style::default().fg(theme.dim),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(header), chunks[0]);
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(header)), chunks[0]);
 
     // Detail is fixed-width so the tree keeps the space it needs on a narrow
     // terminal; below that there is no room for two panes at all.
@@ -1006,7 +853,6 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     // whitespace.
     // ⌥f hands the whole width to the session: the tree is navigation, and
     // once you are working in a session there is nothing to navigate.
-    let full = app.pane_is_full();
     let two_pane = !full && chunks[2].width >= 70;
     let panes = if two_pane {
         Layout::horizontal([Constraint::Length(TREE_W), Constraint::Min(20)]).split(chunks[2])
@@ -1031,11 +877,20 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         return;
     }
 
+    // Too narrow for two panes: while the cursor is on New Session the
+    // launcher is the screen — the prompt has the keyboard, and ↓ brings the
+    // tree back.
+    if !two_pane && !app.loading.active && app.launcher_selected() {
+        render_welcome(app, f, panes[0], rects);
+        render_manage_footer(app, f, chunks[3], rects);
+        return;
+    }
+
     let tree_focused = app.focus == ManageFocus::Tree;
 
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|r| ListItem::new(tree_line(theme, r)))
+        .map(|r| ListItem::new(tree_line(theme, r, app.loading.tick)))
         .collect();
     let mut state = ListState::default();
     state.select(if rows.is_empty() {
@@ -1054,10 +909,7 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                     } else {
                         theme.accent_dim
                     }))
-                    .title(Span::styled(
-                        " cloud agents ",
-                        Style::default().fg(theme.dim),
-                    )),
+                    .title(Span::styled(" threads ", Style::default().fg(theme.dim))),
             )
             .highlight_style(
                 Style::default()
@@ -1090,11 +942,19 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         } else {
             match app.active_session().filter(|_| show_session) {
                 Some(session) => render_session(app, session, f, panes[1]),
+                // The New Session row's pane is the launcher: the wordmark
+                // and the prompt, where a session is about to be.
+                None if matches!(selected_kind, Some(RowKind::NewSession)) => {
+                    render_welcome(app, f, panes[1], rects)
+                }
                 None => {
-                    let title = if matches!(selected_kind, Some(RowKind::Session(..))) {
-                        " session "
+                    let title = if matches!(
+                        selected_kind,
+                        Some(RowKind::Session(..)) | Some(RowKind::Agent(..))
+                    ) {
+                        " thread "
                     } else {
-                        " agent "
+                        " detail "
                     };
                     f.render_widget(
                         Paragraph::new(detail_lines(app)).block(
@@ -1194,6 +1054,23 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
         }
     } else {
         match app.selected_row().map(|r| r.kind) {
+            // The prompt has the keyboard: say how to launch, not how to
+            // manage rows the cursor is not on. The target's own shortcut
+            // sits on the target line, beside the field it changes.
+            Some(RowKind::NewSession) if app.new_session_selected() => vec![
+                ("enter", "launch"),
+                ("shift+tab", "agent"),
+                ("↓", "threads"),
+                ("esc", "home"),
+                ("⌥s", "settings"),
+            ],
+            // Home: the prompt has let go, so letters are keys again.
+            Some(RowKind::NewSession) => vec![
+                ("enter", "write a prompt"),
+                ("↓", "threads"),
+                ("⌥s", "settings"),
+                ("q", "quit"),
+            ],
             Some(RowKind::Session(..)) => vec![
                 ("enter", "connect"),
                 ("⌥f", "maximize"),
@@ -1209,21 +1086,13 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             ],
             Some(RowKind::Agent(..)) => vec![
                 ("enter", "connect"),
-                ("n", "new session"),
+                ("n", "new agent"),
                 if sleeping {
                     ("w", "wake")
                 } else {
                     ("s", "sleep")
                 },
                 ("d", "delete agent"),
-            ],
-            // A group is a place, not a thing to open: the keys that matter
-            // are the ones that act on the environment it stands for.
-            Some(RowKind::Group(..)) => vec![
-                ("n", "new agent here"),
-                ("t", "target"),
-                ("⌥r", "refresh"),
-                ("shift+r", "find agents"),
             ],
             _ => vec![
                 ("enter", "open"),
@@ -1548,44 +1417,6 @@ fn render_settings(app: &App, f: &mut Frame) {
 
 /// Choosing which agent a new session goes on. Only drawn when there is more
 /// than one to choose between.
-fn render_agent_pick(app: &App, f: &mut Frame) {
-    let Some(picker) = app.agent_pick.as_ref() else {
-        return;
-    };
-    let theme = app.theme;
-    let rows: Vec<PanelRow> = picker
-        .rows()
-        .into_iter()
-        .map(|(label, tag)| PanelRow {
-            label,
-            tag,
-            detail: String::new(),
-        })
-        .collect();
-    let footer = Line::from(chord_spans(
-        theme,
-        &[
-            ("↑↓", "choose"),
-            ("enter", "new session"),
-            ("esc", "cancel"),
-        ],
-    ));
-
-    render_panel(
-        f,
-        theme,
-        page(f),
-        Panel {
-            title: "new session",
-            heading: "Which cloud agent?",
-            position: None,
-            rows: &rows,
-            cursor: picker.cursor,
-            footer,
-        },
-    );
-}
-
 /// ⌥n's picker: which agent runs the new session. The wizard's agent step,
 /// floated over the tree the launch is aimed at.
 fn render_harness_pick(app: &App, f: &mut Frame) {
@@ -1603,11 +1434,7 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
         .collect();
     let footer = Line::from(chord_spans(
         theme,
-        &[
-            ("↑↓", "choose"),
-            ("enter", "new session"),
-            ("esc", "cancel"),
-        ],
+        &[("↑↓", "choose"), ("enter", "new agent"), ("esc", "cancel")],
     ));
 
     render_panel(
@@ -1615,8 +1442,8 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
         theme,
         page(f),
         Panel {
-            title: "new session",
-            heading: "Which agent should run it?",
+            title: "new agent",
+            heading: "Which agent should the new Cloud Agent run?",
             position: None,
             rows: &rows,
             cursor,
@@ -1625,8 +1452,8 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
     );
 }
 
-/// ⌥p's composer: the menu's prompt box, floated over the tree so a new
-/// request doesn't cost the walk back to the menu.
+/// ⌥p's composer: the launcher's prompt box, floated over the tree so a new
+/// request doesn't cost the walk back to the New Session row.
 fn render_manage_prompt(app: &App, f: &mut Frame) {
     let Some(draft) = app.manage_prompt.as_ref() else {
         return;
@@ -1667,7 +1494,7 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
             .right_aligned(),
         );
 
-    // The menu box's shell contract, here too: the box explains itself
+    // The launcher box's shell contract, here too: the box explains itself
     // instead of taking dictation, and the draft waits out of sight.
     let (text, fg) = if app.shell_selected() {
         (
@@ -1678,7 +1505,7 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
         (format!("{draft}▏"), theme.fg)
     };
     // Keep the cursor line in view once the wrapped text outgrows the box,
-    // same as the menu's prompt. The padding is chrome, not writing room, so
+    // same as the launcher's prompt. The padding is chrome, not writing room, so
     // it comes off the width and the height the text gets.
     let inner_w = outer.width.saturating_sub(DIALOG_CHROME_X).max(1) as usize;
     let inner_h = outer.height.saturating_sub(DIALOG_CHROME_Y).max(1) as usize;
@@ -1807,7 +1634,8 @@ fn render_keys(app: &App, f: &mut Frame) {
 fn render_session(app: &App, session: &super::session::Session, f: &mut Frame, area: Rect) {
     let theme = app.theme;
     let focused = app.focus == ManageFocus::Session;
-    let title = format!(" {} · {} ", session.agent_name, session.durable_name);
+    // The title reads like a project reference: project / agent / session.
+    let title = format!(" {} ", app.pane_breadcrumb(session));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1879,6 +1707,38 @@ fn render_session(app: &App, session: &super::session::Session, f: &mut Frame, a
         return;
     };
     f.render_widget(Paragraph::new(lines), inner);
+
+    // The connection is gone: say so ON the pane, not down in whatever
+    // half-line ssh's goodbye landed on — its "client_loop: send disconnect"
+    // gets folded into the screen at the cursor, which is usually the
+    // harness's own text box, and reads like the harness broke. The screen
+    // stays (it is the only account of what happened); the banner sits on
+    // top of its first row as the headline, naming the one key that matters
+    // for where the keyboard actually is.
+    if session.ended() && inner.height > 0 {
+        let banner = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        f.render_widget(Clear, banner);
+        f.render_widget(
+            Paragraph::new(if focused {
+                " ✕ disconnected — press r to reconnect · x closes "
+            } else {
+                " ✕ disconnected — click here (or enter on its row) to reconnect "
+            })
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(
+                Style::default()
+                    .bg(theme.pending)
+                    .fg(theme.on_accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            banner,
+        );
+    }
 }
 
 /// Convert one emulated screen into styled lines.
@@ -1999,6 +1859,7 @@ fn session_state(app: &App, name: &str, running: bool) -> &'static str {
 }
 
 /// Trim to `max` characters, with an ellipsis — a status card is one line.
+/// Trim to `max` characters on a character boundary, with an ellipsis.
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -2023,11 +1884,20 @@ fn status_glyph(status: &str) -> &'static str {
     }
 }
 
-fn tree_line(theme: &Theme, row: &Row) -> Line<'static> {
+fn tree_line(theme: &Theme, row: &Row, tick: usize) -> Line<'static> {
     let indent = "  ".repeat(row.depth);
     let mut spans = vec![Span::raw(indent)];
 
     match (&row.kind, row.expanded) {
+        // The launcher reads as an action, not a place: an accent `+` where
+        // the other rows carry their status glyphs.
+        (RowKind::NewSession, _) => {
+            spans.push(Span::styled("+ ", Style::default().fg(theme.accent)));
+            spans.push(Span::styled(
+                row.label.clone(),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            ));
+        }
         (RowKind::Agent(..), _) => {
             let status = row.status.clone().unwrap_or_default();
             spans.push(Span::styled(
@@ -2040,13 +1910,16 @@ fn tree_line(theme: &Theme, row: &Row) -> Line<'static> {
             ));
         }
         (RowKind::Session(..), _) => {
-            // The marker is the state: a filled dot when this UI has it open,
-            // a quiet branch when it is only running on the agent.
-            let connected = row.status.is_some();
-            spans.push(Span::styled(
-                if connected { "● " } else { "↳ " },
-                Style::default().fg(if connected { theme.running } else { theme.dim }),
-            ));
+            // The marker is the state: a spinner while the attach is in
+            // flight, a filled dot when this UI has it open (and the agent is
+            // green — a sleeping agent's sessions never are), a quiet branch
+            // when it is only running on the agent.
+            let (glyph, color) = match row.status.as_deref() {
+                Some("connecting") => (format!("{} ", spinner_frame(tick)), theme.pending),
+                Some(_) => ("● ".to_string(), theme.running),
+                None => ("↳ ".to_string(), theme.dim),
+            };
+            spans.push(Span::styled(glyph, Style::default().fg(color)));
             spans.push(Span::styled(
                 row.label.clone(),
                 Style::default().fg(theme.fg),
@@ -2088,7 +1961,9 @@ fn tree_line(theme: &Theme, row: &Row) -> Line<'static> {
         _ => spans.push(Span::raw(row.label.clone())),
     }
 
-    if !row.note.is_empty() && !matches!(row.kind, RowKind::Agent(..)) {
+    // Every thread row carries its context as a dim note: the project for a
+    // session, the status for an agent still without one.
+    if !row.note.is_empty() {
         spans.push(Span::styled(
             format!("  {}", row.note),
             Style::default().fg(theme.dim),
@@ -2115,6 +1990,13 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     };
 
     match row.kind {
+        // Unreachable in practice — the New Session row gets the launcher
+        // pane, not this card — but the match must answer for it.
+        RowKind::NewSession => vec![Line::from(Span::styled(
+            " enter launches a new session",
+            Style::default().fg(theme.dim),
+        ))],
+        // An agent: where it lives, and a snapshot of the threads on it.
         RowKind::Agent(w, p, e, a) => {
             let proj = &app.tree[w].projects[p];
             let env = &proj.envs[e];
@@ -2132,23 +2014,21 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )),
-                Line::from(vec![
-                    Span::styled(
-                        format!("  {} {}", status_glyph(&status), status),
-                        Style::default().fg(status_color(theme, &status)),
-                    ),
-                    Span::styled(
-                        format!("  ·  {}/{}", proj.name, env.name),
-                        Style::default().fg(theme.dim),
-                    ),
-                ]),
+                Line::from(Span::styled(
+                    format!("  {} {}", status_glyph(&status), status),
+                    Style::default().fg(status_color(theme, &status)),
+                )),
+                Line::from(""),
+                kv("project", proj.name.clone()),
+                kv("env", env.name.clone()),
+                kv("agent", name),
                 Line::from(""),
             ];
 
-            // A card per session: what it is, and the last thing it said. The
-            // last line is only knowable for a session we have a pane for —
-            // the platform reports state, not output — so an unattached one
-            // says how to get its output rather than pretending to have it.
+            // A snapshot of every running session: what it was started on,
+            // and — for a session this UI is attached to — the last thing it
+            // said. That last line is only knowable for an attached pane; the
+            // platform reports state, not output.
             match agent.map(|agent| &agent.sessions) {
                 Some(LoadSessions::Loaded(sessions)) => {
                     let live: Vec<_> = sessions
@@ -2157,12 +2037,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                         .collect();
                     if live.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            "  no sessions running",
-                            Style::default().fg(theme.dim),
-                        )));
-                        lines.push(Line::from(""));
-                        lines.push(Line::from(Span::styled(
-                            "  n starts one",
+                            "  no session running on it",
                             Style::default().fg(theme.dim),
                         )));
                     }
@@ -2177,7 +2052,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                                 Style::default().fg(theme.accent),
                             ),
                             Span::styled(
-                                session.name.clone(),
+                                session.short_name(),
                                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
@@ -2187,7 +2062,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                         ]));
                         let message = match connected.and_then(|pane| pane.last_line()) {
                             Some(line) => (truncate(&line, 60), theme.fg),
-                            None => ("not connected — enter to attach".into(), theme.dim),
+                            None => ("not connected — click to attach".into(), theme.dim),
                         };
                         lines.push(Line::from(Span::styled(
                             format!("      {}", message.0),
@@ -2197,7 +2072,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                     }
                 }
                 Some(LoadSessions::Loading) => lines.push(Line::from(Span::styled(
-                    "  loading sessions…",
+                    "  loading its sessions…",
                     Style::default().fg(theme.dim),
                 ))),
                 Some(LoadSessions::Failed(err)) => lines.push(Line::from(Span::styled(
@@ -2205,10 +2080,19 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                     Style::default().fg(theme.pending),
                 ))),
                 _ => lines.push(Line::from(Span::styled(
-                    "  → to load its sessions",
+                    "  no session running on it",
                     Style::default().fg(theme.dim),
                 ))),
             }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if status == "running" {
+                    " enter / double-click connects · n starts a session"
+                } else {
+                    " w wakes it · enter / double-click connects"
+                },
+                Style::default().fg(theme.dim),
+            )));
             lines
         }
         RowKind::Environment(w, p, e) | RowKind::Group(w, p, e) => {
@@ -2263,7 +2147,16 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                 kv("projects", ws.projects.len().to_string()),
             ]
         }
+        // A thread: which project and agent it lives on — the context you
+        // check before connecting into it.
         RowKind::Session(w, p, e, a, i) => {
+            let proj = &app.tree[w].projects[p];
+            let env = &proj.envs[e];
+            let agent_name = match &env.agents {
+                Load::Loaded(list) => list.get(a).map(|agent| agent.name.clone()),
+                _ => None,
+            }
+            .unwrap_or_default();
             let mut lines = vec![Line::from(Span::styled(
                 format!(" {}", row.label),
                 Style::default()
@@ -2275,6 +2168,11 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             let session = app.console_session(w, p, e, a, i);
             if let Some(session) = session {
                 lines.push(Line::from(""));
+                lines.push(kv("project", proj.name.clone()));
+                lines.push(kv("env", env.name.clone()));
+                lines.push(kv("agent", agent_name));
+                lines.push(Line::from(""));
+                lines.push(kv("session", session.name.clone()));
                 lines.push(kv(
                     "state",
                     session_state(app, &session.name, session.running).to_string(),
@@ -2309,9 +2207,9 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     if sleeping {
-                        " w wakes the agent, then enter reconnects"
+                        " w wakes the agent, then enter / double-click connects"
                     } else {
-                        " enter reconnects · c copies the ssh command"
+                        " enter / double-click connects · c copies the ssh command"
                     },
                     Style::default().fg(theme.dim),
                 )));
@@ -2466,9 +2364,12 @@ mod tests {
     /// every screen.
     #[test]
     fn the_page_keeps_clear_of_the_terminal_edges() {
-        for screen in [Screen::Menu, Screen::Manage] {
+        // Both faces of the Manage screen: the launcher pane, and the tree
+        // with the detail pane beside it.
+        for cursor in [0usize, 2] {
             let mut app = app_with_tree();
-            app.screen = screen;
+            app.screen = Screen::Manage;
+            app.cursor = cursor;
             let grid = cells(&app, 100, 40);
             let blank = |cells: &[(String, Color)]| cells.iter().all(|(s, _)| s == " ");
             let h = grid.len();
@@ -2500,11 +2401,11 @@ mod tests {
             .to_string()
     }
 
-    /// The menu prompt holds a paragraph's worth of writing room — six text
-    /// rows inside the outline — and its breathing room sits outside the box:
+    /// The prompt holds a paragraph's worth of writing room — six text rows
+    /// inside the outline — and its breathing room sits outside the box:
     /// blank rows against the border, not padding within it.
     #[test]
-    fn the_menu_prompt_is_tall_with_its_room_outside() {
+    fn the_prompt_is_tall_with_its_room_outside() {
         let app = app_with_tree();
         let out = draw(&app, 100, 40);
         let lines: Vec<&str> = out.lines().collect();
@@ -2512,24 +2413,31 @@ mod tests {
             .iter()
             .position(|l| l.contains(" Prompt "))
             .expect("the prompt box");
+        let row: Vec<char> = lines[top].chars().collect();
+        let left = row.iter().position(|&c| c == '╭').expect("a top border");
+        let right = row.iter().rposition(|&c| c == '╮').expect("a top border");
         let bottom = (top + 1..lines.len())
-            .find(|&y| lines[y].trim_start().starts_with("╰"))
+            .find(|&y| lines[y].chars().nth(left) == Some('╰'))
             .expect("the prompt's bottom border");
         assert_eq!(bottom - top, 7, "six text rows inside the outline:\n{out}");
+        // The gap rows are measured inside the box's own columns: the pane
+        // the prompt now lives in draws its borders on the same rows.
         for y in [top - 1, bottom + 1] {
+            let inside: String = lines[y].chars().skip(left).take(right - left + 1).collect();
             assert!(
-                lines[y].trim().is_empty(),
-                "row {y} should be the prompt's outside gap: {:?}",
-                lines[y]
+                inside.trim().is_empty(),
+                "row {y} should be the prompt's outside gap: {inside:?}"
             );
         }
     }
 
-    /// The ⌥p composer is the main screen's prompt box opened elsewhere —
-    /// same width, same height — so it reads as the same control.
+    /// The ⌥p composer is the launcher's prompt box opened elsewhere — the
+    /// same writing room — so it reads as the same control. Width follows the
+    /// host (the composer floats over the page; the launcher lives in a
+    /// pane), but the height rule is shared.
     #[test]
-    fn the_composer_matches_the_menu_prompt_box() {
-        fn box_of(out: &str, title: &str) -> (usize, usize) {
+    fn the_composer_matches_the_launcher_prompt_box() {
+        fn box_of(out: &str, title: &str) -> usize {
             let lines: Vec<&str> = out.lines().collect();
             let top = lines
                 .iter()
@@ -2537,21 +2445,44 @@ mod tests {
                 .unwrap_or_else(|| panic!("{title} not drawn"));
             let row: Vec<char> = lines[top].chars().collect();
             let left = row.iter().position(|&c| c == '╭').expect("a top border");
-            let right = row.iter().rposition(|&c| c == '╮').expect("a top border");
-            // The closing corner is found by column, not line start: the
-            // composer floats over the manage screen, whose pane borders own
-            // the starts of these rows.
+            // The closing corner is found by column, not line start: both
+            // boxes sit over the manage screen, whose pane borders own the
+            // starts of these rows.
             let bottom = (top + 1..lines.len())
                 .find(|&y| lines[y].chars().nth(left) == Some('╰'))
                 .expect("a closed box");
-            (bottom - top + 1, right - left + 1)
+            bottom - top + 1
         }
-        let menu = box_of(&draw(&app_with_tree(), 100, 40), " Prompt ");
+        let launcher = box_of(&draw(&app_with_tree(), 100, 40), "╭ Prompt");
         let mut app = app_with_tree();
         app.screen = Screen::ManagePrompt;
         app.manage_prompt = Some(String::new());
-        let composer = box_of(&draw(&app, 100, 40), " New Session ");
-        assert_eq!(menu, composer, "(height, width) of the two prompt boxes");
+        // Matched with its border corner: the launcher's own tree row also
+        // says "New Session", and it is not a box.
+        let composer = box_of(&draw(&app, 100, 40), "╭ New Session");
+        assert_eq!(launcher, composer, "height of the two prompt boxes");
+    }
+
+    /// The title sits exactly two rows above the prompt box — the status line
+    /// and one gap — however tall the pane is. It used to drift further apart
+    /// on tall panes, which read as a hole in the layout.
+    #[test]
+    fn the_welcome_title_sits_two_rows_above_the_prompt() {
+        let out = draw(&app_with_tree(), 100, 40);
+        let lines: Vec<&str> = out.lines().collect();
+        let title = lines
+            .iter()
+            .position(|l| l.contains("What should we build today?"))
+            .expect("the title is drawn");
+        let prompt = lines
+            .iter()
+            .position(|l| l.contains("╭ Prompt"))
+            .expect("the prompt box is drawn");
+        assert_eq!(
+            prompt,
+            title + 3,
+            "two rows between title and prompt:\n{out}"
+        );
     }
 
     /// Submitting from the main screen carries the prompt box along: the
@@ -2644,16 +2575,17 @@ mod tests {
         }
     }
 
-    /// The menu's footer uses the same chord badges as the manage screen, so
-    /// the two read as one product rather than two conventions.
+    /// The launcher's footer uses the same chord badges as the rest of the
+    /// manage screen, so the two read as one product rather than two
+    /// conventions.
     #[test]
-    fn the_menu_footer_uses_chord_badges() {
+    fn the_launcher_footer_uses_chord_badges() {
         let app = app_with_tree();
         let out = draw(&app, 100, 40);
         let footer = out
             .lines()
             .rfind(|l| l.contains("launch"))
-            .expect("the menu footer");
+            .expect("the launcher footer");
         assert!(footer.contains("enter"), "{footer}");
         assert!(footer.contains("settings"), "{footer}");
         assert!(
@@ -2666,85 +2598,6 @@ mod tests {
         assert!(!footer.contains("menu"), "the arrow hint is gone: {footer}");
         // The old run-on line separated with interpuncts; the badges do not.
         assert!(!footer.contains(" · "), "{footer}");
-    }
-
-    /// The cards are a place to point at, not a list of commands: no key
-    /// badges, and nothing that reads like one.
-    #[test]
-    fn the_menu_cards_carry_no_key_badges() {
-        let app = app_with_tree();
-        let out = draw(&app, 100, 40);
-        let card = out
-            .lines()
-            .find(|l| l.contains("New Session"))
-            .expect("the New Session card");
-        assert!(!card.contains(" n "), "no key badge: {card}");
-
-        let card = out
-            .lines()
-            .find(|l| l.contains("Manage Cloud Agents"))
-            .expect("the Manage card");
-        assert!(!card.contains(" m "), "no key badge: {card}");
-    }
-
-    /// Every card, including the first-run Setup one.
-    const CARD_LINES: &[&str] = &[
-        "New Session",
-        "New Cloud Agent",
-        "Manage Cloud Agents",
-        "Setup",
-    ];
-
-    /// The cards sit under the middle of the prompt box, as a block — the names
-    /// stay in one column rather than being centred line by line.
-    #[test]
-    fn the_menu_cards_are_centred_as_a_block() {
-        let mut app = app_with_tree();
-        app.configured = false;
-        let width = 100u16;
-        let out = draw(&app, width, 40);
-
-        let starts: Vec<usize> = out
-            .lines()
-            .filter(|l| CARD_LINES.iter().any(|card| l.contains(card)))
-            .map(|l| l.len() - l.trim_start().len())
-            .collect();
-        assert_eq!(starts.len(), 4, "three cards plus setup");
-        assert!(
-            starts.iter().all(|s| *s == starts[0]),
-            "one left edge, not three: {starts:?}"
-        );
-
-        // And the block as a whole sits on the middle of the screen.
-        let right_edge = out
-            .lines()
-            .filter(|l| CARD_LINES.iter().any(|card| l.contains(card)))
-            .map(|l| l.trim_end().chars().count())
-            .max()
-            .expect("a card");
-        let middle = (starts[0] + right_edge) / 2;
-        assert!(
-            middle.abs_diff(width as usize / 2) <= 2,
-            "the block should be centred: {starts:?}..{right_edge} on {width}"
-        );
-    }
-
-    /// Setup is on the menu only while there is nothing set up; after that
-    /// the answers live behind the ⌥s in the footer, which is there either
-    /// way.
-    #[test]
-    fn setup_is_a_card_only_on_a_first_run() {
-        let mut app = app_with_tree();
-        let out = draw(&app, 100, 40);
-        assert!(!out.contains("Default agent, skills"), "{out}");
-        assert!(
-            out.contains("settings"),
-            "the chord is still offered:\n{out}"
-        );
-
-        app.configured = false;
-        let out = draw(&app, 100, 40);
-        assert!(out.contains("Default agent, skills"), "{out}");
     }
 
     /// With shell selected the box stops being a prompt: it says what enter
@@ -2845,15 +2698,14 @@ mod tests {
         assert!(out.contains("Target Project  not set"), "{out}");
     }
 
-    /// The clickable boxes have to be where the cards actually drew, or a click
-    /// lands on the wrong one — the only way to know is to read them out of a
-    /// real frame.
+    /// The recorded prompt box has to be where the prompt actually drew, or a
+    /// click lands somewhere else — the only way to know is to read it out of
+    /// a real frame.
     #[test]
-    fn the_recorded_card_boxes_match_the_drawn_rows() {
+    fn the_recorded_prompt_box_matches_the_drawn_rows() {
         use crate::commands::cloud_agent::tui::app::PaneRects;
 
-        let mut app = app_with_tree();
-        app.configured = false; // all four cards
+        let app = app_with_tree();
         let mut terminal = Terminal::new(TestBackend::new(100, 44)).unwrap();
         let mut rects = PaneRects::default();
         terminal
@@ -2873,32 +2725,6 @@ mod tests {
             .join("\n");
         let lines: Vec<&str> = out.lines().collect();
 
-        for (i, (label, _)) in app.cards().iter().enumerate() {
-            let drawn = lines
-                .iter()
-                .position(|l| l.contains(label))
-                .unwrap_or_else(|| panic!("{label} was not drawn"));
-            let box_ = rects.cards[i];
-            assert_eq!(
-                box_.y as usize, drawn,
-                "{label}: recorded at {}, drawn at {drawn}",
-                box_.y
-            );
-            assert!(box_.h >= 1, "{label} has no clickable height");
-            // A wrapped description is part of the same card.
-            let wrapped = out
-                .lines()
-                .nth(drawn + 1)
-                .is_some_and(|l| !l.trim().is_empty() && !CARD_LINES.iter().any(|c| l.contains(c)));
-            assert_eq!(
-                box_.h >= 2,
-                wrapped,
-                "{label}: height {} does not match its wrapping",
-                box_.h
-            );
-        }
-
-        // And the prompt box is where it was drawn.
         let prompt = lines
             .iter()
             .position(|l| l.contains("╭ Prompt"))
@@ -3161,12 +2987,14 @@ mod tests {
             "ca_1".into(),
         );
         let before = draw(&app, 100, 30);
-        assert!(before.contains("cloud agents"), "the tree is there first");
+        assert!(before.contains("threads"), "the tree is there first");
 
         app.maximized = true;
         let out = draw(&app, 100, 30);
-        assert!(!out.contains(" cloud agents "), "the tree is gone:\n{out}");
-        assert!(!out.contains("devtools"), "no tree rows:\n{out}");
+        assert!(!out.contains(" threads "), "the tree is gone:\n{out}");
+        // The pane's own title still says `devtools / …` — the tree ROWS are
+        // what must be gone, and the launcher heads those.
+        assert!(!out.contains("+ New Agent"), "no tree rows:\n{out}");
         assert!(out.contains("restore the tree"), "the way back:\n{out}");
 
         // The session pane spans the width rather than starting at the old
@@ -3205,109 +3033,23 @@ mod tests {
         assert!(session_pane_size(narrow, true).is_some());
     }
 
-    /// Choosing which agent a new session goes on is the same card, so the two
-    /// questions look like one flow.
+    /// A terminal too narrow for anything else still keeps the launcher
+    /// usable: the prompt is there and nothing runs off the edge.
     #[test]
-    fn the_agent_picker_lists_the_agents_with_their_status() {
-        use crate::commands::cloud_agent::tui::app::AgentPicker;
-
-        let mut app = app_with_tree();
-        app.agent_pick = Some(AgentPicker {
-            options: vec![
-                ("ca_1".into(), "nimble-otter".into(), "running".into()),
-                ("ca_2".into(), "brisk-heron".into(), "sleeping".into()),
-            ],
-            cursor: 0,
-        });
-        app.screen = Screen::AgentPick;
-        let out = draw(&app, 100, 34);
-        assert!(out.contains("Which cloud agent?"), "{out}");
-        assert!(out.contains("nimble-otter"), "{out}");
-        assert!(out.contains("sleeping"), "the status rides along: {out}");
-        assert!(out.contains("new session"), "{out}");
-    }
-
-    /// The descriptions are longer than the prompt box is wide, so they wrap
-    /// into the column beside the name — the block never grows past the box.
-    #[test]
-    fn card_descriptions_wrap_inside_the_prompt_box() {
-        let app = app_with_tree();
-        for width in [120u16, 100, 90, 80, 60] {
-            let out = draw(&app, width, 44);
-            let lines: Vec<&str> = out.lines().collect();
-
-            let box_left = lines
-                .iter()
-                .find(|l| l.contains("╭ Prompt"))
-                .map(|l| l.chars().position(|c| c == '╭').unwrap())
-                .expect("the prompt box");
-            let box_right = lines
-                .iter()
-                .find(|l| l.contains("╭ Prompt"))
-                .map(|l| l.chars().position(|c| c == '╮').unwrap())
-                .expect("the prompt box");
-
-            // Every card line, continuations included, lives inside the box.
-            for line in lines
-                .iter()
-                .filter(|l| CARD_LINES.iter().any(|card| l.contains(card)) || l.contains("project"))
-            {
-                let start = line.len() - line.trim_start().len();
-                let end = line.trim_end().chars().count();
-                assert!(
-                    start >= box_left && end <= box_right + 1,
-                    "at {width}: {start}..{end} outside {box_left}..{box_right}\n{line}"
-                );
-            }
-
-            // And the sentence still arrives in full, across however many lines
-            // it took.
-            let text: String = lines
-                .join(" ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            assert!(
-                text.contains("Create a new session on a Cloud Agent in your default project"),
-                "at {width}: the description was lost\n{out}"
-            );
-        }
-    }
-
-    /// Below the width where even a wrapped sentence would be shredded, the
-    /// names stand alone.
-    #[test]
-    fn very_narrow_cards_keep_their_names_and_lose_the_descriptions() {
+    fn a_very_narrow_launcher_keeps_the_prompt() {
         let app = app_with_tree();
         let out = draw(&app, 46, 40);
-        assert!(out.contains("New Session"), "{out}");
-        assert!(out.contains("Manage Cloud Agents"), "{out}");
-        assert!(!out.contains("Create a new"), "{out}");
+        assert!(out.contains("Prompt"), "{out}");
         assert!(
             out.lines().all(|l| l.trim_end().chars().count() <= 46),
             "nothing runs off the edge:\n{out}"
         );
     }
 
-    #[test]
-    fn wrap_words_breaks_on_spaces_and_keeps_every_word() {
-        let wrapped = wrap_words("Create a new Cloud Agent in your default project", 20);
-        assert!(wrapped.len() > 1, "{wrapped:?}");
-        assert!(
-            wrapped.iter().all(|l| l.chars().count() <= 20),
-            "{wrapped:?}"
-        );
-        assert_eq!(
-            wrapped.join(" "),
-            "Create a new Cloud Agent in your default project"
-        );
-        assert_eq!(wrap_words("", 20), Vec::<String>::new());
-    }
-
     /// Below the banner threshold the screen still has to be usable — a
     /// terminal that small is common inside a split pane.
     #[test]
-    fn menu_degrades_to_a_wordmark_when_small() {
+    fn the_launcher_degrades_to_a_wordmark_when_small() {
         let app = app_with_tree();
         let out = draw(&app, 50, 20);
         assert!(!out.contains("█"), "banner should be dropped:\n{out}");
@@ -3345,6 +3087,8 @@ mod tests {
     fn manage_drops_the_detail_pane_when_narrow() {
         let mut app = app_with_tree();
         app.screen = Screen::Manage;
+        // Off the launcher row, so the single pane is the tree.
+        app.cursor = 2;
         let out = draw(&app, 60, 20);
         assert!(out.contains("nimble-otter"));
         // The pane's own title, not any line that happens to say "agent" —
@@ -3355,10 +3099,10 @@ mod tests {
         );
     }
 
-    /// The target chooser is the setup flow's card, over the menu — one list of
-    /// places to run, not a trip through the management tree.
+    /// The target chooser is the setup flow's card, floated over the tree —
+    /// one list of places to run, not a trip through the management tree.
     #[test]
-    fn the_target_picker_is_a_card_over_the_menu() {
+    fn the_target_picker_is_a_card_over_the_tree() {
         let mut app = app_with_tree();
         app.start_target_pick();
         let out = draw(&app, 100, 34);
@@ -3366,10 +3110,6 @@ mod tests {
         assert!(out.contains("Where should Cloud Agents run?"), "{out}");
         assert!(out.contains("devtools (production)"), "{out}");
         assert!(out.contains("set target"), "{out}");
-        assert!(
-            !out.contains("╭ agents"),
-            "the management tree must not be behind it:\n{out}"
-        );
     }
 
     /// An open session takes over the right pane, and the agent row says how
@@ -3504,7 +3244,7 @@ mod tests {
         let footer = last_drawn_line(&out);
         let footer = footer.as_str();
         assert!(footer.contains("connect"), "{footer}");
-        assert!(footer.contains("new session"), "{footer}");
+        assert!(footer.contains("new agent"), "{footer}");
         assert!(footer.contains("delete agent"), "{footer}");
         // The agent is running, so it offers sleep and not wake.
         assert!(footer.contains("sleep"), "{footer}");
@@ -3542,10 +3282,24 @@ mod tests {
     fn the_footer_is_shorter_on_a_project() {
         let mut app = app_with_tree();
         app.screen = Screen::Manage;
+        // A project with no agents lives in the tail — the only place project
+        // rows still exist.
+        app.tree[0].projects.push(ProjectNode {
+            id: "proj_2".into(),
+            name: "sandbox".into(),
+            expanded: false,
+            envs: vec![EnvNode {
+                id: "env_sand".into(),
+                name: "production".into(),
+                expanded: false,
+                agents: Load::NotLoaded,
+            }],
+        });
+        app.others_expanded = Some(true);
         app.cursor = app
             .rows()
             .iter()
-            .position(|r| r.label == "devtools")
+            .position(|r| r.label == "sandbox")
             .unwrap();
         let footer = last_drawn_line(&draw(&app, 120, 30));
         assert!(footer.contains("new agent"), "{footer}");
@@ -3571,7 +3325,7 @@ mod tests {
     /// Standing on an agent shows its cards, even while one of its sessions is
     /// open — the pane follows the selection, not merely what is running.
     #[test]
-    fn an_agent_shows_its_cards_while_a_session_runs() {
+    fn the_launcher_stays_up_while_a_session_runs() {
         let mut app = app_with_tree();
         app.screen = Screen::Manage;
         if let Load::Loaded(agents) = &mut app.tree[0].projects[0].envs[0].agents {
@@ -3583,6 +3337,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: true,
+                    created_at: None,
                 },
             ]);
         }
@@ -3593,37 +3348,98 @@ mod tests {
         app.sessions = vec![pane];
         app.active = Some(0);
         app.focus = ManageFocus::Tree;
+        // On the launcher, the prompt owns the pane even while a session runs
+        // in the background.
+        app.cursor = 0;
+        let out = draw(&app, 110, 30);
+        assert!(
+            out.contains("Prompt"),
+            "the launcher holds the pane:\n{out}"
+        );
+        assert!(
+            !out.contains("╭ devtools / nimble-otter / claude-one"),
+            "the running pane must not take over:\n{out}"
+        );
+
+        // Move onto the thread itself and the pane takes over, titled like a
+        // project reference: project / agent / session.
         app.cursor = app
             .rows()
             .iter()
-            .position(|r| r.label == "nimble-otter")
-            .unwrap();
-
-        let out = draw(&app, 110, 30);
-        assert!(
-            out.contains("claude-one"),
-            "the card names the session:\n{out}"
-        );
-        assert!(
-            out.contains("running") || out.contains("attached"),
-            "the card carries its state:\n{out}"
-        );
-
-        // Move onto the session itself and the pane takes over.
-        app.cursor = app
-            .rows()
-            .iter()
-            .position(|r| r.label == "claude-one")
+            .position(|r| r.label == "[S] claude-one")
             .unwrap();
         let out = draw(&app, 110, 30);
         assert!(
-            out.contains("nimble-otter · claude-one"),
+            out.contains("devtools / nimble-otter / claude-one"),
             "the session pane's title:\n{out}"
         );
     }
 
     /// Standing on a session that has no pane says so and offers the way
     /// back, instead of leaving whichever pane was connected last on screen.
+    #[test]
+    fn a_dropped_pane_wears_a_banner_on_top() {
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        let pane =
+            crate::commands::cloud_agent::tui::session::Session::for_test("ca_1", "nimble-otter")
+                .unwrap();
+        app.sessions = vec![pane];
+        app.active = Some(0);
+        app.focus = ManageFocus::Session;
+        app.sessions[0].end_dropped_for_test();
+
+        // Focused: the pane's own keys are the offer.
+        let out = draw(&app, 110, 30);
+        assert!(
+            out.contains("✕ disconnected — press r to reconnect · x closes"),
+            "the banner names the recovery keys:\n{out}"
+        );
+        // The banner sits on the pane's first row — right under its title
+        // border — not down in whatever half-line ssh's goodbye landed on.
+        let title_line = out
+            .lines()
+            .position(|l| l.contains("╭ devtools / nimble-otter"))
+            .unwrap();
+        let banner_line = out
+            .lines()
+            .position(|l| l.contains("✕ disconnected"))
+            .unwrap();
+        assert_eq!(
+            banner_line,
+            title_line + 1,
+            "the banner belongs at the top of the pane:\n{out}"
+        );
+
+        // Unfocused: the keys named are the ones that would actually work.
+        // The cursor moves off the launcher (which would show the welcome
+        // pane instead) onto the dropped pane's own session row — which the
+        // platform still lists, since only our connection died.
+        app.focus = ManageFocus::Tree;
+        if let Load::Loaded(agents) = &mut app.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions = LoadSessions::Loaded(vec![
+                crate::commands::cloud_agent::tui::app::ConsoleSession {
+                    name: "test".into(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: true,
+                    attached: false,
+                    created_at: None,
+                },
+            ]);
+        }
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| r.label == "[S] test")
+            .unwrap();
+        let out = draw(&app, 110, 30);
+        assert!(
+            out.contains("✕ disconnected — click here (or enter on its row) to reconnect"),
+            "the unfocused banner points at the mouse and the row:\n{out}"
+        );
+    }
+
     #[test]
     fn a_disconnected_session_says_so() {
         let mut app = app_with_tree();
@@ -3637,6 +3453,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: true,
+                    created_at: None,
                 },
                 crate::commands::cloud_agent::tui::app::ConsoleSession {
                     name: "claude-two".into(),
@@ -3644,6 +3461,7 @@ mod tests {
                     command: None,
                     running: true,
                     attached: false,
+                    created_at: None,
                 },
             ]);
         }
@@ -3658,12 +3476,12 @@ mod tests {
         app.cursor = app
             .rows()
             .iter()
-            .position(|r| r.label == "claude-two")
+            .position(|r| r.label == "[S] claude-two")
             .unwrap();
 
         let out = draw(&app, 110, 30);
         assert!(
-            !out.contains("nimble-otter · claude-one"),
+            !out.contains("╭ devtools / nimble-otter / claude-one"),
             "the other session's pane must not linger:\n{out}"
         );
         assert!(
@@ -3671,7 +3489,7 @@ mod tests {
             "the card says the session is disconnected:\n{out}"
         );
         assert!(
-            out.contains("enter reconnects"),
+            out.contains("enter / double-click connects"),
             "the card says how to get it back:\n{out}"
         );
     }
