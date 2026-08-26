@@ -239,8 +239,37 @@ async fn background_stage_update(version: &str) -> Result<()> {
     result
 }
 
+/// Restore the default disposition for `SIGPIPE`.
+///
+/// Rust's standard library sets `SIGPIPE` to `SIG_IGN` before `main` runs, so
+/// writing to a closed pipe returns `EPIPE` instead of terminating the
+/// process. The `print!`/`println!` macros panic on write errors, and because
+/// this crate is built with `panic = "abort"` (see `Cargo.toml`), that panic
+/// becomes a `SIGABRT` and a core dump.
+///
+/// The practical effect is that ordinary shell usage such as
+/// `railway logs | head -n 5` crashes the CLI once the reader exits, leaving
+/// a core dump behind on systems that collect them. Restoring `SIG_DFL` makes
+/// the process terminate silently on `SIGPIPE`, which is the conventional
+/// behaviour for a Unix command line tool.
+fn restore_default_sigpipe() {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{SigHandler, Signal, signal};
+        // SAFETY: `SIG_DFL` is the kernel's default disposition; installing
+        // it allocates nothing and runs no user code. This executes once at
+        // the top of `main` before the CLI writes any output, and nothing
+        // else in the process installs a handler for `SIGPIPE`.
+        unsafe {
+            let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    restore_default_sigpipe();
+
     // Internal: detached background download spawned by a prior invocation.
     if let Ok(version) = std::env::var(consts::RAILWAY_STAGE_UPDATE_ENV) {
         return background_stage_update(&version).await;
