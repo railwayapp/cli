@@ -995,6 +995,9 @@ export default () => ({
 
 #[test]
 fn evaluates_python_partial_and_graph() {
+    if which::which("python3").is_err() {
+        return;
+    }
     let dir = tempfile_dir("railway-iac-py-");
     let file = dir.join("railway.py");
     std::fs::write(
@@ -1019,13 +1022,12 @@ def main(ctx=None):
 
 #[test]
 fn evaluates_go_partial_and_graph() {
+    if which::which("go").is_err() {
+        return;
+    }
     let dir = tempfile_dir("railway-iac-go-");
     let file = dir.join("railway.go");
-    std::fs::write(
-        dir.join("go.mod"),
-        "module railway-eval\n\ngo 1.22\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("go.mod"), "module railway-eval\n\ngo 1.22\n").unwrap();
     std::fs::write(
         &file,
         r#"

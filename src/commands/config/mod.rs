@@ -370,7 +370,10 @@ fn write_language_support_files(lang: AuthoringLang, railway_dir: &Path) -> Resu
             )?;
         }
         AuthoringLang::Python => {
-            write_asset_if_missing(&railway_dir.join("requirements.txt"), "railway-sdk>=0.2.0\n")?;
+            write_asset_if_missing(
+                &railway_dir.join("requirements.txt"),
+                "railway-sdk>=0.2.0\n",
+            )?;
         }
         AuthoringLang::TypeScript => {}
     }
