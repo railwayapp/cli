@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, time::Duration};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use super::exec::exec_in_container;
+use super::exec::{exec_in_container, exec_probe_in_container};
 use super::project::{ServiceContext, find_service_instance, get_environment_instances};
 
 /// Per-member probe/switchover timeout. Keeps `status`/`switchover`
@@ -53,9 +53,11 @@ struct PatroniClusterResponse {
 /// command failure.
 pub async fn probe_cluster(instance_id: &str) -> Result<Vec<PatroniMember>> {
     let command = "curl -s --max-time 4 localhost:8008/cluster";
-    let output = tokio::time::timeout(PROBE_TIMEOUT, exec_in_container(instance_id, command))
+    // Retrying wrapper: a relay blip must not read as a dead member. The
+    // timeout is per attempt (the wrapper owns the loop).
+    let output = exec_probe_in_container(instance_id, command, PROBE_TIMEOUT)
         .await
-        .context("Timed out probing Patroni")??;
+        .context("Probing Patroni failed")?;
 
     let parsed: PatroniClusterResponse = serde_json::from_str(output.trim())
         .with_context(|| format!("Unexpected response from Patroni: {}", output.trim()))?;

@@ -71,3 +71,116 @@ pub(crate) async fn exec_in_container(instance_id: &str, command: &str) -> Resul
 
     Ok(String::from_utf8(output.stdout)?)
 }
+
+/// Transport-level failure classifier for the retrying probe wrapper: true
+/// only when a second attempt can plausibly answer differently (the SSH
+/// relay dropped the connection, a handshake timed out, the network
+/// blipped). Deterministic failures — auth, missing binaries, host key
+/// refusals — retry into the same wall and only add latency.
+fn is_transient_exec_error(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    const DETERMINISTIC: &[&str] = &[
+        "permission denied",
+        "publickey",
+        "host key verification failed",
+        "command not found",
+        "no such file",
+        "too many authentication failures",
+    ];
+    if DETERMINISTIC.iter().any(|m| lower.contains(m)) {
+        return false;
+    }
+    const TRANSIENT: &[&str] = &[
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "connection timed out",
+        "timed out",
+        "timeout",
+        "broken pipe",
+        "network is unreachable",
+        "temporarily unavailable",
+        "kex_exchange",
+        "banner exchange",
+        "unexpected eof",
+        "connection to",
+    ];
+    TRANSIENT.iter().any(|m| lower.contains(m))
+}
+
+/// How many attempts a read probe gets, and the pauses between them. Small
+/// on purpose: probes back live `status`-class commands, and three attempts
+/// with short pauses distinguishes a blip from an outage without turning a
+/// dead member into a half-minute hang.
+const PROBE_ATTEMPTS: u32 = 3;
+const PROBE_BACKOFF: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(3),
+];
+
+/// [`exec_in_container`] for READ probes: bounded retry on transient
+/// transport failures, with the per-attempt timeout applied INSIDE the loop
+/// (an outer timeout would kill the whole retry chain on the first slow
+/// attempt). An elapsed attempt counts as transient. NEVER route a mutation
+/// through this — a timeout after the remote side already acted would
+/// replay it (Patroni's `POST /switchover` stays on `exec_in_container`).
+pub(crate) async fn exec_probe_in_container(
+    instance_id: &str,
+    command: &str,
+    per_attempt_timeout: std::time::Duration,
+) -> Result<String> {
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 1..=PROBE_ATTEMPTS {
+        match tokio::time::timeout(per_attempt_timeout, exec_in_container(instance_id, command))
+            .await
+        {
+            Ok(Ok(output)) => return Ok(output),
+            Ok(Err(err)) => {
+                let transient = is_transient_exec_error(&format!("{err:#}"));
+                last_error = Some(err);
+                if !transient {
+                    break;
+                }
+            }
+            Err(_elapsed) => {
+                last_error = Some(anyhow::anyhow!(
+                    "probe timed out after {per_attempt_timeout:?}"
+                ));
+            }
+        }
+        if attempt < PROBE_ATTEMPTS {
+            tokio::time::sleep(PROBE_BACKOFF[(attempt - 1) as usize]).await;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("probe failed with no attempts made")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_transient_exec_error;
+
+    #[test]
+    fn transient_and_deterministic_exec_errors_are_told_apart() {
+        // Worth another attempt: the transport blinked.
+        assert!(is_transient_exec_error(
+            "SSH command failed (exit code 255): Connection reset by peer"
+        ));
+        assert!(is_transient_exec_error(
+            "SSH command failed (exit code 255): kex_exchange_identification: read: Connection reset"
+        ));
+        assert!(is_transient_exec_error("probe timed out after 5s"));
+        assert!(is_transient_exec_error(
+            "SSH command failed (exit code 255): Connection to ssh.railway.com closed by remote host"
+        ));
+        // Not worth another attempt: the answer will not change.
+        assert!(!is_transient_exec_error(
+            "SSH command failed (exit code 255): paulo@ssh.railway.com: Permission denied (publickey)"
+        ));
+        assert!(!is_transient_exec_error(
+            "SSH command failed (exit code 127): sh: curl: command not found"
+        ));
+        assert!(!is_transient_exec_error(
+            "SSH command failed (exit code 255): Host key verification failed"
+        ));
+    }
+}
