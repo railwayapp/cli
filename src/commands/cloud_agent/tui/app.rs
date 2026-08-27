@@ -53,8 +53,9 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("enter", "connect and type in it"),
             ("⌥f", "give it the whole screen · again to restore"),
             ("⌥enter / f", "leave the TUI and connect full screen"),
+            ("⌥⇧[ ⌥⇧]", "previous / next session"),
             ("c", "copy an ssh command for it"),
-            ("⌥/⇧esc / ^] / esc esc", "stop typing in it"),
+            ("⌥⇧esc / ^]", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
@@ -320,12 +321,6 @@ pub const SLEEP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(6
 /// How often to ask again while waiting.
 pub const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// How close together two Escapes must land to count as the double-tap that
-/// releases a focused session back to the tree. Wide enough for a deliberate
-/// tap-tap, tight enough that two Escapes meant for the harness (dismissing
-/// two of its menus, say) rarely fall inside it.
-const DOUBLE_ESC: std::time::Duration = std::time::Duration::from_millis(500);
-
 /// How many background attaches may be in flight at once. Startup wants the
 /// whole tree green, but each attach is a relay ssh, a reader thread, and a
 /// scrollback replay — a fleet's worth at once is a thundering herd.
@@ -472,8 +467,8 @@ pub struct PaneRects {
     /// The new-session prompt box, borders included.
     pub prompt: PaneBox,
     /// The header's session tabs, drawn only while the pane is maximized. A
-    /// fixed array so this stays `Copy`; sessions past the cap keep their ⌥[
-    /// ⌥] keys but aren't clickable.
+    /// fixed array so this stays `Copy`; sessions past the cap keep their
+    /// ⌥⇧[ ⌥⇧] keys but aren't clickable.
     pub tabs: [PaneBox; MAX_TABS],
 }
 
@@ -935,9 +930,6 @@ pub struct App {
     /// to its pane — once per drop, so Esc-ing away sticks. Cleared when the
     /// name reattaches, so a second drop announces itself the same way.
     drop_seen: std::collections::HashSet<String>,
-    /// When the last bare Escape went into a focused session, for spotting
-    /// the double-tap that releases the keyboard to the tree.
-    session_esc_at: Option<std::time::Instant>,
     /// First-run setup, when there are no preferences yet.
     pub wizard: Option<super::wizard::Wizard>,
     /// The ⌥s settings card, while it is open.
@@ -1052,7 +1044,6 @@ impl App {
             connecting: std::collections::HashSet::new(),
             auto_attempted: std::collections::HashSet::new(),
             drop_seen: std::collections::HashSet::new(),
-            session_esc_at: None,
             wizard: None,
             settings: None,
             skills_source: None,
@@ -2076,19 +2067,21 @@ impl App {
                 return None;
             }
             // A few chords are taken from the agent, all because the moment
-            // you want them is while you are using it: ⌥f for room, ⌥] and ⌥[
-            // to move between panes, ⌥n and ⌥p to start more work — the
-            // thought "this needs its own session" arrives while reading one,
-            // and going out to the tree first to act on it is the friction
-            // they exist to remove. ⌥r joins them for the same reason: a
-            // refresh that only worked with the tree focused would be a chord
-            // that silently does nothing half the time you press it. The
-            // costs, all in a shell: ⌥f is Meta-f (forward-word), ⌥n and ⌥p
-            // are Meta-n / Meta-p (the non-incremental history searches, which
-            // few people bind and both harnesses ignore), and ⌥r is Meta-r
-            // (revert-line). Readline leaves Meta-] and Meta-[ unbound, and
-            // `^]` (character-search) is untouched because only the Meta forms
-            // are claimed. Nothing else is intercepted — ⌥s still reaches the
+            // you want them is while you are using it: ⌥f for room, ⌥⇧] and
+            // ⌥⇧[ (with their unshifted aliases) to move between panes, ⌥n
+            // and ⌥p to start more work — the thought "this needs its own
+            // session" arrives while reading one, and going out to the tree
+            // first to act on it is the friction they exist to remove. ⌥r
+            // joins them for the same reason: a refresh that only worked with
+            // the tree focused would be a chord that silently does nothing
+            // half the time you press it. The costs, all in a shell: ⌥f is
+            // Meta-f (forward-word), ⌥n and ⌥p are Meta-n / Meta-p (the
+            // non-incremental history searches, which few people bind and
+            // both harnesses ignore), and ⌥r is Meta-r (revert-line).
+            // Readline leaves Meta-] and Meta-[ unbound, bash binds Meta-{
+            // only to the rarely-reached complete-into-braces, and `^]`
+            // (character-search) is untouched because only the Meta forms are
+            // claimed. Nothing else is intercepted — ⌥s still reaches the
             // agent from here.
             if let Some(chord) = alt_chord(&key)
                 && matches!(chord, 'f' | 'n' | 'p' | 'r' | ']' | '[')
@@ -2116,27 +2109,12 @@ impl App {
                 if dead && scroll.is_none() {
                     return self.dead_pane_key(i, key);
                 }
-                // Esc twice in quick succession releases the keyboard to the
-                // tree. One Esc belongs to the harness — it dismisses menus
-                // and cancels prompts in there — so the first still goes
-                // through; the double-tap is the reflex for "get me out",
-                // and only the second press is taken.
-                if key.code == KeyCode::Esc && key.modifiers.is_empty() {
-                    let now = std::time::Instant::now();
-                    if self
-                        .session_esc_at
-                        .take()
-                        .is_some_and(|at| now.duration_since(at) <= DOUBLE_ESC)
-                    {
-                        self.focus = ManageFocus::Tree;
-                        // Releasing means "show me the tree", same as ⇧esc.
-                        self.maximized = false;
-                        return None;
-                    }
-                    self.session_esc_at = Some(now);
-                } else {
-                    self.session_esc_at = None;
-                }
+                // Every bare Escape belongs to the harness — including two in
+                // a row. There used to be a double-tap release here, but the
+                // first tap always went through, and in Claude Code a single
+                // Esc cancels the running turn: the release gesture cost the
+                // user their work on its way out. ⌥⇧esc (and ⇧esc, ^], ^o)
+                // release without sending anything.
                 if let Some(session) = self.sessions.get_mut(i) {
                     match scroll {
                         // No pointer for a keyboard scroll; report it over the
@@ -3886,7 +3864,7 @@ impl App {
     /// Scoped to panes that are already open rather than every session in the
     /// tree, and that is the whole design: waking a sleeping agent is a cold
     /// boot — seconds of wall clock and a VM that starts billing — so holding
-    /// `⌥]` or `⌥[` must never fan out wakes across agents you were only
+    /// `⌥⇧]` or `⌥⇧[` must never fan out wakes across agents you were only
     /// passing through. Opening something new stays the deliberate `enter` on
     /// a row.
     fn cycle_session(&mut self, forward: bool) -> Option<Effect> {
@@ -5123,16 +5101,28 @@ fn project_agent_count(project: &ProjectNode) -> usize {
 /// everywhere. ⌥[ under Meta is the two bytes `ESC [` — byte-identical to the
 /// CSI prefix that starts every arrow key — so a legacy terminal can never
 /// deliver it; the parser eats the bytes as an unfinished escape sequence and
-/// no key event exists to match. `[` is still in the table for the terminals
-/// that can say it unambiguously: under the kitty keyboard protocol (pushed at
-/// startup) it arrives as a genuine ALT+`[` event, and composed-mode macOS
-/// sends it as a curly double quote. Everywhere else the reverse chord is
-/// simply absent — it can go dead, but never misfire.
+/// no key event exists to match, and a terminal or window manager that binds
+/// ⌥[ itself never lets it through at all. That is why the ADVERTISED chords
+/// are the shifted pair: ⌥⇧[ is `ESC {`, which no escape sequence begins with
+/// and nothing conventionally binds, so it arrives everywhere Meta does. The
+/// unshifted forms stay in the table as silent aliases for the terminals that
+/// can say them unambiguously: under the kitty keyboard protocol (pushed at
+/// startup) they arrive as genuine ALT+bracket events, and composed-mode
+/// macOS folds both shift states into the same curly quotes anyway.
+/// Everywhere else the unshifted chord is simply absent — it can go dead, but
+/// never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
     const ACTIONS: &[char] = &['f', 's', 'n', 'p', 'r', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
-            let c = c.to_ascii_lowercase();
+            let c = match c.to_ascii_lowercase() {
+                // ⌥⇧[ arrives as ALT+`{` where shift reaches us as the
+                // character; fold the braces onto the bracket chords, the
+                // same way the letters fold their capitals.
+                '{' => '[',
+                '}' => ']',
+                c => c,
+            };
             return ACTIONS.contains(&c).then_some(c);
         }
         return None;
@@ -6429,43 +6419,31 @@ mod tests {
         );
     }
 
-    /// Esc-Esc inside a live session steps back out to the tree. A single
-    /// Esc belongs to the harness (menus, cancels), so only the quick second
-    /// tap is taken — and two slow Escapes are just two Escapes.
+    /// Every bare Escape belongs to the harness — even two quick ones. The
+    /// old double-tap release cost the user their running turn (a single Esc
+    /// cancels Claude mid-run, and the first tap always went through).
+    /// ⌥⇧esc releases without sending anything.
     #[test]
-    fn double_esc_releases_a_focused_session() {
+    fn bare_escapes_belong_to_the_harness_and_alt_shift_esc_releases() {
         let mut a = loaded_app();
         a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
         assert_eq!(a.focus, ManageFocus::Session);
 
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
         assert_eq!(
             a.focus,
             ManageFocus::Session,
-            "a single esc stays in the session"
+            "two quick escapes are the harness's, not a release"
         );
 
-        // The quick second tap releases — and unfolds a maximized layout,
-        // since focus on an invisible tree helps nobody.
+        // ⌥⇧esc steps out — and unfolds a maximized layout, since focus on
+        // an invisible tree helps nobody.
         a.maximized = true;
-        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
-        assert_eq!(a.focus, ManageFocus::Tree, "the double-tap steps out");
+        let chord = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(a.on_key(chord), None);
+        assert_eq!(a.focus, ManageFocus::Tree, "⌥⇧esc steps out");
         assert!(!a.maximized, "and brings the tree back");
-
-        // Spaced-out Escapes belong to the harness.
-        a.focus = ManageFocus::Session;
-        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
-        a.session_esc_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(2000));
-        assert_eq!(a.on_key(key(KeyCode::Esc)), None);
-        assert_eq!(
-            a.focus,
-            ManageFocus::Session,
-            "slow escapes belong to the harness"
-        );
-
-        // Any other key in between resets the tap.
-        assert_eq!(a.on_key(key(KeyCode::Char('a'))), None);
-        assert!(a.session_esc_at.is_none(), "typing broke the sequence");
     }
 
     /// A drop never steals the keyboard out from under a dialog — a y/n
@@ -6632,6 +6610,18 @@ mod tests {
             Some('['),
             "the composed ⌥[ quote is the same chord"
         );
+    }
+
+    /// ⌥⇧[ and ⌥⇧] are the advertised cycle chords — `ESC {` collides with
+    /// nothing, where `ESC [` is the CSI prefix half the world has claimed.
+    /// Shift reaches us as the brace character, folded onto the same chords.
+    #[test]
+    fn alt_shift_brackets_are_the_same_chords() {
+        assert_eq!(alt_chord(&alt('{')), Some('['));
+        assert_eq!(alt_chord(&alt('}')), Some(']'));
+        // macOS composes ⌥⇧[ to the closing curly double quote; same chord.
+        assert_eq!(alt_chord(&key(KeyCode::Char('\u{201D}'))), Some('['));
+        assert_eq!(alt_chord(&key(KeyCode::Char('\u{2019}'))), Some(']'));
     }
 
     /// A screen of empty pane is not a state worth reaching by accident.

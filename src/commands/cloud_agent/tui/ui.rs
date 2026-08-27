@@ -822,7 +822,7 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     )];
     if full && !app.sessions.is_empty() {
         // Maximized, the tree is folded away, so the open sessions become
-        // tabs on the header: click one (or ⌥[ ⌥]) to switch panes. The
+        // tabs on the header: click one (or ⌥⇧[ ⌥⇧]) to switch panes. The
         // clickable boxes are recorded as they are laid out.
         let mut x = chunks[0].x + " RAILWAY CLOUD-AGENTS ".chars().count() as u16;
         for i in 0..app.sessions.len() {
@@ -1047,7 +1047,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
         .selected_agent_status()
         .is_some_and(|status| status != "running");
     let hint: Vec<(&str, &str)> = if app.pane_is_full() {
-        vec![("⌥f", "restore the tree"), ("⌥/⇧esc / ^]", "stop typing")]
+        vec![("⌥f", "restore the tree"), ("⌥⇧esc / ^]", "stop typing")]
     } else if app.focus == ManageFocus::Session {
         // A dead pane's keys are recovery, not typing — the hint has to say
         // so, or "stop typing" advertises an input nothing is reading.
@@ -1061,7 +1061,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 ("esc", "back to the tree"),
             ]
         } else {
-            let mut keys = vec![("⌥/⇧esc / ^]", "stop typing"), ("⌥f", "maximize")];
+            let mut keys = vec![("⌥⇧esc / ^]", "stop typing"), ("⌥f", "maximize")];
             // The agent is taking the clicks, so say how to take one back — this is
             // the terminal's own convention, but nobody guesses it.
             if app.active_session().is_some_and(|s| s.wants_mouse()) {
@@ -1123,7 +1123,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     // pane the chord is a no-op and the hint would just be a lie.
     let mut hint = hint;
     if app.sessions.len() > 1 {
-        hint.push(("⌥[ ⌥]", "switch session"));
+        hint.push(("⌥⇧[ ⌥⇧]", "switch session"));
     }
     let spans = chord_spans(theme, &hint);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -3355,7 +3355,7 @@ mod tests {
         let out = draw(&app, 100, 34);
         assert!(out.contains("keys"));
         assert!(out.contains("refresh"), "{out}");
-        assert!(out.contains("⌥/⇧esc / ^]"), "{out}");
+        assert!(out.contains("⌥⇧esc / ^]"), "{out}");
         assert!(out.contains("any key closes"));
     }
 
