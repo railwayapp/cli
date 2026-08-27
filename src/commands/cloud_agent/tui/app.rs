@@ -2451,9 +2451,10 @@ impl App {
                     self.selection = None;
                     return None;
                 }
-                // Clicking the session panel means "let me type here"; clicking
-                // the tree does not, so the tree keeps the keyboard until a
-                // double click or enter asks for it. With no session open the
+                // Clicking the session panel means "let me type here". A tree
+                // click lands on Tree first; `click_tree_row` hands the
+                // keyboard on to the session when the row clicked is one with
+                // an open pane. With no session open the
                 // right pane is the launcher (or an empty detail card):
                 // focusing it would send every key into a pane nothing is
                 // reading, so the keyboard stays where the prompt reads it —
@@ -2529,9 +2530,12 @@ impl App {
 
     /// Move the tree cursor to the row that was clicked.
     ///
-    /// A single click *views*: it shows the session in the pane and leaves the
-    /// keyboard in the tree, so clicking around does not trap you in a session.
-    /// A double click connects and hands the keyboard over, the same as enter.
+    /// Clicking a session row with an open pane shows it AND hands the keyboard
+    /// over: the click says "that one", and typing next should go into the
+    /// session — leaving the keys in the tree turned the first keystroke into
+    /// a shortcut instead. Agent and folder rows keep the keyboard in the tree
+    /// (there is nothing on the right to type into yet); a double click on a
+    /// disconnected row connects, the same as enter.
     fn click_tree_row(&mut self, row: u16, double: bool) -> Option<Effect> {
         self.click_tree_row_inner(row);
         self.sync_active_to_cursor();
@@ -2561,17 +2565,28 @@ impl App {
                 .map(|s| s.name.clone())
                 .and_then(|name| self.pane_for(&name))
             {
-                // One click selects — the pane comes up but the keyboard
-                // stays in the list, so ↑↓ and x still work on the rows. A
-                // double click is what hands the keyboard to the session.
+                // One click selects the pane and hands it the keyboard: the
+                // next thing typed is meant for the session, and routing it
+                // to the tree fired shortcuts instead. ^o (or Esc) is the way
+                // back to the rows.
                 Some(index) => {
                     self.active = Some(index);
-                    if double {
-                        self.focus = ManageFocus::Session;
-                    }
+                    self.focus = ManageFocus::Session;
                 }
                 None if double => return self.reattach_row(clicked.kind),
-                None => self.status = "Double-click (or enter) to connect".into(),
+                // No pane to focus: say how to get one, and re-ask the
+                // platform while the hint is up — a row the agent no longer
+                // reports validates away instead of inviting a reattach to
+                // nothing.
+                None => {
+                    self.status = "Double-click (or enter) to connect".into();
+                    let id = self.tree[w].projects[p].envs[e]
+                        .agents_vec()
+                        .get(a)?
+                        .id
+                        .clone();
+                    return self.refresh_agent_sessions(&id);
+                }
             }
         }
         None
@@ -5025,7 +5040,19 @@ fn merge_agents(previous: Vec<Agent>, fresh: Vec<Agent>) -> Vec<Agent> {
         .map(|mut agent| {
             if let Some((expanded, sessions)) = kept.remove(&agent.id) {
                 agent.expanded = expanded;
-                agent.sessions = sessions;
+                // Sessions live on the machine, and a machine that is not
+                // running has none — carrying the old list across a sleep
+                // kept rows for sessions that no longer exist, forever,
+                // because the refresh cadence only asks running agents.
+                // NotLoaded rather than an empty list: when the agent runs
+                // again the prefetch re-asks, and anything that survived the
+                // wake comes back on its own. A pane we are still attached
+                // to is folded back in by `adopt_pane_sessions`.
+                agent.sessions = if agent.status == "running" {
+                    sessions
+                } else {
+                    LoadSessions::NotLoaded
+                };
             }
             agent
         })
@@ -5348,9 +5375,9 @@ mod tests {
         assert!(a.maximized, "and the layout stayed put");
     }
 
-    /// Clicking the thread list while typing in a session hands the keyboard
-    /// back to the list — so ↓ and x act on rows, instead of x landing in the
-    /// connected pane.
+    /// Clicking a session's row keeps the keyboard with the session — the
+    /// click says "type here", and the way back to the rows is ^o (or Esc),
+    /// after which x acts on the highlighted row instead of typing into it.
     #[test]
     fn clicking_the_list_takes_the_keyboard_back_from_a_session() {
         let mut a = loaded_app();
@@ -5377,9 +5404,17 @@ mod tests {
             .position(|r| r.label == "[S] claude-one")
             .unwrap() as u16;
         a.on_mouse(MouseAction::Down, 5, 3 + row);
-        assert_eq!(a.focus, ManageFocus::Tree, "the click took the keyboard");
+        assert_eq!(
+            a.focus,
+            ManageFocus::Session,
+            "the click means type-into-the-session"
+        );
 
-        // And x now ends the highlighted session instead of typing into it.
+        // ^o hands the keyboard back to the list…
+        a.on_key(ctrl('o'));
+        assert_eq!(a.focus, ManageFocus::Tree, "^o returns to the rows");
+
+        // …and x now ends the highlighted session instead of typing into it.
         let effect = a.on_key(key(KeyCode::Char('x')));
         assert!(
             matches!(effect, Some(Effect::KillSession { ref session_name, .. }) if session_name == "claude-one"),
@@ -7823,7 +7858,11 @@ mod tests {
             .iter()
             .position(|r| r.label == "[S] claude-one")
             .unwrap();
-        assert_eq!(a.on_mouse(MouseAction::Down, 5, 3 + row as u16), None);
+        let effect = a.on_mouse(MouseAction::Down, 5, 3 + row as u16);
+        assert!(
+            matches!(effect, Some(Effect::LoadSessions { .. })),
+            "the first click validates the list instead of spending an ssh: {effect:?}"
+        );
         let effect = a.on_mouse(MouseAction::Down, 5, 3 + row as u16);
         assert!(
             matches!(effect, Some(Effect::Reattach { .. })),
@@ -7864,15 +7903,20 @@ mod tests {
         a.active = Some(0);
         a.panes = panes_fixture();
 
-        // A disconnected sibling: one click only selects and says how to
-        // connect; the second click (a double) reattaches.
+        // A disconnected sibling: one click selects, says how to connect, and
+        // re-asks the platform so a row that no longer exists validates away;
+        // the second click (a double) reattaches.
         let two = a
             .rows()
             .iter()
             .position(|r| r.label == "[S] claude-two")
             .unwrap();
-        assert_eq!(a.on_mouse(MouseAction::Down, 5, 3 + two as u16), None);
-        assert_eq!(a.focus, ManageFocus::Tree, "the list keeps the keyboard");
+        let effect = a.on_mouse(MouseAction::Down, 5, 3 + two as u16);
+        assert!(
+            matches!(effect, Some(Effect::LoadSessions { .. })),
+            "a click on a disconnected row validates the list: {effect:?}"
+        );
+        assert_eq!(a.focus, ManageFocus::Tree, "nothing to type into yet");
         assert!(a.status.contains("Double-click"), "{}", a.status);
         let effect = a.on_mouse(MouseAction::Down, 5, 3 + two as u16);
         assert!(
@@ -7887,9 +7931,7 @@ mod tests {
             .unwrap();
         a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
         assert_eq!(a.active, Some(0), "one click shows the open pane");
-        assert_eq!(a.focus, ManageFocus::Tree, "without stealing the keys");
-        a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
-        assert_eq!(a.focus, ManageFocus::Session, "a double click connects");
+        assert_eq!(a.focus, ManageFocus::Session, "and hands it the keyboard");
     }
 
     /// Enter on a project toggles it: the first press opens it straight
@@ -8319,8 +8361,9 @@ mod tests {
         assert!(a.ending.is_empty());
     }
 
-    /// A single click views, a double click connects — clicking around the
-    /// tree must not trap the keyboard in a session.
+    /// One click on a connected session row shows the pane AND hands it the
+    /// keyboard — clicking a session and typing must reach the session, not
+    /// fire tree shortcuts.
     #[test]
     fn one_click_views_and_two_clicks_connect() {
         let mut a = loaded_app();
@@ -8350,10 +8393,52 @@ mod tests {
 
         a.on_mouse(MouseAction::Down, 5, 3 + row);
         assert_eq!(a.active, Some(0), "one click shows it");
-        assert_eq!(a.focus, ManageFocus::Tree, "and leaves the keyboard alone");
+        assert_eq!(a.focus, ManageFocus::Session, "and hands it the keyboard");
 
         a.on_mouse(MouseAction::Down, 5, 3 + row);
-        assert_eq!(a.focus, ManageFocus::Session, "two clicks connect");
+        assert_eq!(a.focus, ManageFocus::Session, "a second click keeps it");
+    }
+
+    /// A refresh that finds an agent no longer running drops its session
+    /// list: those sessions lived on the machine, and the machine is gone.
+    /// Carrying them showed reattach rows for sessions that no longer exist —
+    /// forever, because the refresh cadence only re-asks running agents.
+    #[test]
+    fn sleep_drops_the_carried_session_list() {
+        let session = ConsoleSession {
+            name: "claude-one".into(),
+            kind: "SHELL".into(),
+            command: None,
+            running: true,
+            attached: false,
+            created_at: None,
+        };
+        let previous = vec![Agent {
+            id: "ca_1".into(),
+            name: "nimble-otter".into(),
+            status: "running".into(),
+            sessions: LoadSessions::Loaded(vec![session]),
+            expanded: true,
+        }];
+        let mut asleep = previous.clone();
+        asleep[0].status = "sleeping".into();
+        asleep[0].sessions = LoadSessions::NotLoaded;
+
+        let merged = merge_agents(previous.clone(), asleep);
+        assert_eq!(
+            merged[0].sessions,
+            LoadSessions::NotLoaded,
+            "a sleeping machine has no console sessions to keep"
+        );
+        assert!(merged[0].expanded, "the fold state is still ours to keep");
+
+        let mut still_running = previous.clone();
+        still_running[0].sessions = LoadSessions::NotLoaded;
+        let merged = merge_agents(previous, still_running);
+        assert!(
+            matches!(&merged[0].sessions, LoadSessions::Loaded(s) if s.len() == 1),
+            "a running agent keeps its list until the reply replaces it"
+        );
     }
 
     /// Clicking the session panel is itself a request to type in it.
