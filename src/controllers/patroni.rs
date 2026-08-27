@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, time::Duration};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use super::exec::exec_in_container;
+use super::exec::{exec_in_container, exec_probe_in_container};
 use super::project::{ServiceContext, find_service_instance, get_environment_instances};
 
 /// Per-member probe/switchover timeout. Keeps `status`/`switchover`
@@ -53,9 +53,11 @@ struct PatroniClusterResponse {
 /// command failure.
 pub async fn probe_cluster(instance_id: &str) -> Result<Vec<PatroniMember>> {
     let command = "curl -s --max-time 4 localhost:8008/cluster";
-    let output = tokio::time::timeout(PROBE_TIMEOUT, exec_in_container(instance_id, command))
+    // Retrying wrapper: a relay blip must not read as a dead member. The
+    // timeout is per attempt (the wrapper owns the loop).
+    let output = exec_probe_in_container(instance_id, command, PROBE_TIMEOUT)
         .await
-        .context("Timed out probing Patroni")??;
+        .context("Probing Patroni failed")?;
 
     let parsed: PatroniClusterResponse = serde_json::from_str(output.trim())
         .with_context(|| format!("Unexpected response from Patroni: {}", output.trim()))?;
@@ -66,13 +68,23 @@ pub async fn probe_cluster(instance_id: &str) -> Result<Vec<PatroniMember>> {
 /// Used when any single cluster member's `/cluster` view is representative
 /// enough (Patroni's REST API returns the same cluster-wide member list from
 /// any node) -- e.g. to resolve the current leader before a switchover.
-pub async fn probe_any(instance_ids: &[String]) -> Option<(String, Vec<PatroniMember>)> {
+///
+/// On total failure, returns every member's own error instead of a bare
+/// `None`: "could not reach Patroni" has historically meant anything from a
+/// wedged cluster to the CALLER's SSH setup being unusable (the probes run
+/// over `ssh <instance>@ssh.railway.com`), and only the underlying error
+/// tells those apart.
+pub async fn probe_any(
+    instance_ids: &[String],
+) -> Result<(String, Vec<PatroniMember>), Vec<(String, String)>> {
+    let mut failures = Vec::with_capacity(instance_ids.len());
     for instance_id in instance_ids {
-        if let Ok(members) = probe_cluster(instance_id).await {
-            return Some((instance_id.clone(), members));
+        match probe_cluster(instance_id).await {
+            Ok(members) => return Ok((instance_id.clone(), members)),
+            Err(e) => failures.push((instance_id.clone(), format!("{e:#}"))),
         }
     }
-    None
+    Err(failures)
 }
 
 /// `POST localhost:8008/switchover` against `instance_id`'s container,

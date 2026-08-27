@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::controllers::{
     config::{EnvironmentConfig, ServiceInstance, Variable, fetch_environment_config},
     db_stats::{parse_i64, split_sections},
-    exec::exec_in_container,
+    exec::exec_probe_in_container,
     postgres_plugins::{self, PgBouncerState},
     project::{
         ServiceContext, find_service_instance, get_environment_instances, resolve_service_context,
@@ -979,12 +979,9 @@ async fn probe_pgbouncer_live_inner(
     let instance_id = instance.id.clone();
 
     let command = build_pgbouncer_probe_command();
-    let output = tokio::time::timeout(
-        LIVE_PROBE_TIMEOUT,
-        exec_in_container(&instance_id, &command),
-    )
-    .await
-    .context("Timed out probing PgBouncer's admin console")??;
+    let output = exec_probe_in_container(&instance_id, &command, LIVE_PROBE_TIMEOUT)
+        .await
+        .context("Probing PgBouncer's admin console failed")?;
 
     Ok(parse_pgbouncer_probe_output(&output))
 }

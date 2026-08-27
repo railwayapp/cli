@@ -763,10 +763,37 @@ async fn switchover(
     .await
     .context("Failed to resolve live cluster member instances")?;
 
+    // The probes below run over native `ssh <instance>@ssh.railway.com` —
+    // an API token alone reaches nothing. Preflight the key so the failure
+    // is "your SSH setup" (with the recipe) instead of a misleading
+    // "could not reach the cluster". Interactive runs may register a key on
+    // the spot; --yes runs must never block on a prompt.
+    let preflight = if args.yes {
+        crate::commands::ssh::native::ensure_ssh_key_noninteractive(&ctx.client, &ctx.configs).await
+    } else {
+        crate::commands::ssh::native::ensure_ssh_key_quiet(&ctx.client, &ctx.configs).await
+    };
+    if let Err(e) = preflight {
+        bail!(
+            "Switchover drives Patroni over SSH (ssh <instance>@ssh.railway.com), and no usable \
+             SSH key is available: {e:#}"
+        );
+    }
+
     let probe_targets: Vec<String> = instance_ids.values().cloned().collect();
-    let Some((probe_instance_id, cluster_members)) = patroni::probe_any(&probe_targets).await
-    else {
-        bail!("Could not reach any cluster member's Patroni API to determine the current leader.");
+    let (probe_instance_id, cluster_members) = match patroni::probe_any(&probe_targets).await {
+        Ok(hit) => hit,
+        Err(failures) => {
+            let detail = failures
+                .iter()
+                .map(|(id, err)| format!("  {id}: {err}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Could not reach any cluster member's Patroni API to determine the current \
+                 leader. Per-member errors:\n{detail}"
+            );
+        }
     };
 
     let leader = cluster_members

@@ -16,13 +16,14 @@ use crate::{
         config::{EnvironmentConfig, fetch_environment_config},
         database::DatabaseType,
         db_stats::{diagnose_db_stats_failure, preflight_db_stats_ssh},
-        exec::exec_in_container,
+        exec::exec_probe_in_container,
         postgres_plugins::{self, PitrState},
         project::{ServiceContext, resolve_service_context},
         template_apply::{
             self, ApplyKind, ApplyTemplateParams, PITR_TEMPLATE_CODE, RevertTemplateParams,
         },
     },
+    errors::RailwayError,
     gql::{mutations, queries},
     util::time::parse_time,
 };
@@ -934,9 +935,10 @@ async fn follow_progress(
     let deadline = start + opts.deadline;
     let visibility_deadline = start + Duration::from_secs(PROGRESS_VISIBILITY_GRACE_SECS);
     let mut last_printed: Option<String> = None;
+    let mut consecutive_transport_errors = 0_u8;
 
     loop {
-        let response = post_graphql::<queries::GetPitrHaWorkflowProgress, _>(
+        let response = match post_graphql::<queries::GetPitrHaWorkflowProgress, _>(
             &ctx.client,
             ctx.configs.get_backboard(),
             queries::get_pitr_ha_workflow_progress::Variables {
@@ -945,7 +947,24 @@ async fn follow_progress(
             },
         )
         .await
-        .context("Failed to fetch the PITR workflow progress")?;
+        {
+            Ok(response) => {
+                consecutive_transport_errors = 0;
+                response
+            }
+            Err(err)
+                if is_transient_progress_transport_error(&err)
+                    && consecutive_transport_errors < 5
+                    && std::time::Instant::now() < deadline =>
+            {
+                consecutive_transport_errors += 1;
+                sleep(Duration::from_secs(progress_poll_interval_secs())).await;
+                continue;
+            }
+            Err(err) => {
+                return Err(err).context("Failed to fetch the PITR workflow progress");
+            }
+        };
 
         let progress = response.pitr_ha_workflow_progress.filter(|p| {
             opts.expected_workflow_id
@@ -1006,6 +1025,10 @@ async fn follow_progress(
 
         sleep(Duration::from_secs(progress_poll_interval_secs())).await;
     }
+}
+
+fn is_transient_progress_transport_error(err: &RailwayError) -> bool {
+    matches!(err, RailwayError::FetchError(_))
 }
 
 /// Follows a rolling HA PITR enable/disable workflow this command just
@@ -1746,8 +1769,8 @@ async fn probe_pitr_live(ctx: &ServiceContext, root_service_id: &str) -> PitrLiv
         .context("No live deployment found for this service")?;
 
         let (pgbackrest_result, archiver_result) = tokio::join!(
-            exec_in_container(&instance_id, PGBACKREST_INFO_PROBE),
-            exec_in_container(&instance_id, ARCHIVER_PROBE_QUERY),
+            exec_probe_in_container(&instance_id, PGBACKREST_INFO_PROBE, PITR_PROBE_TIMEOUT),
+            exec_probe_in_container(&instance_id, ARCHIVER_PROBE_QUERY, PITR_PROBE_TIMEOUT),
         );
 
         let mut probe = PitrLiveProbe {
@@ -1864,6 +1887,11 @@ fn apply_pgbackrest_info(probe: &mut PitrLiveProbe, output: &str) {
 /// `archive_command`, never at the container level.
 ///
 /// Runs via `sh -s` over native SSH -- multi-line is fine on this transport.
+/// Per-attempt budget for the live PITR probes (pgBackRest walks the S3
+/// repo; 15s covers a slow bucket without letting a hung relay stall
+/// `pitr status`). The retrying wrapper applies it per attempt.
+const PITR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 const PGBACKREST_INFO_PROBE: &str = r#"
 export PGBACKREST_REPO1_TYPE=s3 \
   PGBACKREST_REPO1_S3_BUCKET="${WAL_ARCHIVE_BUCKET:-}" \
@@ -2330,6 +2358,13 @@ mod tests {
             build_progress_output(&root, &progress_fixture(PitrHaWorkflowPhase::FAILED)).phase,
             "failed"
         );
+    }
+
+    #[test]
+    fn progress_transport_retry_does_not_match_graphql_failures() {
+        assert!(!is_transient_progress_transport_error(
+            &RailwayError::GraphQLError("forbidden".to_string())
+        ));
     }
 
     #[test]
